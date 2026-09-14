@@ -122,6 +122,68 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("surfaces the LTX-2.5 Community License and the Gemma 4 Apache-2.0 + Prohibited Use Policy documents (sc-18785)", async () => {
+    await render();
+    const ltx25 = [...container.querySelectorAll(".licenses-item")].find((b) =>
+      b.textContent.includes("LTX-2.5"),
+    );
+    expect(ltx25).toBeTruthy();
+    await act(async () => ltx25.click());
+    // Default document is the LTX-2.x Community License Agreement dated 2026-08-11 — a
+    // different, later text than LTX-2.3's January 5, 2026 agreement.
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2.x Community License Agreement",
+    );
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "License date: August 11, 2026",
+    );
+
+    const tabs = [...container.querySelectorAll(".segmented-control button")];
+    const apacheTab = tabs.find((b) => b.textContent.includes("Apache License 2.0"));
+    expect(apacheTab).toBeTruthy();
+    await act(async () => apacheTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Apache License",
+    );
+
+    const prohibitedTab = tabs.find((b) => b.textContent.includes("Prohibited Use Policy"));
+    expect(prohibitedTab).toBeTruthy();
+    await act(async () => prohibitedTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Gemma Prohibited Use Policy",
+    );
+
+    const noticeTab = tabs.find((b) => b.textContent.includes("provenance"));
+    expect(noticeTab).toBeTruthy();
+    await act(async () => noticeTab.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "Diff against LTX-2.3's bundled license",
+    );
+  });
+
+  it("binds the public LTX IC-LoRA rehost to its full license and immutable provenance", async () => {
+    await render();
+    const loras = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("LTX-2.3 IC-LoRA HDR and LipDub"),
+    );
+    expect(loras).toBeTruthy();
+    await act(async () => loras.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2 Community License Agreement",
+    );
+
+    const noticeTab = [...container.querySelectorAll(".segmented-control button")].find((button) =>
+      button.textContent.includes("immutable provenance"),
+    );
+    expect(noticeTab).toBeTruthy();
+    await act(async () => noticeTab.click());
+    const notice = container.querySelector(".licenses-text").textContent;
+    expect(notice).toContain("ca287bbae91f939481b3b36764d1e8b2cfb6160b");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-0.9.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-dubit-0.9.safetensors");
+  });
+
   it("switches between a component's license documents", async () => {
     await render();
     // ffmpeg has two docs (notice + GPL text); pick the GPL tab.

@@ -430,6 +430,74 @@ pub(crate) async fn heartbeat_while_blocking<R: Send + 'static>(
     }
 }
 
+/// Keep the worker's heartbeat alive across a REGION rather than around a single task.
+///
+/// [`heartbeat_while_blocking`] covers one bounded `JoinHandle`, and the streaming consumers cover
+/// their own `select!` loop with an interval arm (sc-4276). Between those two lies the stretch a job
+/// spends after its "Preparing" post and before the generation stream opens: the route's pre-load
+/// admission pass — provider footprint queries, the tier ladder's residency probes, decode-quality
+/// binding. Nothing there is one awaitable task and nothing there is a loop, so neither existing
+/// mechanism reaches it, and it went unheartbeated.
+///
+/// It is not a small window. On an Apple-Silicon host loading a 33 GB Krea bundle that pass measured
+/// 95 s between the source guard returning and `image_pipeline_load_start` — five seconds past the
+/// 90 s stale-worker sweep (`jobs_store::mark_stale_workers_interrupted`), which marked the job
+/// `interrupted` under a worker that was healthy and working. The job then died on its next progress
+/// POST with `409 ... is already interrupted`.
+///
+/// Held as an RAII guard so it covers whatever it is scoped over, including the `?` and cancel paths.
+/// Overlapping a consumer's own interval arm is deliberate and harmless — a heartbeat is an
+/// idempotent `last_seen_at` stamp — and overlap is what makes one guard at the dispatch seam cover
+/// every route instead of each route having to remember its own admission pass.
+///
+/// The pump is a spawned task, not an arm of the caller's loop, precisely because the region it
+/// covers is synchronous: an admission pass that blocks its runtime thread cannot poll anything, so
+/// the ticks have to come from elsewhere. That is sound on the worker's multi-threaded runtime
+/// (`#[tokio::main]` in `apps/rust-worker`) and on the API's in-process pool.
+///
+/// Heartbeat failures are logged and swallowed. There is no caller to return them to, and the two
+/// realistic causes — a transport blip, or a 409 because the sweep already reclaimed the job — are
+/// both handled where the job's next real progress POST lands.
+pub(crate) struct HeartbeatPump {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl HeartbeatPump {
+    pub(crate) fn start(api: &ApiClient, settings: &Settings, job_id: &str) -> Self {
+        let api = api.clone();
+        let settings = settings.clone();
+        let job_id = job_id.to_owned();
+        let period = progress_report_interval(&settings);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The caller has just posted a Busy heartbeat of its own alongside the status update
+            // this guard is scoped from, so the immediate first tick would be a redundant POST.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) =
+                    heartbeat(&api, &settings, WorkerStatus::Busy, Some(&job_id)).await
+                {
+                    tracing::debug!(
+                        event = "heartbeat_pump_post_failed",
+                        jobId = %job_id,
+                        error = %error,
+                        "region heartbeat failed; the job's next progress post reports the outcome"
+                    );
+                }
+            }
+        });
+        Self { handle }
+    }
+}
+
+impl Drop for HeartbeatPump {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested
 /// cancellation, WITHOUT posting any status. Unlike [`check_cancel`] this never
 /// writes the terminal `Canceled`. In-loop generation/training pollers that sit in

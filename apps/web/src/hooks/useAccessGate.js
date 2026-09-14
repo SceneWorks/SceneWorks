@@ -120,7 +120,19 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // degrades to placeholders and recovers when a retry lands — and a "media-ticket"
   // notice tells the user why media is broken while the backoff keeps retrying.
   const [mediaTicketFailed, setMediaTicketFailed] = useState(false);
+  // A hidden tab cannot use media URLs, so refreshing their bearer ticket is pure
+  // background churn. Keep the visibility listener separate from the mint effect so
+  // it is registered once for the hook lifetime rather than once per ticket refresh.
+  const [documentVisible, setDocumentVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
   const ready = authenticated && (mediaReady || mediaTicketFailed);
+
+  useEffect(() => {
+    const onVisibilityChange = () => setDocumentVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
 
   useEffect(() => {
     if (!authenticated || !accessResolved) {
@@ -138,6 +150,9 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
       setMediaTicket("");
       recordStartupMark("media-authorization-settled");
       setMediaReady(true);
+      return undefined;
+    }
+    if (!documentVisible) {
       return undefined;
     }
     let closed = false;
@@ -191,7 +206,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         window.clearTimeout(timer);
       }
     };
-  }, [access.authRequired, accessResolved, authenticated, token, pushNotice, dismissNoticeKind]);
+  }, [access.authRequired, accessResolved, authenticated, documentVisible, token, pushNotice, dismissNoticeKind]);
 
   // Probe whether the deployment requires a password, then release `accessResolved`
   // so an authenticated client (or one not requiring auth) can load its data. Mirrors

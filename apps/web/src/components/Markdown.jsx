@@ -3,15 +3,49 @@ import React from "react";
 // Compact, dependency-free Markdown renderer for first-party prompt-guide
 // content shipped from /public/prompt-guides. It covers the subset those files
 // use — ATX headings, paragraphs, ordered/unordered lists, blockquotes, fenced
-// code blocks, and inline bold/italic/code/links. It builds React elements
-// directly (never dangerouslySetInnerHTML), so untrusted markup cannot inject
-// HTML, and link hrefs are restricted to safe schemes.
+// code blocks, GFM pipe tables, and inline bold/italic/code/links. It builds
+// React elements directly (never dangerouslySetInnerHTML), so untrusted markup
+// cannot inject HTML, and link hrefs are restricted to safe schemes.
+//
+// Tables joined the subset in sc-17161. Eight shipped guides already used pipe
+// tables and every one of them rendered as literal-pipe paragraphs, separator
+// row and all — the MiniMax-H3 guide opens with two of them, so its cost table
+// (the thing a first-time user most needs to read before starting a two-hour
+// render) was the least legible part of the page.
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const LIST_ITEM = /^\s*([-*+]|\d+\.)\s+/;
 const ORDERED_ITEM = /^\s*\d+\.\s+/;
 const FENCE = /^```/;
 const QUOTE = /^\s*>\s?/;
+// A table is a header row followed by a delimiter row — the delimiter is what makes it a table
+// rather than a paragraph that happens to contain pipes, which is why both lines are required
+// before either is consumed.
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_DELIMITER = /^\s*\|(?:\s*:?-{1,}:?\s*\|)+\s*$/;
+
+// Split one pipe row into its cells: drop the leading/trailing pipe, then split on unescaped
+// pipes. `\|` is the GFM escape for a literal pipe inside a cell.
+function tableCells(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replace(/\\\|/g, "|"));
+}
+
+// Per-column alignment from the delimiter row (`:--`, `--:`, `:-:`), or undefined for the default.
+function tableAlignments(line) {
+  return tableCells(line).map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return undefined;
+  });
+}
 
 function safeHref(url) {
   const trimmed = (url || "").trim();
@@ -87,6 +121,18 @@ function parseBlocks(content) {
       blocks.push({ type: "code", text: code.join("\n") });
       continue;
     }
+    if (TABLE_ROW.test(line) && i + 1 < lines.length && TABLE_DELIMITER.test(lines[i + 1])) {
+      const header = tableCells(line);
+      const align = tableAlignments(lines[i + 1]);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && TABLE_ROW.test(lines[i])) {
+        rows.push(tableCells(lines[i]));
+        i += 1;
+      }
+      blocks.push({ type: "table", header, align, rows });
+      continue;
+    }
     if (LIST_ITEM.test(line)) {
       const ordered = ORDERED_ITEM.test(line);
       const items = [];
@@ -113,7 +159,8 @@ function parseBlocks(content) {
       !HEADING.test(lines[i]) &&
       !LIST_ITEM.test(lines[i]) &&
       !FENCE.test(lines[i].trim()) &&
-      !QUOTE.test(lines[i])
+      !QUOTE.test(lines[i]) &&
+      !(TABLE_ROW.test(lines[i]) && i + 1 < lines.length && TABLE_DELIMITER.test(lines[i + 1]))
     ) {
       para.push(lines[i]);
       i += 1;
@@ -144,6 +191,34 @@ function renderBlock(block, key) {
         <blockquote key={key}>
           <p>{renderInline(block.text, key)}</p>
         </blockquote>
+      );
+    case "table":
+      return (
+        // Wrapped so a wide table scrolls inside its own box rather than widening the modal.
+        <div className="markdown-table-wrap" key={key}>
+          <table>
+            <thead>
+              <tr>
+                {block.header.map((cell, index) => (
+                  <th key={`${key}-h${index}`} style={{ textAlign: block.align[index] }}>
+                    {renderInline(cell, `${key}-h${index}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, rowIndex) => (
+                <tr key={`${key}-r${rowIndex}`}>
+                  {block.header.map((_, cellIndex) => (
+                    <td key={`${key}-r${rowIndex}c${cellIndex}`} style={{ textAlign: block.align[cellIndex] }}>
+                      {renderInline(row[cellIndex] ?? "", `${key}-r${rowIndex}c${cellIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       );
     case "code":
       return (

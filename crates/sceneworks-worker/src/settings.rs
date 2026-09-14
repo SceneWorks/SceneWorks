@@ -6,6 +6,10 @@ pub struct Settings {
     pub api_url: String,
     pub access_token: Option<String>,
     pub data_dir: PathBuf,
+    /// App-owned resolved-model cache policy. Invalid environment is fail-closed to the finite,
+    /// disabled shared default rather than enabling or unbounding the cache.
+    #[cfg(not(test))]
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
     pub worker_id: String,
     pub gpu_id: String,
@@ -58,11 +62,14 @@ pub struct Settings {
 
 impl fmt::Debug for Settings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Settings")
+        let mut debug = formatter.debug_struct("Settings");
+        debug
             .field("api_url", &self.api_url)
             .field("access_token", &self.access_token.as_ref().map(|_| "***"))
-            .field("data_dir", &self.data_dir)
+            .field("data_dir", &self.data_dir);
+        #[cfg(not(test))]
+        debug.field("resolved_cache", &self.resolved_cache);
+        debug
             .field("config_dir", &self.config_dir)
             .field("worker_id", &self.worker_id)
             .field("gpu_id", &self.gpu_id)
@@ -89,6 +96,55 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
+    /// The effective resolved-model cache policy (sc-19707). The field itself is
+    /// `cfg(not(test))` — the dozens of test fixtures that build `Settings` literally predate it —
+    /// so under test the SAME environment `from_env` would have read is consulted directly. Both
+    /// forms therefore answer with `ResolvedCachePolicy::from_env_or_safe_default()` for any
+    /// process that took its settings from the environment.
+    #[cfg(not(test))]
+    pub(crate) fn resolved_cache_policy(
+        &self,
+    ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+        self.resolved_cache.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_cache_policy(
+        &self,
+    ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default()
+    }
+
+    /// A minimal offline `Settings` for tests that only care about `data_dir`. Every field that
+    /// could reach the network is pinned to the offline stub URL, so a test using this cannot
+    /// accidentally acquire a live dependency.
+    #[cfg(test)]
+    pub(crate) fn for_test(data_dir: PathBuf) -> Self {
+        Self {
+            api_url: crate::test_env::OFFLINE_URL.to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::new(),
+            worker_id: "worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: crate::test_env::OFFLINE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 1,
+            max_model_url_bytes: 1,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: false,
+            external_model_roots: Vec::new(),
+            gpu_memory_limit_bytes: 0,
+        }
+    }
+
     pub fn from_env() -> Self {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
@@ -100,6 +156,9 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             data_dir: env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir),
+            #[cfg(not(test))]
+            resolved_cache:
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir: config_dir.clone(),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),

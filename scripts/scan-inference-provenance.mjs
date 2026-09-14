@@ -21,6 +21,11 @@ const WORKER_MANIFEST = path.resolve(
 );
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 
+// Git reports repository paths without a leading `./`, so `.` is a stable, serializable name for
+// the root Cargo manifest that can never act as a match-all path prefix. An empty string is unsafe:
+// it disappears from the line-oriented inventory and is a prefix of every repository path.
+export const ROOT_CRATE_PREFIX = ".";
+
 /** The single inference revision the worker's Cargo manifest pins. Throws if it is not unique. */
 export function pinnedRevision(manifestPath = WORKER_MANIFEST) {
   const pins = new Set(
@@ -213,24 +218,17 @@ export function scanCrates(repo, revision = pinnedRevision()) {
   const owning = new Set();
   for (const file of files.filter(productionRustPath)) {
     const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
-    if (owner !== undefined) owning.add(owner);
-  }
-  // A root-level `Cargo.toml` that directly owns top-level production `.rs` files yields the
-  // EMPTY-STRING prefix. `serializeCrates` would render it as a blank line and `parseCrates` drops
-  // blank lines, so the crate would vanish from the inventory. That fails on count/hash rather than
-  // failing open, but with a message that points nowhere. Reject it here instead, where the cause is
-  // legible: the coverage guard classifies by prefix, and "" is a prefix of everything.
-  if (owning.has("")) {
-    throw new Error(
-      `${revision}: the repository ROOT Cargo.toml directly owns production Rust files, which yields an empty crate prefix. ` +
-        "The crate-coverage guard classifies by prefix and \"\" matches every path, so it cannot be classified. " +
-        "Move the root crate's sources under a named crate directory, or teach scanCrates an explicit label for it.",
-    );
+    if (owner !== undefined) owning.add(owner || ROOT_CRATE_PREFIX);
   }
   return [...owning].sort((a, b) => a.localeCompare(b));
 }
 
 export function serializeCrates(crates) {
+  if (crates.some((crate) => !crate)) {
+    throw new Error(
+      `empty crate prefix is unsafe; use ${JSON.stringify(ROOT_CRATE_PREFIX)} for the root Cargo manifest`,
+    );
+  }
   return [
     "# Production-Rust crate prefixes in the pinned inference revision (scan-inference-provenance.mjs).",
     "# Every prefix here must be classified in config/inference-third-party-source.json — either by a",

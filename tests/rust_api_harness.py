@@ -11,10 +11,12 @@ of truth for those fixtures so they can't diverge again.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import httpx
 
@@ -155,6 +157,41 @@ class SpawnedProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         return self._popen.wait(timeout=timeout)
+
+
+def spawn_env(root: Path) -> dict[str, str]:
+    """The base environment for a spawned API/worker binary, with the Hugging Face
+    cache pinned inside ``root``.
+
+    A live-binary spawn inherits the developer's ambient environment, and a real
+    workstation carries `HF_HOME` (or `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE`)
+    pointing at a multi-terabyte Hugging Face cache. The spawned binary resolves
+    those three vars AHEAD of `SCENEWORKS_DATA_DIR`
+    (`sceneworks_core::hf_home::huggingface_hub_cache_dir`), so without a pin the
+    model catalog's install-state sweep probes the HOST's cache instead of the
+    test's temp data dir -- install state stops being a property of the fixture and
+    becomes a property of whatever the developer happens to have downloaded.
+
+    Unsetting the three is NOT sufficient: `ensure_default_huggingface_home()` then
+    defaults `HF_HOME` to the OS Hugging Face home (`~/.cache/huggingface`), which
+    is still a shared, host-owned directory. Pinning `HF_HUB_CACHE` (top precedence)
+    at `<root>/data/cache/huggingface/hub` instead reproduces exactly the
+    `<data_dir>/cache/huggingface/hub` fallback the binary uses under a clean
+    environment, so the spawn is hermetic rather than merely env-less.
+
+    CI runners have an empty HF cache, so an unpinned spawn is green there and red
+    only on a developer box. Measured on Windows against a 2.2 TB ambient cache, the
+    first `POST /api/v1/image/jobs` in the e2e LoRA test spent 22.6s in that sweep
+    and blew the request's 5s timeout; pinned, the same call takes 0.43s. The parity
+    harness has pinned it since sc-19708 (an unpinned golden recorded WHOSE machine
+    ran it) while the e2e harness did not -- this is the one implementation both use
+    so the isolation cannot drift back out of either.
+    """
+    env = os.environ.copy()
+    env["HF_HUB_CACHE"] = str(Path(root) / "data" / "cache" / "huggingface" / "hub")
+    for inherited in ("HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+        env.pop(inherited, None)
+    return env
 
 
 def spawn_process(command, *, cwd, env) -> SpawnedProcess:

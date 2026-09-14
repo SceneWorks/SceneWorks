@@ -152,6 +152,64 @@
       ]
     },
     {
+      "id": "ltx-2.5",
+      "models": [
+        "ltx_2_5"
+      ],
+      "name": "LTX-2.5 + Gemma-4-12B",
+      "publisher": "Lightricks (LTX-2.5) · Google (Gemma-4)",
+      "license": "LTX-2.x Community License (2026-08-11) · Apache-2.0 + Gemma Prohibited Use Policy",
+      "homepage": "https://huggingface.co/Lightricks/LTX-2.5",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Text/image-to-video model with audio. SceneWorks downloads on first use a bundle re-hosted at SceneWorks/ltx-2.5-mlx (consumed by MLX on Apple Silicon and by native candle generation/training on Windows and Linux NVIDIA, the same cross-platform layout SceneWorks/ltx-2.3-mlx already uses), containing the LTX-2.5 video weights under the LTX-2.x Community License Agreement (License date: August 11, 2026 — a distinct, later agreement from the January 5, 2026 text that governs LTX-2.3; see NOTICE.txt for the diff) plus a Gemma-4-12B text encoder. Unlike LTX-2.3's Gemma-3 encoder, Google licenses Gemma 4 model weights under the Apache License 2.0; its separate Gemma Prohibited Use Policy still applies as an acceptable-use layer on top of that permissive grant. Re-hosting strips Hugging Face's extra_gated_* click-through metadata only — it does not remove or alter any of these terms, all of which apply in full; see NOTICE.txt.",
+      "documents": [
+        {
+          "label": "LTX-2.x Community License Agreement (2026-08-11)",
+          "key": "ltx-2.5-license"
+        },
+        {
+          "label": "Apache License 2.0 (Gemma 4)",
+          "key": "ltx-2.5-gemma-apache"
+        },
+        {
+          "label": "Gemma Prohibited Use Policy",
+          "key": "ltx-2.5-gemma-prohibited-use"
+        },
+        {
+          "label": "License provenance & sourcing notice",
+          "key": "ltx-2.5-notice"
+        }
+      ]
+    },
+    {
+      "id": "ltx-2.3-ic-loras",
+      "models": [],
+      "name": "LTX-2.3 IC-LoRA HDR and LipDub",
+      "publisher": "Lightricks Ltd. (redistributed unmodified by SceneWorks)",
+      "license": "LTX-2 Community License",
+      "homepage": "https://huggingface.co/SceneWorks/ltx-2.3-ic-loras",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "LTX-2.3 HDR and LipDub/DubIt IC-LoRA adapters downloaded on first use from the immutable public SceneWorks/ltx-2.3-ic-loras rehost. The rehost contains the exact unmodified upstream HDR adapter, its companion scene embedding, and the LipDub/DubIt adapter; SceneWorks currently downloads the two adapters and does not consume the scene embedding. These derivatives remain subject to the complete LTX-2 Community License, including its use restrictions and paid-license requirement for entities at or above its annual-revenue threshold.",
+      "documents": [
+        {
+          "label": "LTX-2 Community License",
+          "key": "ltx-2.3-license"
+        },
+        {
+          "label": "SceneWorks redistribution notice and immutable provenance",
+          "key": "ltx-2.3-ic-loras-notice"
+        }
+      ]
+    },
+    {
       "id": "kokoro-82m",
       "models": [
         "kokoro_82m"
@@ -422,7 +480,7 @@
         "windows",
         "linux"
       ],
-      "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
+      "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the 378px DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-378 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
       "documents": [
         {
           "label": "Creative Commons BY-NC 4.0 (MMAudio MM-DiT / VAE / BigVGAN weights)",
@@ -918,6 +976,60 @@
       ]
     },
     {
+      "id": "minimax-h3",
+      "models": [
+        "minimax_h3",
+        "minimax_h3_ref"
+      ],
+      "name": "MiniMax-H3 (Hailuo 3.0) + Qwen3-VL-32B",
+      "publisher": "Nanonoble Pte. Ltd. (MiniMax-H3) · Alibaba Qwen (Qwen3-VL-32B)",
+      "license": "MiniMax H3 Community License · Apache-2.0",
+      "homepage": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Joint video + audio generation model, in two entries sharing one component set: MiniMax-H3 (text-to-video and first/last-frame) and MiniMax-H3 References (reference-driven). On Apple Silicon, SceneWorks downloads on first use a converted MLX copy of the two diffusion transformers, re-hosted at SceneWorks/minimax-h3-mlx, plus the text encoder and both autoencoders fetched directly from the upstream MiniMaxAI/MiniMax-H3 repository (not re-hosted). The transformer and autoencoder weights are governed by the MiniMax H3 Community License Agreement, a RESTRICTED licence and not a permissive one: it permits commercial use subject to an Acceptable Use Policy, requires attribution on redistribution, and expressly limits its Applicable Territory to the world EXCLUDING the European Union, the United Kingdom, the Republic of Korea and the United States of America. Read the full text below before use. The text encoder is byte-for-byte identical to Qwen/Qwen3-VL-32B-Instruct and remains under Apache-2.0; both notices apply.",
+      "documents": [
+        {
+          "label": "NOTICE (required by MiniMax H3 Community License §III.4)",
+          "key": "minimax-h3-notice"
+        },
+        {
+          "label": "MiniMax H3 Community License Agreement",
+          "key": "minimax-h3-community-license"
+        },
+        {
+          "label": "Apache License 2.0 (Qwen3-VL-32B text encoder)",
+          "key": "minimax-h3-qwen-apache"
+        }
+      ]
+    },
+    {
+      "id": "wan2_1_t2v_14b_diffusers",
+      "models": [],
+      "appliesToModels": [
+        "krea_2_turbo",
+        "krea_2_raw",
+        "qwen_image",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning"
+      ],
+      "name": "Wan 2.1 VAE alternate decoder",
+      "publisher": "Wan-AI / Alibaba Tongyi Lab",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Experimental terminal decoder for compatible Krea 2 and Qwen-Image z16 generations. SceneWorks downloads only the pinned q4/vae.safetensors donor file from SceneWorks/krea-realtime-14b-mlx; it does not install or run the full Wan generator. Its Apache-2.0 terms append to the selected base model's terms, so the composition remains governed by the strictest applicable license.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "wan2.1-vae-alternate-apache"
+        }
+      ]
+    },
+    {
       "id": "svd",
       "models": [
         "svd"
@@ -971,11 +1083,18 @@
       "models": [
         "controlnet_tile_sdxl"
       ],
-      "name": "ControlNet Tile SDXL",
+      "appliesToModels": [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2"
+      ],
+      "name": "xinsir SDXL ControlNet utilities",
       "publisher": "xinsir",
       "license": "Apache-2.0",
-      "homepage": "https://huggingface.co/xinsir/controlnet-tile-sdxl-1.0",
-      "usage": "Tile ControlNet for SDXL-architecture upscaling (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "homepage": "https://huggingface.co/xinsir",
+      "usage": "OpenPose ControlNet for the five accepted SDXL-family pose-guided models and Tile ControlNet for SDXL-architecture upscaling (shared optional components). Model Manager provisions the pinned upstream OpenPose component alongside each compatible backbone and installs Tile explicitly; SceneWorks does not re-host either artifact, and both routes resolve only installed snapshots during their jobs.",
       "documents": [
         {
           "label": "Apache License 2.0",
@@ -1222,6 +1341,23 @@
         {
           "label": "Apache License 2.0",
           "key": "dwpose-apache"
+        }
+      ]
+    },
+    {
+      "id": "insightface",
+      "models": [
+        "instantid_face_stack"
+      ],
+      "name": "InsightFace face analysis models (SCRFD + ArcFace)",
+      "publisher": "InsightFace (deepinsight)",
+      "license": "Non-commercial research only (model weights); MIT (code)",
+      "homepage": "https://github.com/deepinsight/insightface",
+      "usage": "SCRFD face detector (scrfd_10g) and ArcFace recognition embedder (arcface_iresnet100) behind dataset face analysis, face-likeness comparison, keypoint extraction, structured catalog analysis and the identity lanes' likeness staging; staged from the SceneWorks/instantid-mlx safetensors conversion. InsightFace publishes no standalone weights license: per the verbatim upstream README terms reproduced in the notice, the CODE is MIT but models trained on InsightFace's annotated data — including SCRFD and ArcFace — are available for NON-COMMERCIAL RESEARCH PURPOSES ONLY, and conversion does not change the governing terms. Commercial use requires a separate license from the InsightFace team.",
+      "documents": [
+        {
+          "label": "InsightFace Model License Notice (verbatim upstream terms)",
+          "key": "insightface-model-notice"
         }
       ]
     }

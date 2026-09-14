@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { apiFetch, isAbortError } from "./api.js";
 import {
   beginAssetRequest,
@@ -14,7 +22,7 @@ import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
+import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { editModelForAsset, workflowModelType } from "./presetUtils.js";
@@ -60,6 +68,16 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
+import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
+import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
+import {
+  adoptModelLibrary,
+  createModelLibraryGate,
+  fetchModelLibraryStatus,
+  relocateModelLibrary,
+  setModelLibraryHandler,
+  validateModelLibrary,
+} from "./modelLibrary.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
 // renders instead of this workspace when the sidebar switch is on Simple. The workspace
@@ -549,8 +567,18 @@ export function App() {
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
   const [queueSummary, setQueueSummary] = useState(null);
-  // Mac UI gating (sc-3486): inert until the capabilities endpoint reports macGatingActive.
+  // Mac UI gating (sc-3486): the value is inert until the capabilities endpoint reports
+  // macGatingActive, but keep a separate readiness bit so consumers do not mistake that
+  // temporary fallback for authoritative Candle capability facts.
   const [macCapabilities, setMacCapabilities] = useState(DEFAULT_MAC_CAPABILITIES);
+  const [macCapabilitiesAuthoritative, setMacCapabilitiesAuthoritative] = useState(false);
+  const [macCapabilitiesError, setMacCapabilitiesError] = useState("");
+  const [macCapabilitiesLoading, setMacCapabilitiesLoading] = useState(false);
+  // The generation pickers must not treat the hand-authored fallback catalog as proof that a
+  // model is present on this machine. Until GET /models completes its install/availability sweep,
+  // keep the studios in an explicit initializing state instead (the request may legitimately take
+  // tens of seconds on a cold start). A settled refresh keeps the last authoritative catalog live.
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -695,6 +723,108 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
+  // The unavailable-model-library prompt (sc-19709). One gate for the whole app: it holds at most
+  // one blocked action and resumes it at most once, so a reconnect (or an impatient second click)
+  // can never turn one blocked generation into two jobs. Registered as the module-level handler so
+  // every submission path — and the studios' selection check — reaches it without prop threading.
+  // The relocation sequence's three seams, built once and shared by the blocked-action prompt
+  // (below) and the Settings → Storage "Model library" control, which relocates with no blocked
+  // action to resume but with exactly the same two-write ordering and undo.
+  const modelLibraryRelocator = useMemo(
+    () => ({
+      validate: (path) => validateModelLibrary(token, path),
+      adopt: (path) => relocateModelLibrary(token, path),
+      // Durable persistence of a relocated library is desktop state: the API hands back the exact
+      // HF_HOME the shell must store, in the same field, file and normalization as the first-run
+      // storage step. Returns an undo so the gate can restore the previous location if the
+      // server's re-bind then fails — the two copies must never disagree.
+      //
+      // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
+      // without a previous location there is no undo, so a re-bind failure afterwards would leave
+      // the shell pointed at the new library while the gate reported the previous location still
+      // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
+      persist: async (target) => {
+        // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
+        // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
+        // changed, so the previous location genuinely is still in use.
+        if (!isDesktopShell || !target?.hfHome) return () => {};
+        let before = null;
+        try {
+          before = await tauriInvoke("get_storage_setup");
+        } catch (error) {
+          throw new Error(
+            `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
+          );
+        }
+        const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+        if (!previous) {
+          throw new Error(
+            "The current model library location could not be read, so nothing was changed.",
+          );
+        }
+        await tauriInvoke("set_model_library", { path: target.hfHome });
+        return () => tauriInvoke("set_model_library", { path: previous });
+      },
+    }),
+    [token],
+  );
+  const modelLibraryGate = useMemo(
+    () =>
+      createModelLibraryGate({
+        probe: () => fetchModelLibraryStatus(token),
+        ...modelLibraryRelocator,
+      }),
+    [token, modelLibraryRelocator],
+  );
+  const modelLibraryState = useSyncExternalStore(
+    modelLibraryGate.subscribe,
+    modelLibraryGate.getState,
+  );
+  useEffect(() => setModelLibraryHandler(modelLibraryGate.block), [modelLibraryGate]);
+  // The relocated library, held until the user answers the restart disclosure. The relocation is
+  // already durable at this point — this only decides WHEN the app picks it up.
+  const [modelLibraryRelocation, setModelLibraryRelocation] = useState(null);
+  // True while the NATIVE folder picker is up. The prompt's auto re-probe pauses on it: a drive
+  // that comes back while the user is choosing a folder must not resume the submission behind a
+  // modal OS dialog the user cannot see past.
+  const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
+  const chooseModelLibraryLocation = useCallback(async () => {
+    if (!isDesktopShell) return;
+    setModelLibraryPickerOpen(true);
+    let picked = null;
+    try {
+      picked = await tauriInvoke("choose_folder").catch(() => null);
+    } finally {
+      setModelLibraryPickerOpen(false);
+    }
+    if (!picked) return;
+    const adopted = await modelLibraryGate.relocate(picked);
+    if (adopted?.hfHome) {
+      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
+      // disclosure says so. The Settings path below has no submission to drop.
+      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
+      );
+    }
+  }, [modelLibraryGate, pushNotice]);
+  // Settings → Storage → Model library → Change…: the same relocation (validate, persist, re-bind,
+  // undo on failure) and the same restart disclosure as the prompt, with no blocked action. Resolves
+  // to the adopted target, `null` when the picker was dismissed; rejects with the user-facing
+  // message when the folder was refused or a write failed, for the Settings screen to show inline.
+  // Unlike the prompt path there is no `modelLibraryPickerOpen` bracket: that flag only pauses the
+  // gate's auto re-probe, and with no blocked action pending there is nothing a re-probe could
+  // resume behind the native dialog.
+  const changeModelLibrary = useCallback(async () => {
+    if (!isDesktopShell) return null;
+    const picked = await tauriInvoke("choose_folder").catch(() => null);
+    if (!picked) return null;
+    const adopted = await adoptModelLibrary(modelLibraryRelocator, picked);
+    setModelLibraryRelocation({ ...adopted, droppedSubmission: false });
+    return adopted;
+  }, [modelLibraryRelocator]);
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
@@ -872,7 +1002,12 @@ export function App() {
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
   const generatedAssetRefreshesRef = useRef(new Map());
   const refreshShellDataRef = useRef(null);
+  // A retry or token transition supersedes any older capabilities request. Fetch aborts normally
+  // provide this guarantee too, but the request id keeps a late/non-cooperative response from
+  // restoring stale platform facts after a newer request has started.
+  const macCapabilitiesRequestRef = useRef(0);
   const refreshModelsRef = useRef(null);
+  const modelCatalogRequestRef = useRef(0);
   const refreshModelAndLorasRef = useRef(null);
   const refreshTrainingTargetsRef = useRef(null);
   const refreshTrainingPresetsRef = useRef(null);
@@ -1110,6 +1245,7 @@ export function App() {
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,
@@ -1224,18 +1360,13 @@ export function App() {
   // loaders are sc-10668+), so they must not be offered as a generation target.
   // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = generationModelsForType(models, "image");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
+    return generationModelsForType(models, "image");
   }, [models]);
-  const videoModels = useMemo(() => {
-    const items = generationModelsForType(models, "video");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
-  }, [models]);
-  // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
-  // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
+  const videoModels = useMemo(() => generationModelsForType(models, "video"), [models]);
+  // Audio models (epic 13400) are resolved from the authoritative live catalog and consumed by
+  // Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
   const audioModels = useMemo(() => {
-    const items = generationModelsForType(models, "audio");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "audio");
+    return generationModelsForType(models, "audio");
   }, [models]);
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -1356,6 +1487,16 @@ export function App() {
       { active: 0 },
     );
   }, [jobs, queueSummary]);
+  // Jobs actually executing on a worker. The restart disclosure (sc-19709) withholds "Restart now"
+  // while any of these are in flight: the teardown is graceful, but interrupting a render still
+  // throws away the work, so the user defers rather than discovers. Prefers the server's own count
+  // when the queue summary is loaded, since `jobs` is a recent window rather than the whole queue.
+  const runningJobCount = useMemo(
+    () =>
+      queueSummary?.counts?.running ??
+      jobs.filter((job) => job.status === "running").length,
+    [jobs, queueSummary],
+  );
   const filteredJobs = useMemo(() => {
     if (projectFilter === "all") {
       return jobs;
@@ -1818,6 +1959,49 @@ export function App() {
     editorScratchRegistry.sweep(jobs);
   }, [jobs, editorScratchRegistry]);
 
+  const refreshMacCapabilities = useCallback(async ({ signal } = {}) => {
+    const requestId = macCapabilitiesRequestRef.current + 1;
+    macCapabilitiesRequestRef.current = requestId;
+    // Preserve the last payload for inert Mac-gating helpers, but it is not authorization for
+    // decoder reconciliation/submission while this request is unsettled.
+    setMacCapabilitiesAuthoritative(false);
+    setMacCapabilitiesLoading(true);
+    try {
+      const value = await apiFetch("/api/v1/capabilities/mac", token, { signal });
+      if (signal?.aborted || macCapabilitiesRequestRef.current !== requestId) {
+        return false;
+      }
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        typeof value.macGatingActive !== "boolean"
+      ) {
+        throw new Error("the API returned an invalid capability response");
+      }
+      setMacCapabilities(value);
+      setMacCapabilitiesAuthoritative(true);
+      setMacCapabilitiesError("");
+      return true;
+    } catch (err) {
+      if (
+        isAbortError(err) ||
+        signal?.aborted ||
+        macCapabilitiesRequestRef.current !== requestId
+      ) {
+        return false;
+      }
+      setMacCapabilitiesError(
+        `Could not load engine capabilities: ${err?.message || "unknown error"}`,
+      );
+      return false;
+    } finally {
+      if (macCapabilitiesRequestRef.current === requestId) {
+        setMacCapabilitiesLoading(false);
+      }
+    }
+  }, [token]);
+
   async function refreshShellData({ signal } = {}) {
     const fetchInitial = async (domain, label, path, fallback, optional = false) => {
       try {
@@ -1830,7 +2014,7 @@ export function App() {
         }
         const error = optional ? "" : `${label}: ${err.message}`;
         setDomainError(domain, error);
-        return { label, value: fallback, error };
+        return { label, value: fallback, error, failed: true };
       }
     };
     const projectsPromise = fetchInitial(
@@ -1844,15 +2028,9 @@ export function App() {
       setProjectsLoaded(true);
       return result;
     });
-    fetchInitial(
-      "mac-capabilities",
-      "Mac capabilities",
-      "/api/v1/capabilities/mac",
-      DEFAULT_MAC_CAPABILITIES,
-      true,
-    )
-      .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
-      .catch(() => {});
+    // This optional surface must not hold up shell hydration. Its own state keeps alternate
+    // decoder requests fail-closed and gives affected users retry/reset recovery on failure.
+    void refreshMacCapabilities({ signal });
     const shellPromises = [
       fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
         if (result.aborted) return result;
@@ -1870,13 +2048,28 @@ export function App() {
   }
 
   async function refreshModels({ signal } = {}) {
+    const requestId = ++modelCatalogRequestRef.current;
+    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
+    // specifically the cold-start boundary where no availability answer exists yet.
+    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
     try {
       const items = await apiFetch("/api/v1/models", token, { signal });
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale");
+      }
       setModels(items);
+      setModelCatalogStatus("ready");
       domainErrors.models("");
       return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return refreshFailure("aborted", err);
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale", err);
+      }
+      if (isAbortError(err)) {
+        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
+        return refreshFailure("aborted", err);
+      }
+      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
       domainErrors.models(err.message);
       return refreshFailure("error", err);
     }
@@ -3053,6 +3246,13 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
+    // model, which `imageModels` filters out — before the download starts (sc-17227).
+    catalogModels: models,
+    // The LoRA catalog, for the same reason: `createLoraDownloadJob` gates on the row's
+    // server-stamped `licenseAcknowledgmentModelId`, which a `{ id }` stub does not carry
+    // (sc-17227).
+    catalogLoras: loras,
     macCapabilities,
     catalogRevision,
     failedInstallJobIds,
@@ -3086,6 +3286,40 @@ export function App() {
       onImport={workflowDrop.importImage}
       onUse={workflowDrop.useWorkflow}
     />
+  );
+
+  // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
+  // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler
+  // that opens them is registered at App level and therefore fires in both, so a Simple-UI user
+  // whose library is disconnected would otherwise have their submission swallowed by a dialog that
+  // was never mounted — a silently dead Generate button. Both portal to <body>, so neither
+  // disturbs the shell it renders in.
+  const modelLibraryOverlays = (
+    <>
+      <ModelLibraryDialog
+        autoProbePaused={modelLibraryPickerOpen}
+        canRelocate={isDesktopShell}
+        onCancel={modelLibraryGate.cancel}
+        onRelocate={chooseModelLibraryLocation}
+        onRetry={modelLibraryGate.retry}
+        state={modelLibraryState}
+      />
+      <ModelLibraryRestartDialog
+        canRestart={isDesktopShell}
+        onLater={() => setModelLibraryRelocation(null)}
+        // The rejection is RE-THROWN after the notice: the dialog needs it to leave its restarting
+        // state, or a restart that never launched would leave the disclosure permanently stuck on
+        // "Restarting SceneWorks…" with both buttons disabled, for this and every later relocation.
+        onRestart={() =>
+          tauriInvoke("restart_app").catch((error) => {
+            pushNotice("general", `SceneWorks could not restart: ${String(error)}`);
+            throw error;
+          })
+        }
+        relocation={modelLibraryRelocation}
+        runningJobCount={runningJobCount}
+      />
+    </>
   );
 
   const jobAction = useCallback(
@@ -3153,6 +3387,31 @@ export function App() {
         setError("");
       } catch (err) {
         setError(err.message);
+      }
+    },
+    [setError, token],
+  );
+
+  // Move an explicit Queue-screen selection ahead of all work that was waiting when the action
+  // was submitted. The server ignores anything a worker claimed in the meantime, so this updates
+  // ordering without becoming a preemption control. Returned snapshots carry their durable
+  // queueRank and are upserted immediately; SSE mirrors the same update to other clients.
+  const prioritizeJobs = useCallback(
+    async (jobIds) => {
+      try {
+        const response = await apiFetch("/api/v1/jobs/prioritize", token, {
+          method: "POST",
+          body: JSON.stringify({ jobIds }),
+        });
+        const prioritized = response?.jobs ?? [];
+        if (prioritized.length) {
+          setJobs((items) => prioritized.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+        return true;
+      } catch (err) {
+        setError(err.message);
+        return false;
       }
     },
     [setError, token],
@@ -3296,6 +3555,7 @@ export function App() {
     jobAction,
     clearCompletedJobs,
     cancelPendingJobs,
+    prioritizeJobs,
     clearJob,
     createVqaJob,
     createInterleaveJob,
@@ -3337,8 +3597,13 @@ export function App() {
     videoModels,
     audioModels,
     models,
+    modelCatalogStatus,
     // Mac UI gating (sc-3486)
     macCapabilities,
+    macCapabilitiesAuthoritative,
+    macCapabilitiesError,
+    macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras,
     deleteLora,
     updateLora,
@@ -3380,6 +3645,7 @@ export function App() {
     setTrainingDatasetItemQualityAck,
     createTrainingDataset,
     uploadTrainingDatasetItem,
+    uploadLtxPreparedBundle,
     updateTrainingDataset,
     batchRenameTrainingDataset,
     deleteTrainingDataset,
@@ -3447,19 +3713,21 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
-    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, macCapabilities,
+    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, modelCatalogStatus, macCapabilities,
+    macCapabilitiesAuthoritative, macCapabilitiesError, macCapabilitiesLoading,
+    refreshMacCapabilities,
     loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
     promptBatches, createPromptBatch, updatePromptBatch, deletePromptBatch, duplicatePromptBatch,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
-    refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
+    refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem, uploadLtxPreparedBundle,
     updateTrainingDataset, batchRenameTrainingDataset, deleteTrainingDataset, writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
     trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
@@ -3530,6 +3798,7 @@ export function App() {
               too — otherwise a Simple-UI user's drop would be inspected and then answered by
               nothing. It portals to <body>, so it does not disturb this shell's layout. */}
           {workflowDropPanel}
+          {modelLibraryOverlays}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3712,6 +3981,7 @@ export function App() {
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onChangeModelLibrary={changeModelLibrary}
             onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
             sharingFocusRequest={settingsSharingFocusRequest}
@@ -3841,6 +4111,11 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* The unavailable-model-library prompt and its post-relocation restart disclosure
+          (sc-19709), built above and rendered in BOTH shells. Renders nothing while the gate is
+          idle, which is every normal run. */}
+      {modelLibraryOverlays}
 
       {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
           after the file turned out to carry a recipe. Renders nothing otherwise, which is the

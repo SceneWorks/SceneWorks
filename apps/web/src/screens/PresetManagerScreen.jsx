@@ -10,6 +10,7 @@ import {
   MAX_PRESET_LORAS,
   compactModeList,
   loraMatchesModel,
+  loraWeight,
   presetLoraId,
   presetLoras,
   presetSaveValidation,
@@ -22,12 +23,14 @@ import {
   effectiveLimits,
   samplerOptionsFromModel,
   schedulerOptionsFromModel,
+  stepsMenuFromModel,
 } from "../samplerOptions.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { errorMessage } from "../errorMessage.js";
 
 // The Workflow segment a preset editor offers, and how each choice persists.
 //
@@ -263,7 +266,9 @@ function loraLabel(lora) {
 // `options` carries the menus the selected model actually honors. A stored value outside
 // its menu is a default the model would silently clamp away, so it blocks the save until
 // the user picks a supported one — the in-menu flag shows what's there but can't be kept.
-function defaultValueErrors(form, isVideo, options) {
+// Exported for test (sc-19502): pure, dependency-free, and the only guard stopping a preset from
+// storing a default the model's own engine would refuse on every job it drives.
+export function defaultValueErrors(form, isVideo, options) {
   const errors = [];
   const checkNumber = (value, label, { min, max, integer = false }) => {
     if (value === "") {
@@ -285,6 +290,12 @@ function defaultValueErrors(form, isVideo, options) {
   checkNumber(form.count, "Variations", { min: 1, max: 8, integer: true });
   checkNumber(form.steps, "Steps", { min: 1, max: 200, integer: true });
   checkNumber(form.guidanceScale, "Guidance", { min: 0, max: 60 });
+  // A distilled model renders at exactly one step count (sc-19502). The generic 1..200 range above
+  // does not know that, so without this a preset could be SAVED with `steps: 30` for LTX-2.3 and
+  // then 400 on every job it drove — a stored default guaranteed to fail, which is the same
+  // unsatisfiable-control defect the Video Studio pin removes. Same shape as the fps menu check
+  // below: the range bounds sanity, the menu bounds what the model can actually do.
+  checkInMenu(form.steps, "Steps", options?.steps);
   checkInMenu(form.resolution, isVideo ? "Resolution" : "Aspect", options?.resolutions);
   if (isVideo) {
     checkNumber(form.duration, "Duration", { min: 1, max: 120 });
@@ -362,7 +373,9 @@ export function PresetManagerScreen() {
   const resolutionOptions = resolutionOptionsForModel(selectedModel, isVideo);
   const durationOptions = durationOptionsForModel(selectedModel);
   const fpsOptions = fpsOptionsForModel(selectedModel);
-  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions };
+  // `steps` has NO fallback menu, unlike the three above: absent means "any count", which is every
+  // model but the distilled ones (sc-19502).
+  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenuFromModel(selectedModel) };
 
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
   const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
@@ -483,7 +496,9 @@ export function PresetManagerScreen() {
         return current;
       }
       const source = loras.find((lora) => lora.id === id);
-      const weight = source?.defaultWeight ?? source?.weight ?? 0.8;
+      // Through the shared resolver, not a hand-rolled copy of its precedence chain: this seeds
+      // the SAME starting weight the studio pickers show, and can't drift from the default again.
+      const weight = loraWeight(source);
       return { ...current, loras: [...current.loras, { id, weight: String(weight) }] };
     });
   }
@@ -588,7 +603,7 @@ export function PresetManagerScreen() {
       defaults,
       loras: form.loras.map((lora) => ({
         id: lora.id,
-        weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : 0.8,
+        weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : 1.0,
       })),
       ui: { description: form.description.trim() },
     };
@@ -625,7 +640,7 @@ export function PresetManagerScreen() {
         setMessage({ tone: "success", text: "Preset created." });
       }
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not save this preset.") });
     } finally {
       setSaving(false);
     }
@@ -639,7 +654,7 @@ export function PresetManagerScreen() {
       setSelectedPresetId(duplicated.id);
       setMessage({ tone: "success", text: `Duplicated "${preset.name ?? preset.id}".` });
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not duplicate this preset.") });
     } finally {
       setSaving(false);
     }
@@ -660,7 +675,7 @@ export function PresetManagerScreen() {
       }
       setMessage({ tone: "success", text: `Archived "${preset.name ?? preset.id}".` });
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not archive this preset.") });
     } finally {
       setSaving(false);
     }

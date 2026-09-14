@@ -1,5 +1,122 @@
 use super::*;
 
+/// The single backend this API instance can actually enqueue for — the one authority every
+/// enqueue-time capability gate must key off.
+///
+/// macOS runs the MLX worker, *unless* the operator forced the Candle one
+/// (`SCENEWORKS_CANDLE_REQUIRED` → [`Settings::candle_required`]); every other platform is
+/// Candle-only. A bare `cfg!(target_os = "macos")` is wrong in precisely the mode the setting
+/// exists for: the gate would validate the request against MLX's capability lists while the job
+/// executes on Candle, so an MLX-only choice is admitted and then fails on the worker, and a
+/// Candle-valid choice is 400'd (sc-18420). One derivation, one place.
+///
+/// ## Scope: enqueue gates only — NOT the catalog advertisement lanes
+///
+/// `models.rs`'s `apply_imported_lora_advertisement`, `apply_imported_provider_surface` and the
+/// `mlx_catalog_status` probe keep their own bare `cfg!(target_os = "macos")` deliberately. They
+/// answer a DIFFERENT question: *which engines does this BUILD link* (macOS links MLX and no candle
+/// engine; Windows/Linux/Docker link candle and no MLX), and the MLX tier probe additionally reads
+/// convert-output directories that only exist on macOS. This function answers *which single backend
+/// does this INSTANCE route a job to*, which `candle_required` can move at runtime.
+///
+/// Three reasons not to unify them:
+/// 1. Those sites need a LANE PAIR, consulted ASYMMETRICALLY — a withdrawal crosses lanes, a
+///    positive advertisement never does. Collapsing that into this one-hot routing answer would
+///    break the invariant `apply_imported_lora_advertisement` documents.
+/// 2. A macOS build links no candle engine, so deriving the advertisement from `candle_required`
+///    would publish verdicts for an engine this binary cannot run.
+/// 3. Routing the `mlx_catalog_status` probe through here would HIDE `mlxTiers` and its per-tier
+///    state from the Studio on macOS under `candle_required`, for tier directories that are
+///    genuinely on disk — a regression, not a unification.
+///
+/// The residual skew is real but unshipped: on macOS the desktop wrapper sets
+/// `SCENEWORKS_CANDLE_REQUIRED` only under `cfg(not(target_os = "macos"))` and
+/// [`Settings::candle_required`] is documented "Absent on macOS", so reaching it takes a manual
+/// operator override. Under that override the catalog still advertises MLX-derived imported verdicts
+/// while these gates refuse against candle. Closing it properly means making the advertisement lane
+/// pair a runtime DEPLOYMENT fact (including remote candle workers registered with this API), not
+/// re-pointing it at this function.
+pub(crate) fn enqueue_backend(state: &AppState) -> &'static str {
+    if !cfg!(target_os = "macos") || state.settings.candle_required {
+        "candle"
+    } else {
+        "mlx"
+    }
+}
+
+/// Validate `advanced.decoder` against the descriptor-derived options on the exact post-preset model
+/// row. This is an enqueue-time fail-closed gate: z48/video/unknown models have no compatible option,
+/// and a soft donor that is not installed cannot produce a job that will fail later on the worker.
+///
+/// `active_backend` must come from [`enqueue_backend`] — never a hand-rolled `cfg!` — so the list
+/// consulted here is the list the worker that runs this job will actually offer.
+pub(crate) fn validate_selected_decoder_for_manifest(
+    active_backend: &str,
+    job_payload: &JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<(), ApiError> {
+    let Some(raw) = job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("decoder"))
+    else {
+        return Ok(());
+    };
+    let decoder_id = match raw {
+        Value::Null => return Ok(()),
+        Value::String(value) if value.trim().is_empty() || value == "native" => return Ok(()),
+        Value::String(value) => value.as_str(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "advanced.decoder must be a decoder id string (or 'native')",
+            ))
+        }
+    };
+    if job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("usePid"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(ApiError::bad_request(
+            "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder",
+        ));
+    }
+
+    // The catalog carries capability facts for every deployable backend, but this API instance can
+    // enqueue only for the backend it actually routes to. Looking across every list would let a Linux
+    // candle deployment accept an MLX-only choice and defer the rejection to the worker.
+    let matching: Vec<&Value> = model_manifest_entry
+        .get(sceneworks_core::decoder_support::DECODERS_FIELD)
+        .and_then(|decoders| decoders.get(sceneworks_core::decoder_support::BY_BACKEND_FIELD))
+        .and_then(Value::as_object)
+        .and_then(|by_backend| by_backend.get(active_backend))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|option| option.get("id").and_then(Value::as_str) == Some(decoder_id))
+        .collect();
+    if matching.is_empty() {
+        let model_id = model_manifest_entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("selected model");
+        return Err(ApiError::bad_request(format!(
+            "decoder '{decoder_id}' is not compatible with {model_id}; z48 and unsupported providers fail closed"
+        )));
+    }
+    if !matching
+        .iter()
+        .any(|option| option.get("available").and_then(Value::as_bool) == Some(true))
+    {
+        return Err(ApiError::bad_request(format!(
+            "decoder '{decoder_id}' is not installed; install or repair its standalone pinned component before submitting"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn create_image_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ImageJobRequest>,
@@ -43,15 +160,36 @@ pub(crate) async fn create_image_job(
     // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
     let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
     // Keyed off the POST-preset job_payload["model"], NOT the DTO's payload.model — see the
-    // matching note in create_video_job (sc-12300). The shared canonicalizer reads the final
-    // payload and also owns retry/duplicate, so no alternate image boundary can retain
-    // caller-supplied manifest metadata.
-    let model_manifest_entry =
+    // matching note in create_video_job (sc-12300). apply_recipe_preset_to_image_payload above
+    // may have replaced the model with the preset's own when the caller omitted one, which
+    // leaves payload.model stale and would resolve the DEFAULT model's entry.
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.model.as_str())
+        .to_owned();
+    // The shared canonicalizer reads the final payload and also owns retry/duplicate, so no
+    // alternate image boundary can retain caller-supplied manifest metadata.
+    let mut model_manifest_entry =
         crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
             .await?
             .ok_or_else(|| {
                 ApiError::internal("image model canonicalization returned no catalog entry")
             })?;
+    // Overlay the authored text-encoder selection onto the canonical entry and re-stamp it, so the
+    // worker sees the resolved encoder rather than the catalog default. The decoder gate then runs
+    // against the same server-owned entry.
+    resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
+        .await?;
+    validate_selected_decoder_for_manifest(
+        enqueue_backend(&state),
+        &job_payload,
+        &model_manifest_entry,
+    )?;
+    job_payload.insert(
+        "modelManifestEntry".to_owned(),
+        model_manifest_entry.clone(),
+    );
     // The model's declared `defaults.resolution`, keyed off the canonical post-preset entry for the same
     // reason the video route's gates are (sc-12300). The image half of the dead-`defaults.*` sweep:
     // the web honors this key (`ImageStudio.jsx:215`) but Rust did not, so a caller that named no
@@ -97,6 +235,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
     )
     .await?;
+    validate_imported_submission(&state, &model_id, &job_payload)?;
     if payload.seed.is_none() {
         // `job_payload["count"]` is the resolved count — the block above writes the model's declared
         // `defaults.count` whenever the caller named none, so the seed batch matches what actually
@@ -129,7 +268,89 @@ pub(crate) async fn create_image_job(
     if let Some(caption_request) = caption_request {
         crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
     }
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
+/// source shape and operation select one provider registration; family identity alone never admits
+/// a request. Builtins retain their id-keyed routing and are out of this family gate.
+pub(crate) fn validate_imported_submission(
+    state: &AppState,
+    model_id: &str,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+        || sceneworks_core::jobs_store::is_builtin_image_model(model_id)
+    {
+        return Ok(());
+    }
+    let has_material_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let backend = enqueue_backend(state);
+    let candle_required = backend == "candle";
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .unwrap_or("unknown");
+    if sceneworks_core::jobs_store::imported_image_request_provider_eligible(
+        model_id, payload, backend,
+    ) {
+        return Ok(());
+    }
+    let feature = if has_material_control
+        && !payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("poses"))
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    {
+        "control image/mode without a supported Pose request"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "strict-pose control"
+    } else if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("phases"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "multi-phase denoise"
+    } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        "image edit"
+    } else if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty())
+    {
+        "LoRA/LoKr adapters"
+    } else {
+        "requested generation shape"
+    };
+    let code = if candle_required {
+        "candle_unsupported"
+    } else if has_material_control {
+        "imported_control_unsupported"
+    } else {
+        "imported_unsupported"
+    };
+    Err(ApiError::bad_request(format!(
+        "{code}: imported {family} {feature} is not supported by the resolved {backend} provider \
+         registration for this exact source and operation; the request was not queued"
+    )))
 }
 
 pub(crate) async fn create_vqa_job(
@@ -151,7 +372,7 @@ pub(crate) async fn create_vqa_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
@@ -195,7 +416,7 @@ pub(crate) async fn create_interleave_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
@@ -516,17 +737,260 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
     .await
 }
 
+/// Validate and normalize the LTX-2.5-only generation controls before enqueue.
+///
+/// Returns whether auto-duration remains active. When a caller also supplied `duration`, the
+/// explicit value wins by removing the predictor keys from the enqueued payload; the worker keeps
+/// the same precedence as a replay/backstop. No other video family may carry these keys because
+/// accepting a visible-but-inert control is worse than refusing it at submission.
+fn normalize_ltx25_generation_controls(
+    model_id: &str,
+    job_payload: &mut JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<bool, ApiError> {
+    const KEYS: [&str; 6] = [
+        "vaeDecoder",
+        "autoDuration",
+        "autoDurationMinSeconds",
+        "autoDurationMaxSeconds",
+        "temporalUpsampleRounds",
+        // `transformerVariant` is read only by `ltx25_transformer_variant`, on the 2.5 arm. It
+        // belongs in this list for the same reason `vaeDecoder` does: on any other family it is a
+        // control the UI shows and nothing reads.
+        "transformerVariant",
+    ];
+    /// The legacy LTX guider knobs. LTX-2.5 has no reader for any of them — distilled guidance is
+    /// baked in and the dev checkpoint uses its fixed native video/audio guider parameters — so
+    /// they are inert in exactly the way `guidanceScale` is, and get the same refusal rather than
+    /// being accepted and silently dropped.
+    const DEAD_GUIDANCE_KEYS: [&str; 4] = [
+        "guidanceScale",
+        "videoCfgGuidanceScale",
+        "videoStgGuidanceScale",
+        "videoRescaleScale",
+    ];
+    let advanced = job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let carries_ltx25_control = KEYS.iter().any(|key| advanced.contains_key(*key));
+    if model_id != "ltx_2_5" {
+        if carries_ltx25_control {
+            return Err(ApiError::bad_request(format!(
+                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
+            )));
+        }
+        return Ok(false);
+    }
+
+    if let Some(key) = DEAD_GUIDANCE_KEYS
+        .iter()
+        .find(|key| advanced.contains_key(**key))
+    {
+        return Err(ApiError::bad_request(format!(
+            "LTX-2.5 does not accept advanced.{key}; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters"
+        )));
+    }
+
+    requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
+    requested_temporal_upsample_rounds(&advanced).map_err(ApiError::bad_request)?;
+
+    let explicit_duration = job_payload
+        .get("duration")
+        .and_then(Value::as_f64)
+        .is_some();
+    let auto_enabled = match advanced.get("autoDuration") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "advanced.autoDuration must be a boolean when present",
+            ))
+        }
+    };
+    if explicit_duration && auto_enabled {
+        if let Some(advanced) = job_payload
+            .get_mut("advanced")
+            .and_then(Value::as_object_mut)
+        {
+            for key in [
+                "autoDuration",
+                "autoDurationMinSeconds",
+                "autoDurationMaxSeconds",
+            ] {
+                advanced.remove(key);
+            }
+        }
+        return Ok(false);
+    }
+
+    let Some(range) = requested_auto_duration(&advanced).map_err(ApiError::bad_request)? else {
+        return Ok(false);
+    };
+    if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
+        return Err(ApiError::bad_request(
+            "advanced auto-duration min/max seconds must stay between 1 and 30",
+        ));
+    }
+    let entry = model_manifest_entry
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(message) = duration_limit_error(model_id, range.min_seconds, &entry)
+        .or_else(|| duration_limit_error(model_id, range.max_seconds, &entry))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Auto-duration range is outside the model's supported duration window. {message}"
+        )));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod ltx25_generation_control_tests {
+    use super::*;
+
+    fn entry() -> Value {
+        json!({
+            "id": "ltx_2_5",
+            "limits": { "hardMinDuration": 1, "hardMaxDuration": 15 }
+        })
+    }
+
+    fn payload(value: Value) -> JsonObject {
+        value.as_object().cloned().expect("payload object")
+    }
+
+    #[test]
+    fn auto_duration_omits_duration_but_explicit_duration_wins() {
+        let mut automatic = payload(json!({
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 12
+            }
+        }));
+        assert!(
+            normalize_ltx25_generation_controls("ltx_2_5", &mut automatic, &entry())
+                .expect("valid auto-duration")
+        );
+        assert!(!automatic.contains_key("duration"));
+
+        let mut explicit = payload(json!({
+            "duration": 7,
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": "ignored because duration wins",
+                "autoDurationMaxSeconds": -1,
+                "vaeDecoder": "diffusion",
+                "temporalUpsampleRounds": 2
+            }
+        }));
+        assert!(
+            !normalize_ltx25_generation_controls("ltx_2_5", &mut explicit, &entry())
+                .expect("explicit duration wins")
+        );
+        let advanced = explicit["advanced"].as_object().unwrap();
+        assert!(!advanced.contains_key("autoDuration"));
+        assert!(!advanced.contains_key("autoDurationMinSeconds"));
+        assert!(!advanced.contains_key("autoDurationMaxSeconds"));
+        assert_eq!(advanced["vaeDecoder"], "diffusion");
+        assert_eq!(advanced["temporalUpsampleRounds"], 2);
+    }
+
+    #[test]
+    fn ltx25_controls_reject_dead_or_out_of_contract_requests() {
+        let mut wrong_model = payload(json!({
+            "advanced": { "vaeDecoder": "diffusion" }
+        }));
+        assert!(normalize_ltx25_generation_controls(
+            "ltx_2_3",
+            &mut wrong_model,
+            &json!({ "id": "ltx_2_3" })
+        )
+        .is_err());
+
+        let mut too_long = payload(json!({
+            "advanced": {
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 20
+            }
+        }));
+        assert!(normalize_ltx25_generation_controls("ltx_2_5", &mut too_long, &entry()).is_err());
+
+        let mut bad_rounds = payload(json!({
+            "advanced": { "temporalUpsampleRounds": 3 }
+        }));
+        assert!(normalize_ltx25_generation_controls("ltx_2_5", &mut bad_rounds, &entry()).is_err());
+
+        let mut dead_guidance = payload(json!({
+            "advanced": { "transformerVariant": "dev", "guidanceScale": 4.2 }
+        }));
+        assert!(
+            normalize_ltx25_generation_controls("ltx_2_5", &mut dead_guidance, &entry()).is_err()
+        );
+    }
+
+    /// The legacy LTX guider knobs are as inert on 2.5 as `guidanceScale` — nothing in the worker
+    /// reads any of them on the 2.5 arm — so accepting them would leave the studio showing a
+    /// control that silently does nothing, the exact outcome this routine exists to prevent.
+    #[test]
+    fn ltx25_refuses_the_legacy_guider_keys_the_way_it_refuses_guidance_scale() {
+        for key in [
+            "guidanceScale",
+            "videoCfgGuidanceScale",
+            "videoStgGuidanceScale",
+            "videoRescaleScale",
+        ] {
+            let mut inert = payload(json!({ "advanced": { key: 4.2 } }));
+            let error = normalize_ltx25_generation_controls("ltx_2_5", &mut inert, &entry())
+                .expect_err("an inert guider knob must be refused, not accepted");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(
+                error.detail.contains(key),
+                "{key} refusal should name the key: {}",
+                error.detail
+            );
+        }
+    }
+
+    /// `transformerVariant` is read only on the 2.5 arm, so it is a 2.5-only control: refused
+    /// elsewhere (like `vaeDecoder`) and accepted here.
+    #[test]
+    fn transformer_variant_is_an_ltx25_only_control() {
+        let mut wrong_model = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(normalize_ltx25_generation_controls(
+            "ltx_2_3",
+            &mut wrong_model,
+            &json!({ "id": "ltx_2_3" })
+        )
+        .is_err());
+
+        let mut on_25 = payload(json!({
+            "advanced": { "transformerVariant": "dev" }
+        }));
+        assert!(
+            !normalize_ltx25_generation_controls("ltx_2_5", &mut on_25, &entry())
+                .expect("2.5 accepts its own transformer variant")
+        );
+        assert_eq!(on_25["advanced"]["transformerVariant"], "dev");
+    }
+}
+
 pub(crate) async fn create_video_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
-    let job_type = match payload.mode.as_str() {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
-    };
+    // The mode → job-type mapping lives in core (sc-19570) because the UI-gating probes must build
+    // the SAME pair this route enqueues before asking the claim predicates about it. Two copies
+    // would let the oracle answer about a job type that is never created.
+    let job_type = video_job_type_for_mode(payload.mode.as_str());
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
@@ -558,6 +1022,24 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    let auto_duration_active =
+        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
+    // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
+    // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
+    // direct API client must not be able to send additional references to an older engine that
+    // cannot consume them. The catalog flag is absent today and will be set only with the paired
+    // descriptor/pin evidence.
+    validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
+    validate_selected_decoder_for_manifest(
+        enqueue_backend(&state),
+        &job_payload,
+        &model_manifest_entry,
+    )?;
+    ensure_video_model_available_on_platform(
+        &model_id,
+        &model_manifest_entry,
+        video_job_platform(&state),
+    )?;
     // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
     // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
     // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
@@ -580,18 +1062,60 @@ pub(crate) async fn create_video_job(
     // 6s", a value the caller never set, with a lever ("shorten the clip") for a field they never
     // touched. Enforcing a manifest constraint requires the layer's own default to be
     // manifest-aware first, or the gate refuses a payload this route constructed itself.
-    if let Some(entry) = model_manifest_entry.as_object() {
-        let duration = resolve_duration(job_payload.get("duration"), entry);
-        if let Some(message) = duration_limit_error(&model_id, duration, entry) {
-            return Err(ApiError::bad_request(message));
+    if !auto_duration_active {
+        if let Some(entry) = model_manifest_entry.as_object() {
+            let duration = resolve_duration(job_payload.get("duration"), entry);
+            if let Some(message) = duration_limit_error(&model_id, duration, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+            // Write back ONLY the resolved default. A duration the caller named is already in the
+            // payload verbatim — `validate_video_job` bounded it to 1..=30, so it needs no clamp — and
+            // rewriting it would flatten its JSON shape: `duration` is a `ContractNumber`
+            // (= `serde_json::Number`), which carries int-vs-float across the wire, so a caller's `10`
+            // must not become `10.0`.
+            if !job_payload.contains_key("duration") {
+                job_payload.insert("duration".to_owned(), contract_number(duration));
+            }
         }
-        // Write back ONLY the resolved default. A duration the caller named is already in the
-        // payload verbatim — `validate_video_job` bounded it to 1..=30, so it needs no clamp — and
-        // rewriting it would flatten its JSON shape: `duration` is a `ContractNumber`
-        // (= `serde_json::Number`), which carries int-vs-float across the wire, so a caller's `10`
-        // must not become `10.0`.
-        if !job_payload.contains_key("duration") {
-            job_payload.insert("duration".to_owned(), contract_number(duration));
+    }
+    // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
+    // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
+    // three gates around it bound how long the clip is and how much conditioning media it carries,
+    // never how it is SAMPLED — so a MiniMax-H3 request at exactly its 5.1667s floor and its one
+    // advertised 24 fps, with no references at all, clears every one of them carrying
+    // `advanced.steps = 1` — a single Euler jump from pure noise, which is not a fast draft. Until
+    // this key existed the constraint could only be written as a manifest comment, and a comment
+    // enforces nothing.
+    //
+    // The unit is MODEL EVALUATIONS everywhere on this seam — `advanced.steps`, `defaults.steps`,
+    // `limits.hardMinSteps`, `limits.steps`, and each turbo adapter's declared `sampling.steps`. The
+    // MiniMax-H3 engine appends its own terminal sigma grid point (`evaluations + 1`), so no ±1 is
+    // applied on this side of the boundary (sc-18726). A gate that read grid points while the worker
+    // passed evaluations would be off by one on every model in the family.
+    //
+    // Rejected, never clamped, for the duration cap's reason: raising the step count for the caller
+    // doubles the compute they asked for with no error and no signal.
+    //
+    // sc-19502 widened this from a floor to also cover an EXACT menu, and the same call site serves
+    // both. LTX-2.3 is distilled — 8 baked sigma waypoints, no other renderable count — so an
+    // `advanced.steps = 30` request used to 400 late from the candle engine and, on mlx, be accepted
+    // and silently rendered at 8 anyway. Both lanes now refuse it, and this gate refuses it here
+    // first, before the job is dispatched.
+    //
+    // Same placement rationale as the three gates above — keyed off the post-preset `model_id` and
+    // the resolved entry, with the count read off `job_payload` so the gate judges the value
+    // actually enqueued. Unlike duration and fps there is no write-back and no resolved default:
+    // `advanced` is a verbatim passthrough map, so an omitted `steps` means the engine picks, which
+    // is not a value this gate may invent (see `requested_steps`).
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(steps) = job_payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(requested_steps)
+        {
+            if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
         }
     }
     // The model's declared `defaults.fps` + `limits.fps`, the other half of `frames = duration ×
@@ -611,6 +1135,33 @@ pub(crate) async fn create_video_job(
     // resolved entry (reading either from the DTO is sc-12300). The RESOLVED rate is written back so
     // the enqueued payload records what was actually rendered — the worker re-resolves identically
     // from the same entry, but a recipe replay reads this row.
+    // The model's declared reference-media caps (sc-17160) — `limits.maxReferenceAssets` /
+    // `maxSourceClipAssets` / `maxReferenceAudioAssets` / `maxCombinedReferenceAssets`. This is the
+    // BINDING half of the caps; `validate_video_job`'s three constants are only the payload-sanity
+    // outer bound, for the same reason `1..=30` is for duration — that gate runs before the model is
+    // known, and a recipe preset can still replace it (sc-12300).
+    //
+    // It is what makes raising the image blanket 8 -> 9 for MiniMax-H3 safe for every OTHER video
+    // model: `reference_caps` defaults to 8 images / 8 clips / 0 audio / no combined ceiling, so a
+    // family that declares nothing behaves byte-for-byte as it did before this key had a reader — a
+    // 9th reference to bernini is still refused, just here instead of one layer up. A per-family cap
+    // rather than a global bump, which is what the "raising a shared constant affects every video
+    // model" warning on the story asks for.
+    //
+    // Same placement rationale as the duration and fps caps above: keyed off the post-preset
+    // `model_id` and the resolved entry. The counts come off the DTO, not `job_payload`, because no
+    // preset patches the id lists — they are the caller's media, verbatim.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(message) = reference_limit_error(
+            &model_id,
+            payload.reference_asset_ids.len(),
+            payload.source_clip_asset_ids.len(),
+            payload.reference_audio_asset_ids.len(),
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
     if let Some(entry) = model_manifest_entry.as_object() {
         let fps = resolve_fps(job_payload.get("fps"), entry);
         if let Some(message) = fps_limit_error(&model_id, fps, entry) {
@@ -647,8 +1198,55 @@ pub(crate) async fn create_video_job(
         Some(&catalogs),
     )
     .await?;
+    // **THE NO-LANE GATE (sc-19504).** Last, on the payload actually about to be enqueued, so it
+    // judges the post-preset model + the resolved geometry rather than the DTO (sc-12300) — and
+    // after the LoRA validation, because a rejected adapter is a better error than "no backend".
+    //
+    // Every gate above this one asks "is this request well-formed?". This one asks the different
+    // question that GH #2074, sc-15328 and sc-19504 all turned on: **will anything ever run it?**
+    // A video job no lane claims is not rejected and not failed — it sits `queued` /
+    // "Waiting for an available worker." forever, next to an idle worker, with no error and no
+    // terminal state. `wan_2_2_i2v_14b` + `first_last_frame` was exactly that: admitted by the
+    // `VIDEO_JOB_MODES` allow-list, advertised by the manifest, offered as a Video Studio tab
+    // off-Mac, and claimable by neither the MLX engine (the I2V-A14B descriptor declares
+    // `conditioning: [Reference]` — no `Keyframe`) nor the candle i2v gate (which requires
+    // `mode == "image_to_video"`). Withdrawing the capability stops the TAB; only this stops the
+    // HANG, because `VIDEO_JOB_MODES` is global and an MCP / raw-REST / recipe-replay caller can
+    // still name any admitted mode against any model.
+    //
+    // Derived from the real claim predicates `worker_supports_job` consults, never a restated list,
+    // so a routing change moves this gate with it — see
+    // `video_request_is_claimable_by_any_lane`, which also documents why this is neither a
+    // capability gate nor a platform gate.
+    if !video_request_is_claimable_by_any_lane(&job_type, &job_payload) {
+        let mode = job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str());
+        return Err(ApiError::bad_request(format!(
+            "{model_id} cannot render the \"{mode}\" mode — no backend implements it, so this job \
+             would wait for a worker that will never claim it. Choose a mode this model lists in \
+             its capabilities, or a model that supports this one."
+        )));
+    }
+    // **THE PLATFORM HALF OF THE SAME DEFECT IS NOT DECIDED HERE (sc-19570).** The gate above is
+    // platform-independent and stays that way, so it admits a request some OTHER host's lane would
+    // claim — `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set. Off-Mac nothing can claim those, and the job used to hang forever.
+    //
+    // sc-19570 first refused them right here with a `400`, which made `POST /api/v1/video/jobs`
+    // answer differently on Windows than on macOS for byte-identical bodies. That was ruled out:
+    // **an HTTP contract is not platform-dependent.** The status code, response shape and error
+    // envelope are the same on every host; what a given machine can actually RENDER is an execution
+    // outcome, and it is reported as one.
+    //
+    // So the platform verdict moved into the job lifecycle —
+    // `JobsStore::fail_platform_unreachable_jobs`, run below and again on every claim — and the job
+    // reaches a terminal `failed` with a `platform_unreachable:` reason instead of sitting queued.
+    // Nothing about the two gates' ORDER or wording is coupled: this one still 400s a mode no lane
+    // serves anywhere, on every platform alike.
     let job = create_generation_job(
-        state,
+        state.clone(),
         job_type,
         project_id,
         project_name,
@@ -656,7 +1254,63 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    // Terminate an unreachable job NOW rather than leaving it for the claim-time sweep. The sweep
+    // runs when a worker polls, and the deployments that most need this answer are exactly the ones
+    // where no worker ever will (an API-only container, a Windows host whose GPU worker is not
+    // installed). Waiting for a poll would reintroduce the hang this story exists to remove, so the
+    // response the caller already holds carries the terminal state.
+    let job = fail_job_if_platform_unreachable(&state, job).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+pub(crate) fn video_job_platform(_state: &AppState) -> &'static str {
+    #[cfg(test)]
+    if let Some(platform) = *_state.video_platform_override.lock() {
+        return platform;
+    }
+    std::env::consts::OS
+}
+
+pub(crate) fn ensure_video_model_available_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> Result<(), ApiError> {
+    if crate::models::video_model_withdrawn_on_platform(model_id, model_manifest_entry, platform) {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} is available only on macOS and cannot create video jobs on {platform}."
+        )));
+    }
+    Ok(())
+}
+
+/// Run the sc-19570 platform-reachability sweep and return `job` as it now stands: unchanged on a
+/// Mac and for any pair this host's lane serves, terminal `failed` when nothing here can ever claim
+/// it.
+///
+/// The status code does NOT depend on the verdict — the caller returns `201` either way, on every
+/// platform. Only the snapshot's `status` / `error` differ, which is what an execution outcome is.
+///
+/// It calls the same store method the claim path calls rather than duplicating the decision, so the
+/// two entry points can never disagree about which pairs are unreachable.
+async fn fail_job_if_platform_unreachable(
+    state: &AppState,
+    job: JobSnapshot,
+) -> Result<JobSnapshot, ApiError> {
+    let host_os = state.settings.host_os.clone();
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_platform_unreachable_jobs(&host_os)
+    })
+    .await?;
+    let mut result = job;
+    for failed_job in failed {
+        crate::jobs::emit_platform_unreachable(&failed_job);
+        publish(state, "job.updated", &failed_job);
+        if failed_job.id == result.id {
+            result = failed_job;
+        }
+    }
+    Ok(result)
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
@@ -731,22 +1385,36 @@ pub(crate) async fn create_audio_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an
 /// integral value stays integral.
 ///
+/// `pub(crate)` only so `a_fractional_resolved_duration_keeps_the_manifests_own_decimal` can assert
+/// the encoding directly rather than through a whole enqueue round-trip.
+///
 /// The wire has always carried `"duration": 5`, not `5.0` — `ContractNumber` preserves whatever the
 /// caller sent, and every shipped `defaults.duration` is a whole number. Writing an `f32` straight
 /// in flattens that (`Value::from(5.0_f32)` is `5.0`), a gratuitous contract change that the
 /// payload-normalization tests correctly catch.
-fn contract_number(value: f32) -> Value {
+pub(crate) fn contract_number(value: f32) -> Value {
     if value.fract() == 0.0 {
-        Value::from(value as i64)
-    } else {
-        Value::from(value)
+        return Value::from(value as i64);
     }
+    // A FRACTIONAL default must round-trip to the decimal the manifest declared, not to the f32's
+    // binary expansion (sc-17159). `Value::from(f32)` widens to `f64`, so MiniMax-H3's
+    // `defaults.duration: 5.1667` was enqueued as `5.1666998863220215` — numerically harmless
+    // (`VideoRequest` reads it back as the same f32 and lands on frame 124) but not EQUAL to any of
+    // the fourteen values in that model's `limits.durations`, which is the menu the duration
+    // dropdown preselects against and the set a recipe replay is compared to. Every video model
+    // before this family had a whole-number default, so the fractional branch had never carried a
+    // shipped value.
+    //
+    // `f32::to_string` emits the shortest decimal that reproduces the f32 exactly ("5.1667"), so
+    // parsing that back yields the manifest's own number. The fallback keeps the historical shape
+    // for any value whose text somehow does not re-parse.
+    serde_json::from_str(&value.to_string()).unwrap_or_else(|_| Value::from(value))
 }
 
 /// The typed route that owns `job_type`, or `None` for every job type the generic
@@ -787,5 +1455,297 @@ pub(crate) fn typed_generation_route(job_type: &JobType) -> Option<&'static str>
         // `POST /api/v1/jobs` would reach the worker without its entry. One door per generation kind.
         JobType::AudioGenerate => Some("/api/v1/audio/jobs"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod decoder_selection_tests {
+    use super::*;
+
+    fn manifest(available: bool) -> Value {
+        json!({
+            "id": "qwen_image",
+            "decoders": { "byBackend": {
+                "mlx": [{
+                    "id": "wan_2_1_vae",
+                    "componentId": "vae",
+                    "available": available
+                }],
+                "candle": []
+            } }
+        })
+    }
+
+    /// A row whose `mlx` and `candle` lists advertise DIFFERENT installed decoders, so which list
+    /// the gate consulted is observable from the error alone. The shipped facts happen to declare
+    /// no candle decoders at all today, which would make "consulted candle" and "consulted nothing"
+    /// indistinguishable — this fixture keeps the assertion about the backend selection itself.
+    fn split_manifest() -> Value {
+        json!({
+            "id": "qwen_image",
+            "decoders": { "byBackend": {
+                "mlx": [{ "id": "mlx_only_vae", "componentId": "vae", "available": true }],
+                "candle": [{ "id": "candle_only_vae", "componentId": "vae", "available": true }]
+            } }
+        })
+    }
+
+    fn payload(value: Value) -> JsonObject {
+        value.as_object().expect("payload object").clone()
+    }
+
+    #[test]
+    fn decoder_submission_is_default_off_and_fails_closed() {
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({})),
+            &manifest(false)
+        )
+        .is_ok());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({ "advanced": { "decoder": "native" } })),
+            &manifest(false),
+        )
+        .is_ok());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(false),
+        )
+        .is_err());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(true),
+        )
+        .is_ok());
+        // The same installed MLX option on the candle lane: the shipped facts declare no candle
+        // decoders, so it fails closed rather than deferring the rejection to the worker.
+        assert!(validate_selected_decoder_for_manifest(
+            "candle",
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(true),
+        )
+        .is_err());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &json!({ "id": "wan_2_2_t2v_a14b" }),
+        )
+        .is_err());
+    }
+
+    /// Both directions of the backend selection, against one row that advertises a different
+    /// installed decoder per lane. This is the half a bare `cfg!(target_os = "macos")` got wrong
+    /// (sc-18420): under `SCENEWORKS_CANDLE_REQUIRED` on macOS the gate consulted the MLX list
+    /// while the job ran on candle, admitting the MLX-only id and refusing the candle-valid one.
+    #[test]
+    fn the_gate_consults_only_the_executing_backends_option_list() {
+        for (backend, valid, foreign) in [
+            ("mlx", "mlx_only_vae", "candle_only_vae"),
+            ("candle", "candle_only_vae", "mlx_only_vae"),
+        ] {
+            assert!(
+                validate_selected_decoder_for_manifest(
+                    backend,
+                    &payload(json!({ "advanced": { "decoder": valid } })),
+                    &split_manifest(),
+                )
+                .is_ok(),
+                "{backend} must admit its own installed option {valid}"
+            );
+            let error = validate_selected_decoder_for_manifest(
+                backend,
+                &payload(json!({ "advanced": { "decoder": foreign } })),
+                &split_manifest(),
+            )
+            .expect_err("the other lane's option must not be admitted")
+            .detail;
+            assert!(
+                error.contains("is not compatible with qwen_image"),
+                "{backend} got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_decoder_and_pid_are_mutually_exclusive() {
+        let error = validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({
+                "advanced": { "decoder": "wan_2_1_vae", "usePid": true }
+            })),
+            &manifest(true),
+        )
+        .unwrap_err()
+        .detail;
+        assert!(error.contains("exactly one decoder"), "got: {error}");
+    }
+}
+
+/// End-to-end enqueue coverage for an IMPORTED plan-backed Wan checkpoint (epic 20398, sc-20651).
+///
+/// The unit-level claim predicates live in `sceneworks-core`; this module asserts the thing the
+/// user actually experiences — that `POST /api/v1/video/jobs` answers `201` and the job is really
+/// on the queue, rather than the `400` the sc-19504 no-lane gate returned for every imported Wan
+/// checkpoint while the video claim predicates had no `importPlan` awareness.
+#[cfg(test)]
+mod plan_backed_video_enqueue_tests {
+    use crate::tests::support::*;
+
+    /// The manifest set `test_settings` reads, with `user.models.jsonc` supplied by the caller.
+    fn write_manifests(config_dir: &std::path::Path, user_models: &str) {
+        std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+        for (name, body) in [
+            (
+                "builtin.models.jsonc",
+                r#"{ "schemaVersion": 1, "models": [] }"#,
+            ),
+            ("user.models.jsonc", user_models),
+            (
+                "builtin.loras.jsonc",
+                r#"{ "schemaVersion": 1, "loras": [] }"#,
+            ),
+            ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+            (
+                "builtin.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+            (
+                "user.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+        ] {
+            std::fs::write(config_dir.join(name), body).expect("manifest writes");
+        }
+    }
+
+    /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
+    /// verbatim so the control case can drop it and change nothing else.
+    fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+        write_manifests(
+            &temp_dir.path().join("config/manifests"),
+            &format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "imported_wan_2_2_abc123",
+                    "name": "Imported Wan 2.2",
+                    "type": "video",
+                    "family": "wan-video"{import_plan}
+                  }}]
+                }}"#
+            ),
+        );
+        create_app(test_settings(temp_dir)).expect("app creates")
+    }
+
+    const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
+
+    async fn create_project(app: &axum::Router) {
+        let (status, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Imported Wan" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "project create: {project}");
+    }
+
+    #[tokio::test]
+    async fn a_plan_backed_wan_checkpoint_enqueues_a_text_to_video_job() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        create_project(&app).await;
+
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "text_to_video",
+                "prompt": "a fox in the rain"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "enqueue answered: {job}");
+        assert_eq!(job["type"], "video_generate");
+        // Not merely accepted — still QUEUED after `fail_job_if_platform_unreachable` has run, so
+        // the row is genuinely waiting for a worker rather than terminal-failed on the way out.
+        assert_eq!(job["status"], "queued", "{job}");
+        // The plan identity the worker's Wan lane resolves through is on the enqueued payload.
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["importPlan"]["checkpointId"],
+            "ckpt_wan_abc123"
+        );
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 1, "the job must be on the queue");
+    }
+
+    /// The control that makes the test above an assertion about the PLAN. The identical catalog
+    /// entry with no `importPlan` is claimed by no lane — its model id is in no static routed list
+    /// — so the no-lane gate 400s it, which is exactly what the plan-backed request used to get.
+    #[tokio::test]
+    async fn the_same_imported_wan_entry_without_a_plan_is_still_refused_by_the_no_lane_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, "");
+        create_project(&app).await;
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "text_to_video",
+                "prompt": "a fox in the rain"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+        assert!(
+            error.to_string().contains("no backend implements it"),
+            "the no-lane gate must be what refused it: {error}"
+        );
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 0);
+    }
+
+    /// A mode the plan-backed Wan lane does not serve is refused at the gate that can still explain
+    /// why (a `400`), rather than enqueued and later refused by the worker — the claim predicate and
+    /// `resolve_candle_video_route`'s plan-backed arm agree on the served set.
+    #[tokio::test]
+    async fn a_plan_backed_wan_checkpoint_is_refused_on_a_mode_its_lane_does_not_serve() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        create_project(&app).await;
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "image_to_video",
+                "prompt": "a fox in the rain",
+                "sourceAssetId": "asset-1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 0);
     }
 }

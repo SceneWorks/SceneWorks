@@ -20,11 +20,15 @@
 //   node scripts/bump-inference.mjs --sha <sha40>   # pin a specific inference revision
 //   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite + the facts checks
 //
-// `--self-test` runs in `npm run check`. It used to be a manual npm script only, which made it a
-// place to add an assertion and never learn whether it fired; sc-17593 wired it in when it grew the
-// engine-capability-facts coverage checks, whose whole subject is a guard that was never exercised.
+// `--self-test` is a MANUAL script (`npm run bump:inference:self-test`) and is meant to stay one.
+// sc-17593 did wire it into `npm run check`, and sc-19758 (`8e70ce4a8`, "stop running the gate chain on
+// every commit") deliberately took it back out along with the rest of the gate chain: this script only
+// runs when a human bumps the pin, so paying for it on every commit bought nothing. Do not re-add it —
+// run it as part of the bump. The paragraph above used to claim it ran in `npm run check`; it has not
+// since that teardown.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,6 +42,7 @@ import {
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../apps/web/src/data/previewSupportDerivation.js";
+import { validateMemoryContractFacts } from "./lib/memory-contract-reconciliation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
@@ -53,6 +58,7 @@ const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // two-revisions-in-one-lockfile skew `inferenceManifests()` exists to prevent one step earlier.
 const INFERENCE_CRATES = [
   "sceneworks-gen-core",
+  "sceneworks-gen-core-testkit",
   "runtime-macos",
   "runtime-cuda",
   "mlx-gen",
@@ -104,6 +110,7 @@ const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";
 // Relative-plus-joined rather than one absolute path because `--self-test` drives the same code over
 // a fixture tree; nothing else in this script needs a second root.
 const INFERENCE_CLOSURES_RELATIVE = "config/inference-provider-closures.json";
+const ANCHOR_CURRENCY_ATTESTATIONS = "config/anchor-currency-attestations.json";
 const INFERENCE_CLOSURES = join(repoRoot, INFERENCE_CLOSURES_RELATIVE);
 const SHA_RE = /^[0-9a-f]{40}$/;
 
@@ -213,29 +220,45 @@ function cargoUpdate(sha) {
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
 
-function updateLockIfNeededAndVerifySkew(
+function verifyCargoLockCurrent(root = repoRoot, run = execFileSync) {
+  console.log("$ cargo metadata --locked --format-version 1");
+  run("cargo", ["metadata", "--locked", "--format-version", "1"], {
+    cwd: root,
+    // Keep the successful metadata document out of the operator log, but preserve Cargo's
+    // actionable error when the manifest and lockfile disagree.
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+}
+
+function reconcileCargoLock(
   sha,
   manifestsAlreadyPinned,
   {
-    lockText = readFileSync(LOCKFILE, "utf8"),
+    readLock = () => readFileSync(LOCKFILE, "utf8"),
     update = cargoUpdate,
-    verify = verifyNoSkew,
+    verify = verifyCargoLockCurrent,
   } = {},
 ) {
-  // A transition always needs Cargo to resolve the rewritten manifests. On a re-run, only resolve
-  // again when an inference source is stale: Cargo may otherwise choose a different, still-valid
-  // solution for unrelated transitive dependencies and make an already-complete bump non-idempotent.
-  const needsUpdate = !manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, lockText);
-  if (needsUpdate) update(sha);
-  else {
-    console.log(
-      "bump-inference: Cargo.lock already carries the requested inference revision; skipping update",
-    );
+  // `cargo update -p` is not a byte-idempotent verifier when Cargo.lock already contains duplicate
+  // registry versions. Cargo can alternate which locked `windows-sys` / `proc-macro-crate` package
+  // an unchanged dependency edge names even though it reports "Locking 0 packages". Only invoke
+  // the mutating command for a real manifest transition or a stale inference source. Once the
+  // target revision is present everywhere, `cargo metadata --locked` is the non-mutating proof that
+  // the checked-in lock still satisfies the manifests.
+  if (!manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, readLock())) {
+    update(sha);
+    return "updated";
   }
-
-  // Keep this unconditional. Revision-string agreement cannot detect gen-core or pmetal-mlx-rs skew.
   verify();
-  return needsUpdate;
+  return "verified";
+}
+
+function cargoManifestsAlreadyPinned(entries) {
+  const cargoManifests = entries.filter(({ updatesCargoLock }) => updatesCargoLock);
+  if (cargoManifests.length === 0) {
+    throw new Error("no Cargo manifest inputs were provided for lockfile reconciliation");
+  }
+  return cargoManifests.every(({ current, bumped }) => current === bumped);
 }
 
 function distinctResolutions(crate) {
@@ -243,7 +266,18 @@ function distinctResolutions(crate) {
   // visible even off-macOS -- the same data source check-gen-core-skew.sh uses.
   const tree = execFileSync(
     "cargo",
-    ["tree", "-p", "sceneworks-worker", "--features", "backend-candle", "--target", "all", "--prefix", "none"],
+    [
+      "tree",
+      "-p",
+      "sceneworks-worker",
+      "--features",
+      "backend-candle",
+      "--target",
+      "all",
+      "--locked",
+      "--prefix",
+      "none",
+    ],
     { cwd: repoRoot, encoding: "utf8" },
   );
   return new Set(
@@ -256,66 +290,360 @@ function distinctResolutions(crate) {
 
 // `config/inference-third-party-source.json` is ALSO keyed to the pin: check-license-coverage.mjs
 // fails closed when its `inferenceRevision` / `provenanceScan.revision` / `crateCoverage.revision` do
-// not equal the pinned rev. Unlike the memory matrix this cannot be regenerated blindly — a bump that
-// brings a NEW crate or a new embedded third-party source needs a human classification decision, and
+// not equal the pinned rev. This cannot be regenerated blindly — a bump that brings a NEW crate or a
+// new embedded third-party source needs a human classification decision, and
 // the rescan needs a local inference clone (`--repo`) that this script does not otherwise require. So
 // run the guard and let its own remediation text (which names the exact scanner invocations) speak; the
 // point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
 // Fail-closed on purpose: the manifests and lockfile are already written by now, so the bump is
 // genuinely incomplete until the audit is refreshed and this passes.
-function verifyLicenseAudit() {
-  console.log("$ node scripts/check-license-coverage.mjs");
-  try {
-    execFileSync("node", ["scripts/check-license-coverage.mjs"], {
-      cwd: repoRoot,
-      stdio: "inherit",
-    });
-  } catch {
+function verifyLicenseAudit(io = {}) {
+  const {
+    report = () =>
+      execFileSync("node", ["scripts/check-license-coverage.mjs"], {
+        cwd: repoRoot,
+        stdio: "inherit",
+      }),
+    derive = deriveAuditFacts,
+    readAudit = () => JSON.parse(readFileSync(AUDIT_PATH, "utf8")),
+    log = console.log,
+  } = io;
+  log("$ node scripts/check-license-coverage.mjs");
+  report();
+  // The report cannot be the proof that the derivation worked. It is deliberately non-fatal
+  // (sc-19751), and treating its exit code as the signal is exactly how the restamp broke: the old
+  // body caught a rejection that stopped happening, so a stale audit sailed through here silently.
+  // Grade the written record against the checker's own derived facts instead.
+  //
+  // This grades the DERIVATION, not the licensing worklist — an open compliance item is still just a
+  // printed finding. Only a field the deriver failed to write refuses, and it names which, which is
+  // what the message below always claimed to do.
+  const derived = derive();
+  const audit = readAudit();
+  const drift = [
+    ["auditDigest", audit.auditDigest, derived.auditDigest],
+    [
+      "provenanceScan.matchedFiles",
+      audit.provenanceScan?.matchedFiles,
+      derived.provenanceMatchedFiles,
+    ],
+    [
+      "provenanceScan.populationSha256",
+      audit.provenanceScan?.populationSha256,
+      derived.provenancePopulationSha256,
+    ],
+    ["crateCoverage.cratePrefixes", audit.crateCoverage?.cratePrefixes, derived.cratePrefixes],
+    [
+      "crateCoverage.cratePopulationSha256",
+      audit.crateCoverage?.cratePopulationSha256,
+      derived.cratePopulationSha256,
+    ],
+  ].filter(([, written, computed]) => written !== computed);
+  if (drift.length > 0) {
     throw new Error(
-      "the inference source/license audit is stale for the new pin (see the check output above). " +
-        "Re-run the scanner against a local inference clone, refresh " +
-        "config/inference-third-party-source.json (inferenceRevision, provenanceScan, crateCoverage, " +
-        "auditDigest), then re-run this bump to verify. The pin itself is already written.",
+      "the inference source/license audit is STILL stale after deriveLicenseAudit() ran. That is a " +
+        "bug in the derivation rather than work for you: the checker grades a field the deriver does " +
+        "not write.\n" +
+        drift
+          .map(([field, written, computed]) => `  ${field}: wrote ${written}, checker computes ${computed}`)
+          .join("\n"),
+    );
+  }
+  if (!Array.isArray(derived.auditSummaryErrors)) {
+    throw new Error(
+      "the license checker did not return auditSummaryErrors; the bump cannot verify the human audit summary.",
+    );
+  }
+  if (derived.auditSummaryErrors.length > 0) {
+    throw new Error(
+      "the inference source/license audit human _comment is stale after deriveLicenseAudit() ran. " +
+        "Review the pin advance and update the summary without copying historical finding counts.\n" +
+        derived.auditSummaryErrors.map((error) => `  ${error}`).join("\n"),
     );
   }
 }
 
-// `docs/generated/memory-matrix.{json,md}` is DERIVED from the inference pin: the generator stamps
-// `inferenceRevision` on the document (`generatedFrom`; sc-16268 removed the per-cell copy that
-// used to duplicate it into every row), and each cell's derived `calibrationFingerprint` includes
-// the inference pin alongside the provider ABI and semantic cell identity. So a pin bump makes the checked-in artifact stale by construction, and
-// `tests/test_memory_matrix.py`
-// (parity CI) fails with "generated memory matrix is stale". Regenerating here keeps everything derived
-// from the pin moving in ONE commit, the same reason the lockfile regen lives in this script rather than
-// in the caller's hands.
-function regenerateMemoryMatrix() {
-  console.log("$ node scripts/generate-memory-matrix.mjs");
-  execFileSync("node", ["scripts/generate-memory-matrix.mjs"], {
+// ---------------------------------------------------------------------------
+// Derivation (sc-19758)
+//
+// Bumping a pin used to be eleven steps and three aborts. Every abort told a human to run a script
+// this one could have run itself, and one of them made a human transcribe a hash the tool had just
+// computed. A gate whose remedy is entirely mechanical is not review; it is a chore with an error
+// message. These derive instead, and the existing verifiers below them now grade the derivation.
+//
+// The enabler: SceneWorks/inference is PUBLIC, so a shallow fetch of the pinned revision costs
+// seconds and needs no token. parity-digests in check.yml already leaned on that; the bump does
+// too, instead of demanding the caller produce a clone by hand.
+// ---------------------------------------------------------------------------
+
+/** A local inference checkout at `sha` — the caller's `--repo`, else a shallow fetch. */
+function ensureInferenceCheckout(sha, explicitRepo) {
+  if (explicitRepo) {
+    console.log(`bump-inference: using inference checkout ${explicitRepo}`);
+    return explicitRepo;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "bump-inference-"));
+  console.log(`bump-inference: shallow-fetching inference ${sha.slice(0, 12)}… -> ${dir}`);
+  execFileSync("git", ["init", "-q", dir], { stdio: "pipe" });
+  const git = (...args) => execFileSync("git", ["-C", dir, ...args], { stdio: "pipe" });
+  git("remote", "add", "origin", INFERENCE_GIT);
+  git("fetch", "-q", "--depth=1", "origin", sha);
+  git("checkout", "-q", "FETCH_HEAD");
+  return dir;
+}
+
+/** Re-derive the per-provider closure digests and every captured digest keyed to them. */
+function deriveInferenceClosures(sha, repo) {
+  // `--revision` is passed explicitly and deliberately. It DEFAULTS to the pin currently on disk,
+  // which during a bump is the old one, so omitting it re-derives the revision being replaced and
+  // prints a cheerful "wrote … at <old sha>". That silent-wrong-answer cost a debugging round the
+  // first time this sequence was done by hand.
+  console.log("$ node scripts/inference-closure-digest.mjs --write");
+  execFileSync(
+    "node",
+    ["scripts/inference-closure-digest.mjs", "--repo", repo, "--revision", sha, "--write"],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
+
+  // The per-model ANCHOR loader closures (sc-22511) are derived at the pin too. Re-deriving them on
+  // a bump is expected to produce NO digest change in the ordinary case — the unit contains no
+  // revision — and the run exists precisely so that the case where it DOES change (the bump moved
+  // the model's own loader source) shows up in the diff as the staleness it is.
+  console.log("$ node scripts/anchor-loader-closure.mjs --write");
+  execFileSync(
+    "node",
+    ["scripts/anchor-loader-closure.mjs", "--repo", repo, "--revision", sha, "--write"],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
+
+  // The backfill re-derives each CAPTURED record at the revision it was captured at, so it needs
+  // every one of those present — not just the pin. A shallow fetch of the pin alone dies with
+  // "unknown revision" on the first historical one. `--revisions` reports exactly which, computed
+  // from the same workload the backfill itself walks, so the two cannot drift apart.
+  const revisions = execFileSync("node", ["scripts/backfill-closure-digests.mjs", "--revisions"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  })
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (revisions.length > 0) {
+    console.log(`bump-inference: fetching ${revisions.length} captured revision(s) for the backfill`);
+    for (const rev of revisions) {
+      try {
+        execFileSync("git", ["-C", repo, "fetch", "-q", "--depth=1", "origin", rev], { stdio: "pipe" });
+      } catch {
+        // A caller-supplied --repo may already have it, or may be a full clone with no `origin`.
+        // Let the backfill judge: it fails loudly on a revision it genuinely cannot resolve.
+      }
+    }
+  }
+  console.log("$ node scripts/backfill-closure-digests.mjs --write");
+  execFileSync("node", ["scripts/backfill-closure-digests.mjs", "--repo", repo, "--write"], {
     cwd: repoRoot,
     stdio: "inherit",
   });
 }
 
-// sc-18100 deleted `scripts/calibration-cost-model.mjs` and its two committed artifacts, which used
-// to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
-// generated consumer, so the regen above is the whole of that cascade.
+const AUDIT_PATH = join(repoRoot, "config/inference-third-party-source.json");
 
-// Every checked-in file under `config/engine-capabilities/` is keyed to the pin exactly like the
-// licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
-// the preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability
-// surfaces read off the LINKED registries at that revision (sc-16965,
-// epic 16948). A bump can move any descriptor's flag — every remaining family story in that epic
-// flips more of them — so the checked-in dumps go stale by construction.
+/**
+ * The facts check-license-coverage.mjs derives from the two inventories and the audit record itself.
+ *
+ * Read from its `--derive-json` mode rather than scraped out of its report. The report is non-fatal by
+ * design (sc-19751), so there is no thrown error to read a computed value out of — which is precisely
+ * how the restamp below silently stopped firing: the old code took the digest from
+ * `execFileSync`'s rejection, the rejection stopped happening, and the audit shipped describing the
+ * previous revision. A derived value belongs in structured output.
+ */
+function deriveAuditFacts() {
+  return JSON.parse(
+    execFileSync("node", ["scripts/check-license-coverage.mjs", "--derive-json"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }),
+  );
+}
+
+/**
+ * The audit record a pin bump owes: the new revisions plus every population fact the checker grades.
+ *
+ * Pure, so `--self-test` drives it without a checkout. `matchedFiles` and `cratePrefixes` are the two
+ * fields nothing used to write — the checker grades both ("ported-source population count changed",
+ * "crate-prefix population count changed") and the deriver skipped both, so a bump that added or
+ * removed a ported file or a crate left the audit asserting the previous population.
+ */
+export function restampAuditRecord(audit, sha, derived) {
+  return {
+    ...audit,
+    inferenceRevision: sha,
+    provenanceScan: {
+      ...audit.provenanceScan,
+      revision: sha,
+      matchedFiles: derived.provenanceMatchedFiles,
+      populationSha256: derived.provenancePopulationSha256,
+    },
+    crateCoverage: {
+      ...audit.crateCoverage,
+      revision: sha,
+      cratePrefixes: derived.cratePrefixes,
+      cratePopulationSha256: derived.cratePopulationSha256,
+    },
+  };
+}
+
+/** Re-scan the ported/embedded source inventory and restamp the audit for the new revision. */
+function deriveLicenseAudit(sha, repo, io = {}) {
+  const {
+    scan = (...args) =>
+      execFileSync("node", ["scripts/scan-inference-provenance.mjs", "--repo", repo, ...args], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }),
+    derive = deriveAuditFacts,
+    readAudit = () => JSON.parse(readFileSync(AUDIT_PATH, "utf8")),
+    writeAudit = (record) => writeFileSync(AUDIT_PATH, `${JSON.stringify(record, null, 2)}\n`),
+    log = console.log,
+  } = io;
+
+  log("$ node scripts/scan-inference-provenance.mjs --write (paths + crates)");
+  scan("--write", "config/inference-provenance-candidates.tsv");
+  scan("--write-crates", "config/inference-crate-prefixes.txt");
+
+  // Pass 1 writes the population facts, which are pure functions of the two inventories just written.
+  const record = restampAuditRecord(readAudit(), sha, derive());
+  writeAudit(record);
+  // Pass 2 takes the digest, and must run AFTER pass 1 has landed: both population blocks are inside
+  // the canonical payload, so sealing first would seal the pre-scan population.
+  record.auditDigest = derive().auditDigest;
+  writeAudit(record);
+  log(
+    `bump-inference: restamped auditDigest -> ${record.auditDigest.slice(0, 12)}… ` +
+      `(${record.provenanceScan.matchedFiles} ported paths, ${record.crateCoverage.cratePrefixes} crates)`,
+  );
+
+  // What a human still owes is READING it, which no script can do. The licensing-relevant signal is
+  // an added/removed path or a changed ported-source marker; rows whose git_blob_sha1 moved with an
+  // unrelated edit are not.
+  log(
+    "bump-inference: third-party source audit restamped. Review the diff of\n" +
+      "  config/inference-provenance-candidates.tsv — added/removed paths and changed markers are\n" +
+      "  the signal; rows differing only in git_blob_sha1 are not.",
+  );
+}
+
+/**
+ * Say up front which capability facts this machine cannot produce.
+ *
+ * The dump binary selects its backend by PLATFORM, not by feature flag, so on macOS the documented
+ * `--no-default-features --features backend-candle` command rewrites the MLX file instead of the
+ * candle one. Learning that at the END of a bump — after pins, closures, audit and matrix have all
+ * moved — is what makes this feel like a maze. Same information, delivered before the work.
+ */
+function reportCrossLaneWork(sha) {
+  const dir = join(repoRoot, "config/engine-capabilities");
+  const revisionMismatches = [];
+  for (const [sub, name] of [
+    ["", "capabilities.mlx.json"],
+    ["", "capabilities.candle.json"],
+    ["audio", "capabilities.candle.json"],
+  ]) {
+    try {
+      const facts = JSON.parse(readFileSync(join(dir, sub, name), "utf8"));
+      const at = facts?.generatedFrom?.inferenceRevision;
+      if (at && at !== sha) revisionMismatches.push([join(sub, name), at]);
+    } catch {
+      /* absent files are the existing checker's business, not this preview's */
+    }
+  }
+  if (revisionMismatches.length === 0) return;
+  console.log("bump-inference: engine-capability revision labels that differ from this pin —");
+  for (const [name, at] of revisionMismatches) {
+    const needsOtherLane = name === "capabilities.candle.json" && process.platform === "darwin";
+    console.log(
+      `    ${name}  (at ${at.slice(0, 12)}…)  ${needsOtherLane ? "NEEDS A LINUX/WINDOWS LANE" : "dumpable here"}`,
+    );
+  }
+  if (
+    revisionMismatches.some(([name]) => name === "capabilities.candle.json") &&
+    process.platform === "darwin"
+  ) {
+    console.log(
+      "  capabilities.candle.json cannot be dumped on macOS. Land the bump, then re-dump it on a\n" +
+        "  Linux/Windows lane if declared Candle capabilities changed. A revision-only mismatch is\n" +
+        "  informational and does not require either producer machine.",
+    );
+  }
+}
+
+/**
+ * Say up front which memory-anchor currency attestations this pin strands.
+ *
+ * `config/anchor-currency-attestations.json` is the OTHER half of a pin bump, and the only half
+ * nothing here derives. An attestation is bounded to the one revision it names: it records that the
+ * loader-closure diff from an anchor's measurement revision up to `attestedRevision` was read and is
+ * accounting-only, or is witnessed unchanged by a re-measure. Moving the pin past that revision
+ * leaves the store claiming a justification for a revision that is no longer the pin — which
+ * `sceneworks-core`'s `a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to` reds on
+ * `parity-rust`, at the END of a CI round (sc-22765, where it cost exactly that).
+ *
+ * Reported rather than rewritten, for the same reason as the licence audit's prose: the remediation
+ * is a REVIEW. Re-keying means reading the new range against that anchor's closure and either
+ * extending the justification or deleting the entry so the anchor goes honestly stale. A script that
+ * stamped the new revision in would manufacture the false green the currency key exists to prevent.
+ *
+ * Pure over the parsed config so `--self-test` drives it without a checkout.
+ */
+function staleCurrencyAttestations(config, sha) {
+  return (config?.attestations ?? [])
+    .filter((entry) => entry?.attestedRevision && entry.attestedRevision !== sha)
+    .map((entry) => [entry.anchorId, entry.attestedRevision]);
+}
+
+function reportStaleCurrencyAttestations(sha) {
+  let config;
+  try {
+    config = JSON.parse(readFileSync(join(repoRoot, ANCHOR_CURRENCY_ATTESTATIONS), "utf8"));
+  } catch {
+    /* absent or unparsable is the anchor tooling's business, not this preview's */
+    return;
+  }
+  const stale = staleCurrencyAttestations(config, sha);
+  if (stale.length === 0) return;
+  console.log(
+    `bump-inference: ${stale.length} memory-anchor currency attestation(s) key to a revision this ` +
+      "pin moves past —",
+  );
+  for (const [anchorId, at] of stale) {
+    console.log(`    ${anchorId}  (attested at ${at.slice(0, 12)}…)`);
+  }
+  console.log(
+    [
+      "  Each is a REVIEW, not a re-stamp. For one anchor, intersect its `closureFiles` in",
+      "  config/anchor-loader-closures.json with the range's changed files:",
+      `      git -C <inference> diff --name-only <attestedRevision>..${sha.slice(0, 12)}`,
+      "  An EMPTY intersection means that anchor's closure is byte-identical across the range: extend",
+      "  the entry to this pin and record that reading in its `why`. A non-empty one must be",
+      "  classified file by file, or the entry DELETED so the anchor goes honestly stale. Then:",
+      "      node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
+      "  Leaving them is a parity-rust failure, not a warning.",
+    ].join("\n"),
+  );
+}
+
+// Every checked-in file under `config/engine-capabilities/` records the producing revision and the
+// preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability surfaces
+// read off the LINKED registries (sc-16965, epic 16948). A pin change alone does not invalidate that
+// content (e14171984); the revision label is retained as provenance and reported when it differs.
 //
-// Like the licence audit, and unlike the memory matrix, this CANNOT be regenerated blindly from
-// here: the dumper needs a lane that actually links engines (macOS for mlx,
+// Like the licence audit, this CANNOT be regenerated blindly from here: the dumper needs a lane that
+// actually links engines (macOS for mlx,
 // `--features backend-candle` off-Mac for candle), which a bump does not otherwise require and
-// which no single host can supply for both backends. So verify, and let the remediation text name
-// the exact invocation. Fail-closed on purpose: the pins are already written by now, so the bump is
-// genuinely incomplete until the dumps are refreshed and the stage-2 artifacts regenerated.
+// which no single host can supply for both backends. So verify structural completeness and native
+// content shape, report revision-label drift, and let the remediation text name the exact invocation.
 //
-// Downstream cascade, same shape as the memory-matrix regen above: re-dumping a facts file
-// makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
+// Downstream cascade: re-dumping a facts file makes `config/manifests/builtin.preview-support.jsonc`
+// + `apps/web/src/data/previewSupport.json`
 // stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
 // `npm run gen:preview-support` is re-run.
 // `root` is a parameter purely so `--self-test` can drive this against fixture trees. It is the one
@@ -446,6 +774,14 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     "audio",
   );
 
+  // SC-18460: a pin bump must not accept descriptor-only media dumps. The same generated files are
+  // the authoritative registry side of the memory-contract reconciliation gate, so require the
+  // complete two-backend inventory, unique providers/selectors, and digest-bound surfaces here.
+  // Audio facts remain a separate registry and deliberately carry no image-memory contracts.
+  validateMemoryContractFacts(
+    names.map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))),
+  );
+
   const stale = [];
   for (const [from, fileNames, label] of [
     [dir, names, ""],
@@ -459,16 +795,22 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     }
   }
   if (stale.length) {
-    throw new Error(
-      `engine-capability facts are stale for ${sha}:\n  ${stale.join("\n  ")}\n` +
-        "Each file must be re-dumped on the lane that owns it — one file per backend, so no lane " +
-        "overwrites another's:\n" +
-        "  macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
-        "  off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+    // REPORTED, not refused. A pin bump does not invalidate a capability dump: pins change
+    // constantly, declared capabilities almost never do. A dump goes stale when a provider gains or
+    // loses a capability — a property of its CONTENT, not of the revision label on it — and the only
+    // way to learn that is to re-dump on a lane that links the backend.
+    //
+    // Refusing here made every pin bump wait on a second machine, because the candle media dump can
+    // only be produced off-Mac. Landing a bump and re-dumping when that lane next runs leaves the
+    // catalog describing the previous revision's descriptors in the meantime, which is a stale
+    // label on accurate data far more often than it is a wrong capability.
+    console.warn(
+      `bump-inference: engine-capability facts still at an older revision (NOT blocking):\n  ${stale.join("\n  ")}\n` +
+        "  Re-dump on the lane that owns each file when convenient — one file per backend:\n" +
+        "    macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
+        "    off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
         "--no-default-features --features backend-candle\n" +
-        "Either command also rewrites audio/ — the audio registry is candle-native on both lanes.\n" +
-        "then regenerate the derived catalog: (cd apps/web && npm run gen:preview-support). " +
-        "The pin itself is already written.",
+        "  then (cd apps/web && npm run gen:preview-support).",
     );
   }
   // Silent when driven from `--self-test`, which runs in `npm run check`: the fixture tree is a
@@ -477,7 +819,8 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   if (root === repoRoot) {
     console.log(
       `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
-        `+ ${runtimeNames.length} rich runtime file(s) dumped at ${sha}`,
+        `+ ${runtimeNames.length} rich runtime file(s) are structurally complete; Cargo pin ${sha} ` +
+        "(revision-label differences are informational)",
     );
   }
 }
@@ -590,6 +933,26 @@ function selfTest() {
   }
   check("throws when no inference pin is present", threw);
 
+  // The currency-attestation preview (sc-22765). It fires on exactly the condition that reds
+  // parity-rust — an entry keyed to anything but the new pin — and stays silent once re-keyed, so
+  // "it is wired" is again not the same as "it fires".
+  const attestations = {
+    attestations: [
+      { anchorId: "keyed-to-the-old-pin", attestedRevision: "b".repeat(40) },
+      { anchorId: "keyed-to-this-pin", attestedRevision: SHA },
+    ],
+  };
+  check(
+    "a currency attestation keyed to another revision is reported, and one at the pin is not",
+    JSON.stringify(staleCurrencyAttestations(attestations, SHA)) ===
+      JSON.stringify([["keyed-to-the-old-pin", "b".repeat(40)]]),
+  );
+  check(
+    "an attestation file with no entries reports nothing",
+    staleCurrencyAttestations({ attestations: [] }, SHA).length === 0 &&
+      staleCurrencyAttestations({}, SHA).length === 0,
+  );
+
   // The fixture deliberately carries a DECOY 40-hex constant: the real file declares
   // CLIP_MODEL_REVISION (an upstream HF model revision) two lines above the stamp, and nothing else
   // guards it -- it is only ever compared against itself. A loosened SEMANTIC_PROVENANCE_RE would
@@ -643,27 +1006,80 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
     ),
   );
-  let updateCalls = 0;
-  let verifyCalls = 0;
+  let lockFixture = duplicateLock;
+  let lockUpdates = 0;
+  let lockVerifications = 0;
+  const reconcileFixture = (manifestsAlreadyPinned) =>
+    reconcileCargoLock(SHA, manifestsAlreadyPinned, {
+      readLock: () => lockFixture,
+      // Model Cargo's problematic behavior directly: another update of an already-current lock
+      // would change unrelated bytes. The second reconciliation must therefore verify, not call
+      // this mutator again.
+      update: () => {
+        lockUpdates += 1;
+        lockFixture =
+          duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT) +
+          `# unrelated-edge-form-${lockUpdates}\n`;
+      },
+      verify: () => {
+        lockVerifications += 1;
+      },
+    });
+  reconcileFixture(false);
+  const lockAfterTransition = lockFixture;
+  reconcileFixture(true);
   check(
-    "an already-current lock skips cargo update but still verifies skew",
-    !updateLockIfNeededAndVerifySkew(SHA, true, {
-      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
-      update: () => updateCalls++,
-      verify: () => verifyCalls++,
-    }) &&
-      updateCalls === 0 &&
-      verifyCalls === 1,
+    "a second exact-pin reconciliation verifies without rewriting lock bytes",
+    lockUpdates === 1 && lockVerifications === 1 && lockFixture === lockAfterTransition,
+  );
+  let staleLockRepairs = 0;
+  reconcileCargoLock(SHA, true, {
+    readLock: () => duplicateLock,
+    update: () => {
+      staleLockRepairs += 1;
+    },
+    verify: () => {},
+  });
+  check(
+    "a stale lock is repaired even when manifests already carry the target pin",
+    staleLockRepairs === 1,
+  );
+  const provenanceOnlyRepair = [
+    { current: "cargo-at-target", bumped: "cargo-at-target", updatesCargoLock: true },
+    { current: "old-provenance", bumped: "new-provenance", updatesCargoLock: false },
+  ];
+  let provenanceOnlyUpdates = 0;
+  let provenanceOnlyVerifications = 0;
+  reconcileCargoLock(SHA, cargoManifestsAlreadyPinned(provenanceOnlyRepair), {
+    readLock: () =>
+      duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+    update: () => {
+      provenanceOnlyUpdates += 1;
+    },
+    verify: () => {
+      provenanceOnlyVerifications += 1;
+    },
+  });
+  check(
+    "a provenance-only repair verifies the current lock without updating it",
+    provenanceOnlyUpdates === 0 && provenanceOnlyVerifications === 1,
   );
   check(
-    "a pin transition updates the lock and still verifies skew",
-    updateLockIfNeededAndVerifySkew(SHA, false, {
-      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
-      update: () => updateCalls++,
-      verify: () => verifyCalls++,
-    }) &&
-      updateCalls === 1 &&
-      verifyCalls === 2,
+    "a Cargo manifest transition still requires an update",
+    !cargoManifestsAlreadyPinned([
+      { current: "old-pin", bumped: "new-pin", updatesCargoLock: true },
+    ]),
+  );
+  let metadataInvocation = null;
+  verifyCargoLockCurrent("/self-test/repo", (command, args, options) => {
+    metadataInvocation = { command, args, options };
+  });
+  check(
+    "current-lock verification resolves the full locked graph without mutating it",
+    metadataInvocation?.command === "cargo" &&
+      metadataInvocation?.args.join(" ") === "metadata --locked --format-version 1" &&
+      metadataInvocation?.options.cwd === "/self-test/repo" &&
+      !metadataInvocation?.args.includes("--no-deps"),
   );
   let stampThrew = false;
   try {
@@ -685,13 +1101,39 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     'pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];',
     "",
   ].join("\n");
-  const factsFile = (backend, revision, extra = {}) =>
-    JSON.stringify({
-      ...extra,
+  const factsFile = (backend, revision, extra = {}) => {
+    const surfaces = [
+      {
+        selector: { tier: "q4", offloadPolicy: "resident", loadShape: "deferred_materialization" },
+        implementedRungs: ["resident", "bounded_transformer_residency"],
+        structurallyNotApplicableRungs: [],
+        deferredMaterializationRungs: ["bounded_transformer_residency"],
+      },
+    ];
+    return JSON.stringify({
       backend,
       generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
       engines: [{ id: "x", modality: "image", supportsPreview: false }],
+      memoryContracts: [
+        {
+          id: `${backend}_x`,
+          composed: false,
+          selectorDigest: `sha256:${createHash("sha256")
+            .update(JSON.stringify(surfaces))
+            .digest("hex")}`,
+          surfaces,
+        },
+      ],
+      memoryRouteWitnesses: [{
+        provider: `${backend}_x`,
+        tier: "q4",
+        mode: "text_to_image",
+        overlay: "none",
+        loadProfile: "plain",
+      }],
+      ...extra,
     });
+  };
   const runtimeFactsFile = (backend, revision, narrow = false) =>
     JSON.stringify({
       schemaVersion: 2,
@@ -724,6 +1166,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     runtimeRevision = SHA,
     narrowRuntime = false,
     swapped = false,
+    mutateMediaFacts = null,
   } = {}) => {
     const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
     mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
@@ -734,11 +1177,15 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     const dir = join(root, "config/engine-capabilities");
     mkdirSync(dir, { recursive: true });
     for (const backend of ["candle", "mlx"]) {
+      const mediaFacts = JSON.parse(
+        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+      );
+      mutateMediaFacts?.(mediaFacts, backend);
       writeFileSync(
         join(dir, `capabilities.${backend}.json`),
         // `swapped` puts an AUDIO dump where a media one belongs — the realistic mistake, and the
         // one `backend` alone cannot detect, since both registries are `candle`.
-        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+        JSON.stringify(mediaFacts),
       );
     }
     if (audio) {
@@ -772,6 +1219,31 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   };
 
   check("a complete facts tree verifies", verifyFacts() === null);
+  const missingContracts = verifyFacts({
+    mutateMediaFacts: (facts) => { facts.memoryContracts = []; },
+  });
+  check(
+    "a descriptor-only media dump is refused",
+    !!missingContracts && /no memoryContracts inventory/.test(missingContracts),
+  );
+  const duplicateContract = verifyFacts({
+    mutateMediaFacts: (facts, backend) => {
+      if (backend === "mlx") facts.memoryContracts.push(structuredClone(facts.memoryContracts[0]));
+    },
+  });
+  check(
+    "duplicate memory-contract providers are refused during a pin bump",
+    !!duplicateContract && /duplicate mlx memory-contract provider/.test(duplicateContract),
+  );
+  const unboundDigest = verifyFacts({
+    mutateMediaFacts: (facts, backend) => {
+      if (backend === "mlx") facts.memoryContracts[0].selectorDigest = `sha256:${"f".repeat(64)}`;
+    },
+  });
+  check(
+    "a selector digest that does not bind the dumped surfaces is refused",
+    !!unboundDigest && /selectorDigest does not bind/.test(unboundDigest),
+  );
   // THE regression this exists for. Before sc-17593 this exact tree — every media backend dumped,
   // the audio registry dumped nowhere — passed, because `candle` in SCENEWORKS_BACKENDS is satisfied
   // by the MEDIA dump alone. The check must name the audio lane, not merely fail.
@@ -783,23 +1255,20 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       /audio engine-capability facts are missing/.test(missingAudio) &&
       /dump-engine-capabilities/.test(missingAudio),
   );
-  // Staleness must reach into the subdirectory too: an audio dump left at the previous pin describes
-  // descriptors that may have moved, exactly as a stale media dump does.
+  // Staleness is now WARNED about, not refused (see verifyEngineCapabilityFacts): a pin bump does
+  // not invalidate a capability dump, and blocking on one meant waiting for a second machine. What
+  // must survive is that a MISSING dump still fails — absence is a real coverage hole, whereas an
+  // older revision is a stale label on data that is usually still accurate.
   const staleAudio = verifyFacts({ revision: "b".repeat(40) });
-  check(
-    "a stale audio dump is reported, named by its subdirectory path",
-    !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
-  );
+  check("a stale audio dump no longer blocks the bump", staleAudio === null);
   const missingRuntime = verifyFacts({ runtime: false });
   check(
     "a missing rich runtime descriptor dump fails coverage",
     !!missingRuntime && /rich runtime descriptor facts are missing/.test(missingRuntime),
   );
+  // Same reasoning as the audio dump above: an older revision is warned about, not refused.
   const staleRuntime = verifyFacts({ runtimeRevision: "b".repeat(40) });
-  check(
-    "a stale rich runtime descriptor dump is reported by exact path",
-    !!staleRuntime && /runtime\/capabilities\.candle\.json/.test(staleRuntime),
-  );
+  check("a stale rich runtime descriptor dump no longer blocks the bump", staleRuntime === null);
   const narrowRuntime = verifyFacts({ narrowRuntime: true });
   check(
     "a narrow runtime projection without parity axes is refused",
@@ -941,6 +1410,147 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     ) === PREVIOUS_PIN,
   );
 
+  // The license-audit restamp (sc-18420). The bug this pins is subtle and cost the epic's pin advance
+  // a manual repair: the deriver read the recomputed digest out of `execFileSync`'s thrown error, and
+  // sc-19751 made check-license-coverage.mjs report-only, so the checker exits 0, nothing throws, and
+  // the restamp silently never fired — while `verifyLicenseAudit` graded the same exit code and also
+  // passed. Both fields the checker grades by COUNT were never written at all.
+  //
+  // The fake deriver mirrors the real one where it matters: its digest is a function of the record on
+  // disk, so a restamp taken before the population facts land is visibly the wrong digest.
+  const AUDIT_FIXTURE = {
+    _comment: `Pin ${PREVIOUS_PIN.slice(0, 8)} records 600 provenance candidates and 90 production-Rust crate prefixes.`,
+    inferenceRevision: PREVIOUS_PIN,
+    auditDigest: "0".repeat(64),
+    includeSites: [{ source: "a", included: "b", disposition: "artifact" }],
+    provenanceScan: {
+      scanner: "scripts/scan-inference-provenance.mjs",
+      revision: PREVIOUS_PIN,
+      matchedFiles: 600,
+      populationSha256: "1".repeat(64),
+    },
+    crateCoverage: {
+      scanner: "scripts/scan-inference-provenance.mjs",
+      revision: PREVIOUS_PIN,
+      cratePrefixes: 90,
+      cratePopulationSha256: "2".repeat(64),
+    },
+  };
+  let stored = structuredClone(AUDIT_FIXTURE);
+  const auditWrites = [];
+  const fakeDerive = (audit = stored) => {
+    const summary = audit._comment ?? "";
+    const summaryErrors = [];
+    if (!summary.includes(audit.inferenceRevision.slice(0, 8))) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current pin ${audit.inferenceRevision.slice(0, 8)}.`,
+      );
+    }
+    if (!summary.includes(`${audit.provenanceScan.matchedFiles} provenance candidates`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.provenanceScan.matchedFiles} provenance candidates.`,
+      );
+    }
+    if (!summary.includes(`${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes.`,
+      );
+    }
+    return {
+      provenanceMatchedFiles: 626,
+      provenancePopulationSha256: "3".repeat(64),
+      cratePrefixes: 94,
+      cratePopulationSha256: "4".repeat(64),
+      auditDigest: `digest-of:${audit.provenanceScan.matchedFiles}:${audit.crateCoverage.cratePrefixes}`,
+      auditSummaryErrors: summaryErrors,
+    };
+  };
+  deriveLicenseAudit(SHA, "/self-test/inference", {
+    scan: () => "",
+    derive: fakeDerive,
+    readAudit: () => structuredClone(stored),
+    writeAudit: (record) => {
+      stored = structuredClone(record);
+      auditWrites.push(structuredClone(record));
+    },
+    log: () => {},
+  });
+  check(
+    "the audit digest is restamped even though the checker exits 0 and throws nothing",
+    stored.auditDigest === "digest-of:626:94",
+  );
+  check(
+    "the population COUNTS the checker grades are written, not only the population hashes",
+    stored.provenanceScan.matchedFiles === 626 && stored.crateCoverage.cratePrefixes === 94,
+  );
+  check(
+    "the digest is sealed after the population facts, never over the pre-scan record",
+    auditWrites.length === 2 && stored.auditDigest !== "digest-of:600:90",
+  );
+  check(
+    "every revision-keyed field moves to the new pin",
+    stored.inferenceRevision === SHA &&
+      stored.provenanceScan.revision === SHA &&
+      stored.crateCoverage.revision === SHA,
+  );
+  check(
+    "unrelated audit content is carried through untouched",
+    JSON.stringify(stored.includeSites) === JSON.stringify(AUDIT_FIXTURE.includeSites),
+  );
+
+  const verifyDrift = (mutate) => {
+    const audit = mutate(structuredClone(stored));
+    try {
+      verifyLicenseAudit({
+        report: () => {},
+        derive: () => fakeDerive(audit),
+        readAudit: () => audit,
+        log: () => {},
+      });
+      return null;
+    } catch (error) {
+      return error.message;
+    }
+  };
+  const staleSummary = verifyDrift((audit) => audit);
+  check(
+    "a restamped audit with stale human prose refuses and names the current pin and population",
+    !!staleSummary &&
+      /human _comment is stale/.test(staleSummary) &&
+      new RegExp(SHA.slice(0, 8)).test(staleSummary) &&
+      /626 provenance candidates/.test(staleSummary) &&
+      /94 production-Rust crate prefixes/.test(staleSummary),
+  );
+  stored._comment =
+    `Pin ${SHA.slice(0, 8)} records 626 provenance candidates and 94 production-Rust crate prefixes; ` +
+    `the prior pin was ${PREVIOUS_PIN.slice(0, 8)}.`;
+  check("a fully restamped audit passes verification", verifyDrift((audit) => audit) === null);
+  const skippedCount = verifyDrift((audit) => {
+    audit.provenanceScan.matchedFiles = 600;
+    return audit;
+  });
+  check(
+    "a graded field the deriver failed to write refuses, and the refusal NAMES it",
+    !!skippedCount &&
+      /provenanceScan\.matchedFiles: wrote 600, checker computes 626/.test(skippedCount),
+  );
+  const skippedCrates = verifyDrift((audit) => {
+    audit.crateCoverage.cratePrefixes = 90;
+    return audit;
+  });
+  check(
+    "the crate-prefix population count is graded on the same footing",
+    !!skippedCrates && /crateCoverage\.cratePrefixes: wrote 90, checker computes 94/.test(skippedCrates),
+  );
+  const staleDigest = verifyDrift((audit) => {
+    audit.auditDigest = "0".repeat(64);
+    return audit;
+  });
+  check(
+    "a stale digest is caught here rather than by an exit code the report no longer sets",
+    !!staleDigest && /auditDigest: wrote 0{64}/.test(staleDigest),
+  );
+
   console.log(rc === 0 ? "self-test: PASS" : "self-test: FAIL");
   process.exit(rc);
 }
@@ -958,6 +1568,9 @@ function main() {
     console.error(`bump-inference: not a 40-char commit SHA: ${sha}`);
     process.exit(2);
   }
+  // An inference checkout to derive from. Optional — one is shallow-fetched otherwise (sc-19758).
+  const repoIdx = args.indexOf("--repo");
+  const explicitRepo = repoIdx >= 0 ? resolve(args[repoIdx + 1] ?? "") : null;
 
   // Three files the tool can safely rewrite: the worker's direct deps, the root's candle-kernels
   // [patch], and the worker's semantic-provenance stamp. They must land on the same rev, so bump
@@ -986,30 +1599,32 @@ function main() {
     ...inferenceManifests().map((path) => ({
       path,
       rewrite: (text) => repin(text, sha, path),
+      updatesCargoLock: true,
     })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
     {
       path: MEMORY_PROVENANCE,
       rewrite: (text) => repinMemoryProvenance(text, sha),
     },
-  ].map(({ path, rewrite }) => {
+  ].map(({ path, rewrite, updatesCargoLock = false }) => {
     const current = readFileSync(path, "utf8");
-    return { path, current, bumped: rewrite(current) };
+    return { path, current, bumped: rewrite(current), updatesCargoLock };
   });
   // NOTE: "manifests already say `sha`" is NOT the same as "the lockfile agrees". This used to
   // early-return on the manifests alone, so a tree whose manifests were correct but whose
   // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
   // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
-  // leaves behind. Fall through to the lock/skew step instead. It resolves Cargo.lock when the
-  // manifests changed or an inference source is stale, and always runs the independent skew guards.
-  // Skipping Cargo's resolver for an already-current lock is important: a fresh resolution can pick
-  // a different, still-valid solution for unrelated transitive dependencies, violating idempotence.
+  // leaves behind. `reconcileCargoLock()` still repairs that case, but does not misuse
+  // `cargo update -p` as a verifier once the lock is current: Cargo can alternate unrelated duplicate
+  // dependency edges on otherwise identical update runs. The clean path uses `cargo metadata
+  // --locked` instead, then `verifyNoSkew()` catches divergences (gen-core, pmetal-mlx-rs) that no
+  // revision-string comparison can see.
   // Captured before anything is written: after the rewrite loop below the previous revision is gone
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
   const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
-  const manifestsAlreadyPinned = manifests.every((m) => m.bumped === m.current);
-  if (manifestsAlreadyPinned) {
+  const cargoPinsAlreadyInManifests = cargoManifestsAlreadyPinned(manifests);
+  if (cargoPinsAlreadyInManifests) {
     console.log(
       lockHasStaleInferenceRevision(sha)
         ? `bump-inference: manifests already pinned at ${sha}, but the lockfile is STALE; repairing`
@@ -1039,6 +1654,13 @@ function main() {
     console.log("bump-inference: dry run, no files written");
     return;
   }
+  // sc-19758: derive, then verify. Everything below is a mechanical function of the new pin, so the
+  // bump produces it instead of aborting with instructions for producing it. The verifiers are kept
+  // and still run — they now grade the derivation rather than the caller's diligence.
+  reportCrossLaneWork(sha);
+  reportStaleCurrencyAttestations(sha);
+  const repo = ensureInferenceCheckout(sha, explicitRepo);
+  deriveInferenceClosures(sha, repo);
   verifyInferenceClosures(sha);
   for (const m of manifests) {
     if (m.bumped === m.current) {
@@ -1048,8 +1670,11 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  updateLockIfNeededAndVerifySkew(sha, manifestsAlreadyPinned);
-  regenerateMemoryMatrix();
+  reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
+  verifyNoSkew();
+  // Historical measurement and inspection artifacts are deliberately not regenerated on a pin
+  // bump. Their recorded revisions remain provenance; measurement campaigns run once at epic end.
+  deriveLicenseAudit(sha, repo);
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input
   // this script cannot synthesize (a local inference clone / a lane that links engines), so both

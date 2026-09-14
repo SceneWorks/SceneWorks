@@ -237,7 +237,7 @@ pub(crate) fn segment_box_blocking(
                 }
             }
         }
-        if best.as_ref().map_or(true, |(score, _, _)| inside > *score) {
+        if best.as_ref().is_none_or(|(score, _, _)| inside > *score) {
             best = Some((inside, grid, values));
         }
     }

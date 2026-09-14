@@ -302,6 +302,7 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Cold,
                     spec.offload_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })

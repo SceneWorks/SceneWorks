@@ -283,12 +283,20 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
 /// The other half of the guard: the job types the generic route legitimately serves keep
 /// working. `image_upscale` / `image_detail` are the real web callers (batch ops), and
 /// neither has a typed door — so the sc-12305 rejection must not touch them.
+///
+/// sc-19708: these payloads are no longer forwarded byte-identical — the model-source seam
+/// attaches the fixed utility/default model's catalog entry (the sc-18480 enrichment pattern),
+/// because the worker's pre-loader guard fails closed on a model-backed job with no carriers.
+/// The client's own fields must still pass through untouched.
 #[tokio::test]
 async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    for job_type in ["image_upscale", "image_detail"] {
+    for (job_type, expected_model) in [
+        ("image_upscale", "real_esrgan"),
+        ("image_detail", "realvisxl"),
+    ] {
         let (status, body) = request(
             app.clone(),
             "POST",
@@ -306,9 +314,20 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
             "{job_type} must still enqueue: {body}"
         );
         assert_eq!(
-            body["payload"],
-            json!({ "sourceAssetId": "asset-1" }),
-            "legacy raw payloads without a catalog model must remain unchanged"
+            body["payload"]["sourceAssetId"],
+            json!("asset-1"),
+            "the client's own payload fields must pass through unchanged"
+        );
+        let stamped = body["payload"]["modelManifestEntries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{job_type} must carry its fixed model entry, got {body}"))
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stamped,
+            vec![expected_model],
+            "{job_type} must carry exactly its fixed utility/default model"
         );
     }
 }
@@ -401,6 +420,123 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
     .await;
     assert_eq!(status, StatusCode::OK, "detail dispatches: {claimed}");
     assert_eq!(claimed["job"]["id"], job["id"]);
+}
+
+/// The OpenPose co-requisite belongs to Model Manager install/repair authority, not the generic
+/// image worker payload. A normal no-pose SDXL request must carry only the provider's unconditional
+/// hard components (three on Candle; none for the self-contained MLX package), and retry/duplicate
+/// must preserve that projection at their shared canonicalization boundary.
+#[tokio::test]
+async fn ordinary_sdxl_txt2img_never_forwards_the_soft_openpose_component() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "realvisxl",
+            "count": 1,
+            "advanced": { "steps": 20 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "txt2img enqueues: {original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let mut boundary_jobs = vec![("create", original.clone())];
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "advanced": { "steps": 21 } } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        boundary_jobs.push((operation, replay));
+    }
+
+    for (boundary, job) in boundary_jobs {
+        assert!(
+            job["payload"]["advanced"].get("poses").is_none(),
+            "{boundary}: the ordinary request must remain a no-pose job"
+        );
+        let co_requisites: Vec<&Value> = job["payload"]["modelManifestEntry"]["downloads"]
+            .as_array()
+            .expect("authoritative downloads array")
+            .iter()
+            .filter(|download| download["coRequisite"] == json!(true))
+            .collect();
+        let component_ids: std::collections::BTreeSet<&str> = co_requisites
+            .iter()
+            .filter_map(|download| download["componentId"].as_str())
+            .collect();
+        assert!(
+            !component_ids.contains("controlnet_openpose"),
+            "{boundary}: a no-pose job must not forward the soft OpenPose component: {component_ids:?}"
+        );
+        let hard_sdxl_components = std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]);
+        assert_eq!(
+            component_ids, hard_sdxl_components,
+            "{boundary}: the authoritative payload carries only the exact hard SDXL metadata rows"
+        );
+        for download in &co_requisites {
+            let platforms = download["platforms"]
+                .as_array()
+                .expect("hard SDXL co-requisites declare their platforms")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                platforms,
+                std::collections::BTreeSet::from(["windows", "linux"]),
+                "{boundary}: carried hard SDXL metadata is Candle-only: {download}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        let target_platform = "macos";
+        #[cfg(target_os = "windows")]
+        let target_platform = "windows";
+        #[cfg(target_os = "linux")]
+        let target_platform = "linux";
+        let applicable_component_ids = co_requisites
+            .iter()
+            .filter(|download| {
+                download["platforms"].as_array().is_some_and(|platforms| {
+                    platforms
+                        .iter()
+                        .any(|platform| platform.as_str() == Some(target_platform))
+                })
+            })
+            .filter_map(|download| download["componentId"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        #[cfg(target_os = "macos")]
+        assert!(
+            applicable_component_ids.is_empty(),
+            "{boundary}: carried Candle metadata is inapplicable to self-contained MLX SDXL: \
+             {applicable_component_ids:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            applicable_component_ids, hard_sdxl_components,
+            "{boundary}: Candle receives exactly its three descriptor-required components"
+        );
+    }
 }
 
 #[tokio::test]
@@ -710,6 +846,7 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
                     "name": "Imported Krea",
                     "type": "image",
                     "family": "krea_2",
+                    "importSourceShape": "transformer_file",
                     "capabilities": ["text_to_image", "edit_image"],
                     "paths": {{ "model": "{}" }},
                     "defaults": {{ "count": 1, "resolution": "1024x1024" }},
@@ -1172,6 +1309,43 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
+    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
+    // caller-forged authorization/revision fields are removed and never persisted.
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": {
+                        "controlWeights": {
+                            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                            "filename": "diffusion_pytorch_model.safetensors",
+                            "revision": "0123456789abcdef0123456789abcdef01234567",
+                            "_catalogAuthorized": true
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        let weights = body["payload"]["advanced"]["controlWeights"]
+            .as_object()
+            .expect("canonical controlWeights");
+        assert_eq!(
+            weights.get("repo").and_then(Value::as_str),
+            Some("xinsir/controlnet-openpose-sdxl-1.0")
+        );
+        assert_eq!(
+            weights.get("filename").and_then(Value::as_str),
+            Some("diffusion_pytorch_model.safetensors")
+        );
+        assert!(!weights.contains_key("revision"));
+        assert!(!weights.contains_key("_catalogAuthorized"));
+    }
+
     // Legitimate operations retain their existing success semantics after the merged payload is
     // canonicalized; rejected injections above must not have persisted hidden jobs.
     for operation in ["retry", "duplicate"] {
@@ -1192,9 +1366,720 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        3,
-        "only the original and two clean operations may persist"
+        5,
+        "only the original, two shipped-control operations, and two clean operations may persist"
     );
+}
+
+/// SC-18314: the browser authors only an opaque encoder id. Every image-create boundary must
+/// discard caller/persisted resolution metadata, resolve the id against current server state, and
+/// reject an id that has disappeared instead of silently substituting the model encoder.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let base_payload = json!({
+        "projectId": "project-1",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "model": "krea_2_turbo",
+        "count": 1,
+        "width": 1024,
+        "height": 1024
+    });
+    let mut stale_create = base_payload.clone();
+    stale_create["advanced"] = json!({ "textEncoderModel": stale_id });
+    // A typed create must ignore any client attempt to carry the private resolution and reject the
+    // unavailable authored id from a fresh catalog lookup.
+    stale_create["modelManifestEntry"] = json!({
+        "resolvedTextEncoder": {
+            "selectionId": stale_id,
+            "sourceKind": "directory",
+            "path": temp_dir.path().join("attacker-selected")
+        }
+    });
+    let (status, body) = request(app.clone(), "POST", "/api/v1/image/jobs", stale_create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("is unavailable")));
+
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", base_payload).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    assert!(original["payload"]["modelManifestEntry"]
+        .get("resolvedTextEncoder")
+        .is_none());
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": { "textEncoderModel": stale_id },
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is unavailable")));
+
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        assert!(body["payload"]["modelManifestEntry"]
+            .get("resolvedTextEncoder")
+            .is_none());
+    }
+}
+
+/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
+/// typed-image metadata shape so every generic job projection is covered without depending on a
+/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
+/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+#[tokio::test]
+async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let selected = temp_dir.path().join("server/private/selected.safetensors");
+    let selected_parent = selected.parent().expect("selected parent").to_path_buf();
+    let distinct_server_root = temp_dir.path().join("other/managed/models");
+    let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
+    let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
+    let job_payload = json!({
+        "prompt": "/imagine a lake",
+        "installedPath": "/public/models/base.safetensors",
+        "sourcePath": "/public/loras/style.safetensors",
+        "selectedEcho": selected.display().to_string(),
+        "advanced": { "textEncoderModel": selection_id },
+        "modelManifestEntry": {
+            "resolvedTextEncoder": {
+                "selectionId": selection_id,
+                "sourceKind": "file",
+                "path": selected
+            }
+        }
+    });
+    let create_request = json!({
+        "type": "image_detail",
+        "projectId": "project-1",
+        "projectName": "Project 1",
+        "payload": job_payload,
+        "requestedGpu": "auto"
+    });
+    let assert_public = |surface: &str, value: &Value| {
+        let encoded = value.to_string();
+        assert!(
+            !encoded.contains("resolvedTextEncoder"),
+            "{surface} exposed server-private resolution: {value}"
+        );
+        assert!(
+            !encoded.contains(selected.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem path: {value}"
+        );
+        assert!(
+            !encoded.contains(selected_parent.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem prefix: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_server_root.to_string_lossy().as_ref()),
+            "{surface} exposed an allowed model root: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_canonical_target.to_string_lossy().as_ref()),
+            "{surface} exposed a distinct canonical target: {value}"
+        );
+    };
+
+    let mut events = state.events.subscribe();
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_public("create response", &created);
+    assert_eq!(
+        created["payload"]["advanced"]["textEncoderModel"],
+        selection_id
+    );
+    assert_eq!(created["payload"]["prompt"], "/imagine a lake");
+    assert_eq!(
+        created["payload"]["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["sourcePath"],
+        "/public/loras/style.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["selectedEcho"],
+        "[selected text encoder]"
+    );
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "public projection must not mutate the worker-owned stored row"
+    );
+    assert_eq!(
+        raw.payload["selectedEcho"],
+        selected.display().to_string(),
+        "the raw worker payload must retain an exact selected-path echo"
+    );
+    let mut raw_with_extra = raw.clone();
+    raw_with_extra.status = sceneworks_core::contracts::JobStatus::Failed;
+    raw_with_extra.extra.insert(
+        "partialAssetPath".to_owned(),
+        Value::String("/public/outputs/partial.png".to_owned()),
+    );
+    let projected_extra =
+        serde_json::to_value(crate::public_job_snapshot(raw_with_extra)).expect("job serializes");
+    assert_eq!(
+        projected_extra["partialAssetPath"], "/public/outputs/partial.png",
+        "unrelated partial output paths remain public contract data"
+    );
+
+    for expected in ["job.updated", "queue.updated"] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("create event arrives")
+            .expect("event stream remains open");
+        assert_eq!(event.event, expected);
+        assert_public(
+            &format!("live {expected}"),
+            &serde_json::from_str(&event.data).expect("event data parses"),
+        );
+    }
+
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("list response", &listed);
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("get response", &fetched);
+    let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("queue response", &queue);
+
+    let (status, reconnect) = request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect[1].0, "jobs.snapshot");
+    assert_public("reconnect jobs.snapshot", &reconnect[1].1);
+    assert_eq!(reconnect[2].0, "queue.updated");
+    assert_public("reconnect queue.updated", &reconnect[2].1);
+
+    for operation in ["retry", "duplicate"] {
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {response}");
+        assert_public(&format!("{operation} response"), &response);
+    }
+
+    let (status, canceled_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled_one}");
+    assert_public("single cancel response", &canceled_one);
+    let (status, cleared_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_one}");
+    assert_public("single clear response", &cleared_one);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_public("cancel-pending response", &canceled);
+
+    // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
+    // must survive public projection intact so the worker can validate and prepare its receipt.
+    let (status, worker_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "Test GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(
+        claimed["job"]["payload"]["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "the worker claim must retain the server-private exact source"
+    );
+    let claimed_id = claimed["job"]["id"].as_str().expect("claimed id");
+    while tokio::time::timeout(Duration::from_millis(25), events.next())
+        .await
+        .is_ok()
+    {}
+    let (status, progress) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{progress}");
+    assert_public("progress response", &progress);
+    let progress_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_event.event, "job.updated");
+    assert_public(
+        "progress job.updated",
+        &serde_json::from_str(&progress_event.data).expect("progress event parses"),
+    );
+    let progress_queue = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress queue.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_queue.event, "queue.updated");
+    assert_public(
+        "progress queue.updated",
+        &serde_json::from_str(&progress_queue.data).expect("progress queue event parses"),
+    );
+
+    let private_error = format!(
+        "Selected text encoder must be inside an app-managed directory ({}, {}). Pinned target changed from {} to {}",
+        selected_parent.display(),
+        distinct_server_root.display(),
+        selected.display(),
+        distinct_canonical_target.display()
+    );
+    let private_result = json!({
+        "partialAssetPath": "/public/outputs/partial.png",
+        "selectedReceipt": selected.display().to_string()
+    });
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": format!("Selected encoder failed at {}", selected.display()),
+            "error": private_error,
+            "result": private_result,
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_public("failed progress response", &failed);
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Selected text encoder must be inside")));
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("[selected text encoder]")));
+    assert_eq!(
+        failed["result"]["partialAssetPath"],
+        "/public/outputs/partial.png"
+    );
+    assert_eq!(
+        failed["result"]["selectedReceipt"],
+        "[selected text encoder]"
+    );
+    let raw_failed = state
+        .jobs_store
+        .get_job(claimed_id)
+        .expect("raw failure reads");
+    assert_eq!(raw_failed.error.as_deref(), Some(private_error.as_str()));
+    assert!(raw_failed
+        .message
+        .contains(selected.to_string_lossy().as_ref()));
+    assert_eq!(
+        raw_failed.result["selectedReceipt"],
+        selected.display().to_string()
+    );
+    let failed_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("failed job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(failed_event.event, "job.updated");
+    assert_public(
+        "failed job.updated",
+        &serde_json::from_str(&failed_event.data).expect("failed event parses"),
+    );
+    let (status, failed_get) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{claimed_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed get response", &failed_get);
+    let (status, failed_list) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed list response", &failed_list);
+    let (status, failed_reconnect) =
+        request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed reconnect jobs.snapshot", &failed_reconnect[1].1);
+    assert_public("failed reconnect queue.updated", &failed_reconnect[2].1);
+    let (status, cleared_terminal) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_terminal}");
+    assert_public("terminal clear response", &cleared_terminal);
+
+    // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
+    // the ordinary progress response. Claim one final raw row so that container boundary is also
+    // proven public while the persisted worker payload remains exact.
+    let (status, termination_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
+    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job_id = termination_job["id"]
+        .as_str()
+        .expect("termination job id")
+        .to_owned();
+    let (status, termination_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{termination_claim}");
+    assert_eq!(termination_claim["job"]["id"], termination_job_id);
+    let (status, terminated) = request(
+        app,
+        "POST",
+        "/api/v1/workers/worker-1/terminated",
+        json!({ "signal": 9, "exitCode": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terminated}");
+    assert_eq!(terminated["id"], termination_job_id);
+    assert_public("worker-terminated response", &terminated);
+    let raw_terminated = state
+        .jobs_store
+        .get_job(&termination_job_id)
+        .expect("raw terminated job reads");
+    assert_eq!(
+        raw_terminated.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "worker-termination projection must not mutate the stored worker payload"
+    );
+}
+
+#[test]
+fn selected_encoder_root_file_parent_is_never_a_universal_redaction_prefix() {
+    #[cfg(unix)]
+    let selected = std::path::Path::new("/selected.safetensors");
+    #[cfg(windows)]
+    let selected = std::path::Path::new(r"C:\selected.safetensors");
+
+    let cases = [
+        (
+            "https://example.com/models/help",
+            "https://example.com/models/help",
+        ),
+        (
+            "keep this/that slash-bearing prose",
+            "keep this/that slash-bearing prose",
+        ),
+        ("/", "/"),
+        ("root: / and keep this", "root: / and keep this"),
+        ("root: /; keep this", "root: /; keep this"),
+        (r#"root: "/" and keep this"#, r#"root: "/" and keep this"#),
+        (
+            "/another/private/models/escaped.safetensors",
+            "[selected text encoder]",
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let mut selected = selected.display().to_string();
+    crate::redact_private_text_encoder_diagnostic(&mut selected);
+    assert_eq!(selected, "[selected text encoder]");
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_encoder_symlink_canonical_target_is_redacted_without_using_root() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let lexical_parent = temp_dir.path().join("managed/text-encoders");
+    let escaped_parent = temp_dir.path().join("outside-root");
+    std::fs::create_dir_all(&lexical_parent).expect("lexical parent creates");
+    std::fs::create_dir_all(&escaped_parent).expect("escaped parent creates");
+    let canonical_target = escaped_parent.join("target.safetensors");
+    std::fs::write(&canonical_target, b"sentinel").expect("target writes");
+    let lexical = lexical_parent.join("selected.safetensors");
+    std::os::unix::fs::symlink(&canonical_target, &lexical).expect("symlink creates");
+
+    let mut diagnostic = format!(
+        "Selected text encoder resolved from {} to {}; allowed roots: {}",
+        lexical.display(),
+        canonical_target.display(),
+        temp_dir.path().join("another/model/root").display()
+    );
+    crate::redact_private_text_encoder_diagnostic(&mut diagnostic);
+    assert!(!diagnostic.contains(temp_dir.path().to_string_lossy().as_ref()));
+    assert!(diagnostic.contains("Selected text encoder resolved from"));
+    assert!(diagnostic.contains("[selected text encoder]"));
+}
+
+#[test]
+fn selected_encoder_path_token_scrubber_handles_wrappers_and_preserves_web_urls() {
+    let cases = [
+        ("source:/private/model", "source:[selected text encoder]"),
+        ("`/private/model with spaces`", "[selected text encoder]"),
+        ("</private/model>", "[selected text encoder]"),
+        (
+            r"source=C:\Models\private\model",
+            "source=[selected text encoder]",
+        ),
+        (
+            r"source=\\server\share\private\model",
+            "source=[selected text encoder]",
+        ),
+        ("file:///private/model", "[selected text encoder]"),
+        (
+            "https://example.com/private/model",
+            "https://example.com/private/model",
+        ),
+        (
+            "//cdn.example.com/private/model",
+            "//cdn.example.com/private/model",
+        ),
+        ("relative/model", "relative/model"),
+        ("./relative/model", "./relative/model"),
+        ("../relative/model", "../relative/model"),
+        ("~/relative/model", "~/relative/model"),
+        ("${HOME}/relative/model", "${HOME}/relative/model"),
+        (
+            "/Volumes/External Models/encoder.safetensors changed",
+            "[selected text encoder]",
+        ),
+        (
+            "at /tmp/private see https://example.com/public",
+            "at [selected text encoder]",
+        ),
+        ("/💾", "[selected text encoder]"),
+        ("/_", "[selected text encoder]"),
+        ("/...", "[selected text encoder]"),
+        ("/", "/"),
+        (r"C:\", r"C:\"),
+    ];
+
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+}
+
+#[test]
+fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() {
+    let file = crate::private_text_encoder_path_spellings("/models/x.safetensors", Some("file"));
+    let windows_file =
+        crate::private_text_encoder_path_spellings("C:/Models/X.safetensors", Some("file"));
+    let windows_unc = crate::private_text_encoder_path_spellings(
+        r"\\Server\Share\Encoder.safetensors",
+        Some("file"),
+    );
+    let encoded_file = crate::private_text_encoder_path_spellings(
+        "/Volumes/External Models/x.safetensors",
+        Some("file"),
+    );
+    let unix_backslash = crate::private_text_encoder_path_spellings(r"/models/a\b", Some("file"));
+    let directory =
+        crate::private_text_encoder_path_spellings("/models/encoder", Some("directory"));
+    let trailing_directory =
+        crate::private_text_encoder_path_spellings("/models/encoder/", Some("directory"));
+    let cases = [
+        (&file, "/models/x.safetensors", "[selected text encoder]"),
+        (
+            &file,
+            "file:///models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:///C:/Models/X.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:/c:/models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            r"c:\models\x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_unc,
+            "//server/share/encoder.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/External%20Models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/%e2%98%83/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "/Volumes/External%20Models/x.safetensors",
+            "/Volumes/External%20Models/x.safetensors",
+        ),
+        (
+            &file,
+            "/models/x.safetensors.backup",
+            "/models/x.safetensors.backup",
+        ),
+        (&file, "/models/x.safetensors.", "[selected text encoder]."),
+        (&file, "/models/x.safetensors!", "[selected text encoder]!"),
+        (
+            &file,
+            "xhttp:///models/x.safetensors",
+            "xhttp://[selected text encoder]",
+        ),
+        (
+            &directory,
+            "/models/encoder changed",
+            "[selected text encoder] changed",
+        ),
+        (
+            &directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (
+            &trailing_directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (&directory, "/models/encoder-v2", "/models/encoder-v2"),
+        (
+            &directory,
+            "/backup/models/encoder",
+            "/backup/models/encoder",
+        ),
+        (
+            &directory,
+            "https://example.com/models/encoder",
+            "https://example.com/models/encoder",
+        ),
+        (&unix_backslash, "/models/a/b", "/models/a/b"),
+    ];
+
+    for (spellings, input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_selected_text_encoder_paths(&mut actual, spellings);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let unknown_directory = crate::private_text_encoder_path_spellings("/models/unknown", None);
+    let mut unknown_descendant = "/models/unknown/shard.safetensors".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut unknown_descendant, &unknown_directory);
+    assert_eq!(
+        unknown_descendant,
+        "[selected text encoder]/shard.safetensors"
+    );
+
+    let posix_double_slash =
+        crate::private_text_encoder_path_spellings("//mnt/Encoder", Some("file"));
+    let mut case_distinct_posix = "//mnt/encoder".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut case_distinct_posix, &posix_double_slash);
+    assert_eq!(case_distinct_posix, "//mnt/encoder");
 }
 
 #[test]
@@ -1217,6 +2102,19 @@ fn serialize_job_lora_carries_network_type_to_payload() {
     // A plain LoRA without the field stays absent/null (treated as lora downstream).
     let plain = serialize_job_lora(&json!({ "id": "x", "family": "sdxl" }), &json!({}), "x");
     assert!(plain.get("networkType").map(Value::is_null).unwrap_or(true));
+}
+
+#[test]
+fn serialize_job_lora_preserves_exact_model_allowlists_for_the_worker() {
+    let catalog_lora = json!({
+        "id": "ltx25",
+        "family": "ltx-video",
+        "modelIds": ["ltx_2_5"],
+        "model_ids": ["ltx_2_5_alias"],
+    });
+    let payload = serialize_job_lora(&catalog_lora, &json!({}), "ltx25");
+    assert_eq!(payload["modelIds"], json!(["ltx_2_5"]));
+    assert_eq!(payload["model_ids"], json!(["ltx_2_5_alias"]));
 }
 
 #[test]
@@ -1785,6 +2683,1255 @@ async fn create_image_job_enforces_the_pose_output_ceiling() {
         error["detail"],
         "advanced.poses must contain at most 64 entries; each pose renders one image"
     );
+}
+
+#[tokio::test]
+async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "krea_2_turbo",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["catalogScope"],
+        json!("builtin"),
+        "the worker-facing merged manifest must preserve builtin scope"
+    );
+}
+
+#[tokio::test]
+async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("candle_unsupported")));
+    }
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 0, "a preflight refusal must not create a queued job");
+}
+
+/// The pinned soft VAE donor the `wan_2_1_vae` decoder option depends on, mirroring the shipped
+/// `qwen_image` co-requisite row. Written into a test manifest so a tempdir catalog can advertise a
+/// genuinely SELECTABLE decoder option rather than only the "not installed" refusal.
+const DECODER_DONOR_REPO: &str = "SceneWorks/krea-realtime-14b-mlx";
+const DECODER_DONOR_REVISION: &str = "e68e9a3d98187fdf6936838ffcf6df5aa48d6626";
+const DECODER_DONOR_FILE: &str = "q4/vae.safetensors";
+
+/// A catalog holding the real `qwen_image` id — the id the checked-in engine decoder facts key on,
+/// so `decoders.byBackend` is stamped onto the resolved entry — plus that row's pinned soft VAE
+/// donor, with the donor's exact snapshot file seeded under `data_dir` so the descriptor-derived
+/// MLX option resolves `available: true`.
+///
+/// Installing the donor is what makes the backend selection observable: with it absent, both lanes
+/// refuse (candle for "no such option", MLX for "not installed") and the two are indistinguishable.
+fn write_decoder_capable_catalog(temp_dir: &tempfile::TempDir) {
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{ "schemaVersion": 1, "models": [{{
+                "id": "qwen_image", "name": "Qwen Image", "type": "image", "family": "test",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "SceneWorks/qwen-image-mlx" }},
+                  {{
+                    "provider": "huggingface",
+                    "repo": "{DECODER_DONOR_REPO}",
+                    "revision": "{DECODER_DONOR_REVISION}",
+                    "coRequisite": true,
+                    "required": "soft",
+                    "componentId": "vae",
+                    "files": ["{DECODER_DONOR_FILE}"],
+                    "estimatedSizeBytes": 507591212
+                  }}
+                ]
+            }}] }}"#
+        ),
+    )
+    .expect("builtin models writes");
+
+    let data_dir = temp_dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let repo_cache =
+        huggingface_repo_cache_path(&data_dir, DECODER_DONOR_REPO).expect("donor cache path");
+    let snapshot = repo_cache.join("snapshots").join(DECODER_DONOR_REVISION);
+    let donor = snapshot.join(DECODER_DONOR_FILE);
+    std::fs::create_dir_all(donor.parent().expect("donor parent")).expect("donor dir creates");
+    std::fs::write(&donor, b"pinned donor").expect("donor writes");
+}
+
+fn decoder_image_job(decoder: Value) -> Value {
+    json!({
+        "projectId": "project-1",
+        "model": "qwen_image",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "count": 1,
+        "advanced": { "decoder": decoder },
+    })
+}
+
+/// sc-18420: the alternate-decoder gate must consult the option list of the backend this API
+/// instance actually routes to. It derived that with a bare `cfg!(target_os = "macos")`, so under
+/// `SCENEWORKS_CANDLE_REQUIRED` on macOS — a real, supported mode — it validated `advanced.decoder`
+/// against MLX's list while the job executed on Candle: an MLX-only decoder was admitted and then
+/// failed on the worker, and a Candle-valid one would have been 400'd.
+///
+/// Both directions of the same catalog row and the same request: only `candle_required` differs.
+#[tokio::test]
+async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
+    let _env = isolate_hf_cache();
+
+    // Candle lane: the shipped facts declare no candle decoder for this row, so the MLX-only
+    // selection must be refused at enqueue rather than deferred to a worker that cannot run it.
+    let candle_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&candle_dir);
+    let mut candle_settings = test_settings(&candle_dir);
+    candle_settings.candle_required = true;
+    let candle_app = create_app(candle_settings).expect("app creates");
+    let (status, error) = request(
+        candle_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let detail = error["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("is not compatible with qwen_image"),
+        "candle_required must reject an MLX-only decoder as incompatible, not merely uninstalled. \
+         NOTE: this exact branch is coupled to the SHIPPED decoder facts declaring ZERO candle \
+         options for qwen_image — if `capabilities.candle.json` ever gains a decoderOption for this \
+         row, the correct refusal becomes 'is not installed' (or the selection becomes valid) and \
+         this assertion must be re-stated against the new facts, NOT deleted. The backend-selection \
+         claim itself lives in the platform-free unit test \
+         `the_gate_consults_only_the_executing_backends_option_list`: {error}"
+    );
+
+    // Native lane: the same request against the same row, with candle_required off. On macOS the
+    // MLX option is installed and selectable, so it is accepted — which is what proves the
+    // refusal above came from the backend swap and not from the option being unusable.
+    let native_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&native_dir);
+    let native_app = create_app(test_settings(&native_dir)).expect("app creates");
+    let (status, body) = request(
+        native_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["payload"]["advanced"]["decoder"], "wan_2_1_vae",
+            "the accepted selection must reach the worker verbatim"
+        );
+    } else {
+        // Candle everywhere else regardless of the setting — same refusal as above.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is not compatible with qwen_image")));
+    }
+}
+
+/// sc-18420: retry/duplicate re-run the text-encoder gate but skipped the decoder gate entirely,
+/// and `payloadChanges` is a SHALLOW merge — `advanced` arrives replaced wholesale. A retry could
+/// therefore enqueue exactly the decoder shapes the create path 400s.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The original job selects no decoder, so it is admitted on either lane.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(Value::Null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        // Mutually exclusive with usePid — refused on every lane, before any list lookup.
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+        // Not an option on any backend for this row.
+        (
+            "is not compatible with qwen_image",
+            json!({ "decoder": "no_such_decoder" }),
+        ),
+        // The typed shape guard the create path applies to the same field.
+        (
+            "advanced.decoder must be a decoder id string",
+            json!({ "decoder": 7 }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must fail with the create path's own refusal ({label}): {error}"
+            );
+        }
+    }
+
+    // A refused retry/duplicate must not have enqueued anything, and the boundary must still admit
+    // the selection the create path admits — the gate is not a blanket refusal of `advanced`.
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "decoder": "wan_2_1_vae" } } }),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["payload"]["advanced"]["decoder"], "wan_2_1_vae");
+    } else {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{replayed}");
+    }
+}
+
+/// sc-18420, video half: `create_video_job` runs the same decoder gate, and the merged
+/// retry/duplicate boundary skipped it there too. No video provider advertises an alternate
+/// decoder, so every selection must fail closed at enqueue rather than reach a worker that has no
+/// such option.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_decoder_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        (
+            "is not compatible with",
+            json!({ "decoder": "wan_2_1_vae" }),
+        ),
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must reproduce the video create path's refusal ({label}): {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // A replay that selects no decoder is untouched by the new gate.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "a slower drone shot" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+/// One image model and one video model, each declaring its own LoRA family, plus the four adapters
+/// the retry/duplicate LoRA-gate tests need: a wrong-family one, a right-family-but-absent-on-disk
+/// one, and a compatible installed one per lane. Mirrors the fixture
+/// `generation_job_routes_reject_incompatible_loras` uses on the create path, so both boundaries are
+/// asserted against the SAME catalog and therefore the same refusal strings.
+fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "gate_image",
+              "name": "Gate Image",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": {}
+            },
+            {
+              // A REAL routed id (sc-19570's claimability gate is id-keyed against the routing
+              // catalog, so a synthetic id would 400 at create before the LoRA gate under test
+              // ever runs). Only the id is real; every other field is this fixture's own.
+              "id": "ltx_2_3",
+              "name": "Gate Video",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["ltx-video"] },
+              "ui": {}
+            }
+          ]
+        }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "qwen_style", "name": "Qwen Style", "family": "qwen-image",
+              "triggerWords": [], "compatibility": { "families": ["qwen-image"] },
+              "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+            },
+            {
+              "id": "deleted_style", "name": "Deleted Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/deleted.safetensors" }
+            },
+            {
+              "id": "good_style", "name": "Good Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/good.safetensors" }
+            },
+            {
+              "id": "motion_style", "name": "Motion Style", "family": "ltx-video",
+              "triggerWords": [], "compatibility": { "families": ["ltx-video"] },
+              "source": { "provider": "local", "path": "loras/motion.safetensors" }
+            }
+          ]
+        }"#,
+    )
+    .expect("user loras writes");
+    for file in ["builtin.recipe-presets.jsonc", "user.recipe-presets.jsonc"] {
+        std::fs::write(
+            config_dir.join(file),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("preset manifest writes");
+    }
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    // `deleted.safetensors` is deliberately NOT written: a catalog-backed adapter whose file is gone
+    // resolves to a non-installed state, which is the create path's "is not installed" refusal.
+    for name in ["qwen.safetensors", "good.safetensors", "motion.safetensors"] {
+        write_test_safetensors(&lora_dir.join(name));
+    }
+}
+
+/// sc-18420: `validate_job_lora_compatibility_with` runs at BOTH create boundaries
+/// (`create_image_job`, `create_video_job`) and at neither retry/duplicate one. `loras` is a
+/// TOP-LEVEL key, so the shallow `payload_changes` merge replaces the whole array — a retry could
+/// swap a validated adapter set for a wrong-family, uninstalled, or entirely unknown one and enqueue
+/// it, deferring the failure to a worker that cannot load the file.
+///
+/// Every refusal string here is the create path's own, asserted verbatim against the same catalog.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
+    // and not about the route rejecting adapters at all.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "loras": [{ "id": "good_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        (
+            "LoRA is not installed: deleted_style",
+            json!([{ "id": "deleted_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+        // A mixed set must be refused for its bad member, not silently pruned to the good one.
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
+        ),
+    ] {
+        // The create path's own verdict on the identical set, so the two boundaries are compared
+        // rather than the retry refusal being asserted in isolation.
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "model": "gate_image",
+                "count": 1,
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still admit — and NORMALIZE — a set the create path accepts, so the canonical
+    // object this boundary returns carries the hydrated catalog spec rather than the bare id.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+    assert!(
+        replayed["payload"]["loras"][0].get("name").is_some(),
+        "the admitted set must be the normalized catalog spec, not the caller's bare id: {replayed}"
+    );
+}
+
+/// sc-18420: the retry/duplicate LoRA gate must honour the ORIGINAL job's inline-LoRA provenance.
+///
+/// `characters.rs`'s test-job route creates `image_generate` jobs with `allow_inline_loras = true`,
+/// and a character's adapters are inline links (`character_lora_<hex>`, `category: "character"`,
+/// path-bearing) that `character_store::attach_lora` registers in NO catalog. Mirroring the gate
+/// with a hard-coded `false` refused that persisted set with "LoRA not found" — breaking even a
+/// retry with EMPTY `payloadChanges`.
+///
+/// Both directions, because the obvious fix opens a hole: `characterId` and `mode` are
+/// caller-settable (`ImageJobRequest` exposes both), so permission must come from the persisted
+/// LINK SHAPE, which only the character route can have put there. An ordinary image job wearing
+/// those markers must NOT be able to smuggle an inline path-bearing adapter through
+/// `payloadChanges`.
+#[tokio::test]
+async fn retry_honours_character_inline_lora_provenance_without_letting_others_borrow_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Character Retry" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, character) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters"),
+        json!({ "name": "Mira", "type": "person" }),
+    )
+    .await;
+    let character_id = character["id"].as_str().expect("character id").to_owned();
+    let source = temp_dir.path().join("data/loras/character.safetensors");
+    write_test_safetensors(&source);
+    let (status, attached) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+        json!({
+            "name": "Character Style",
+            "sourcePath": source.display().to_string(),
+            // Compatible with `gate_image` so the test-job itself is admitted; the family gate is
+            // pinned elsewhere and is not what this test is about.
+            "compatibility": { "families": ["z-image"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{attached}");
+
+    let (status, character_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+        json!({ "prompt": "portrait", "model": "gate_image" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{character_job}");
+    let character_job_id = character_job["id"].as_str().expect("job id").to_owned();
+    let inline_lora = character_job["payload"]["loras"][0].clone();
+    assert_eq!(
+        inline_lora["category"], "character",
+        "the fixture must really be an inline character link, or this test proves nothing: \
+         {character_job}"
+    );
+    let inline_lora_id = inline_lora["id"].as_str().expect("link id").to_owned();
+    assert!(
+        inline_lora_id.starts_with("character_lora_"),
+        "got: {inline_lora_id}"
+    );
+
+    // DIRECTION 1: the character job's own inline set survives retry AND duplicate, including the
+    // no-op replay that the hard-coded `false` broke.
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{operation} of a character test job must not refuse its own inline links: {replayed}"
+        );
+        assert_eq!(
+            replayed["payload"]["loras"][0]["id"], inline_lora_id,
+            "{operation} must preserve the character link"
+        );
+    }
+    // And a real change alongside them still works.
+    let (status, replayed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/retry"),
+        json!({ "payloadChanges": { "prompt": "portrait, side light" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["prompt"], "portrait, side light");
+
+    // The permit is PER-ADAPTER, not a blanket flag on the merged array: a genuine character job may
+    // replay its own links, but may not use that standing to introduce a foreign inline adapter.
+    let foreign = temp_dir.path().join("data/loras/foreign.safetensors");
+    write_test_safetensors(&foreign);
+    for (label, loras) in [
+        // Swap the persisted set for an entirely foreign inline adapter.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([{
+                "id": "character_lora_foreign",
+                "name": "Foreign",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+        // Keep the persisted link AND smuggle a foreign one alongside it: the permit must not
+        // launder its companion.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([
+                inline_lora.clone(),
+                {
+                    "id": "character_lora_foreign",
+                    "name": "Foreign",
+                    "category": "character",
+                    "sourcePath": foreign.display().to_string(),
+                    "compatibility": { "families": ["z-image"] }
+                }
+            ]),
+        ),
+        // Replay the persisted link's OWN id with a REDIRECTED path — the case an id-only match
+        // would wave through, carrying an arbitrary file into the enqueued payload.
+        (
+            &format!("LoRA not found: {inline_lora_id}"),
+            json!([{
+                "id": inline_lora_id,
+                "name": "Character Style",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} must not extend the character permit beyond the PERSISTED links: \
+                 {error}"
+            );
+            assert_eq!(error["detail"], label);
+        }
+    }
+
+    // A CATALOG adapter added alongside the persisted inline set is admitted — the narrowing must
+    // not turn a character job into one that can never gain an adapter — and both survive, in order.
+    let (status, widened) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/duplicate"),
+        json!({
+            "payloadChanges": {
+                "loras": [inline_lora.clone(), { "id": "good_style" }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{widened}");
+    assert_eq!(widened["payload"]["loras"][0]["id"], inline_lora_id);
+    assert_eq!(widened["payload"]["loras"][1]["id"], "good_style");
+    assert!(
+        widened["payload"]["loras"][1].get("name").is_some(),
+        "the added catalog adapter must be hydrated from the catalog, not passed through inline: \
+         {widened}"
+    );
+
+    // DIRECTION 2: an ORDINARY image job that wears both caller-settable markers must not borrow
+    // that permission. Create is happy to make it — the LoRA gate no-ops on an empty set — which is
+    // exactly why provenance cannot be read from the markers.
+    let smuggler = temp_dir.path().join("data/loras/smuggled.safetensors");
+    write_test_safetensors(&smuggler);
+    let (status, ordinary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "character_image",
+            "characterId": "character_not_really_mine",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "referenceAssetIds": [],
+            "loras": [],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the marker-wearing decoy must be creatable for the smuggle attempt to be meaningful: \
+         {ordinary}"
+    );
+    let ordinary_id = ordinary["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{ordinary_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "loras": [{
+                        "id": "character_lora_forged",
+                        "name": "Forged",
+                        "category": "character",
+                        "sourcePath": smuggler.display().to_string(),
+                        "compatibility": { "families": ["z-image"] }
+                    }]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{operation} must not accept an inline adapter for a job whose PERSISTED set had none: \
+             {error}"
+        );
+        assert_eq!(error["detail"], "LoRA not found: character_lora_forged");
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused smuggle must not persist a job"
+    );
+
+    // The decoy still validates a CATALOG adapter normally, so the refusal above is about inline
+    // permission and not about the job being unable to take adapters at all.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{ordinary_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+}
+
+/// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+            "model": "ltx_2_3",
+            "loras": [{ "id": "motion_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model ltx_2_3",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        // A z-image adapter is installed and well-formed, just wrong for THIS lane's model.
+        (
+            "LoRA good_style is not compatible with model ltx_2_3",
+            json!([{ "id": "good_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+    ] {
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a drone shot",
+                "model": "ltx_2_3",
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the video create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "motion_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "motion_style");
+}
+
+/// sc-18420: the same retry/duplicate bypass for the imported-submission gate. The create path
+/// refuses an imported request shape the resolved provider registration cannot execute; the merged
+/// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
+/// backend has no route for.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
+    // request is admitted and the pose replay is the shape with no route.
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the plain imported generate shape has a candle route: {original}"
+    );
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("candle_unsupported")),
+                "{operation} must reproduce the create path's imported refusal: {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still pass a merged shape the create path accepts — a prompt-only replay keeps
+    // the admitted generate operation.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("imported_control_unsupported")));
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": {
+                "poses": [{ "id": "pose-1", "keypoints": [] }],
+                "controlImage": "control-1",
+                "controlMode": "pose"
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["controlImage"], "control-1");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the supported imported Pose request queues");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "finetune_mage",
+            "name": "Fine-tuned Mage",
+            "type": "image",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "paths": { "model": "/probe/finetune-mage" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "reference-1" })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+        (
+            "unsupported quant tier",
+            json!({ "advanced": { "quantTier": "nvfp4" } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(extra.as_object().expect("extra object").clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("imported_unsupported")),
+            "{label} must fail at exact imported-provider admission: {error}"
+        );
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the exact registered generate shape queues");
 }
 
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.
@@ -3382,6 +5529,85 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
 }
 
 #[tokio::test]
+async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-priority",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, first) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "first" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let (_, selected) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "selected" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+
+    let selected_id = selected["id"].as_str().expect("selected id");
+    let (status, prioritized) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/prioritize",
+        json!({ "jobIds": [selected_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prioritized["prioritized"], 1);
+    assert_eq!(prioritized["jobs"][0]["id"], selected["id"]);
+    assert!(prioritized["jobs"][0]["queueRank"]
+        .as_i64()
+        .is_some_and(|rank| rank > 0));
+
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-priority" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], selected["id"]);
+    let (_, first_after) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{}", first["id"].as_str().expect("first id")),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(first_after["status"], "queued");
+}
+
+#[tokio::test]
 async fn clear_single_job_soft_hides_only_that_terminal_job() {
     // sc-12231 / issue #1556: POST /api/v1/jobs/:id/clear (the per-card ×) drops one
     // terminal job from the queue and leaves its siblings alone.
@@ -4421,6 +6647,17 @@ async fn image_and_video_job_routes_normalize_payloads() {
         "/api/v1/video/jobs",
         json!({
             "projectId": "project-1",
+            // Names `wan_2_2` rather than riding `default_video_model()`, which is `ltx_2_3`.
+            // LTX's replacement provider is the IC-LoRA keyframe-append path, so
+            // `video_request_is_mlx_eligible` and `ltx_replace_candle_eligible` both require
+            // `loras_contain_ltx_ic_lora`; an adapter-free LTX `replace_person` is claimed by NO
+            // lane, and sc-19504's enqueue gate correctly 400s it rather than letting it sit
+            // `queued` forever. Supplying an adapter instead would need a seeded LoRA catalog and
+            // an on-disk weight file, dragging catalog resolution into a test that exists to prove
+            // payload NORMALIZATION. `wan_2_2` is claimable adapter-free on both lanes (native
+            // Wan-VACE), so the shape below is unchanged and the assertions stay on topic. The
+            // server-default video model has its own dedicated coverage further down this file.
+            "model": "wan_2_2",
             "mode": "replace_person",
             "prompt": "hero walks through rain",
             "sourceClipAssetId": "asset-video",
@@ -4451,6 +6688,213 @@ async fn image_and_video_job_routes_normalize_payloads() {
     let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(queue["counts"]["queued"], 5);
+}
+
+/// THE regression test the cap change required: a video model that declares none of the four new
+/// `limits` keys keeps the exact reference budget it had before sc-17160.
+///
+/// The shape that matters is 8 images + 8 clips — SIXTEEN reference files on one request, which
+/// this route accepts today because the pre-story caps were per-list only. Introducing the combined
+/// cap as a payload-sanity BLANKET of 12 (the reading the story's wording invites) would have
+/// refused it, silently narrowing every already-shipped video model. That is why the combined cap
+/// is per-model declaration only, and why this test asserts an ACCEPT rather than a reject: the
+/// rejecting tests would all still pass with the regression in place.
+#[tokio::test]
+async fn existing_video_models_keep_their_pre_sc_17160_reference_budget() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Budget" }),
+    )
+    .await;
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "ads2v",
+            "prompt": "drive the edit",
+            "sourceClipAssetId": "clip-src",
+            "referenceClipAssetId": "clip-ref",
+            "referenceAssetIds": ["i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8"],
+            "sourceClipAssetIds": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "16 reference files was legal before this story and must stay legal: {job}"
+    );
+    assert_eq!(
+        job["payload"]["referenceAssetIds"].as_array().map(Vec::len),
+        Some(8)
+    );
+    assert_eq!(
+        job["payload"]["sourceClipAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+}
+
+/// The story's acceptance pair at the ROUTE, against a model that declares the Ref2VA reference
+/// surface: 9 images + 3 clips + 3 audio is 15 reference files and must be refused; 9 + 2 + 1 is
+/// 12 and must be accepted, with all three lists on the enqueued payload.
+///
+/// Driven off a SEEDED manifest rather than a shipped model on purpose. The caps are per-model
+/// (`limits.maxReferenceAssets` / `maxSourceClipAssets` / `maxReferenceAudioAssets` /
+/// `maxCombinedReferenceAssets`), so the only honest way to exercise the accepting side today is a
+/// model that declares them — MiniMax-H3's own manifest entry is sc-17158. That separation is the
+/// point of the design: this test needs no engine and no weights to pin the contract.
+///
+/// The seeded entry carries a REAL routed id (sc-19504): the enqueue no-lane gate refuses a model
+/// no lane can claim, so the old synthetic `ref2va_probe` would now 400 before reaching the caps.
+/// The entry is still entirely this test's own — its four caps are the fixture's, not the shipped
+/// manifest's — so the assertions are unchanged; only the id is one the routing tables recognise.
+///
+/// The combined budget has NO payload-sanity blanket, only this per-model declaration — see the
+/// note in `validate_video_job`. 12 is MiniMax-H3's number and today's per-list caps already admit
+/// a 16-file request (8 images + 8 clips), so a blanket 12 would have narrowed every existing
+/// video model. `existing_video_models_keep_their_pre_sc_17160_reference_budget` holds that line.
+#[tokio::test]
+async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "minimax_h3_ref",
+              "name": "Ref2VA Probe",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "stub",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12
+              },
+              "ui": {}
+            },
+            {
+              "id": "legacy_probe",
+              "name": "Legacy Probe",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "stub",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Ref2VA" }),
+    )
+    .await;
+
+    let submit = |model: &str, images: usize, clips: usize, audio: usize| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": "project-1",
+            "model": model,
+            "mode": "reference_to_video",
+            "prompt": "the subject speaks",
+            "referenceAssetIds": (0..images).map(|i| format!("img-{i}")).collect::<Vec<_>>(),
+            "sourceClipAssetIds": (0..clips).map(|i| format!("clip-{i}")).collect::<Vec<_>>(),
+            "referenceAudioAssetIds": (0..audio).map(|i| format!("aud-{i}")).collect::<Vec<_>>(),
+        });
+        async move { request(app, "POST", "/api/v1/video/jobs", body).await }
+    };
+
+    // 9 + 3 + 3 = 15 > 12. REFUSED, and the message decomposes the total so the caller knows how
+    // much to cut without counting three lists themselves. Nothing but the combined budget can
+    // decide this one: 9 <= 9, 3 <= 3 and 3 <= 3 all pass their own caps.
+    let (status, over) = submit("minimax_h3_ref", 9, 3, 3).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over["detail"],
+        "minimax_h3_ref takes up to 12 reference files in total, but this request supplies 15 \
+         (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
+    );
+
+    // 9 + 2 + 1 = 12. ACCEPTED, at the cap, and every list reaches the enqueued payload. These
+    // four assertions were withheld together with the route while
+    // `minimax_h3_ref`/`reference_to_video` had no claiming lane; sc-18650 restored the MLX route
+    // and them with it.
+    let (status, at_cap) = submit("minimax_h3_ref", 9, 2, 1).await;
+    assert_eq!(status, StatusCode::CREATED, "{at_cap}");
+    assert_eq!(at_cap["type"], "video_generate");
+    assert_eq!(
+        at_cap["payload"]["referenceAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(9)
+    );
+    assert_eq!(
+        at_cap["payload"]["sourceClipAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        at_cap["payload"]["referenceAudioAssetIds"],
+        json!(["aud-0"]),
+        "the audio references must reach the worker verbatim, not just validate"
+    );
+
+    // A shape that clears the blanket but not what THIS model declares: 4 clips against its
+    // declared 3, only 8 files in total. Refused by the per-model gate, naming the model.
+    let (status, per_model) = submit("minimax_h3_ref", 4, 4, 0).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        per_model["detail"],
+        "minimax_h3_ref takes up to 3 source clips, but this request supplies 4. Reduce \
+         sourceClipAssetIds to 3 or fewer, or choose a model that takes more."
+    );
+
+    // The SAME 9 + 2 + 1 request against a model that declares nothing is refused — twice over,
+    // and the image cap is what it trips first. This is the per-family shape doing its job: the
+    // declaration travels with the model, not with the API constant.
+    let (status, legacy) = submit("legacy_probe", 9, 2, 1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        legacy["detail"],
+        "legacy_probe takes up to 8 reference images, but this request supplies 9. Reduce \
+         referenceAssetIds to 8 or fewer, or choose a model that takes more."
+    );
 }
 
 #[tokio::test]
@@ -4528,7 +6972,14 @@ async fn bernini_video_modes_validate_required_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Reference id lists are bounded before the worker has to encode them.
-    let (status, _) = request(
+    //
+    // THE REGRESSION ASSERTION FOR sc-17160. This 9-reference request 400'd before that story and
+    // must keep 400ing after it, even though the API's payload-sanity blanket was raised from 8 to
+    // 9 for MiniMax-H3 — bernini declares no `limits.maxReferenceAssets`, so the per-model gate in
+    // `create_video_job` holds it at the historical 8. The status alone would pass for the wrong
+    // reason (any 400 satisfies it), so the message is asserted too: it has to be bernini's own cap
+    // talking, not the blanket.
+    let (status, over_cap) = request(
         app.clone(),
         "POST",
         "/api/v1/video/jobs",
@@ -4542,6 +6993,82 @@ async fn bernini_video_modes_validate_required_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over_cap["detail"],
+        "bernini takes up to 8 reference images, but this request supplies 9. Reduce \
+         referenceAssetIds to 8 or fewer, or choose a model that takes more."
+    );
+
+    // 8 is still admitted — the cap moved for nobody, in either direction.
+    let (status, at_cap) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1", "ref-2", "ref-3", "ref-4", "ref-5", "ref-6", "ref-7", "ref-8"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        at_cap["payload"]["referenceAssetIds"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+    // And the new list is present-but-empty on a model that has nothing to do with it, so a replay
+    // reader never has to tell "absent" from "empty" (sc-12345).
+    assert_eq!(at_cap["payload"]["referenceAudioAssetIds"], json!([]));
+
+    // The new audio list is INERT for every already-shipped video model: bernini declares no
+    // `limits.maxReferenceAudioAssets`, which defaults to 0, so a single audio reference is
+    // refused rather than accepted-and-silently-dropped by an engine that cannot consume it.
+    let (status, audio_refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["voice-1"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        audio_refused["detail"],
+        "bernini takes no audio references, but this request supplies 1. Remove \
+         referenceAudioAssetIds, or choose a model that conditions on audio references."
+    );
+
+    // Blank audio ids are rejected exactly as blank image and clip ids are, and by the blanket —
+    // so the refusal does not depend on the model declaring anything.
+    let (status, blank_audio) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "the subject dances",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["  "]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        blank_audio["detail"],
+        "referenceAudioAssetIds must not contain blank ids"
+    );
 
     // A complete video_to_video request creates a base video_generate job that
     // carries the source clip.
@@ -4801,6 +7328,401 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "scail2_14b",
+                "name": "SCAIL-2 14B",
+                "family": "scail2",
+                "type": "video",
+                "capabilities": ["image_to_video"],
+                "ui": { "scail2MultiReference": multi_reference }
+            }]
+        }))
+        .expect("multi-reference manifest serializes"),
+    )
+    .expect("multi-reference manifest writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
+/// The paired SCAIL-2 provider has six source-position slots: the first character plus five
+/// ordered extras. The API owns the public boundary, while the worker keeps the same backstop for
+/// retry/legacy payloads; neither is permitted to silently retain only the first six. The source
+/// implementation must also stay behind the resolved descriptor gate until the final inference
+/// pin carries the paired layout. This pins that gate and the canonical empty-array payload shape
+/// used by recipes, replay, retry, and duplicate.
+#[tokio::test]
+async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 multi-reference" }),
+    )
+    .await;
+
+    let base = || {
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving"
+        })
+    };
+
+    // 0 references without the legacy source fallback remains incomplete. The one-reference
+    // path remains available while the current engine descriptor has not yet proven the paired
+    // layout.
+    let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", base()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut padded_model = base();
+    padded_model
+        .as_object_mut()
+        .unwrap()
+        .insert("model".to_owned(), json!(" scail2_14b "));
+    padded_model
+        .as_object_mut()
+        .unwrap()
+        .insert("referenceAssetIds".to_owned(), json!(["character-primary"]));
+    let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", padded_model).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"].as_str().is_some_and(
+            |detail| detail.contains("model must not contain leading or trailing whitespace")
+        ),
+        "submit must reject a padded model id rather than letting the worker trim it: {error}"
+    );
+    let mut padded_reference = base();
+    padded_reference.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([" character-primary "]),
+    );
+    let (status, error) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", padded_reference).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("leading or trailing whitespace")),
+        "submit must reject a padded reference id rather than letting the worker trim it: {error}"
+    );
+    let single_reference = vec!["character-0"];
+    let mut single = base();
+    single.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!(single_reference.clone()),
+    );
+    let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", single).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["referenceAssetIds"], json!(single_reference));
+
+    // A direct API caller is held to the same honest gate as the Studio. This prevents the
+    // source-ready worker path from making today's older inference pin claim multi-reference
+    // support before the descriptor flag is shipped with the final paired pin.
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references));
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_string()
+                .contains("multi-reference is unavailable until the paired inference descriptor"),
+            "{count} references must stay behind the current descriptor gate, got: {error}"
+        );
+    }
+
+    // A sourceAssetId remains the old single-reference fallback. Whether referenceAssetIds was
+    // absent or explicitly [], the stored/replayable shape must canonicalize to [] rather than
+    // accidentally serializing null or dropping the field on a retry/duplicate.
+    for reference_ids in [None, Some(json!([]))] {
+        let mut body = base();
+        let object = body.as_object_mut().unwrap();
+        object.insert("sourceAssetId".to_owned(), json!("legacy-reference"));
+        if let Some(reference_ids) = reference_ids {
+            object.insert("referenceAssetIds".to_owned(), reference_ids);
+        }
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+    }
+
+    let mut seven = base();
+    seven.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([
+            "character-0",
+            "character-1",
+            "character-2",
+            "character-3",
+            "character-4",
+            "character-5",
+            "character-6"
+        ]),
+    );
+    let (status, error) = request(app, "POST", "/api/v1/video/jobs", seven).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.to_string().contains("at most 6 reference characters"),
+        "seven references must be rejected explicitly, got: {error}"
+    );
+
+    // The exact same endpoint becomes source-ready when the resolved, server-owned manifest
+    // carries the paired-descriptor gate. Use an isolated miniature catalog rather than changing
+    // the real builtin manifest before inference-main and terminal evidence exist.
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    let config_dir = enabled_temp_dir.path().join("config/manifests");
+    write_scail2_reference_test_manifest(&config_dir, true);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 paired descriptor" }),
+    )
+    .await;
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references.clone()));
+        let (status, job) = request(enabled_app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{count} references must be accepted"
+        );
+        assert_eq!(
+            job["payload"]["referenceAssetIds"],
+            json!(references),
+            "{count} references must stay ordered for the paired worker contract"
+        );
+    }
+}
+
+/// Retry and duplicate rebuild `modelManifestEntry` from current server state, so the exact merged
+/// reference array must be re-authorized against that rebuilt entry before either operation creates
+/// work. This protects both directions of the descriptor transition: a current-pin replay cannot
+/// bypass the missing flag, while an enabled pin keeps every accepted id in caller order.
+#[tokio::test]
+async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
+    let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
+    let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
+    request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 current descriptor replay" }),
+    )
+    .await;
+    let (status, current_original) = request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{current_original}");
+    let current_job_id = current_original["id"].as_str().expect("current job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "model": " scail2_14b ",
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail
+                    .contains("model must not contain leading or trailing whitespace")),
+            "{operation} must reject the padded-model capability bypass: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "mode": " animate_character ",
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail
+                    .contains("mode must not contain leading or trailing whitespace")),
+            "{operation} must reject the padded-mode capability bypass: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": [" character-primary "]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("referenceAssetIds must not contain leading or trailing whitespace")),
+            "{operation} must reject a padded id rather than letting VideoRequest trim it: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("multi-reference is unavailable until the paired inference descriptor")),
+            "{operation} must enforce the current-pin refusal: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["r0", "r1", "r2", "r3", "r4", "r5", "r6"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("at most 6 reference characters")),
+            "{operation} must reject seven before descriptor dispatch: {error}"
+        );
+
+        for (malformed, expected) in [
+            (json!("not-an-array"), "must be an array of string ids"),
+            (
+                json!(["character-primary", 7]),
+                "must contain only string ids",
+            ),
+            (
+                json!(["character-primary", "  "]),
+                "must not contain blank ids",
+            ),
+        ] {
+            let (status, error) = request(
+                current_app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+                json!({ "payloadChanges": { "referenceAssetIds": malformed } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(expected)),
+                "{operation} must reject malformed referenceAssetIds ({expected}): {error}"
+            );
+        }
+    }
+
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 enabled descriptor replay" }),
+    )
+    .await;
+    let (status, enabled_original) = request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{enabled_original}");
+    let enabled_job_id = enabled_original["id"].as_str().expect("enabled job id");
+    let ordered = json!([
+        "character-4",
+        "character-1",
+        "character-5",
+        "character-0",
+        "character-3",
+        "character-2"
+    ]);
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            enabled_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{enabled_job_id}/{operation}"),
+            json!({ "payloadChanges": { "referenceAssetIds": ordered.clone() } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replayed}");
+        assert_eq!(
+            replayed["payload"]["referenceAssetIds"], ordered,
+            "{operation} must preserve the exact six-reference order"
+        );
+    }
 }
 
 #[tokio::test]
@@ -5144,6 +8066,10 @@ async fn generation_job_routes_reject_incompatible_loras() {
         .contains("is not compatible with model z_image_turbo"));
 }
 
+/// The seeded video model carries a REAL routed id (`wan_2_2`, sc-19504) rather than the old
+/// synthetic `vid-model`: the enqueue no-lane gate refuses a model no lane can claim, so a
+/// synthetic id now 400s before preset expansion can be observed. The entry is still the fixture's
+/// own — its defaults, limits and repo are written here — so nothing this test pins has changed.
 #[tokio::test]
 async fn video_jobs_expand_recipe_presets_server_side() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -5157,7 +8083,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "vid-model",
+              "id": "wan_2_2",
               "name": "Vid Model",
               "family": "wan-video",
               "type": "video",
@@ -5216,7 +8142,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
               "id": "dream_motion",
               "name": "Dream Motion",
               "workflow": "text_to_video",
-              "model": "vid-model",
+              "model": "wan_2_2",
               "defaults": { "duration": 8, "fps": 30, "resolution": "1280x720", "quality": "best", "negativePrompt": "jitter" },
               "prompt": { "prefix": "cinematic", "suffix": "smooth camera motion" },
               "loras": [{ "id": "motion-lora", "weight": 0.5 }]
@@ -5253,7 +8179,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
             "projectId": project_id,
             "mode": "text_to_video",
             "prompt": "a fox runs",
-            "model": "vid-model",
+            "model": "wan_2_2",
             // Client render settings that DIFFER from the preset's declared
             // defaults — the studio seeds the form from the preset but the user
             // is free to override, so these submitted values must win.
@@ -5344,7 +8270,10 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     // quietly stop modelling *the default's* entry if the default ever changed: the pre-fix
     // failure would degrade from "carries the DEFAULT's entry" to "carries {}" — still red,
     // but no longer demonstrating the documented defect. Its 32 / owner/default mirror the
-    // real default video manifest; `preset-vid` mirrors mochi_1's 16 / distinct repo.
+    // real default video manifest; the override entry mirrors the real mochi_1's 16 / distinct
+    // repo. Both fixture ids are REAL routed video models (sc-19504): the enqueue no-lane gate
+    // refuses a model no lane can claim, so a synthetic id would now 400 before this assertion.
+    // Each keeps its own seeded limits, so what the test pins is unchanged.
     let default_video_model = crate::defaults::default_video_model();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
@@ -5368,14 +8297,14 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -5403,7 +8332,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -5444,20 +8373,193 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     // The preset's model won over the omitted-model default...
-    assert_eq!(video_job["payload"]["model"], "preset-vid");
+    assert_eq!(video_job["payload"]["model"], "mochi_1");
     // ...and the entry travelling with it must describe THAT model, not the default's.
     let entry = &video_job["payload"]["modelManifestEntry"];
     assert_eq!(
-        entry["id"], "preset-vid",
+        entry["id"], "mochi_1",
         "manifest entry should be resolved from the post-override model"
     );
     assert_eq!(
-        entry["downloads"][0]["repo"], "owner/preset-vid",
+        entry["downloads"][0]["repo"], "owner/mochi_1",
         "wrong repo => the worker fetches the wrong model's weights (loud failure)"
     );
     assert_eq!(
         entry["limits"]["requiresDimensionsMultipleOf"], 16,
         "wrong dimension floor => silently renders off-bucket geometry (sc-11993)"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_routes() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Base LTX",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [{ "provider": "huggingface", "repo": "owner/base", "files": ["*.safetensors"], "default": true }],
+              "paths": {}, "defaults": {}, "limits": {}, "ui": { "label": "Base LTX" }
+            },
+            {
+              "id": "ltx_2_3_eros",
+              "name": "LTX Eros",
+              "family": "ltx-video",
+              "type": "video",
+              "macOnly": true,
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [{ "provider": "huggingface", "repo": "owner/eros", "files": ["*.safetensors"], "default": true }],
+              "paths": {}, "defaults": {}, "limits": {}, "ui": { "label": "LTX Eros" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "ltx_2_3_eros",
+            "macOnly": false,
+            "downloadable": true,
+            "usable": true
+          }]
+        }"#,
+    )
+    .expect("user override attempt writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [{
+            "id": "eros_preset",
+            "name": "Eros Preset",
+            "workflow": "text_to_video",
+            "model": "ltx_2_3_eros",
+            "defaults": {},
+            "prompt": { "prefix": "cinematic" }
+          }]
+        }
+        "#,
+    )
+    .expect("builtin presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user presets writes");
+
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.video_platform_override.lock() = Some("windows");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Platform Withdrawal Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    for payload in [
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "ltx_2_3_eros"
+        }),
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "recipePresetId": "eros_preset"
+        }),
+    ] {
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only on macOS"));
+    }
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+
+    // Base LTX stays cross-platform, while the same Eros route remains valid on macOS.
+    let (status, base_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{base_job}");
+    *state.video_platform_override.lock() = Some("macos");
+    let (status, eros_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "ltx_2_3_eros"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{eros_job}");
+
+    // A legacy Eros job and a model-changing replay are both rejected before a new row is queued.
+    *state.video_platform_override.lock() = Some("linux");
+    for (job_id, payload_changes) in [
+        (eros_job["id"].as_str().unwrap(), json!({})),
+        (
+            base_job["id"].as_str().unwrap(),
+            json!({ "model": "ltx_2_3_eros" }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": payload_changes }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+            assert!(body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only on macOS"));
+        }
+    }
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().expect("jobs array").len(),
+        2,
+        "only the explicitly valid base and macOS Eros jobs may exist"
     );
 }
 
@@ -6517,7 +9619,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
 ///
 /// The fixture is built so the two plausible homes for this check disagree:
 ///   * default video model — cap 15 (generous)
-///   * `preset-vid`        — cap  5 (strict)
+///   * `mochi_1`             — cap  5 (strict)
 ///
 /// The request omits `model` (so the preset's model wins, per sc-12300) and asks for 10s. Gating
 /// on the DTO's `payload.model` — i.e. inside `validate_video_job`, the intuitive home, which runs
@@ -6554,14 +9656,14 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -6589,7 +9691,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6632,11 +9734,11 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "10s past preset-vid's 5s cap must be refused at enqueue, not silently clamped: {body}"
+        "10s past mochi_1's 5s cap must be refused at enqueue, not silently clamped: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("preset-vid"),
+        detail.contains("mochi_1"),
         "names the model whose cap applied — NOT the default's: {detail}"
     );
     assert!(detail.contains("5s"), "states the cap: {detail}");
@@ -6658,7 +9760,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "5s is at the cap: {body}");
-    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(body["payload"]["model"], "mochi_1");
 
     // ...and the SAME 10s request against the default model (cap 15) is admitted, proving the
     // rejection above came from the per-model cap rather than a blanket duration bound.
@@ -6687,9 +9789,9 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
 ///
 /// The fixture makes both halves load-bearing by having the two models' menus disagree:
 ///   * default video model — `[24, 25, 30]`, default 25 (permissive)
-///   * `preset-vid`        — `[30]`, default 30 (strict, the mochi_1 shape)
+///   * `mochi_1`             — `[30]`, default 30 (strict)
 ///
-/// `fps: 25` is the discriminator. It is on the default's menu and off `preset-vid`'s, so a gate
+/// `fps: 25` is the discriminator. It is on the default's menu and off `mochi_1`'s, so a gate
 /// reading the DTO's stale `payload.model` — i.e. inside `validate_video_job`, before
 /// `apply_recipe_preset_to_video_payload` — admits it and enqueues a job the strict model does not
 /// advertise. 25 is also the blanket the DTO used to default to, which is why the omitted-fps case
@@ -6723,14 +9825,14 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "preset-vid",
+              "id": "mochi_1",
               "name": "Preset Vid",
               "family": "mochi",
               "type": "video",
               "adapter": "mochi_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-vid", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": { "fps": 30 },
@@ -6758,7 +9860,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "preset-vid",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -6801,11 +9903,11 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "25fps is off preset-vid's [30] menu and must be refused at enqueue, not snapped: {body}"
+        "25fps is off mochi_1's [30] menu and must be refused at enqueue, not snapped: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("preset-vid"),
+        detail.contains("mochi_1"),
         "names the model whose menu applied — NOT the default's: {detail}"
     );
     assert!(
@@ -6835,7 +9937,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         StatusCode::CREATED,
         "a request naming no fps must not be refused by the menu: {body}"
     );
-    assert_eq!(body["payload"]["model"], "preset-vid");
+    assert_eq!(body["payload"]["model"], "mochi_1");
     assert_eq!(
         body["payload"]["fps"], 30,
         "the enqueued payload records the model's declared rate, not the blanket 25: {body}"
@@ -6859,7 +9961,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "30 is what preset-vid advertises: {body}"
+        "30 is what mochi_1 advertises: {body}"
     );
     assert_eq!(body["payload"]["fps"], 30);
 
@@ -6911,6 +10013,456 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .contains("fps must be between 1 and 60"));
 }
 
+/// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,
+/// and — the part that makes the key worth existing — a below-floor request is REFUSED rather than
+/// raised onto the floor.
+///
+/// The fixture makes the two plausible homes disagree, exactly as the duration and fps tests above
+/// do:
+///   * default video model — no floor at all (1 step is fine)
+///   * `mochi_1`             — floor 2, the MiniMax-H3 shape
+///
+/// `advanced.steps: 1` is the discriminator. A gate reading the DTO's stale `payload.model` — i.e.
+/// inside `validate_video_job`, which runs BEFORE `apply_recipe_preset_to_video_payload` — sees the
+/// default's absent floor, admits it, and enqueues a job whose scheduler cannot build a schedule
+/// from a single sigma grid point.
+#[tokio::test]
+async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "mochi_1",
+              "name": "Preset Vid",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 50 },
+              "limits": { "hardMinSteps": 2 },
+              "ui": { "label": "Preset Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "mochi_1",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Step Floor Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // 1 step: fine for the default (no floor) but under the preset-resolved model's 2. `model`
+    // omitted so the preset's model wins — the sc-12300 shape.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 1 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1 step under mochi_1's 2-step floor must be refused at enqueue, not raised: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("mochi_1"),
+        "names the model whose floor applied — NOT the default's: {detail}"
+    );
+    assert!(
+        detail.contains("at least 2 sampling steps"),
+        "states the floor: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 1."),
+        "states what was asked: {detail}"
+    );
+
+    // At-floor admits: 2 is exactly the floor, and the bound is `<`. This is what keeps the
+    // assertion above from passing for a gate that simply rejects everything.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 2 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
+    assert_eq!(body["payload"]["model"], "mochi_1");
+    assert_eq!(
+        body["payload"]["advanced"]["steps"], 2,
+        "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
+    );
+
+    // A request naming NO steps is admitted even on the floored model: `advanced` is a passthrough
+    // map with no blanket step count, so an omitted `steps` means the engine picks. Refusing it
+    // would be the sc-12400 regression on a new axis.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a steps-less payload must not be refused by the floor: {body}"
+    );
+
+    // ...and the SAME 1-step request against the default model (no floor) is admitted, proving the
+    // rejection above came from the per-model floor rather than a blanket step bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 1 },
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the default model declares no floor, so 1 step is its own business: {body}"
+    );
+}
+
+/// sc-19502: `limits.steps` — the EXACT-value menu — is enforced at enqueue, and the half a floor
+/// could never express is enforced too: an OVER-menu count is refused.
+///
+/// This is the reachability half of the story. `limits.steps: [8]` is only a real constraint if a
+/// real HTTP request trips it, and `advanced.steps: 30` is the exact payload the story names: it
+/// used to be accepted here, then 400 late from the candle engine after dispatch, or — on mlx — be
+/// accepted and silently rendered at 8, a control that visibly did nothing.
+///
+/// The fixture makes the two plausible homes disagree the same way the floor test above does:
+///   * default video model — no menu at all (30 steps is its own business)
+///   * `mochi_1`           — menu `[8]`, the distilled shape
+///
+/// Both ids are REAL routed video models, and `mochi_1` is the same id the floor test above uses.
+/// The menu model cannot be a made-up id: the sc-19504 no-lane gate runs last on the enqueue path
+/// and refuses any video request no backend's claim predicate accepts, so a synthetic id 400s for
+/// "no backend implements it" and the ON-menu `201` arm below — the one that keeps the rejections
+/// above from passing for a gate that simply refuses every step count — can never be reached.
+/// `mochi_1` is `video_mlx_routed` + `candle_video_routed` and serves `text_to_video` only, so both
+/// lanes claim it on every platform. The menu itself is fixture-declared, which is the point: this
+/// asserts the ENFORCEMENT of `limits.steps`, not any particular model's declaration of it.
+///
+/// It was `ltx_2_3_eros` until the 2026-08-19 main sync. That id is now a product WITHDRAWAL
+/// off-Mac (sc-18902 removed its candle route; `video_model_withdrawn_on_platform` names it
+/// literally), so on `parity-rust` the platform gate 400'd first with "available only on macOS" and
+/// the catalog read below could not find the row at all — a fixture id that had quietly become
+/// platform-dependent. Nothing about the step-menu contract changed; only the id it is asserted on.
+#[tokio::test]
+async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Default Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/default-vid", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Default Vid" }
+            },
+            {
+              "id": "mochi_1",
+              "name": "Distilled Vid",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": { "steps": [8] },
+              "ui": { "label": "Distilled Vid" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "preset_override",
+              "name": "Preset Override",
+              "workflow": "text_to_video",
+              "model": "mochi_1",
+              "defaults": {},
+              "prompt": { "prefix": "cinematic", "suffix": "smooth" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Step Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // THE CASE THE STORY NAMES. 30 steps: over the menu, so a FLOOR-shaped key would have admitted
+    // it. `model` omitted so the preset's model wins — the sc-12300 shape.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 30 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "30 steps is off mochi_1's exact menu and must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("mochi_1"),
+        "names the model whose menu applied — NOT the default's: {detail}"
+    );
+    assert!(
+        detail.contains("fixed 8-step schedule"),
+        "states the legal value: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 30 steps"),
+        "states what was asked: {detail}"
+    );
+
+    // Under-menu is refused too, so the menu is not secretly a ceiling.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 4 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "4 is off the menu as well");
+
+    // ON the menu admits, and travels VERBATIM. This is what keeps the assertions above from
+    // passing for a gate that simply rejects every step count.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 8 },
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "8 is the menu: {body}");
+    assert_eq!(body["payload"]["model"], "mochi_1");
+    assert_eq!(
+        body["payload"]["advanced"]["steps"], 8,
+        "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
+    );
+
+    // A request naming NO steps is admitted: `advanced` is a passthrough map, so an omitted `steps`
+    // means the engine runs its baked schedule. Refusing it would make every distilled model
+    // unusable without the caller knowing its magic number.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "recipePresetId": "preset_override"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a steps-less payload must not be refused by the menu: {body}"
+    );
+
+    // ...and the SAME 30-step request against the default model (no menu) is admitted, proving the
+    // rejection above came from the per-model menu rather than a blanket step bound.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox runs",
+            "advanced": { "steps": 30 },
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the default model declares no menu, so 30 steps is its own business: {body}"
+    );
+
+    // REACHABILITY FOR THE UI HALF. Video Studio pins its Steps control off `limits.steps`, which
+    // only works if the catalog endpoint actually serializes the key — a `limits` block that
+    // allowlisted its contents would leave the control free while the gate above still refused, i.e.
+    // the UI/gate desync this story exists to remove. Asserted on the wire rather than by reading
+    // the serializer.
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "catalog lists: {catalog}");
+    let listed = catalog
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|model| model["id"] == "mochi_1")
+        .expect("mochi_1 is listed");
+    assert_eq!(
+        listed["limits"]["steps"],
+        json!([8]),
+        "the catalog must carry limits.steps through to the studio: {listed}"
+    );
+}
+
 /// sc-12400 — the regression sc-12297 shipped: a request that names **no duration at all** was
 /// rejected for "asking for 6s", on 7 of the 10 shipped video models.
 ///
@@ -6946,27 +10498,58 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     // regression bricked — plus ltx_2_3, whose cap of 15 admitted 6.0 and which therefore stayed
     // green throughout. Listing the survivor alongside the victims is what makes this a per-model
     // assertion rather than "the route works".
-    for (model, want_duration) in [
-        ("bernini", 5.0),
-        ("scail2_14b", 5.0),
-        ("wan_2_2_t2v_14b", 5.0),
-        ("wan_2_2_i2v_14b", 5.0),
-        ("wan_2_2_vace_fun_14b", 5.0),
-        ("svd", 4.0),
-        ("ltx_2_3", 6.0),
-    ] {
-        let (status, body) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/video/jobs",
+    //
+    // Each row now carries a mode the model actually SERVES, plus that mode's required media
+    // (sc-19504). It used to submit `text_to_video` for all seven, which three of them do not do at
+    // all — `scail2_14b` is animate/replace only, `wan_2_2_vace_fun_14b` is replace only, `svd` is
+    // image-conditioned only — so those three rows were asserting a 201 on a job NO lane would have
+    // claimed, i.e. one that would have sat queued forever. The enqueue no-lane gate refuses that
+    // shape now, and the fix is to drive each model where it lives: the duration default this test
+    // is about is resolved from the manifest entry and is mode-independent, so nothing is weakened.
+    for (model, mode, media, want_duration) in [
+        ("bernini", "text_to_video", json!({}), 5.0),
+        (
+            "scail2_14b",
+            "animate_character",
+            json!({ "sourceClipAssetId": "clip-1", "referenceAssetIds": ["img-1"] }),
+            5.0,
+        ),
+        ("wan_2_2_t2v_14b", "text_to_video", json!({}), 5.0),
+        (
+            "wan_2_2_i2v_14b",
+            "image_to_video",
+            json!({ "sourceAssetId": "img-1" }),
+            5.0,
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "replace_person",
             json!({
-                "projectId": project_id,
-                "mode": "text_to_video",
-                "prompt": "a fox runs",
-                "model": model
+                "sourceClipAssetId": "clip-1",
+                "personTrackId": "track-1",
+                "characterId": "character-1"
             }),
-        )
-        .await;
+            5.0,
+        ),
+        (
+            "svd",
+            "image_to_video",
+            json!({ "sourceAssetId": "img-1" }),
+            4.0,
+        ),
+        ("ltx_2_3", "text_to_video", json!({}), 6.0),
+    ] {
+        let mut request_body = json!({
+            "projectId": project_id,
+            "mode": mode,
+            "prompt": "a fox runs",
+            "model": model
+        });
+        request_body
+            .as_object_mut()
+            .expect("body object")
+            .extend(media.as_object().expect("media object").clone());
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", request_body).await;
         assert_eq!(
             status,
             StatusCode::CREATED,
@@ -7488,4 +11071,1614 @@ async fn styles_endpoint_serves_the_builtin_catalog() {
         catalog["groups"][0]["styles"][0]["prompt"],
         "gentle hand-painted"
     );
+}
+
+/// **THE CLASS GUARD, API half (sc-17159, GH #2074).** Every video mode a shipped model advertises
+/// in `capabilities` must be a mode `POST /api/v1/video/jobs` will actually ACCEPT.
+///
+/// `validate_video_job`'s allow-list is a SEPARATE reachability gate from the catalog: a mode
+/// missing from it 400s with "Unsupported video mode" no matter how completely the rest of the
+/// stack is wired. That is exactly how SCAIL-2's `animate_character` shipped — catalog,
+/// `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate, the worker's
+/// `generate_scail2` AND the Video Studio tab, all correct, and every submission rejected.
+///
+/// Read off BOTH real sources so it cannot go stale: the advertisement comes from the shipped
+/// `builtin.models.jsonc` bytes and the admission from [`crate::VIDEO_JOB_MODES`], the constant
+/// `validate_video_job` itself consults. A guard that re-typed the mode list would assert against
+/// its own copy and stay green through exactly the drift it exists to catch.
+///
+/// The routing half of the same class is
+/// `every_declared_video_capability_is_claimable_by_some_lane` (sceneworks-core routing/catalog.rs),
+/// which proves some lane will CLAIM each of these once submitted.
+#[test]
+fn every_declared_video_capability_is_submittable() {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let videos: Vec<&Value> = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|entry| entry["type"] == "video")
+        .collect();
+    assert!(
+        videos.len() >= 12,
+        "only {} shipped video models were read — the manifest parse is wrong and this guard is \
+         vacuous",
+        videos.len()
+    );
+
+    let mut checked = 0_usize;
+    for entry in &videos {
+        let id = entry["id"].as_str().expect("every model row has an id");
+        let capabilities = entry["capabilities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: every shipped video model declares capabilities"));
+        assert!(!capabilities.is_empty(), "{id}: declares no capability");
+        for capability in capabilities {
+            let mode = capability
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: capabilities entries are strings"));
+            checked += 1;
+            assert!(
+                crate::VIDEO_JOB_MODES.contains(&mode),
+                "{id} advertises `{mode}` in builtin.models.jsonc — the Video Studio builds a tab \
+                 for it — but `validate_video_job`'s allow-list does not admit it, so every \
+                 submission 400s with \"Unsupported video mode\" and the mode is unreachable from \
+                 the moment it ships (GH #2074). Add it to VIDEO_JOB_MODES with its per-mode \
+                 required-asset arm, or stop advertising it."
+            );
+        }
+    }
+    assert!(
+        checked >= 30,
+        "only {checked} (model, capability) pairs were checked — this guard is vacuous"
+    );
+
+    // …and the converse, so the allow-list cannot quietly accumulate modes nothing serves: every
+    // admitted mode is advertised by at least one shipped video model.
+    let advertised: std::collections::BTreeSet<&str> = videos
+        .iter()
+        .filter_map(|entry| entry["capabilities"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for mode in crate::VIDEO_JOB_MODES {
+        assert!(
+            advertised.contains(mode),
+            "`{mode}` is admitted by validate_video_job but no shipped video model advertises it \
+             — either a model lost the capability or the allow-list has a dead entry"
+        );
+    }
+}
+
+/// Seed the SHIPPED manifests into a temp config dir and return a live app + project id, so a
+/// video-jobs test drives the real `minimax_h3` / `minimax_h3_ref` entries rather than a fixture
+/// whose numbers the test itself chose (sc-17159 — a seeded probe would prove the ROUTE works, not
+/// that the shipped family is reachable).
+async fn shipped_manifest_app(temp_dir: &tempfile::TempDir) -> (axum::Router, String) {
+    shipped_manifest_app_on_os(temp_dir, "macos").await
+}
+
+/// The same app, told it is running on `os` (sc-19570). The ONLY difference from
+/// [`shipped_manifest_app`] is `Settings::host_os`, which production always fills with
+/// `std::env::consts::OS`.
+///
+/// It exists because macOS structurally cannot detect the defect sc-19570 fixed by running on
+/// itself: the per-mode reachability sweep terminates exactly what no Windows/Linux lane will
+/// claim, and on a Mac that branch never executes. Tagging the fixture with the FOREIGN OS is what
+/// makes the check run everywhere, on the sc-17227 precedent.
+///
+/// What varies with `os` is the JOB's outcome, never the response. `POST /api/v1/video/jobs`
+/// answers `201` for the same body on every value passed here — that is asserted directly by
+/// [`the_video_enqueue_contract_is_identical_on_every_platform`] — and only the created job's
+/// `status` differs. A guard that expects a different STATUS CODE per `os` is asserting the shape
+/// this story removed.
+///
+/// The OS is always passed explicitly — never read from `std::env::consts::OS`. The two lanes that
+/// run this suite disagree (`parity-rust` is `ubuntu-latest`, the hosted workspace job is macOS),
+/// so reading the runner would make every assertion here mean something different depending on
+/// which lane executed it. [`shipped_manifest_app`] therefore pins macOS and these guards pin the
+/// foreign OS, and both lanes reach the same verdict.
+async fn shipped_manifest_app_on_os(
+    temp_dir: &tempfile::TempDir,
+    os: &str,
+) -> (axum::Router, String) {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let mut settings = test_settings(temp_dir);
+    settings.host_os = os.to_owned();
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MiniMax-H3 Reachability" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (app, project_id)
+}
+
+/// sc-17159 (epic 17137) — every mode MiniMax-H3 DECLARES is submittable end to end against the
+/// SHIPPED manifest, and the enqueued payload carries what the worker needs.
+///
+/// "Declaration is not enforcement is not reachability." sc-17158 declared the two entries and
+/// their geometry; this asserts a caller can actually get each of the four declared modes past
+/// EVERY gate on the enqueue path — the allow-list, the per-mode required-asset arm, the three
+/// reference-list blankets, the payload-sanity duration/fps/dimension bounds, and then the
+/// per-model `duration_limit_error` / `fps_limit_error` / `reference_limit_error` that only fire
+/// once the manifest entry is resolved. A `201` here is the whole point: asserting the mode string
+/// appears in a list is what GH #2074 already passed.
+#[tokio::test]
+async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    // (label, model, the mode-specific half of the payload). One case per declared capability:
+    // `minimax_h3` = [text_to_video, image_to_video, first_last_frame], `minimax_h3_ref` =
+    // [reference_to_video]. fl2va is "0, 1 or 2 images", which is three payload shapes across two
+    // modes, so all three are driven.
+    let cases = [
+        ("t2va", "minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "fl2va first frame only",
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "asset-first" }),
+        ),
+        (
+            "fl2va both frames",
+            "minimax_h3",
+            json!({
+                "mode": "first_last_frame",
+                "sourceAssetId": "asset-first",
+                "lastFrameAssetId": "asset-last"
+            }),
+        ),
+        (
+            "Ref2VA images + clips + audio",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "referenceAssetIds": ["img-0", "img-1", "img-2", "img-3", "img-4", "img-5", "img-6", "img-7", "img-8"],
+                "sourceClipAssetIds": ["clip-0", "clip-1"],
+                "referenceAudioAssetIds": ["aud-0"]
+            }),
+        ),
+        // Audio references as a COMPANION to a visual one — the shape sc-17159 unblocked, minus
+        // the audio-ONLY case it also unblocked by mistake. sc-19574 refused that one again (see
+        // `minimax_h3_refusals_each_name_their_own_reason`): upstream's `before_encoder.py` raises
+        // on `set(kinds) == {"audio"}`, so it is not a shape the checkpoint serves.
+        (
+            "Ref2VA one image with three audio references",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "referenceAssetIds": ["img-0"],
+                "referenceAudioAssetIds": ["aud-0", "aud-1", "aud-2"]
+            }),
+        ),
+        (
+            "Ref2VA video clips only",
+            "minimax_h3_ref",
+            json!({
+                "mode": "reference_to_video",
+                "sourceClipAssetIds": ["clip-0", "clip-1", "clip-2"]
+            }),
+        ),
+    ];
+
+    for (label, model, extra) in cases {
+        let mut body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse keeper hums while the storm rolls in"
+        });
+        body.as_object_mut()
+            .expect("body object")
+            .extend(extra.as_object().expect("case object").clone());
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{label}: a mode the manifest declares must be accepted: {job}"
+        );
+        // All four modes map to the base job type, which is what routes to `run_video_generate_job`
+        // — none of them is an extend/bridge/replace shape.
+        assert_eq!(job["type"], "video_generate", "{label}");
+        // The resolved geometry the worker will read: the model's own declared defaults, not the
+        // route's historical blankets (6.0 s / 25 fps / 768x512 — none of which is on this
+        // family's lattice, menu or bucket list).
+        assert_eq!(
+            job["payload"]["duration"], 5.1667,
+            "{label}: defaults.duration is the shortest lattice rung"
+        );
+        assert_eq!(job["payload"]["fps"], 24, "{label}: the one cadence");
+        assert_eq!(job["payload"]["width"], 1344, "{label}");
+        assert_eq!(job["payload"]["height"], 768, "{label}");
+        // The entry actually resolved — the worker reads geometry off this, so a job enqueued
+        // without it silently loses the lattice and the area budget.
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["id"], model,
+            "{label}: the resolved manifest entry must be the one the caller asked for"
+        );
+    }
+
+    // The conditioning media reaches the worker verbatim rather than merely validating — all
+    // three reference lists survive into the enqueued payload. (These pass-through assertions
+    // were withheld together with the route and restored by sc-18650, alongside the same four in
+    // `ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve`.)
+    let (status, ref2va) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "prompt": "the subject speaks over the rain",
+            "referenceAssetIds": ["img-0", "img-1"],
+            "sourceClipAssetIds": ["clip-0"],
+            "referenceAudioAssetIds": ["aud-0"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{ref2va}");
+    assert_eq!(
+        ref2va["payload"]["referenceAssetIds"],
+        json!(["img-0", "img-1"]),
+        "the reference images must reach the worker verbatim: {ref2va}"
+    );
+    assert_eq!(
+        ref2va["payload"]["sourceClipAssetIds"],
+        json!(["clip-0"]),
+        "the source clips must reach the worker verbatim: {ref2va}"
+    );
+    assert_eq!(
+        ref2va["payload"]["referenceAudioAssetIds"],
+        json!(["aud-0"]),
+        "the audio references must reach the worker verbatim: {ref2va}"
+    );
+
+    // A named duration ON the lattice is honoured verbatim — the accepting side of the menu, so
+    // the refusals below are not just "everything is rejected".
+    let (status, on_rung) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "minimax_h3", "mode": "text_to_video",
+            "prompt": "a fox", "duration": 14.375
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{on_rung}");
+    assert_eq!(on_rung["payload"]["duration"], 14.375);
+}
+
+/// sc-17159 — the refusals sc-17158 established are INTACT after the family is made reachable, and
+/// each one names its OWN reason.
+///
+/// Pinning the exact `detail` matters more than the status here: a bare "it 400'd" assertion goes
+/// inert the moment the request would have been rejected for some other reason (sc-19488). Each
+/// case below is constructed to be legal in every respect but the one under test, and the message
+/// is compared in full.
+#[tokio::test]
+async fn minimax_h3_refusals_each_name_their_own_reason() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    let submit = |model: &str, extra: Value| {
+        let app = app.clone();
+        let project_id = project_id.clone();
+        let model = model.to_owned();
+        async move {
+            let mut body = json!({
+                "projectId": project_id, "model": model, "mode": "text_to_video",
+                "prompt": "a fox runs"
+            });
+            body.as_object_mut()
+                .expect("body object")
+                .extend(extra.as_object().expect("case object").clone());
+            request(app, "POST", "/api/v1/video/jobs", body).await
+        }
+    };
+
+    // 15.0 s: the reference ADVERTISES it and the lattice cannot reach it (the next rung, 362
+    // frames, is 15.083 s). Refused rather than silently delivered as 14.375 — which is exactly
+    // what sc-17147 was doing.
+    let (status, over) = submit("minimax_h3", json!({ "duration": 15.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        over["detail"],
+        "minimax_h3 renders clips up to 14.375s, but this request asks for 15s. Shorten the clip \
+         to 14.375s or less, or choose a model that renders longer clips."
+    );
+
+    // 3.0 s: under `hardMinDuration`. The floor is checked FIRST, so the message offers the
+    // lengthen lever and never the shorten one.
+    let (status, under) = submit("minimax_h3", json!({ "duration": 3.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        under["detail"],
+        "minimax_h3 renders clips of at least 5.1667s, but this request asks for 3s. Lengthen the \
+         clip to 5.1667s or more, or choose a model that renders shorter clips."
+    );
+
+    // T = 1. There is NO image lane for this family — `min_duration` is a hardcoded 5.0 upstream,
+    // so a single-frame request does not render at all. Both spellings are refused, and they are
+    // refused by DIFFERENT gates, so both messages are pinned rather than assumed:
+    //   * 1/24 s is below the route's payload-sanity blanket and never reaches the model's floor;
+    //   * 1.0 s clears the blanket and is refused by the model's own declared floor.
+    let (status, single_frame) = submit("minimax_h3", json!({ "duration": 1.0 / 24.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(single_frame["detail"], "duration must be between 1 and 30");
+    let (status, one_second) = submit("minimax_h3", json!({ "duration": 1.0 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        one_second["detail"],
+        "minimax_h3 renders clips of at least 5.1667s, but this request asks for 1s. Lengthen the \
+         clip to 5.1667s or more, or choose a model that renders shorter clips."
+    );
+
+    // fps: the family declares ONE cadence. 30 is off-menu.
+    let (status, fps) = submit("minimax_h3", json!({ "fps": 30 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        fps["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("minimax_h3 renders at 24 fps"),
+        "the fps refusal must name the model's own menu: {fps}"
+    );
+
+    // Canvas. The AREA budget is 1,032,192 px and it is NOT an enqueue refusal — an over-cap
+    // canvas is REFIT by `normalized_dimensions` at the worker, so the route accepts it. What the
+    // route refuses is the per-edge blanket. Both halves are pinned so "over-cap canvas" is never
+    // read as "rejected at enqueue".
+    let (status, square) = submit(
+        "minimax_h3",
+        json!({ "width": 1344, "height": 1344, "duration": 5.1667 }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "1344x1344 is accepted at enqueue and refit at the worker: {square}"
+    );
+    let entry = square["payload"]["modelManifestEntry"].clone();
+    assert_eq!(entry["limits"]["maxPixels"], 1_032_192);
+    let refit = sceneworks_core::video_request::VideoRequest::from_payload(
+        square["payload"].as_object().expect("payload object"),
+    );
+    assert!(
+        u64::from(refit.width) * u64::from(refit.height) <= 1_032_192,
+        "the enqueued payload must refit under the area budget, got {}x{}",
+        refit.width,
+        refit.height
+    );
+    assert_ne!(
+        (refit.width, refit.height),
+        (1344, 1344),
+        "the refit must actually fire, else the cap is decoration"
+    );
+    let (status, too_wide) = submit("minimax_h3", json!({ "width": 2016, "height": 512 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(too_wide["detail"], "width must be between 256 and 1920");
+
+    // Reference caps. The base partition declares 0/0/0 precisely because its checkpoint has no
+    // reference path — a Ref2VA-shaped request must not reach a checkpoint that would ignore it.
+    let (status, base_images) = submit(
+        "minimax_h3",
+        json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-0"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        base_images["detail"],
+        "minimax_h3 takes no reference images, but this request supplies 1. Remove \
+         referenceAssetIds, or choose a model that conditions on reference images."
+    );
+    let (status, base_audio) =
+        submit("minimax_h3", json!({ "referenceAudioAssetIds": ["aud-0"] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        base_audio["detail"],
+        "minimax_h3 takes no audio references, but this request supplies 1. Remove \
+         referenceAudioAssetIds, or choose a model that conditions on audio references."
+    );
+
+    // The reference partition's own caps: 9 / 3 / 3 per list and 12 combined. 15 files clears
+    // every per-list cap and is refused only by the combined budget.
+    let ids = |prefix: &str, count: usize| -> Value {
+        (0..count)
+            .map(|i| Value::String(format!("{prefix}-{i}")))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    let (status, combined) = submit(
+        "minimax_h3_ref",
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ids("img", 9),
+            "sourceClipAssetIds": ids("clip", 3),
+            "referenceAudioAssetIds": ids("aud", 3)
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        combined["detail"],
+        "minimax_h3_ref takes up to 12 reference files in total, but this request supplies 15 \
+         (9 reference images + 3 source clips + 3 audio references). Remove 3 of them."
+    );
+    // A 10th image is over the payload-sanity blanket, which is one layer ABOVE the per-model cap,
+    // so it names the field rather than the model — a different gate, a different message.
+    let (status, tenth) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "referenceAssetIds": ids("img", 10) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        tenth["detail"],
+        "referenceAssetIds must contain at most 9 ids"
+    );
+    // A 4th audio reference is inside the blanket (3 is the blanket AND the model's cap here, so
+    // drive the model's cap through the clips list instead: 4 clips against its declared 3, well
+    // inside the blanket 8).
+    let (status, clips) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "sourceClipAssetIds": ids("clip", 4) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        clips["detail"],
+        "minimax_h3_ref takes up to 3 source clips, but this request supplies 4. Reduce \
+         sourceClipAssetIds to 3 or fewer, or choose a model that takes more."
+    );
+
+    // fl2va's required media is still required: `first_last_frame` means BOTH frames.
+    let (status, one_frame) = submit(
+        "minimax_h3",
+        json!({ "mode": "first_last_frame", "sourceAssetId": "asset-first" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        one_frame["detail"],
+        "First/Last Frame requires first and last image assets."
+    );
+    // …and a reference-driven request with NO reference of any kind is still refused. sc-17159
+    // loosened this arm from "at least one reference IMAGE" to "at least one reference", not to
+    // "no reference needed".
+    let (status, no_refs) = submit("minimax_h3_ref", json!({ "mode": "reference_to_video" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        no_refs["detail"],
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // THE sc-19574 SHAPE: audio references and nothing else. sc-17159's widening went one list too
+    // far — upstream's `before_encoder.py` raises on `set(kinds) == {"audio"}` because an audio
+    // reference never reaches the visual conditioner — so the API accepted a request the worker
+    // then refused. It is refused HERE now, which is the first point the user could learn it.
+    let (status, audio_only) = submit(
+        "minimax_h3_ref",
+        json!({ "mode": "reference_to_video", "referenceAudioAssetIds": ["aud-0", "aud-1"] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an audio-only reference set must not be admitted: {audio_only}"
+    );
+    assert_eq!(
+        audio_only["detail"],
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+    // …and the SAME audio references alongside one image are accepted, so the refusal above is
+    // about the missing visual reference and not about the audio list existing at all.
+    let (status, audio_with_image) = submit(
+        "minimax_h3_ref",
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["img-0"],
+            "referenceAudioAssetIds": ["aud-0", "aud-1"]
+        }),
+    )
+    .await;
+    // ACCEPTED — the contrast the pairing draws: the audio-only case above is refused by the
+    // ref2va payload rule, while the SAME audio list alongside one image is the shape Ref2VA
+    // serves and enqueues (the route is live since sc-18650). If the payload rule ever wrongly
+    // rejected audio-alongside-an-image, this arm would surface that refusal and go red.
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "audio alongside a visual reference is the shape Ref2VA serves — it must enqueue, never \
+         be caught by the reference rule above: {audio_with_image}"
+    );
+    // Bernini's engine takes image references alone, so the loosened arm must not become a way to
+    // hand its r2v path a clips-only conditioning set. The API admits it (the arm is
+    // model-independent by design) and the worker's own `resolve_bernini_conditioning` refuses it,
+    // naming bernini — the model-specific half of the requirement lives with the model.
+    let (status, bernini_clips) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "bernini", "mode": "reference_to_video",
+            "prompt": "a fox", "sourceClipAssetIds": ["clip-0"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the enqueue arm is model-independent: {bernini_clips}"
+    );
+    let (status, bernini_bare) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id, "model": "bernini", "mode": "reference_to_video",
+            "prompt": "a fox"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bernini_bare["detail"],
+        "Reference to Video requires at least one reference image or video clip. Audio references \
+         condition the soundtrack and cannot be the only reference."
+    );
+}
+
+/// **THE ENFORCEMENT GUARD (sc-19504).** A video mode NO lane will claim is refused at submission,
+/// with a real request, rather than enqueued to wait forever.
+///
+/// This is the half `every_declared_video_capability_is_claimable_by_some_lane` and
+/// `every_declared_video_capability_is_submittable` structurally cannot cover. Both read the
+/// manifest, so both only see what a model ADVERTISES — and `VIDEO_JOB_MODES` is global: any
+/// caller may name any admitted mode against any model, and the studio is not the only caller
+/// (`sceneworks-mcp`'s `submit_video_job` picks `first_last_frame` on its own the moment a
+/// `lastFrameAssetId` is present, then POSTs here). Withdrawing `first_last_frame` from
+/// `wan_2_2_i2v_14b` removes the TAB; only the enqueue gate removes the HANG.
+///
+/// Driven against the SHIPPED manifest through the REAL route, because "the mode is in a list" is
+/// what GH #2074 already passed. A `queued` job here is the defect: no worker claims it, no sweep
+/// fails it (both enforce sweeps default to warn), and the user sees "Waiting for an available
+/// worker." forever next to an idle worker (sc-15328).
+#[tokio::test]
+async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+
+    let submit = |body: Value| {
+        let app = app.clone();
+        let project_id = project_id.clone();
+        async move {
+            let mut full = json!({ "projectId": project_id, "prompt": "a fox runs" });
+            full.as_object_mut()
+                .expect("body object")
+                .extend(body.as_object().expect("case object").clone());
+            request(app, "POST", "/api/v1/video/jobs", full).await
+        }
+    };
+
+    // THE REPORTED DEFECT. Legal in every other respect — the mode is in `VIDEO_JOB_MODES`, both
+    // required frames are present, the model exists, the geometry is default — and claimable by
+    // nobody: the MLX I2V-A14B descriptor declares `conditioning: [Reference]` with no `Keyframe`,
+    // and the candle i2v gate requires `mode == "image_to_video"`.
+    let (status, flf) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first",
+        "lastFrameAssetId": "img-last"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a first_last_frame request on the 14B I2V must be REFUSED, not enqueued to wait for a \
+         worker that will never claim it: {flf}"
+    );
+    assert_eq!(
+        flf["detail"],
+        "wan_2_2_i2v_14b cannot render the \"first_last_frame\" mode — no backend implements it, \
+         so this job would wait for a worker that will never claim it. Choose a mode this model \
+         lists in its capabilities, or a model that supports this one."
+    );
+
+    // …and the same shape on the 5B, which DOES have the mask-blend keyframe path, is accepted.
+    // Without this the assertion above would be satisfied by a gate that refused every FLF request.
+    let (status, five_b) = submit(json!({
+        "model": "wan_2_2",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first",
+        "lastFrameAssetId": "img-last"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "wan_2_2 (TI2V-5B) serves first_last_frame on MLX and must still be accepted: {five_b}"
+    );
+
+    // The gate is NOT a platform gate. `extend_clip` on this same model is served only by the
+    // candle Wan-VACE lane — no MLX path at all — and must still enqueue, on a Mac included: the
+    // two shipped topologies share one queue and a job waits for ITS lane's worker.
+    let (status, extend) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "extend_clip",
+        "sourceClipAssetId": "clip-1"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "extend_clip is candle-VACE-served on this model and must still enqueue: {extend}"
+    );
+    assert_eq!(extend["type"], "video_extend");
+
+    // The gate is NOT a capability gate either, and this case is why it must not become one:
+    // `wan_2_2_t2v_14b` does not ADVERTISE `extend_clip`, but the candle VACE lane genuinely
+    // renders it. A capabilities-shaped gate would 400 a working shape — a real regression for
+    // every non-studio caller — while fixing nothing this gate does not already fix.
+    let (status, undeclared) = submit(json!({
+        "model": "wan_2_2_t2v_14b",
+        "mode": "extend_clip",
+        "sourceClipAssetId": "clip-1"
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an undeclared but genuinely-served mode must not be refused: {undeclared}"
+    );
+
+    // The mode's own required-asset arm still runs FIRST, so a malformed request keeps its own
+    // precise message instead of being flattened into "no backend implements it".
+    let (status, missing) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "first_last_frame",
+        "sourceAssetId": "img-first"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        missing["detail"],
+        "First/Last Frame requires first and last image assets."
+    );
+
+    // Every mode `wan_2_2_i2v_14b` still advertises survives the gate, so the withdrawal narrowed
+    // exactly one capability and not the model.
+    let (status, i2v) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "image_to_video",
+        "sourceAssetId": "img-first"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{i2v}");
+    let (status, bridge) = submit(json!({
+        "model": "wan_2_2_i2v_14b",
+        "mode": "video_bridge",
+        "sourceClipAssetId": "clip-1",
+        "bridgeRightClipAssetId": "clip-2"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{bridge}");
+}
+
+/// The measured MLX-only, candle-unclaimable pairs (sc-19570), each with the media its mode
+/// requires so the request is legal in every OTHER respect — a 400 from a missing asset would be
+/// the wrong outcome entirely and would leave a guard below passing for a reason that has nothing
+/// to do with platform.
+///
+/// The two remaining mac-only-download families (`krea_realtime_14b`, `minimax_h3_ref`) ride
+/// the same route as everything else, because "install state is not a reachability gate" is only an
+/// argument until the REST leg actually exercises it.
+///
+/// It listed ALL TWENTY when sc-19570 measured it. Syncing `main` into this epic branch gave
+/// thirteen of them a candle lane, and sc-20755 gave the three MiniMax-H3 base modes a Candle lane,
+/// so four remain — exactly the two mac-only families above.
+fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
+    vec![
+        // SIXTEEN PAIRS WERE REMOVED HERE: thirteen when `main` was synced into the epic branch
+        // and MiniMax-H3 base's three modes when sc-20755 added its measured Candle lane. The
+        // `ltx_2_3` / `ltx_2_3_eros` five apiece, `wan_2_2`'s two keyframe shapes, and
+        // `wan_2_2_vace_fun_14b`'s `replace_person`, plus MiniMax-H3 t2va and both fl2va shapes.
+        // They now belong to `candle_served_pairs` rather than here. Keeping them would assert that
+        // a served pair must TERMINATE off-Mac — the exact inversion of this guard. The same rows
+        // left `MLX_ONLY_ADVERTISED_PAIRS` in
+        // `routing/catalog.rs`, which is this table's core-side twin; the two must agree.
+        // The four pairs the story's measurement did NOT list, because these two families ship
+        // `platforms: ["macos"]` downloads and it scoped itself to Windows/Linux-installable
+        // models. They belong on the REST leg specifically: the whole argument for having an
+        // enqueue gate at all is that it must refuse a raw REST call REGARDLESS of install state,
+        // and a core-predicate assertion cannot exercise that. Install state is not a reachability
+        // gate — a mac-only download list is one manifest edit from changing — and the route
+        // resolves these ids from the seeded manifest on every OS, so there is nothing to exempt.
+        ("krea_realtime_14b", json!({ "mode": "text_to_video" })),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "krea_realtime_14b",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+    ]
+}
+
+/// The pairs the candle lane genuinely serves off-Mac — the other half of every guard below. A
+/// mechanism that simply failed everything off-Mac would satisfy the stranded assertions and go red
+/// here.
+fn candle_served_pairs() -> Vec<(&'static str, Value)> {
+    vec![
+        ("wan_2_2", json!({ "mode": "text_to_video" })),
+        (
+            "wan_2_2",
+            json!({ "mode": "extend_clip", "sourceClipAssetId": "clip-1" }),
+        ),
+        (
+            "wan_2_2",
+            json!({ "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "track-1", "characterId": "char-1" }),
+        ),
+        ("ltx_2_3", json!({ "mode": "text_to_video" })),
+        // Two of the thirteen pairs that moved out of `mlx_only_stranded_pairs` when `main` was
+        // synced in: `candle_video_engine_id` resolves the LTX pair to `ltx_2_3_distilled`, which
+        // serves both of these adapter-free. Asserted on this side rather than merely deleted from
+        // the other, so the sync's claim — "these gained a lane" — is proved rather than assumed.
+        // The advanced three (extend / bridge / replacement) are deliberately NOT here: they are
+        // candle-served only with an IC-LoRA, so an adapter-free body would be refused at enqueue
+        // and would prove the opposite of what this table is for.
+        (
+            "ltx_2_3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "ltx_2_3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        // MiniMax-H3 base moved here in sc-20755; SC-20756 adds the Ref2VA twin.
+        ("minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "minimax_h3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
+        ),
+        (
+            "svd",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        ("bernini", json!({ "mode": "text_to_video" })),
+        (
+            "bernini",
+            json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
+        ),
+    ]
+}
+
+/// Build the full `POST /api/v1/video/jobs` body for one `(model, case)` row.
+fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
+    let mut full = json!({ "projectId": project_id, "prompt": "a fox runs", "model": model });
+    full.as_object_mut()
+        .expect("body object")
+        .extend(case.as_object().expect("case object").clone());
+    full
+}
+
+/// **THE HTTP CONTRACT GUARD (sc-19570).** `POST /api/v1/video/jobs` answers `201 Created` for
+/// byte-identical bodies on macOS, Windows and Linux alike — for the MLX-only pairs AND for
+/// the candle-served ones.
+///
+/// This is the property Michael ruled on: *"http contracts are not platform dependant and never
+/// should be."* sc-19570's first shipped fix refused the MLX-only pairs with a `400` off-Mac, so
+/// the published surface disagreed with itself across hosts and
+/// `test_person_tracking_and_replace_person_contracts` (the cross-runtime parity suite, which runs
+/// on Linux) caught it as a 400 where it expected 201.
+///
+/// The assertion is deliberately status-code-shaped and platform-blind: every row, every OS, one
+/// expected value. A future edit that reintroduces ANY platform-conditional refusal on this route
+/// — for any subset, with any message — turns this red. The companion guard
+/// [`an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac`] owns the other half, that
+/// accepting these off-Mac does not resurrect the hang.
+#[tokio::test]
+async fn the_video_enqueue_contract_is_identical_on_every_platform() {
+    let stranded = mlx_only_stranded_pairs();
+    let served = candle_served_pairs();
+    // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
+    // pairs a real Candle lane; sc-20755 moved the three MiniMax-H3 base modes, and sc-20756 moved
+    // Ref2VA. The guard is KEPT, not deleted, and kept EXACT: a drop below three means a genuinely
+    // stranded pair stopped being covered without its replacement lane being recorded here.
+    assert_eq!(
+        stranded.len(),
+        3,
+        "the stranded set is the three remaining mac-only-download pairs that enqueue — a shrunken table \
+         would narrow every guard that reads it"
+    );
+
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in stranded.iter().chain(served.iter()) {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: the enqueue contract must not vary by platform — the \
+                 same body answers 201 everywhere, and what this host can RENDER is reported on \
+                 the job, not in the status code: {body}"
+            );
+            // The response SHAPE is part of the contract too: a job snapshot with an id, on every
+            // platform. A host that answered 201 with a different envelope would be just as
+            // platform-dependent as one that answered 400.
+            assert!(
+                body["id"].as_str().is_some_and(|id| !id.is_empty()),
+                "{model} + {mode} on {os}: 201 must carry a job snapshot: {body}"
+            );
+        }
+    }
+}
+
+/// The cross-runtime PARITY fixture, pinned here so its platform-independence is proved by a test
+/// that runs on every lane (sc-19570).
+///
+/// `tests/test_rust_api_contract_snapshots.py::test_person_tracking_and_replace_person_contracts`
+/// submits this exact body and snapshots the whole response, including the job's `status`, `stage`
+/// and `error`. That suite runs on `ubuntu-latest` only, so a fixture whose job outcome depends on
+/// the host records a Linux-shaped snapshot no other lane can reproduce — and it did: the fixture
+/// used to omit `model`, inheriting the catalog default `ltx_2_3`, whose `replace_person` is
+/// MLX-only and now terminates at once off-Mac.
+///
+/// `wan_2_2` serves `replace_person` on both lanes, so this asserts `201` AND `queued` on all
+/// three platforms. If someone repoints that fixture at an MLX-only model, this goes red on a Mac
+/// developer's machine instead of only on the Linux CI lane hours later.
+#[tokio::test]
+async fn the_parity_replace_person_fixture_is_platform_independent() {
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "projectName": "Parity Project",
+                "model": "wan_2_2",
+                "mode": "replace_person",
+                "prompt": "hero walks through rain",
+                "sourceClipAssetId": "asset-video",
+                "personTrackId": "track_fixture",
+                "characterId": "character_fixture",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "on {os}: {body}");
+        assert_eq!(
+            body["status"], "queued",
+            "the parity fixture must enqueue identically on every platform, or its snapshot is \
+             only reproducible on the lane that recorded it — on {os}: {body}"
+        );
+        assert!(
+            body["error"].is_null(),
+            "on {os} the parity fixture must carry no error: {body}"
+        );
+    }
+}
+
+/// **THE TERMINAL-STATE GUARD (sc-19570) — the property this story actually owns.** An MLX-only
+/// pair submitted off-Mac must reach a terminal `failed` state with a legible reason, NOT sit
+/// `queued` forever.
+///
+/// That hang is the real defect. `ltx_2_3` + `image_to_video` and the other nineteen were admitted
+/// by sc-19504's (correct, platform-independent) gate, offered as Video Studio tabs off-Mac, and
+/// then claimed by nothing — no `mlx` worker can register on Windows or Linux — leaving the job at
+/// `queued` / "Waiting for an available worker." with no error and no terminal state. None of the
+/// four pre-existing sweeps rescues it: `fail_stranded_candle_jobs` bails the instant any live
+/// candle worker exists (the job is unclaimable, not unserved), its `mlx` twin is inert off-Mac,
+/// and both `fail_unsupported_*` sweeps default to warn.
+///
+/// The current stranded-pair table drives it, on BOTH off-Mac platforms, so coverage does not shrink
+/// when the refusal moved off the HTTP boundary. Three further arms keep it honest:
+///   * the terminal state is asserted on the enqueue RESPONSE, proving it does not wait for a
+///     worker poll — the deployments that need this most are the ones where no worker ever polls;
+///   * the failure names WHICH reason (`platform_unreachable:`), because a `status == "failed"`
+///     assertion alone would be satisfied by any unrelated failure path;
+///   * the same pairs stay `queued` on macOS, and the candle-served pairs stay `queued` off-Mac,
+///     so a sweep that failed everything cannot pass.
+#[tokio::test]
+async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
+    let stranded = mlx_only_stranded_pairs();
+    let served = candle_served_pairs();
+
+    for os in ["windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+        for (model, case) in &stranded {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: {body}"
+            );
+            assert_eq!(
+                body["status"], "failed",
+                "{model} + {mode} on {os} has no lane here — the job must TERMINATE, not sit \
+                 queued waiting for a worker that can never exist: {body}"
+            );
+            // WHICH failure, not merely "a failure". Every one of these requests is well-formed, so
+            // a bare `status == failed` assertion could be satisfied by an unrelated terminal path
+            // and would still be green if the platform verdict never ran.
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.starts_with("platform_unreachable: "),
+                "{model} + {mode} on {os} must fail for the PLATFORM reason, not some other \
+                 terminal path: {body}"
+            );
+            assert!(
+                error.contains(model) && error.contains(mode) && error.contains(os),
+                "{model} + {mode} on {os}: the reason must name the model, the mode and the host \
+                 so the job card explains itself: {error}"
+            );
+            // Terminal means terminal: re-reading the job returns the same failed state, so this is
+            // a persisted transition and not a response-only decoration.
+            let job_id = body["id"].as_str().expect("job id");
+            let (status, reread) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{reread}");
+            assert_eq!(
+                reread["status"], "failed",
+                "{model} + {mode} on {os}: the terminal state must be PERSISTED: {reread}"
+            );
+            assert_eq!(reread["error"], body["error"]);
+        }
+
+        // The sweep is not "fail everything off-Mac": a candle-served pair stays queued on the same
+        // host, in the same run, waiting for the worker that will claim it.
+        for (model, case) in &served {
+            let mode = case["mode"].as_str().expect("case names a mode");
+            let body_json = video_job_body(&project_id, model, case);
+            let (status, body) =
+                request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{model} + {mode} on {os}: {body}"
+            );
+            assert_eq!(
+                body["status"], "queued",
+                "{model} + {mode} is candle-served on {os} and must stay claimable: {body}"
+            );
+        }
+    }
+
+    // …and on a Mac every stranded pair stays QUEUED, because the MLX engine renders it there.
+    // Without this arm the assertions above would be satisfied by a sweep that failed these pairs
+    // on every platform — which would break the Mac to fix Windows.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "macos").await;
+    for (model, case) in &stranded {
+        let mode = case["mode"].as_str().expect("case names a mode");
+        let body_json = video_job_body(&project_id, model, case);
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", body_json).await;
+        assert_eq!(status, StatusCode::CREATED, "{model} + {mode}: {body}");
+        assert_eq!(
+            body["status"], "queued",
+            "{model} + {mode} renders on macOS and must stay claimable there: {body}"
+        );
+        assert!(
+            body["error"].as_str().unwrap_or_default().is_empty(),
+            "{model} + {mode} on macOS must carry no error: {body}"
+        );
+    }
+}
+
+/// The claim-path arm of the same sweep (sc-19570). `POST /api/v1/video/jobs` terminates an
+/// unreachable job inline, but that route is not the only way a job reaches `queued`: **retry**
+/// and **duplicate** re-queue an existing job without passing through it, and a job already sitting
+/// `queued` from a build that predates this sweep never saw it at all.
+///
+/// So the store method also runs on every `POST /api/v1/jobs/claim`. This drives the retry door: a
+/// stranded pair is submitted (terminal off-Mac), retried back to `queued` with no reachability
+/// check anywhere on that path, and must be terminal again after a single claim.
+#[tokio::test]
+async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "windows").await;
+
+    // `krea_realtime_14b`, not `ltx_2_3`: syncing `main` gave the LTX pair a candle lane, so it is
+    // no longer stranded off-Mac and this test would assert `failed` on a job that is correctly
+    // `queued`. Krea Realtime has no candle generator at all and stays in the stranded set.
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a fox runs",
+            "model": "krea_realtime_14b",
+            "mode": "image_to_video",
+            "sourceAssetId": "img-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["status"], "failed", "{created}");
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+
+    // Retry re-queues verbatim — no video validation, no reachability check. Without the claim-path
+    // arm this is the hang, reopened one button-press later.
+    let (status, retried) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(
+        retried["status"], "queued",
+        "retry re-queues without a reachability check, which is why the claim path needs the \
+         sweep: {retried}"
+    );
+
+    let retry_id = retried["id"].as_str().expect("retry id").to_owned();
+    assert_ne!(retry_id, job_id, "retry creates a fresh queued row");
+
+    // A LIVE, capable candle worker polls — the realistic off-Mac deployment, and the exact
+    // condition under which `fail_stranded_candle_jobs` declines to act. The job is unclaimable,
+    // not unserved, so only the reachability sweep can terminate it.
+    let (status, registered) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-sweep-probe",
+            "gpuId": "0",
+            "gpuName": "Test GPU",
+            "capabilities": ["gpu", "candle", "video_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-sweep-probe" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+
+    let (status, after) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{retry_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(
+        after["status"], "failed",
+        "a queued job no lane on this host can claim must be swept terminal at claim time: {after}"
+    );
+    assert!(
+        after["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("platform_unreachable: "),
+        "the claim sweep must fail it for the PLATFORM reason: {after}"
+    );
+    // The claim itself must not have HANDED the unreachable job to the worker — the sweep runs
+    // first, so there is nothing left for `claim_next_job_routed` to return.
+    assert!(
+        claimed["job"].is_null(),
+        "the swept job must not also be claimed: {claimed}"
+    );
+}
+
+/// **sc-19504 IS INTACT AND DISTINGUISHABLE (sc-19570).** The no-lane-ANYWHERE gate is a correct
+/// `400` and stays one: a mode no backend implements is a malformed request on every host, so
+/// refusing it is platform-independent. Only the platform-conditional refusal moved.
+///
+/// The two must never be collapsed again, so this asserts them side by side on the SAME host:
+/// `wan_2_2_i2v_14b` + `first_last_frame` (no lane anywhere) is a 400 on macOS, Windows AND Linux
+/// with the same wording, while `krea_realtime_14b` + `image_to_video` (no lane HERE) is a 201 on
+/// all three.
+/// A future edit that turns either into the other turns this red.
+#[tokio::test]
+async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_case() {
+    for os in ["macos", "windows", "linux"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
+
+        // NO LANE ANYWHERE → 400, identically on every platform.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "a fox runs",
+                "model": "wan_2_2_i2v_14b",
+                "mode": "first_last_frame",
+                "sourceAssetId": "img-1",
+                "lastFrameAssetId": "img-2",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the sc-19504 gate is platform-INdependent and must still refuse on {os}: {body}"
+        );
+        assert_eq!(
+            body["detail"],
+            "wan_2_2_i2v_14b cannot render the \"first_last_frame\" mode — no backend implements \
+             it, so this job would wait for a worker that will never claim it. Choose a mode this \
+             model lists in its capabilities, or a model that supports this one.",
+            "the no-lane-anywhere refusal must keep its own wording on {os}, never the platform one"
+        );
+        assert!(
+            !body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("platform"),
+            "the two refusals must stay distinguishable to a reader on {os}: {body}"
+        );
+
+        // NO LANE *HERE* → 201 on every platform, with the verdict on the job instead.
+        // `krea_realtime_14b` since the `main` sync: LTX gained a candle lane and so is served
+        // everywhere now, which would make this arm assert nothing about the platform case.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "prompt": "a fox runs",
+                "model": "krea_realtime_14b",
+                "mode": "image_to_video",
+                "sourceAssetId": "img-1",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a pair some lane serves must never be refused by STATUS CODE on {os}: {body}"
+        );
+        let expected_status = if os == "macos" { "queued" } else { "failed" };
+        assert_eq!(
+            body["status"], expected_status,
+            "on {os} the platform verdict belongs on the job, not the response code: {body}"
+        );
+    }
+}
+
+/// The `candleSupport` block itself (sc-19570), read off the real `GET /api/v1/models` response —
+/// the off-Mac twin of `macSupport`, and what `candleVideoModeBlock` in the web client reads.
+///
+/// Emitted on EVERY platform (the client decides whether to act on it from `candleGatingActive`),
+/// so this asserts it from a macOS test run too. A block that only appeared off-Mac could never be
+/// asserted by the macOS rust lane — which is how the off-Mac half of this defect stayed invisible.
+#[tokio::test]
+async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_model() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, _project_id) = shipped_manifest_app(&temp_dir).await;
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    let models = models["models"]
+        .as_array()
+        .or_else(|| models.as_array())
+        .expect("models list");
+    let mut video_models = std::collections::BTreeSet::<String>::new();
+    for model in models {
+        if model["type"].as_str() != Some("video") {
+            continue;
+        }
+        let id = model["id"].as_str().expect("model id");
+        video_models.insert(id.to_owned());
+        let candle = &model["candleSupport"];
+        assert!(
+            candle.is_object(),
+            "{id}: every video model must carry a candleSupport block"
+        );
+        // The block must AGREE with the routing predicate, per mode. Restating the verdict here
+        // would assert nothing; deriving it from `model_candle_support` is what makes a routing
+        // change move this guard with it.
+        let expected = serde_json::to_value(sceneworks_core::jobs_store::model_candle_support(
+            id, "video",
+        ))
+        .expect("candle support serializes");
+        assert_eq!(
+            *candle, expected,
+            "{id}: the serialized candleSupport drifted from the predicate"
+        );
+    }
+    // The population is DERIVED from the shipped manifest, never pinned to a number.
+    //
+    // `GET /api/v1/models` filters the catalog with `retain_models_for_os(std::env::consts::OS)` —
+    // the RUNNER's real OS, not the fixture's `host_os` — so the two lanes that run this suite
+    // legitimately see different video sets: `ltx_2_3_eros` is a product withdrawal off-Mac
+    // (sc-18902), so the macOS workspace job sees it and `parity-rust` on Linux does not. A literal
+    // floor was therefore green on one lane and red on the other for no defect at all, and it also
+    // went stale every time the catalog grew (MiniMax-H3's two entries, here).
+    //
+    // Re-deriving through the same withdrawal predicate the endpoint uses keeps the guard exact on
+    // both lanes and moves it with the catalog instead of breaking on it.
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let expected_video_models = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|entry| entry["type"].as_str() == Some("video"))
+        .filter_map(|entry| {
+            let id = entry["id"].as_str().expect("model id");
+            (!crate::models::video_model_withdrawn_on_platform(id, entry, std::env::consts::OS))
+                .then(|| id.to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        video_models, expected_video_models,
+        "the catalog's video rows must be exactly the shipped video entries this platform still \
+         serves — a mismatch means the catalog read is wrong and every assertion above it is \
+         vacuous"
+    );
+    assert!(
+        video_models.len() >= 8,
+        "only {} video models were checked — the shipped catalog cannot have shrunk this far, so \
+         the manifest read itself is wrong",
+        video_models.len()
+    );
+
+    // ...and the split itself, BY NAME, because a derived set is only as discriminating as the
+    // predicate it derives from: silently swapping which entries the withdrawal covers would keep
+    // the equality above green. Exactly one shipped video product is platform-split — the sc-18902
+    // `ltx_2_3_eros` withdrawal — and MiniMax-H3's two partitions are NOT part of it. Both are
+    // listed on every platform (their off-Mac gap is a LANE gap, reported in `candleSupport`
+    // above, which is a different thing from a catalog withdrawal); asserting that here is what
+    // keeps "epic 17137's entries went missing off-Mac" from ever being mistaken for this split.
+    assert_eq!(
+        video_models.contains("ltx_2_3_eros"),
+        std::env::consts::OS == "macos",
+        "`ltx_2_3_eros` is the one off-Mac product withdrawal: listed on macOS, absent elsewhere"
+    );
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        assert!(
+            video_models.contains(id),
+            "{id} must be listed on EVERY platform — it carries no `macOnly` and is not a product \
+             withdrawal, so a missing row here is a catalog defect, not a platform split"
+        );
+    }
+
+    // The two gating switches the client reads, and the reason `candleGatingActive` is
+    // platform-intrinsic rather than the `candle_required` rollout flag: the pairs it hides are
+    // unreachable off-Mac whether or not a deployment opted into terminal gap reporting.
+    let caps = |os: &str| sceneworks_core::jobs_store::mac_capabilities(os, false);
+    assert!(!caps("macos").candle_gating_active, "inert on a Mac");
+    assert!(!caps("darwin").candle_gating_active, "inert on the alias");
+    assert!(caps("windows").candle_gating_active, "engaged on Windows");
+    assert!(caps("linux").candle_gating_active, "engaged on Linux");
+}
+
+/// The withdrawal itself (sc-19504), read off the SHIPPED manifest bytes rather than restated: the
+/// `wan_2_2_i2v_14b` entry must not advertise `first_last_frame` in `capabilities` OR in
+/// `ui.recommendedFor` — the Video Studio builds its mode tabs from the first and highlights from
+/// the second, and off-Mac (where the Mac gate is inactive) `capabilities` is the ONLY thing
+/// standing between a user and the tab that hangs.
+///
+/// Its siblings assert the CLASS; this asserts the specific advertisement stays withdrawn, so
+/// re-adding the string is red here as well as in the class guard.
+#[test]
+fn the_14b_i2v_no_longer_advertises_first_last_frame() {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"] == "wan_2_2_i2v_14b")
+        .expect("wan_2_2_i2v_14b is a shipped model");
+
+    assert_eq!(
+        entry["capabilities"],
+        json!(["image_to_video", "extend_clip", "video_bridge"]),
+        "the three modes a lane genuinely serves — `extend_clip` / `video_bridge` via the candle \
+         Wan-VACE engine, `image_to_video` on both lanes. `first_last_frame` is not one of them."
+    );
+    assert_eq!(
+        entry["ui"]["recommendedFor"],
+        json!(["image_to_video", "extend_clip", "video_bridge"]),
+        "`recommendedFor` must track `capabilities`: it is the second array the studio reads, so a \
+         mode left here re-surfaces the withdrawn advertisement"
+    );
+}
+
+/// sc-17159 — the resolved-default write-back preserves the manifest's own decimal.
+///
+/// `contract_number`'s fractional branch had never carried a shipped value: every video model
+/// before MiniMax-H3 declares a whole-number `defaults.duration`, so the branch existed only for
+/// the integral case's sake. The first fractional default exposed it — `Value::from(5.1667_f32)`
+/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the fourteen
+/// entries in that model's `limits.durations`. The duration dropdown preselects by comparing
+/// against that menu and a recipe replay is compared against the enqueued row, so the value has to
+/// be the declared one, not merely a number that rounds to it.
+#[test]
+fn a_fractional_resolved_duration_keeps_the_manifests_own_decimal() {
+    // The value under test, and the assertion that makes it load-bearing: it must equal the
+    // manifest's own number, which the f64-widened form does not.
+    assert_eq!(crate::generation::contract_number(5.1667), json!(5.1667));
+    assert_ne!(json!(5.1666998863220215), json!(5.1667));
+    // Every other lattice rung the menu offers.
+    for rung in [
+        5.875_f32, 6.5833, 7.2917, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583,
+        13.6667, 14.375,
+    ] {
+        let enqueued = crate::generation::contract_number(rung);
+        assert_eq!(
+            enqueued.as_f64().map(|v| v as f32),
+            Some(rung),
+            "{rung}: the enqueued row must read back as the same f32"
+        );
+        assert!(
+            enqueued.to_string().len() <= rung.to_string().len(),
+            "{rung}: enqueued as {enqueued}, which is longer than the declared decimal"
+        );
+    }
+    // The integral branch is untouched: a whole-number default stays an INT on the wire, because
+    // `duration` is a `ContractNumber` that carries int-vs-float across it (the sc-12400 contract).
+    assert_eq!(crate::generation::contract_number(5.0), json!(5));
+    assert_eq!(crate::generation::contract_number(6.0), json!(6));
+    assert!(crate::generation::contract_number(4.0).is_i64());
+}
+
+/// **sc-19563 — the declared-partition refusal is reachable from a REAL request.**
+///
+/// The unit tests in `loras.rs` call `validate_lora_specs_for_model` directly. That proves the
+/// function refuses; it does not prove a user can ever reach it. This one goes through the actual
+/// route — `POST /api/v1/video/jobs` — with the manifests on disk, the adapter file on disk and the
+/// app assembled by `create_app`, and asserts the exact body a client receives.
+///
+/// The epic's own rule is why this arm exists at all: **declaration ≠ enforcement ≠ reachability.**
+/// `loraCompatibility` declared the relationship, the validator enforces it, and only a submission
+/// shows the enforcement is on the path a request takes.
+///
+/// Both directions, plus both positive controls. The controls are load-bearing twice over: they
+/// prove the gate is not refusing every H3 LoRA, and they prove the fixture is well-formed enough to
+/// reach the LoRA check at all.
+#[tokio::test]
+async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job_route() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // Both H3 partitions, declared exactly as `builtin.models.jsonc` declares them: ONE family,
+    // ONE architecture. That identity is the point — the family check passes both ways, so the
+    // refusal below can only come from the declared-partition gate.
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "minimax_h3",
+              "name": "MiniMax-H3",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video", "image_to_video", "first_last_frame"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["minimax-h3"] },
+              "ui": {}
+            },
+            {
+              "id": "minimax_h3_ref",
+              "name": "MiniMax-H3 References",
+              "family": "minimax-h3",
+              "type": "video",
+              "adapter": "minimax_h3",
+              "capabilities": ["text_to_video", "reference_to_video"],
+              "downloads": [],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["minimax-h3"] },
+              "ui": {}
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    // The two adapters, each declaring the ONE partition it is distilled for — the same shape
+    // `builtin.loras.jsonc` now ships.
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "minimax_h3_turbo_8step",
+              "name": "MiniMax-H3 Turbo (8-step)",
+              "family": "minimax-h3",
+              "modelIds": ["minimax_h3"],
+              "triggerWords": [],
+              "compatibility": { "families": ["minimax-h3"] },
+              "source": { "provider": "local", "path": "loras/h3_fl2v.safetensors" }
+            },
+            {
+              "id": "minimax_h3_ref2v_turbo_4step",
+              "name": "MiniMax-H3 Ref2VA Turbo (4-step)",
+              "family": "minimax-h3",
+              "modelIds": ["minimax_h3_ref"],
+              "triggerWords": [],
+              "compatibility": { "families": ["minimax-h3"] },
+              "source": { "provider": "local", "path": "loras/h3_ref2v.safetensors" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    // Real MiniMax-H3 diffusers keys, so `detect_lora_family` reports `minimax-h3` and the
+    // detected-family check is exercised rather than skipped on a `None`.
+    let keys: Vec<String> = ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"]
+        .iter()
+        .flat_map(|target| {
+            ["lora_A.default.weight", "lora_B.default.weight"]
+                .iter()
+                .flat_map(move |suffix| {
+                    [
+                        format!("transformer_blocks.0.{target}.{suffix}"),
+                        format!("token_refiner.refiner_blocks.0.{target}.{suffix}"),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    write_test_safetensors_with_keys(&lora_dir.join("h3_fl2v.safetensors"), &keys);
+    write_test_safetensors_with_keys(&lora_dir.join("h3_ref2v.safetensors"), &keys);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "H3 partitions" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let submit = |model: &'static str, lora: &'static str| {
+        let app = app.clone();
+        let project_id = project_id.to_owned();
+        async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/video/jobs",
+                json!({
+                    "projectId": project_id,
+                    "mode": "text_to_video",
+                    "prompt": "a cellist on a rooftop",
+                    "model": model,
+                    "loras": [{ "id": lora, "weight": 1.0 }]
+                }),
+            )
+            .await
+        }
+    };
+
+    // ── the ref2v adapter on the fl2v partition.
+    let (status, body) = submit("minimax_h3", "minimax_h3_ref2v_turbo_4step").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-selecting must be refused at submit; got {body:?}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("minimax_h3_ref2v_turbo_4step"),
+        "the message must name the LoRA; got {detail}"
+    );
+    // The exact phrase, not a substring search: `minimax_h3_ref2v_turbo_4step` CONTAINS
+    // `minimax_h3_ref`, so `detail.contains("minimax_h3_ref")` is satisfied by the LoRA id already
+    // in the message and asserts nothing about the partition.
+    assert!(
+        detail.contains("is declared for model minimax_h3_ref"),
+        "the message must name the partition it IS for; got {detail}"
+    );
+
+    // ── and the reverse.
+    let (status, body) = submit("minimax_h3_ref", "minimax_h3_turbo_8step").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {body:?}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("minimax_h3_turbo_8step"), "{detail}");
+    assert!(
+        detail.contains("is declared for model minimax_h3,"),
+        "{detail}"
+    );
+
+    // ── the controls. Each adapter on its OWN partition must NOT be refused for a LoRA reason.
+    //    A later gate in `create_video_job` (the sc-19504 no-lane check) may still stop a job in a
+    //    test environment with no worker, so the assertion is on the REASON rather than on a 201:
+    //    what this proves is that the LoRA gate let it past, which is exactly the control needed.
+    for (model, lora) in [
+        ("minimax_h3", "minimax_h3_turbo_8step"),
+        ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step"),
+    ] {
+        let (status, body) = submit(model, lora).await;
+        let detail = body["detail"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            !detail.contains("is declared for model"),
+            "{lora} on its OWN partition {model} must not trip the partition gate; got \
+             {status} {detail}"
+        );
+    }
 }

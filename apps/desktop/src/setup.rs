@@ -593,15 +593,47 @@ fn inject_huggingface_cache_env(command: Command, hf_home: &str) -> Command {
         .fold(command, |command, (name, value)| command.env(name, value))
 }
 
+fn resolved_cache_env(
+    policy: &sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<[(&'static str, String); 3], String> {
+    policy.env_pairs().map_err(|error| error.to_string())
+}
+
+/// One centralized spawn seam for the API and both native GPU worker processes. All three receive
+/// exactly the same validated policy; an invalid policy aborts the spawn rather than enabling or
+/// unbounding a sidecar.
+fn inject_resolved_cache_env(
+    command: Command,
+    policy: &sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<Command, String> {
+    Ok(resolved_cache_env(policy)?
+        .into_iter()
+        .fold(command, |command, (name, value)| command.env(name, value)))
+}
+
 fn huggingface_home() -> PathBuf {
+    huggingface_home_selection().0
+}
+
+/// The cache home the sidecars will actually receive at their next spawn, plus whether an ambient
+/// `HF_HOME` in the desktop's own environment is what decides it. When it is, the persisted
+/// Settings override is inert — Settings shows the active path and says so instead of offering a
+/// change that would silently not take effect (`get_storage_setup`).
+pub fn huggingface_home_selection() -> (PathBuf, bool) {
+    let linux_absolute = cfg!(all(unix, not(target_os = "macos")));
     let ambient = std::env::var("HF_HOME").ok();
+    let ambient_wins = ambient
+        .as_deref()
+        .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        .is_some();
     let persisted = crate::settings::load_settings().hf_home;
-    select_huggingface_home(
+    let home = select_huggingface_home(
         ambient.as_deref(),
         persisted.as_deref(),
         shared_huggingface_home(),
-        cfg!(all(unix, not(target_os = "macos"))),
-    )
+        linux_absolute,
+    );
+    (home, ambient_wins)
 }
 
 /// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's
@@ -1276,9 +1308,6 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
     if !enabled {
         return loopback();
     }
-    let password = password
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
     let Some(password) = password else {
         return ApiBindEnv {
             warning: Some(
@@ -1288,6 +1317,20 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
             ),
             ..loopback()
         };
+    };
+    let password = match crate::settings::validate_remote_password(&password) {
+        Ok(password) => password.to_owned(),
+        Err(_) => {
+            return ApiBindEnv {
+                warning: Some(format!(
+                    "remote access is enabled but the saved password does not meet the \
+                     {}-character minimum — binding loopback-only. Replace it in \
+                     Settings → Remote Access, then restart SceneWorks.",
+                    crate::settings::MIN_REMOTE_PASSWORD_LENGTH
+                )),
+                ..loopback()
+            };
+        }
     };
     let port = port.unwrap_or(crate::settings::DEFAULT_REMOTE_PORT);
     ApiBindEnv {
@@ -1309,9 +1352,11 @@ fn lan_access_token() -> Option<String> {
     if !crate::settings::load_settings().remote_access_enabled {
         return None;
     }
-    crate::settings::read_remote_password()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    crate::settings::read_remote_password().and_then(|value| {
+        crate::settings::validate_remote_password(&value)
+            .ok()
+            .map(str::to_owned)
+    })
 }
 
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
@@ -1361,6 +1406,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // The catalog's install-state detection resolves the HF cache from these;
     // they must match the worker's download root or every model reads "missing".
     command = inject_huggingface_cache_env(command, &hf_home);
+    command = inject_resolved_cache_env(command, &settings.resolved_cache)?;
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -2408,6 +2454,10 @@ fn supervise_mlx_worker(app: AppHandle) {
                     config_dir().to_string_lossy().to_string(),
                 );
             command = inject_huggingface_cache_env(command, ctx.hf_home);
+            command = inject_resolved_cache_env(
+                command,
+                &crate::settings::load_settings().resolved_cache,
+            )?;
             // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
             // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
             // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
@@ -2531,6 +2581,10 @@ fn supervise_candle_worker(app: AppHandle) {
                     config_dir().to_string_lossy().to_string(),
                 );
             command = inject_huggingface_cache_env(command, ctx.hf_home);
+            command = inject_resolved_cache_env(
+                command,
+                &crate::settings::load_settings().resolved_cache,
+            )?;
             // cudarc dynamic-linking `LoadLibrary`s the CUDA runtime DLLs by name;
             // prepend the bundled redist dir to this worker's PATH so they resolve
             // without a CUDA Toolkit on the machine (sc-5560).
@@ -2987,6 +3041,20 @@ fn unix_shutdown_pids(
         .collect()
 }
 
+/// What the graceful teardown does once every sidecar is down (sc-19709).
+///
+/// Relaunching after a settings change that only the sidecars' spawn environment can carry — a
+/// relocated model library — is the SAME teardown as quitting, not a faster one. It deliberately
+/// reuses [`begin_teardown`] rather than the auto-update path's `stop_sidecars_for_update`, which
+/// force-kills immediately because an NSIS installer is waiting on a file lock: a hard kill of an
+/// MLX worker mid-render can wedge the host GPU client until reboot, so a user-initiated restart
+/// must go through SIGTERM-and-grace like an ordinary quit.
+#[derive(Clone, Copy)]
+enum Teardown {
+    Exit,
+    Relaunch,
+}
+
 /// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on
 /// Windows/Linux) then the API sidecar.
 /// On Unix this sends SIGTERM and waits up to the grace period before
@@ -2994,6 +3062,16 @@ fn unix_shutdown_pids(
 /// Windows-session refinement). Returns true if shutdown was initiated (caller
 /// should prevent the immediate exit), false if it was already in progress.
 pub fn begin_shutdown(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Exit)
+}
+
+/// The identical graceful teardown, followed by a relaunch instead of an exit (sc-19709). Returns
+/// false when a teardown is already running, so a second "Restart now" cannot start a second one.
+pub fn begin_restart(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Relaunch)
+}
+
+fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
     let managed = app.state::<Managed>();
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
@@ -3072,7 +3150,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(cred_ipc) = cred_ipc {
             let _ = std::fs::remove_file(&cred_ipc.socket);
         }
-        handle.exit(0);
+        match then {
+            Teardown::Exit => handle.exit(0),
+            // Diverges: the process is replaced, so nothing after this runs.
+            Teardown::Relaunch => handle.restart(),
+        }
     });
     true
 }
@@ -3742,8 +3824,8 @@ pub async fn start_setup(app: AppHandle) {
 #[cfg(test)]
 mod path_tests {
     use super::{
-        huggingface_cache_env, packaged_macos_bundle_paths, select_huggingface_home,
-        LinuxDesktopPaths, MacosBundlePaths,
+        huggingface_cache_env, packaged_macos_bundle_paths, resolved_cache_env,
+        select_huggingface_home, LinuxDesktopPaths, MacosBundlePaths,
     };
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -3768,6 +3850,46 @@ mod path_tests {
         std::fs::create_dir_all(path.parent().expect("fixture parent"))
             .expect("create fixture parent");
         std::fs::write(path, b"fixture").expect("write fixture file");
+    }
+
+    #[test]
+    fn resolved_cache_spawn_environment_is_exact_for_every_sidecar() {
+        let policy = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+            enabled: true,
+            max_bytes: 4_294_967_296,
+            inactivity_seconds: 604_800,
+        };
+        let expected = [
+            ("SCENEWORKS_RESOLVED_CACHE_ENABLED", "true".to_owned()),
+            (
+                "SCENEWORKS_RESOLVED_CACHE_MAX_BYTES",
+                "4294967296".to_owned(),
+            ),
+            (
+                "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS",
+                "604800".to_owned(),
+            ),
+        ];
+        assert_eq!(resolved_cache_env(&policy).unwrap(), expected);
+        let source = include_str!("setup.rs");
+        let injection_call = ["command = inject_", "resolved_cache_env("].concat();
+        assert_eq!(
+            source.matches(&injection_call).count(),
+            3,
+            "API, MLX, and Candle must all enter the centralized policy seam"
+        );
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for path in [
+            manifest.join("../rust-api/src/server.rs"),
+            manifest.join("../../crates/sceneworks-worker/src/settings.rs"),
+        ] {
+            let consumer = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                consumer.contains("ResolvedCachePolicy::from_env_or_safe_default()"),
+                "{} must use the shared fail-closed parser",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -4518,18 +4640,18 @@ mod bind_tests {
 
     #[test]
     fn enabled_with_password_binds_open_fixed_port_with_token() {
-        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish  ".to_owned()));
+        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish-12  ".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, "8910");
         // Token is the trimmed password; it is also handed to the GPU worker(s).
-        assert_eq!(env.access_token.as_deref(), Some("swordfish"));
+        assert_eq!(env.access_token.as_deref(), Some("swordfish-12"));
         assert_eq!(env.fixed_port, Some(8910));
         assert!(env.warning.is_none());
     }
 
     #[test]
     fn enabled_without_port_uses_the_default_suggestion() {
-        let env = decide_api_bind_env(true, None, Some("pw".to_owned()));
+        let env = decide_api_bind_env(true, None, Some("twelve-chars".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, DEFAULT_REMOTE_PORT.to_string());
         assert_eq!(env.fixed_port, Some(DEFAULT_REMOTE_PORT));
@@ -4557,6 +4679,18 @@ mod bind_tests {
         assert_eq!(env.host, "127.0.0.1");
         assert!(env.access_token.is_none());
         assert!(env.warning.is_some());
+    }
+
+    #[test]
+    fn enabled_with_short_password_fails_closed_with_replacement_guidance() {
+        let env = decide_api_bind_env(true, Some(8787), Some("legacy".to_owned()));
+        assert_eq!(env.host, "127.0.0.1");
+        assert_eq!(env.port, "0");
+        assert!(env.access_token.is_none());
+        assert!(env.fixed_port.is_none());
+        let warning = env.warning.expect("short password must surface a warning");
+        assert!(warning.contains("12-character minimum"), "{warning}");
+        assert!(warning.contains("Replace it in Settings"), "{warning}");
     }
 
     /// Story 3: the desktop must NEVER set `SCENEWORKS_ALLOW_OPEN_BIND` (the server's

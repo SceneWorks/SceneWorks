@@ -8,6 +8,7 @@ import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
   lossTypeOptions,
+  ltx25WorkflowPlan,
   networkTypeLabel,
   optimizerLabel,
   optionLabel,
@@ -106,6 +107,27 @@ export function ConfigureJobPanel({
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
+  const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
+    ? (selectedTarget?.limits?.ltxWorkflows ?? [])
+    : [];
+  const updateLtxWorkflow = (workflow) => {
+    const plan = ltx25WorkflowPlan(workflow);
+    updateConfigDraft("ltxWorkflow", workflow);
+    updateConfigDraft("ltxVideo", plan.video);
+    updateConfigDraft("ltxAudio", plan.audio);
+  };
+  const updateLtxCondition = (field, index, key, value) => {
+    const modality = configDraft[field];
+    updateConfigDraft(field, {
+      ...modality,
+      conditions: (modality?.conditions ?? []).map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, [key]: value } : entry,
+      ),
+    });
+  };
+  const updateLtxValidation = (key, value) => {
+    updateConfigDraft("ltxValidation", { ...(configDraft.ltxValidation ?? {}), [key]: value });
+  };
   return (
     <WorkPanel
       className="training-config-panel"
@@ -272,6 +294,95 @@ export function ConfigureJobPanel({
               />
             </label>
           </div>
+
+          {ltxWorkflows.length ? (
+            <section className="training-control-note" aria-label="LTX-2.5 workflow">
+              <strong>LTX-2.5 prepared workflow</strong>
+              <label>
+                Workflow
+                <select
+                  onChange={(event) => updateLtxWorkflow(event.target.value)}
+                  value={configDraft.ltxWorkflow ?? ""}
+                  {...invalidProps(configValidity, "ltxWorkflow")}
+                >
+                  {ltxWorkflows.map((workflow) => (
+                    <option key={workflow} value={workflow}>{optionLabel(workflow)}</option>
+                  ))}
+                </select>
+              </label>
+              {["ltxVideo", "ltxAudio"].map((field) => {
+                const modality = configDraft[field];
+                if (!modality) return null;
+                return (
+                  <div key={field} className="training-advanced-grid">
+                    <p><strong>{field === "ltxVideo" ? "Video" : "Audio"}</strong> · {modality.isGenerated ? "generated" : "conditioning only"}</p>
+                    {(modality.conditions ?? []).map((entry, index) => (
+                      <React.Fragment key={`${entry.type}-${index}`}>
+                        <label>
+                          {optionLabel(entry.type)} probability
+                          <input min="0" max="1" step="0.05" type="number" value={entry.probability ?? ""}
+                            onChange={(event) => updateLtxCondition(field, index, "probability", event.target.value)} />
+                        </label>
+                        {["mask", "reference"].includes(entry.type) ? (
+                          <label>
+                            Tensor key
+                            <input value={entry.tensorKey ?? ""}
+                              onChange={(event) => updateLtxCondition(field, index, "tensorKey", event.target.value)} />
+                          </label>
+                        ) : null}
+                        {["prefix", "suffix"].includes(entry.type) ? (
+                          <label>
+                            Temporal boundary
+                            <input min="1" step="1" type="number" value={entry.temporalBoundary ?? ""}
+                              onChange={(event) => updateLtxCondition(field, index, "temporalBoundary", event.target.value)} />
+                          </label>
+                        ) : null}
+                        {entry.type === "spatialCrop" ? (
+                          <label>
+                            Spatial region (y1,x1,y2,x2)
+                            <input value={Array.isArray(entry.spatialRegion) ? entry.spatialRegion.join(",") : entry.spatialRegion ?? ""}
+                              onChange={(event) => updateLtxCondition(field, index, "spatialRegion", event.target.value)} />
+                          </label>
+                        ) : null}
+                        {entry.type === "reference" ? (
+                          <>
+                            <label>Spatial scale factor<input min="1" step="1" type="number" value={entry.spatialScaleFactor ?? ""}
+                              onChange={(event) => updateLtxCondition(field, index, "spatialScaleFactor", event.target.value)} /></label>
+                            <label>Temporal scale factor<input min="1" step="1" type="number" value={entry.temporalScaleFactor ?? ""}
+                              onChange={(event) => updateLtxCondition(field, index, "temporalScaleFactor", event.target.value)} /></label>
+                          </>
+                        ) : null}
+                      </React.Fragment>
+                    ))}
+                  </div>
+                );
+              })}
+              <details>
+                <summary>Validation recipe</summary>
+                <div className="training-advanced-grid">
+                  {[
+                    ["width", "Width", 32, 4096, 32], ["height", "Height", 32, 4096, 32],
+                    ["frames", "Frames", 1, 257, 8], ["fps", "FPS", 1, 120, 1],
+                    ["steps", "Steps", 1, 100, 1], ["videoCfgScale", "Video CFG scale", 0, 20, 0.1],
+                    ["audioCfgScale", "Audio CFG scale", 0, 20, 0.1], ["videoStgScale", "Video STG scale", 0, 20, 0.1],
+                    ["audioStgScale", "Audio STG scale", 0, 20, 0.1], ["guidanceRescale", "Guidance rescale", 0, 1, 0.1],
+                    ["videoModalityGuidanceScale", "Video modality guidance", 0, 20, 0.1],
+                    ["audioModalityGuidanceScale", "Audio modality guidance", 0, 20, 0.1],
+                  ].map(([key, label, min, max, step]) => (
+                    <label key={key}>{label}<input min={min} max={max} step={step} type="number"
+                      value={configDraft.ltxValidation?.[key] ?? ""}
+                      onChange={(event) => updateLtxValidation(key, event.target.value)} /></label>
+                  ))}
+                  <label>STG block<input min="0" max="47" step="1" type="number" value={Array.isArray(configDraft.ltxValidation?.stgBlocks)
+                    ? configDraft.ltxValidation.stgBlocks.join(",") : configDraft.ltxValidation?.stgBlocks ?? ""}
+                    onChange={(event) => updateLtxValidation("stgBlocks", event.target.value)} /></label>
+                  <label className="training-checkbox-field"><input type="checkbox"
+                    checked={Boolean(configDraft.ltxValidation?.generateAudio)}
+                    onChange={(event) => updateLtxValidation("generateAudio", event.target.checked)} />Generate validation audio</label>
+                </div>
+              </details>
+            </section>
+          ) : null}
 
           {isControlTarget ? (
             <p className="training-control-note inline-success">

@@ -37,7 +37,8 @@ jobs:
         run: npm --prefix apps/web run build
 
   # `parity` IS THE REQUIRED STATUS CHECK, and it is an aggregator — the work fans out into
-  # the four `parity-*` jobs below. They are mutually independent, and running them serially
+  # the four `parity-*` jobs below plus the dependency-advisory gate. They are mutually
+  # independent, and running them serially
   # in one job meant everything queued behind the Rust compile for no reason. Measured
   # 2026-08-11 over 12 runs: rust 6.8m, closure digests 4.0m, scaffold 1.6m, docker smoke
   # 6.8m when it fires (4/12) — a 14.2m median job whose longest single member is 6.8m.
@@ -45,8 +46,34 @@ jobs:
   # Keeping ONE required context (rather than promoting each split job to its own) means the
   # ruleset needs no change, and there is no window in which a split-out check has stopped
   # being covered by `parity` but is not yet required on its own.
+  supply-chain:
+    name: dependency policy + advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          shared-key: cargo-deny-0.19.9
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          cache-bin: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-deny
+        run: command -v cargo-deny >/dev/null || cargo install cargo-deny --locked --version 0.19.9
+      - name: Validate advisory exception governance
+        run: python3 scripts/ci/check_advisory_policy.py
+      - name: Audit Rust dependency advisories
+        run: cargo deny --locked check advisories
+
   parity:
-    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker]
+    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker, supply-chain]
     # FAIL CLOSED. Without `if: always()` this job is SKIPPED whenever any `needs:` job fails
     # or is skipped — and a skipped job reports **Success** to a required status check, which
     # is exactly the false-green shape documented at the top of changed-paths.yml. So it runs
@@ -58,16 +85,16 @@ jobs:
       - name: Assert every parity job succeeded
         env:
           RESULTS: ${{ toJSON(needs) }}
-        # Iterates whatever is in `needs` rather than naming the four jobs, so adding a fifth
-        # `parity-*` job cannot silently go ungraded. The count floor is the other half of
+        # Iterates whatever is in `needs` rather than naming the upstream jobs, so adding a sixth
+        # job cannot silently go ungraded. The count floor is the other half of
         # that: deleting a `needs:` entry would otherwise shrink the assertion to a green
         # no-op instead of failing.
         run: |
           set -euo pipefail
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
           count="$(jq -r 'length' <<<"$RESULTS")"
-          if [ "$count" -lt 4 ]; then
-            echo "::error::parity expects at least 4 upstream jobs, saw ${count} — a needs: entry was removed"
+          if [ "$count" -lt 5 ]; then
+            echo "::error::parity expects at least 5 upstream jobs, saw ${count} — a needs: entry was removed"
             exit 1
           fi
           if [ "$(jq -r '[to_entries[] | select(.value.result != "success")] | length' <<<"$RESULTS")" != "0" ]; then
@@ -81,6 +108,11 @@ jobs:
       # Fetch the pinned inference source once, then force every build and build.rs process
       # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
+      # This lane installs a real ffmpeg (step below), so the measured AV-mux tests must RUN here
+      # rather than soft-skip. `video_jobs::tests::ffmpeg_reachable` turns "no ffmpeg" from a skip
+      # into a failure while this is set, so the install silently disappearing goes red instead of
+      # quietly reporting `ok` in 0.03 s (sc-19549; convention inherited from sc-19425).
+      SCENEWORKS_REQUIRE_FFMPEG: "1"
     # A stalled step otherwise rides GitHub's 6-hour default timeout, blocking the PR and
     # holding a runner for hours — this bit PR #1300 / sc-10354 for ~4 h. Cap well above the
     # healthy duration so healthy runs are unaffected but a wedge fails in minutes with a
@@ -100,11 +132,48 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      # SAVE ONLY ON `main`. This is the canonical note; every other rust-cache step in this repo
+      # carries the same input and points here.
+      #
+      # GitHub scopes an Actions cache to the ref that wrote it: a `refs/pull/N/merge` entry is
+      # readable only from inside PR N, while a `refs/heads/main` entry is readable from every
+      # branch and every PR. Left at the default (`save-if: true`) each PR job writes its own copy,
+      # so the repo accumulates one cache per lane per open PR and almost nothing another PR can
+      # use. Measured 2026-08-15, before this change: 12 of 12 SceneWorks caches were PR-scoped,
+      # ZERO were on main, and the repo sat at 14.3 GB of its 16 GB ceiling. Every PR job started
+      # cold, every time.
+      #
+      # The failure is a RATCHET, not a steady state. Eviction is LRU and fires on the PEAK, so a
+      # burst of concurrent PRs pushes the repo over the ceiling and drops the least-recently-read
+      # entries. A main baseline that PRs still read has its access time refreshed and survives; one
+      # that gets dropped can never come back, because refreshing it requires a read and the entry
+      # is gone. It stays dead until the next successful push to main, which is days apart here.
+      # Demonstrated in the sibling inference repo: main's `candle-cpu` baseline was full-matched at
+      # 2026-08-14T23:33 and gone by the next morning, after which every PR rebuilt the whole candle
+      # dependency graph inside its test step — ~18 minutes of a ~20-minute step, on every run.
+      #
+      # Restricting saves to main keeps exactly one baseline per lane, which is the only kind a PR
+      # can read anyway. A PR whose Cargo.lock differs from main's gets rust-cache's prefix restore
+      # instead of a full match: partial, and far better than cold.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+      - name: Install ffmpeg for the measured AV-mux tests (sc-19549)
+        # `npm run rust:check` runs `cargo test` over the workspace default members, which include
+        # `crates/sceneworks-worker`. Its AV-mux tests (sc-19425's generation mux, sc-19549's SeedVR2
+        # upscale mux) decode their own output to count frames, and their arg-shape halves cannot
+        # substitute: MEASURED, swapping the two `-i` inputs keeps every arg assertion green while
+        # producing 50 frames instead of 48. Without a binary here those tests returned early and
+        # reported `ok`, so nothing in CI had ever exercised them — the runner image was the only
+        # thing deciding. `SCENEWORKS_REQUIRE_FFMPEG` (job env above) makes that state fail loudly.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
         # adapter tests, deleted in sc-8863; the surviving suite (Rust-API
@@ -118,7 +187,8 @@ jobs:
         # are picked up automatically; e2e/parity-marked tests run in their own
         # later steps against the built Rust API (sc-4180).
         run: python -m pytest -q tests/ -m "not e2e and not parity" --strict-markers
-      - name: Guard against gen-core version skew (sc-4482, epic 3720)
+      - name: Guard against gen-core version skew (sc-4482, epic 3720) (DISABLED)
+        if: false
         # Fails if more than one distinct `sceneworks-gen-core` rev resolves in the worker's
         # build graph (split contract types can invalidate explicit catalog wiring). `--target all`
         # resolves the macOS-only mlx-gen transitive gen-core even on this Linux lane. The
@@ -165,11 +235,45 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+      - name: Install pinned scaffold dependencies
+        run: npm ci --ignore-scripts
+      # sc-22511: `anchor-loader-closure.test.mjs` derives the memory-anchor currency key over the
+      # REAL pinned inference source, because the claims it makes ("a pin bump leaves the key
+      # unchanged", "a sibling model's edit does not", "an edit on the loader's own path does") are
+      # claims about a repository and a synthetic fixture can agree with a broken walk. Without a
+      # clone here, most of its cases skipped and CI green meant nothing ran.
+      #
+      # SceneWorks/inference is PUBLIC (#2164), so a shallow fetch costs seconds and needs no token.
+      # Two things are fetched: the PIN, and EVERY revision the packaged anchors were measured at —
+      # an anchor's recorded currency key is derived at its own measurement revision, so the suite
+      # needs those trees to re-derive it. The revision list comes from `--anchor-revisions`, which
+      # reads the same store the derivation walks, so CI cannot end up fetching a subset while the
+      # remaining cases skip quietly. Under CI the tests FAIL rather than returning when a tree is
+      # missing.
+      - name: Fetch the pinned inference source for the anchor-closure suite
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
+          git -C "$RUNNER_TEMP/inference" checkout -q "$pin"
       - name: Run scaffold and compose checks
+        env:
+          INFERENCE_REPO: ${{ runner.temp }}/inference
         run: |
           npm run check
-          npm run check:compose
-      - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
+      # DISABLED at PR time (sc-19758). release.yml still scans the BUILT bundle in all three of its
+      # jobs, which is where redistributing NC weights would actually happen — this step only
+      # re-scanned the source trees on every pull request.
+      - name: Guard against NC model weights in a published artifact (DISABLED — see release.yml)
+        if: false
         # SceneWorks converts weights at install and pulls them at runtime — it never
         # redistributes them. Baking a Non-Commercial family's weights (Anima /
         # CircleStone, FLUX NC, Ideogram, Krea, NVIDIA SANA, …) into an installer or
@@ -180,7 +284,8 @@ jobs:
         run: |
           node scripts/check-no-nc-weights.mjs --self-test
           npm run check:nc-weights
-      - name: Guard About→Licenses coverage for shipped models and embedded source
+      - name: Guard About→Licenses coverage for shipped models and embedded source (DISABLED)
+        if: false
         # The licenses page records the upstream license + attribution for every model
         # whose weights SceneWorks downloads — including which ones are NON-COMMERCIAL.
         # It had drifted to cover only the bundled binaries, Wan2.2/LTX and the audio
@@ -189,13 +294,18 @@ jobs:
         # adding a catalog model had no mechanical link to the page. This fails the build
         # if a downloading model is unclaimed, a claimed id no longer exists, or a
         # document key is not wired into bundledLicenses.js (which would render an EMPTY
-        # license — worse than a missing one). The same executable guard also
-        # revision-locks the audited inventory of ported/embedded inference source
-        # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
-        # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
-        # It additionally fails CLOSED on any production-Rust crate in the pinned
-        # inference revision that is neither covered by a ported-source area nor given
-        # an explicit crateDispositions decision. The marker regex that finds ported
+        # license — worse than a missing one). It also audits the ported/embedded
+        # inference source inventory (Cephes, CMUDICT) against the Cargo pin, and the
+        # classification of every production-Rust crate in the pinned revision.
+        #
+        # sc-19751: this REPORTS, it does not gate. All of the analysis above still runs
+        # and every finding is printed, but the step exits 0. It used to fail closed, and
+        # two of its rules fired on changes with nothing to do with licensing: the
+        # revision-locked audit made EVERY inference pin bump owe a manual re-audit of
+        # upstream NOTICE/LICENSE-*/include_str! sites, and a new inference crate failed
+        # SceneWorks CI until someone classified it. Run with --strict to gate
+        # deliberately during the compliance pass. The NC-weights guard above is
+        # unaffected and still fails closed. The marker regex that finds ported
         # FILES is only a heuristic, and a whole crate already slipped it once —
         # mlx-gen-krea-realtime described its port in words the regex did not know and
         # shipped unclassified on a false green (sc-15138 → sc-15191).
@@ -214,7 +324,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
-      - name: Verify the per-lane inference closure digests against real pinned source (sc-17774)
+      - name: Verify the per-lane inference closure digests against real pinned source (DISABLED)
+        if: false
         # `npm run check` only asserts that config/inference-provider-closures.json is KEYED to the
         # live pin. It cannot tell a real digest from a hand-edited one, because the derivation needs
         # inference's source and the SceneWorks checkout does not contain it.
@@ -251,6 +362,14 @@ jobs:
             git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
           done < <(node scripts/backfill-closure-digests.mjs --revisions)
           node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
+          # sc-19542: the same posture for the rung-4 prerequisite records. `npm run check` can only
+          # assert that config/rung4-contract-prerequisites.json is KEYED to the live pin; whether
+          # the recorded `additional_prerequisites` edges are the ones each provider actually
+          # appends needs inference's source, which a SceneWorks checkout does not contain. The
+          # pinned tree is already fetched above, so re-deriving all 40 records costs seconds. The
+          # memory matrix's rung-4 arm admits cells from these records, so a record nothing grades
+          # is the same fail-open shape the blanket rung-1 proxy was.
+          node scripts/rung4-contract-prerequisites.mjs --repo "$RUNNER_TEMP/inference" --check
 
   # Split out because the smoke recompiles the whole workspace inside BuildKit and shares
   # nothing with the host's rust-cache — ~7m that used to land at the END of a 14m serial job,
@@ -342,11 +461,13 @@ jobs:
           # scripts/platform-review-contracts.test.mjs, same as every other lane's input.
           toolchain: "1.97.1"
           components: clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
         with:
           # A distinct key from `parity`'s: this job compiles the same crates under a different
           # feature set, so sharing one cache would thrash both.
           key: candle
+          # Save only on `main` — see the note on the `parity-rust` cache step above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"

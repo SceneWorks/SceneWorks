@@ -67,6 +67,7 @@ pub(crate) async fn create_event_ticket(
             .map_err(|error| ApiError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 detail: format!("JSON decode error: {error}"),
+                context: None,
                 code: None,
             })?
             .unwrap_or_default()
@@ -106,6 +107,7 @@ pub(crate) async fn create_event_ticket(
                 "Too many outstanding event tickets; retry after at most \
                  {EVENT_TICKET_TTL_SECONDS} seconds"
             ),
+            context: None,
             code: None,
         })
 }
@@ -237,6 +239,7 @@ pub(crate) async fn job_events(
         .collect::<std::collections::HashSet<_>>();
     jobs.retain(|job| !cleared_job_id_set.contains(&job.id));
     jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let jobs = public_job_snapshots(jobs);
     let initial_jobs = EventMessage {
         event: "jobs.snapshot".to_owned(),
         data: serde_json::to_string(&json!({

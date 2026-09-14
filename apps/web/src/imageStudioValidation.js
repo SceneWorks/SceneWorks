@@ -13,11 +13,20 @@ import { MAX_IMAGE_DIMENSION, MIN_IMAGE_DIMENSION } from "./resolutionOverride.j
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
-export function batchPromptBudgetOverages(composedPrompts = []) {
-  return composedPrompts.flatMap((prompt, index) => {
+// `limit` lets a streaming caller stop after the first actionable violation instead
+// of retaining an entry for every member of a very large batch.
+export function batchPromptBudgetOverages(composedPrompts = [], limit = Infinity) {
+  const overages = [];
+  let index = 0;
+  for (const prompt of composedPrompts) {
     const budget = promptBudget(prompt);
-    return budget.over ? [{ item: index + 1, ...budget }] : [];
-  });
+    if (budget.over) {
+      overages.push({ item: index + 1, ...budget });
+      if (overages.length >= limit) break;
+    }
+    index += 1;
+  }
+  return overages;
 }
 
 export function batchPromptBudgetMessage(overages = []) {
@@ -62,6 +71,9 @@ export function imageGenerateValidation({
   // (or null) — a value the user actively broke that nothing else on the form explains, so it blocks
   // Generate AND is surfaced. Null/absent leaves the gate unchanged for every other model.
   dimensionError = null,
+  // A restored alternate decoder cannot be reconciled or safely omitted until the platform
+  // capability response identifies the active engine. Native selections never set this gate.
+  decoderCapabilitiesPending = false,
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -115,6 +127,14 @@ export function imageGenerateValidation({
   if (dimensionError) {
     issues.push(issue.error(null, dimensionError));
   }
+  if (decoderCapabilitiesPending) {
+    issues.push(
+      issue.error(
+        "decoder",
+        "Waiting for engine capabilities before using the restored decoder.",
+      ),
+    );
+  }
   return issues;
 }
 
@@ -148,6 +168,7 @@ export function imageBatchValidation({
   // (Mage-Flow) narrows the batch check to its own range + ÷16 stride, while every other model keeps the
   // global 256–4096 / no-stride envelope. Defaults to that global envelope for callers with no model.
   dimensionConstraints = { min: MIN_IMAGE_DIMENSION, max: MAX_IMAGE_DIMENSION, step: 1 },
+  decoderCapabilitiesPending = false,
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -177,6 +198,14 @@ export function imageBatchValidation({
   }
   if (promptBudgetOverages.length) {
     issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));
+  }
+  if (decoderCapabilitiesPending) {
+    issues.push(
+      issue.error(
+        "decoder",
+        "Waiting for engine capabilities before using the restored decoder.",
+      ),
+    );
   }
   if (batchTotal === 0) {
     issues.push(issue.requirement("prompts", "Add at least one prompt to run a batch."));

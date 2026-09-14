@@ -923,12 +923,13 @@ mod resolve_onnx_tests {
         });
         let repo_dir = crate::huggingface_repo_cache_path(dir.path(), "acme/esrgan-onnx")
             .expect("repo cache path");
-        let snapshot = repo_dir.join("snapshots").join("deadbeef");
+        let revision = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let snapshot = repo_dir.join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).expect("mk snapshot");
         let staged = snapshot.join("custom_x4.onnx");
         std::fs::write(&staged, b"onnx").expect("write");
         std::fs::create_dir_all(repo_dir.join("refs")).expect("mk refs");
-        std::fs::write(repo_dir.join("refs").join("main"), "deadbeef").expect("write refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
 
         assert_eq!(
             resolve_onnx(&settings_at(dir.path().to_path_buf()), 4, &entry).expect("resolves"),

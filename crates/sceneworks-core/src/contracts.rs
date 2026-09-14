@@ -1060,9 +1060,36 @@ pub struct GenerationMetrics {
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot".
+    /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot" / "nvfp4".
+    ///
+    /// This is the **request/tier** identity — which variant was selected. It is deliberately NOT
+    /// the answer to "what did this host execute": a checkpoint stored NVFP4 reports
+    /// `quantLabel: "nvfp4"` on a pre-Blackwell box too, where the run took the dense BF16
+    /// fallback. Read [`Self::execution_representation`] for what actually ran (sc-21484).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quant_label: Option<String>,
+    /// The **source codec** the checkpoint's weights are stored in — the engine's stable codec id
+    /// (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), never a tier spelling
+    /// (sc-21484, epic 11037).
+    ///
+    /// A device-independent fact about the artifact: the same file reports the same value on
+    /// `sm_120`, on datacenter `sm_100`, on a pre-Blackwell GPU, on a Mac and on CPU. `None` when
+    /// the run's source shape has no single classified codec (a diffusers tree, a builtin turnkey
+    /// tier) or when SceneWorks' classification has no proved engine codec for it — never a
+    /// fallback to the tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_codec: Option<String>,
+    /// What this host **actually materialized** the source codec as: `"native-packed"` (the stored
+    /// packing was the execution operand — NVFP4 W4A4) or `"dense-fallback"` (the stored bytes were
+    /// decoded to dense BF16 and executed dense). The engine's stable
+    /// `ExecutionRepresentation::label()` strings (sc-21484, epic 11037).
+    ///
+    /// `None` means **not measured**, which is neither of the two. Nothing derives this from the
+    /// host's capability or from [`Self::source_codec`]: a host that *could* run packed may still
+    /// have taken the dense path for a reason only the load receipt knows, so an absent receipt
+    /// stays absent rather than being filled in from what was likely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_representation: Option<String>,
     /// Quant bit-width (16 / 8 / 4); None for non-bits tiers like ConvRot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quant_bits: Option<u32>,
@@ -1284,6 +1311,29 @@ pub struct CancelPendingJobsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CancelPendingJobsResponse {
     pub canceled: usize,
+    pub jobs: Vec<JobSnapshot>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Body for `POST /api/v1/jobs/prioritize` — move selected jobs that have not started to the
+/// front of the durable worker queue. The API caps the collection size; unknown, active, and
+/// terminal ids are harmlessly ignored so a selection racing a worker claim cannot preempt it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsRequest {
+    pub job_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/prioritize`: the snapshots whose queue ranks changed, in their
+/// preserved relative scheduling order. Returning the snapshots lets the acting client reorder
+/// immediately while the same updates fan out over SSE to every other Queue screen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsResponse {
+    pub prioritized: usize,
     pub jobs: Vec<JobSnapshot>,
     #[serde(flatten)]
     pub extra: ExtraFields,

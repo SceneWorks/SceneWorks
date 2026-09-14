@@ -22,6 +22,15 @@ const appleWorker = {
   utilization: { memoryUsedMb: 30000, memoryTotalMb: 64000, gpuLoadPercent: 41 },
 };
 
+// The real native macOS worker: `gpu.rs` publishes exactly this id and name.
+const mlxWorker = {
+  id: "worker-mlx-1",
+  gpuId: "mlx",
+  gpuName: "Apple Silicon (MLX)",
+  capabilities: ["gpu", "image_generate"],
+  utilization: { memoryUsedMb: 30000, memoryTotalMb: 131072, gpuLoadPercent: 88 },
+};
+
 const cpuWorker = {
   id: "worker-cpu-1",
   gpuId: "cpu-0",
@@ -39,7 +48,26 @@ describe("deriveWorkerHardware", () => {
     });
   });
 
-  it("identifies Apple Silicon GPUs as MPS", () => {
+  it("identifies the native Apple Silicon worker as MLX from its gpuId", () => {
+    expect(deriveWorkerHardware(mlxWorker)).toMatchObject({
+      device: "GPU",
+      vendor: "Apple",
+      architecture: "mlx",
+      gpuLabel: "Apple Silicon (MLX)",
+    });
+  });
+
+  // The gpuId is authoritative precisely BECAUSE the name is not: "Apple Silicon (MLX)"
+  // matches the same Apple branch that answers "mps" for the legacy descriptor below, so
+  // a name-only derivation cannot tell the two runtimes apart and labelled every Apple
+  // worker MPS.
+  it("does not let the Apple name heuristic override an MLX gpuId", () => {
+    expect(deriveWorkerHardware({ ...mlxWorker, gpuName: "Apple M2 Ultra" })).toMatchObject({
+      architecture: "mlx",
+    });
+  });
+
+  it("identifies the legacy Apple MPS descriptor as MPS", () => {
     expect(deriveWorkerHardware(appleWorker)).toMatchObject({
       device: "GPU",
       vendor: "Apple",

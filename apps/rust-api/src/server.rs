@@ -60,6 +60,8 @@ pub struct Settings {
     pub host: String,
     pub port: u16,
     pub data_dir: PathBuf,
+    /// Finite, disabled-by-default app-owned resolved-model cache policy shared with workers.
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
     /// Directory holding the `credentials.json` store (sc-16540). Resolved by
     /// [`sceneworks_core::credentials::credentials_dir`] and deliberately independent
@@ -112,6 +114,21 @@ pub struct Settings {
     /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
     /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
     pub trust_loopback: bool,
+    /// sc-19570 — the API host's OS (`std::env::consts::OS` in production), threaded through
+    /// `Settings` rather than read at each use site so the OFF-MAC branch of the per-mode
+    /// reachability sweep can be exercised on a Mac. macOS structurally cannot detect that class of
+    /// defect by running on itself: the sweep fails only what no Windows/Linux lane will claim, and
+    /// on a Mac that branch never executes, so an untestable `std::env::consts::OS` call inside
+    /// `JobsStore::fail_platform_unreachable_jobs`'s callers would ship a guard whose only proof is
+    /// its own doc comment.
+    ///
+    /// It decides a job's EXECUTION outcome, never an HTTP status code: `POST /api/v1/video/jobs`
+    /// answers `201` for the same body on every platform, and this field only determines whether
+    /// the job it creates is `queued` or terminal `failed`. A read of this field that changes a
+    /// response code is a bug — that shape was ruled out.
+    ///
+    /// Values are the `std::env::consts::OS` vocabulary (`"macos"` / `"windows"` / `"linux"`).
+    pub host_os: String,
     /// Epic 10231 (sc-10233) — base URL the embedded MCP server's thin API client
     /// uses to call back into this API's `/api/v1/*` routes (the MCP tools are a
     /// thin HTTP client over the existing surface, mirroring the Rust worker — no
@@ -173,6 +190,8 @@ impl Settings {
             host: host.clone(),
             port,
             data_dir,
+            resolved_cache:
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir,
             credentials_dir,
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
@@ -212,6 +231,10 @@ impl Settings {
             trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
+            // Always the real host OS in production — never an env override. The field exists to
+            // be substitutable in a test, not configurable in a deployment: a deployment that
+            // could claim to be Windows would re-open the exact hang sc-19570 closes.
+            host_os: std::env::consts::OS.to_owned(),
             // The MCP self-calls originate on this machine; derive a base URL that
             // resolves to an interface this API actually binds (sc-10260).
             // `SCENEWORKS_API_URL` still overrides for reverse-proxy/container setups.
@@ -306,6 +329,18 @@ pub struct AppState {
     pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
+    /// The ONE resolved-model cache session this API process holds (sc-19711).
+    ///
+    /// `ResolvedCacheStore::open` takes a session slot — a `sessions/<id>/` directory plus its own
+    /// exclusive lock file — and the store's design is that a slot belongs to a PROCESS for that
+    /// process's lifetime, with dead processes' slots reclaimed by a later `recover()`. Opening a
+    /// store per HTTP request would therefore leave a fresh, permanently-held slot behind on every
+    /// pin, preview and removal the UI performs, and nothing would clear them until a worker next
+    /// recovered. The handle is created lazily on the first mutating request so that a deployment
+    /// which only ever reads status never materializes the cache root as a side effect.
+    pub(crate) resolved_cache_session: Arc<
+        AsyncMutex<Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore>>,
+    >,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     /// One generation-keyed install-state snapshot shared by `/models`, recipe
@@ -319,6 +354,8 @@ pub struct AppState {
         Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
     #[cfg(test)]
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
+    #[cfg(test)]
+    pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI

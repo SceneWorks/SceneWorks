@@ -1,0 +1,263 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/krea-2-raw-mlx",
+        "resolvedRevision": "b88090c79762ba34b1de23a892da239eb76962e4",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "krea-2-raw-bf16-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-07T02:54:40Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:krea-raw-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 7843452552
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 7845917348
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 37696572188
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 39273229248
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 47517058216
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 39278263756
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 34413542756
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupActive",
+            "unit": "bytes",
+            "value": 34413542756
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPeak",
+            "unit": "bytes",
+            "value": 39278263756
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupActive",
+            "unit": "bytes",
+            "value": 34413542756
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 156
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "loadSpecCarriesQuant",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "krea-raw-mlx-bf16-768-seed22735-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9511a33e5d5748de9ae7",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/krea-2-raw-mlx@b88090c79762ba34b1de23a892da239eb76962e4:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-13c720df1ce44724736b",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.6099738448918179,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 7845917348,
+          "allocatorBytes": 7845917504,
+          "reclaimableBytes": 156
+        },
+        "decode": {
+          "activeBytes": 39273229248,
+          "allocatorBytes": 39273229248,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 37696572188,
+          "allocatorBytes": 45940401156,
+          "reclaimableBytes": 8243828968
+        },
+        "overall": {
+          "activeBytes": 39273229248,
+          "allocatorBytes": 47517058216,
+          "reclaimableBytes": 8243828968
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 8254390272,
+        "decode": 41271951360,
+        "denoise": 48251273216,
+        "overall": 49928994816
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps and tier; selected Krea rung versus unselected request",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.15,
+        "meanError": 0,
+        "meanErrorThreshold": 0.005,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "4d1eaa8acab8710d3831f17abc3de62622a0f93b48f09e039da4f48f84be3f58",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:5904b72b9cdcd02e97dbba5421bf6fb99e0640156a74bfeaecce446597071f35",
+          "revision": "28609ed84ca5a1157c060ea4cc128c2c3d6c2818"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 49928994816,
+          "name": "exact_fit",
+          "predictedBytes": 49928994816,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory and warm recovery stayed within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory and warm recovery stayed within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Krea 2 Raw base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "krea_2_raw",
+        "overlay": "none",
+        "provider": "krea_2_raw",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

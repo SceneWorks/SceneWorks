@@ -16,10 +16,12 @@ if (request.action === "probe") {
     }
   }));
 } else {
+  // A canonical, individually VALID composition that is never the one asked for, so the runner's
+  // planned-vs-measured comparison is what rejects it rather than rung-order validation.
+  const mismatch = request.planned.strategy.rung === "bounded_decode"
+    ? { rung: "resident", engagedRungs: ["resident"] }
+    : { rung: "bounded_decode", engagedRungs: ["resident", "bounded_decode"] };
   process.stdout.write(JSON.stringify({
-    strategy: {
-      ...request.planned.strategy,
-      engagedRungs: ["resident", "staged_residency", request.planned.strategy.rung],
-    },
+    strategy: { ...request.planned.strategy, ...mismatch },
   }));
 }

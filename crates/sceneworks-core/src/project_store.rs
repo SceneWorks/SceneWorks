@@ -65,6 +65,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/renders",
     "assets/documents",
     "assets/poses",
+    "assets/keypoints",
     "characters",
     "generation-sets",
     "loras",
@@ -958,6 +959,22 @@ impl ProjectStore {
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
     }
 
+    pub fn install_ltx_prepared_bundle(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).install_ltx_prepared_bundle(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+        )
+    }
+
     /// Persist freshly-extracted Tier-0 scalars onto dataset items as the readiness cache (sc-6533).
     /// Locked like any dataset mutation; a metadata-only write (no version/`updated_at` bump).
     pub fn cache_dataset_tier0_scalars(
@@ -1303,6 +1320,11 @@ impl ProjectStore {
         let path = timeline_file_path(&project_path, &timeline_id, &name);
         let rel_path = relative_string(&project_path, &path)?;
         write_json(&path, &timeline)?;
+        // A rename changes the slug portion of the timeline file name while keeping
+        // its id. Remove every prior document for this id after the replacement has
+        // reached disk; otherwise a later reindex sees duplicate ids and can
+        // nondeterministically revive the pre-rename content.
+        remove_stale_timeline_files(&project_path, &timeline_id, &path)?;
         index_timeline(&project_path, &timeline, &rel_path)?;
         Ok(timeline)
     }
@@ -1410,7 +1432,15 @@ impl ProjectStore {
         // the listing — fail open and return whatever the table currently
         // holds (possibly empty), which is strictly better than an error.
         if total == 0 && project_has_sidecars(&project_path) {
-            let _ = reindex_project_path(project_id, &project_path, false);
+            if let Err(error) = reindex_project_path(project_id, &project_path, false) {
+                tracing::warn!(
+                    event = "asset_list_auto_reindex_failed",
+                    project_id,
+                    project = %project_path.display(),
+                    error = %error,
+                    "could not rebuild the asset index while listing; returning indexed rows"
+                );
+            }
             connection = connect_project_db(&project_path)?;
         }
 
@@ -1453,12 +1483,18 @@ impl ProjectStore {
         let mut assets = Vec::new();
         for (row_id, sidecar_rel, asset_json) in rows {
             let Some(asset_json) = asset_json else {
+                tracing::warn!(event = "asset_list_indexed_envelope_missing", asset_id = %row_id, "skipping asset row with no indexed envelope");
                 continue;
             };
-            let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) else {
-                continue;
+            let mut asset = match serde_json::from_str::<Value>(&asset_json) {
+                Ok(asset) => asset,
+                Err(error) => {
+                    tracing::warn!(event = "asset_list_indexed_envelope_invalid", asset_id = %row_id, error = %error, "skipping malformed indexed asset envelope");
+                    continue;
+                }
             };
             if !indexed_asset_envelope_is_valid(&row_id, sidecar_rel.as_deref(), &asset) {
+                tracing::warn!(event = "asset_list_indexed_envelope_invalid", asset_id = %row_id, "skipping invalid indexed asset envelope");
                 continue;
             }
             if let Some(sidecar_rel) = sidecar_rel {
@@ -1466,13 +1502,17 @@ impl ProjectStore {
                     object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
                 }
             }
-            let Ok(asset) = hydrate_indexed_asset_cached(
+            let asset = match hydrate_indexed_asset_cached(
                 project_id,
                 &project_path,
                 asset,
                 &mut generation_sets,
-            ) else {
-                continue;
+            ) {
+                Ok(asset) => asset,
+                Err(error) => {
+                    tracing::warn!(event = "asset_list_indexed_envelope_hydration_failed", asset_id = %row_id, error = %error, "skipping asset whose indexed envelope could not be hydrated");
+                    continue;
+                }
             };
             if seen_asset_ids.insert(row_id) {
                 assets.push(asset);
@@ -1896,24 +1936,36 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
-        if !content_type.starts_with("image/") && !content_type.starts_with("video/") {
+        if !content_type.starts_with("image/")
+            && !content_type.starts_with("video/")
+            && !content_type.starts_with("audio/")
+        {
             return Err(ProjectStoreError::BadRequest(
-                "Only image and video uploads are supported".to_owned(),
+                "Only image, video and audio uploads are supported".to_owned(),
             ));
         }
 
+        // sc-18650: audio is normalized by a DIFFERENT rule than image/video, so it is dispatched
+        // here rather than folded into `normalize_image_upload` (which passes every non-image
+        // through untouched). See `normalize_audio_upload` for why an uploaded clip is always
+        // converted rather than stored as sent.
+        //
         // sc-6143: transcode a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless
         // PNG before storing, so every downstream decode site, thumbnail, and preview reads a format
         // it supports. Supported formats and videos pass through unchanged.
-        let normalized = normalize_image_upload(
-            &upload.source_path,
-            &content_type,
-            &upload.filename,
-            &upload_dir,
-            // sc-15949: a shared image may carry the sanitized recipe that made it. Read it from
-            // the bytes the user handed us, before any transcode can strip it.
-            WorkflowScan::Read,
-        )?;
+        let normalized = if content_type.starts_with("audio/") {
+            normalize_audio_upload(&upload.source_path, &upload_dir)?
+        } else {
+            normalize_image_upload(
+                &upload.source_path,
+                &content_type,
+                &upload.filename,
+                &upload_dir,
+                // sc-15949: a shared image may carry the sanitized recipe that made it. Read it from
+                // the bytes the user handed us, before any transcode can strip it.
+                WorkflowScan::Read,
+            )?
+        };
         let content_type = normalized.content_type.clone();
 
         let asset_id = format!("asset_{}", random_hex(16)?);
@@ -1940,24 +1992,41 @@ impl ProjectStore {
             })
             .to_owned();
 
+        let media_type = media_type_for_mime(&content_type)?;
+        let mut file = json!({
+            "path": media_rel,
+            "mimeType": content_type,
+            "width": Value::Null,
+            "height": Value::Null,
+            "duration": Value::Null,
+            "fps": Value::Null
+        });
+        // An audio upload's `file` block additionally carries the clip facts the audio tile, the
+        // transport and the waveform all read — the SAME three fields `build_audio_sidecar_parts`
+        // writes for an Audio Studio render, so the two doors an audio asset can come through
+        // produce one shape (sc-18650). Without them the tile renders `0:00` and the waveform has
+        // nothing to size against.
+        //
+        // MEASURED off the stored WAV, never trusted from the upload: the transcode above is what
+        // decided them. They are added only for audio, so no image/video sidecar grows a key.
+        if media_type == "audio" {
+            if let Some(facts) = wav_facts(&media_path) {
+                file["duration"] = json!(facts.duration_secs);
+                file["sampleRate"] = json!(facts.sample_rate);
+                file["channels"] = json!(facts.channels);
+            }
+        }
         let mut asset = json!({
             "schemaVersion": 1,
             "id": asset_id,
             "projectId": project_id,
             "generationSetId": Value::Null,
-            "type": media_type_for_mime(&content_type)?,
+            "type": media_type,
             "displayName": display_name,
             "createdAt": created_at,
             // Manual imports are Library media in their own right (sc-2024).
             "origin": "upload",
-            "file": {
-                "path": media_rel,
-                "mimeType": content_type,
-                "width": Value::Null,
-                "height": Value::Null,
-                "duration": Value::Null,
-                "fps": Value::Null
-            },
+            "file": file,
             "status": {
                 "favorite": false,
                 "rating": 0,
@@ -2869,7 +2938,7 @@ impl ProjectStore {
         let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let mut moved = Vec::new();
-        for member_id in upscale_lineage_group(&project_path, asset_id) {
+        for member_id in upscale_lineage_group(&project_path, asset_id)? {
             let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
             let mut asset = read_json(&sidecar_path)?;
             {
@@ -2940,7 +3009,7 @@ impl ProjectStore {
         character_store.get_character(project_id, character_id)?;
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let mut moved = Vec::new();
-        for member_id in upscale_lineage_group(&project_path, asset_id) {
+        for member_id in upscale_lineage_group(&project_path, asset_id)? {
             let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
             let mut asset = read_json(&sidecar_path)?;
             {
@@ -3187,13 +3256,36 @@ impl ProjectStore {
     ) -> ProjectStoreResult<AssetMutationResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let sidecar_rel = relative_string(&project_path, &sidecar_path)?;
+        if !is_safe_relative_path(&sidecar_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset sidecar path must be project-relative".to_owned(),
+            ));
+        }
+        let sidecar_path = confined_deletion_target(&project_path, &sidecar_rel, "Asset sidecar")?;
         let asset = read_json(&sidecar_path)?;
         let media_rel = asset
             .pointer("/file/path")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let media_path = project_path.join(media_rel);
-        let trash_dir = project_path.join("trash");
+        // The sidecar is durable, externally writable project state. Validate its
+        // media path before constructing any deletion or trash target from it.
+        if !media_rel.is_empty() && !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset media path must be project-relative".to_owned(),
+            ));
+        }
+        let media_path = if media_rel.is_empty() {
+            None
+        } else {
+            Some(confined_deletion_target(
+                &project_path,
+                media_rel,
+                "Asset media",
+            )?)
+        };
+        let project_root = fs::canonicalize(&project_path)?;
+        let trash_dir = project_root.join("trash");
         let asset_trash_dir = sidecar_path
             .parent()
             .filter(|parent| {
@@ -3209,7 +3301,10 @@ impl ProjectStore {
                 vec![dir]
             } else {
                 let mut targets = Vec::new();
-                if media_path.exists() && media_path.is_file() {
+                if let Some(media_path) = media_path
+                    .as_ref()
+                    .filter(|path| path.exists() && path.is_file())
+                {
                     targets.push(media_path.clone());
                 }
                 if sidecar_path.exists() {
@@ -3241,7 +3336,7 @@ impl ProjectStore {
         remove_sibling_poster_no_symlinks(&project_path, media_rel)?;
         CharacterStore::new(&self.data_dir, project_path.clone())
             .remove_asset_references(asset_id)?;
-        if media_path.exists() && media_path.is_file() {
+        if let Some(media_path) = media_path.filter(|path| path.exists() && path.is_file()) {
             fs::remove_file(media_path)?;
         }
         remove_asset_sidecar(&sidecar_path)?;
@@ -3567,6 +3662,8 @@ fn run_ensure_ready_before_lock_hook(project_path: &Path) {
 thread_local! {
     static FAIL_NEXT_ASSET_INDEX_DB_MUTATION: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_ASSET_SIDECAR_REMOVE: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_UPSCALE_LINEAGE_DB_READ: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_ASSET_POSTER_DB_READ: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -3577,6 +3674,42 @@ fn fail_next_asset_index_db_mutation() {
 #[cfg(test)]
 fn fail_next_asset_sidecar_remove() {
     FAIL_NEXT_ASSET_SIDECAR_REMOVE.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_next_upscale_lineage_db_read() {
+    FAIL_NEXT_UPSCALE_LINEAGE_DB_READ.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_asset_poster_db_read() {
+    FAIL_NEXT_ASSET_POSTER_DB_READ.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn maybe_fail_upscale_lineage_db_read() -> ProjectStoreResult<()> {
+    if FAIL_NEXT_UPSCALE_LINEAGE_DB_READ.with(|fail| fail.replace(false)) {
+        return Err(ProjectStoreError::Sqlite(rusqlite::Error::InvalidQuery));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maybe_fail_upscale_lineage_db_read() -> ProjectStoreResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn maybe_fail_asset_poster_db_read() -> ProjectStoreResult<()> {
+    if FAIL_NEXT_ASSET_POSTER_DB_READ.with(|fail| fail.replace(false)) {
+        return Err(ProjectStoreError::Sqlite(rusqlite::Error::InvalidQuery));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn maybe_fail_asset_poster_db_read() -> ProjectStoreResult<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3880,23 +4013,19 @@ const UPSCALE_LINEAGE_QUERY: &str = "
     select id from connected
 ";
 
-fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
+fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> ProjectStoreResult<Vec<String>> {
     let mut group = vec![asset_id.to_owned()];
-    let Ok(connection) = connect_project_db(project_path) else {
-        return group;
-    };
-    let Ok(mut statement) = connection.prepare(UPSCALE_LINEAGE_QUERY) else {
-        return group;
-    };
-    let Ok(rows) = statement.query_map(params![asset_id], |row| row.get::<_, String>(0)) else {
-        return group;
-    };
-    for id in rows.filter_map(Result::ok) {
+    let connection = connect_project_db(project_path)?;
+    maybe_fail_upscale_lineage_db_read()?;
+    let mut statement = connection.prepare(UPSCALE_LINEAGE_QUERY)?;
+    let rows = statement.query_map(params![asset_id], |row| row.get::<_, String>(0))?;
+    for id in rows {
+        let id = id?;
         if id != asset_id && !group.contains(&id) {
             group.push(id);
         }
     }
-    group
+    Ok(group)
 }
 
 fn reindex_project_path(
@@ -3921,19 +4050,30 @@ fn reindex_project_path(
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
-        let Ok(asset) = read_json(&sidecar_path) else {
-            continue;
+        let asset = match read_json(&sidecar_path) {
+            Ok(asset) => asset,
+            Err(error) => {
+                tracing::warn!(event = "asset_reindex_sidecar_invalid", sidecar = %sidecar_path.display(), error = %error, "skipping malformed asset sidecar during reindex");
+                continue;
+            }
         };
-        if asset.get("id").is_none() || asset.pointer("/file/path").is_none() {
-            continue;
-        }
-        index_asset_on_connection(
+        if let Err(error) = index_asset_on_connection(
             &transaction,
             project_id,
             project_path,
             &asset,
             Some(&sidecar_path),
-        )?;
+        ) {
+            match error {
+                // The caller's rebuild transaction is the SQLite invariant: never
+                // turn a database failure into a superficially successful index.
+                ProjectStoreError::Sqlite(_) => return Err(error),
+                error => {
+                    tracing::warn!(event = "asset_reindex_sidecar_invalid", sidecar = %sidecar_path.display(), error = %error, "skipping malformed asset sidecar during reindex");
+                    continue;
+                }
+            }
+        }
         counts.assets += 1;
     }
 
@@ -3943,19 +4083,27 @@ fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::GenerationSetRead);
-        let Ok(generation_set) = read_json(&entry) else {
-            continue;
+        let generation_set = match read_json(&entry) {
+            Ok(generation_set) => generation_set,
+            Err(error) => {
+                tracing::warn!(event = "generation_set_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed generation set sidecar during reindex");
+                continue;
+            }
         };
-        if generation_set.get("id").is_none() {
-            continue;
-        }
+        let id = match required_str(&generation_set, "id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(event = "generation_set_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed generation set sidecar during reindex");
+                continue;
+            }
+        };
         transaction.execute(
             "
             insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
             values (?1, ?2, ?3, ?4, ?5, ?6)
             ",
             params![
-                required_str(&generation_set, "id")?,
+                id,
                 optional_str(&generation_set, "mode").unwrap_or("unknown"),
                 optional_str(&generation_set, "model").unwrap_or("unknown"),
                 optional_str(&generation_set, "prompt").unwrap_or(""),
@@ -3976,12 +4124,20 @@ fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::TimelineRead);
-        let Ok(timeline) = read_json(&entry) else {
-            continue;
+        let timeline = match read_json(&entry) {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                tracing::warn!(event = "timeline_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed timeline sidecar during reindex");
+                continue;
+            }
         };
-        if timeline.get("id").is_none() {
-            continue;
-        }
+        let id = match required_str(&timeline, "id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(event = "timeline_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed timeline sidecar during reindex");
+                continue;
+            }
+        };
         let rel_path = relative_string(project_path, &entry)?;
         transaction.execute(
             "
@@ -3990,7 +4146,7 @@ fn reindex_project_path(
             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ",
             params![
-                required_str(&timeline, "id")?,
+                id,
                 optional_str(&timeline, "name").unwrap_or("Timeline"),
                 rel_path,
                 optional_str(&timeline, "aspectRatio").unwrap_or("16:9"),
@@ -4329,7 +4485,7 @@ fn normalize_timeline_items(timeline: &mut Value) -> ProjectStoreResult<()> {
             let needs_history = object
                 .get("versionHistory")
                 .and_then(Value::as_array)
-                .map_or(true, Vec::is_empty);
+                .is_none_or(Vec::is_empty);
             if needs_history {
                 object.insert(
                     "versionHistory".to_owned(),
@@ -4454,6 +4610,33 @@ fn index_timeline(project_path: &Path, timeline: &Value, rel_path: &str) -> Proj
         ],
     )?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Remove every other readable timeline document with this id. Used by
+/// [`ProjectStore::save_timeline`] to make the replacement file authoritative
+/// without trusting the current database path alone.
+fn remove_stale_timeline_files(
+    project_path: &Path,
+    timeline_id: &str,
+    authoritative_path: &Path,
+) -> ProjectStoreResult<()> {
+    for candidate in read_dir_paths(&project_path.join("timelines"))? {
+        if candidate == authoritative_path
+            || !candidate
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+        {
+            continue;
+        }
+        let Ok(candidate_timeline) = read_json(&candidate) else {
+            continue;
+        };
+        if candidate_timeline.get("id").and_then(Value::as_str) == Some(timeline_id) {
+            fs::remove_file(candidate)?;
+        }
+    }
     Ok(())
 }
 
@@ -4787,7 +4970,14 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     // The list-valued source ids are parents too — mv2v's clips, the reference-driven modes'
     // subject images, and ads2v's reference video. Without them those modes' provenance names
     // only a subset of what the clip was actually derived from (sc-12345).
-    let list_source_keys = ["sourceClipAssetIds", "referenceAssetIds"];
+    // sc-17160 adds the audio references: media the clip was genuinely derived from, so leaving
+    // them out would name only a subset of its provenance — the same gap sc-12345 closed for the
+    // clip and image lists.
+    let list_source_keys = [
+        "sourceClipAssetIds",
+        "referenceAssetIds",
+        "referenceAudioAssetIds",
+    ];
     let parents: Vec<Value> = source_keys
         .iter()
         .chain(std::iter::once(&"referenceClipAssetId"))
@@ -4817,7 +5007,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         Some(value) if !value.is_null() => value.clone(),
         _ => get(requested),
     };
-    let file = json!({
+    let mut file = json!({
         "path": get("mediaPath"),
         "mimeType": get("mimeType"),
         "width": get("width"),
@@ -4826,6 +5016,19 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fps": measured("encodedFps", "fps"),
         "frameCount": fact.get("encodedFrameCount").cloned().unwrap_or(Value::Null),
     });
+    // sc-19577: whether the mp4 carries a soundtrack, measured off what the worker actually MUXED.
+    //
+    // Written ONLY when the fact carries it, and deliberately not defaulted to `false`. Every asset
+    // generated before sc-19577 has no such fact, and a `false` there would be a fresh claim that
+    // those clips are silent — which for the LTX renders among them is untrue. Absent means UNKNOWN
+    // and the UI shows nothing; `false` means measured-and-silent. Same shape `frameCount` would
+    // have needed had a wrong default been possible for it.
+    if let (Some(has_audio), Some(object)) = (
+        fact.get("hasAudio").filter(|value| value.is_boolean()),
+        file.as_object_mut(),
+    ) {
+        object.insert("hasAudio".to_owned(), has_audio.clone());
+    }
     // ...whereas `normalizedSettings` is the REPLAY record: the knobs the user picked off the
     // model's `limits.durations` / `limits.fps` menus, which "re-run this generation" (sc-12324 /
     // sc-12345) rebuilds the payload from. It must round-trip the ask, not the measurement.
@@ -4845,6 +5048,9 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fitMode": get("fitMode"),
         "sourceClipAssetIds": list_or_empty("sourceClipAssetIds"),
         "referenceAssetIds": list_or_empty("referenceAssetIds"),
+        // sc-17160. `list_or_empty` keeps the array shape on facts written before this key
+        // existed, so the replay reader never distinguishes "absent" from "empty".
+        "referenceAudioAssetIds": list_or_empty("referenceAudioAssetIds"),
         "referenceClipAssetId": get("referenceClipAssetId"),
         "characterId": get("characterId"),
         "characterLookId": get("characterLookId"),
@@ -5092,6 +5298,22 @@ fn normalize_image_upload(
             workflow,
         });
     }
+    if kind.png_transcode_is_lossy() {
+        // Scene-linear HDR (sc-18790). Storing the PNG and discarding the source is right for every
+        // other transcoded format — their pixels survive the conversion — but here it would throw
+        // away the float latitude the file exists for, leaving a tone-mapped proxy and no way back.
+        // So the original bytes are stored; the browser-renderable PNG is produced on demand by the
+        // `?thumbnail=` derivative route, which already falls back to `transcode_to_png` when the
+        // `image` crate cannot decode a source. Download therefore serves the original.
+        let (extension, mime) = kind.canonical();
+        return Ok(NormalizedUpload {
+            source_path: source_path.to_path_buf(),
+            content_type: mime.to_owned(),
+            extension: format!(".{extension}"),
+            transcoded_temp: None,
+            workflow,
+        });
+    }
     let temp_png = work_dir.join(format!("upload-transcode-{}.png", random_hex(8)?));
     crate::media_convert::transcode_to_png(source_path, &temp_png).map_err(|error| {
         let _ = fs::remove_file(&temp_png);
@@ -5106,6 +5328,125 @@ fn normalize_image_upload(
         extension: ".png".to_owned(),
         transcoded_temp: Some(temp_png),
         workflow,
+    })
+}
+
+/// Normalize an audio upload to the canonical PCM-16 RIFF/WAVE the product can actually read back
+/// (sc-18650), ALWAYS — there is no pass-through branch.
+///
+/// The rule is deliberately unlike [`normalize_image_upload`]'s, where an already-decodable PNG or
+/// JPEG is stored byte-for-byte. Audio has exactly one reader,
+/// `sceneworks_worker::audio_jobs::read_wav_pcm16`, and it accepts exactly one encoding, so
+/// "already supported" is a much narrower set than "already audio": a 24-bit WAV, a float WAV, or a
+/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Sniffing for that narrow set and
+/// branching would mean the conversion path only ran for some inputs — the shape of latent bug this
+/// story exists to remove — for a saving of one ffmpeg pass on a file measured in megabytes.
+///
+/// A conversion failure is a `BadRequest`: the caller named a file that is not decodable audio (or
+/// carries no audio stream), which is a fact about the upload, not about the host. The one host-shaped
+/// failure — no reachable ffmpeg — is reported through the same error with ffmpeg's own message, which
+/// says so.
+fn normalize_audio_upload(
+    source_path: &Path,
+    work_dir: &Path,
+) -> ProjectStoreResult<NormalizedUpload> {
+    let temp_wav = work_dir.join(format!("upload-transcode-{}.wav", random_hex(8)?));
+    crate::media_convert::transcode_to_wav_pcm16(source_path, &temp_wav).map_err(|error| {
+        let _ = fs::remove_file(&temp_wav);
+        ProjectStoreError::BadRequest(format!(
+            "Could not convert the uploaded audio to a supported format: {error}"
+        ))
+    })?;
+    Ok(NormalizedUpload {
+        source_path: temp_wav.clone(),
+        content_type: "audio/wav".to_owned(),
+        extension: ".wav".to_owned(),
+        transcoded_temp: Some(temp_wav),
+        // An audio file carries no SceneWorks workflow chunk — that envelope is a PNG ancillary
+        // chunk, and nothing writes an audio equivalent.
+        workflow: None,
+    })
+}
+
+/// The clip facts a stored PCM WAV declares in its own header: rate, channel count, and the duration
+/// those two plus the `data` chunk length imply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WavFacts {
+    sample_rate: u32,
+    channels: u16,
+    duration_secs: f64,
+}
+
+/// Read [`WavFacts`] out of a RIFF/WAVE header, or `None` if the file is not one this product wrote.
+///
+/// Header-only: it walks the chunk list for `fmt ` and `data` and reads the `data` chunk's declared
+/// LENGTH, never its bytes, so a 200 MB clip costs one small read. It is intentionally NOT a second
+/// `read_wav_pcm16` — that one lives in the worker, decodes samples, and answers a different
+/// question. This one answers "what does the sidecar record about this file", which the store has to
+/// answer without linking a decoder.
+fn wav_facts(path: &Path) -> Option<WavFacts> {
+    // The fixed prelude plus the largest offset read below (`fmt `'s 16-byte body).
+    let mut head = vec![0u8; 4096];
+    let read = {
+        use std::io::Read;
+        let mut file = fs::File::open(path).ok()?;
+        let mut filled = 0usize;
+        loop {
+            match file.read(&mut head[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(_) => return None,
+            }
+            if filled == head.len() {
+                break;
+            }
+        }
+        filled
+    };
+    let bytes = &head[..read];
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let le16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    let le32 = |offset: usize| {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    };
+    let mut position = 12usize;
+    let mut format: Option<(u16, u32, u16)> = None; // (channels, sample_rate, bits)
+    let mut data_len: Option<u32> = None;
+    while position + 8 <= bytes.len() {
+        let id = &bytes[position..position + 4];
+        let size = le32(position + 4);
+        let body = position + 8;
+        if id == b"fmt " && size >= 16 && body + 16 <= bytes.len() {
+            format = Some((le16(body + 2), le32(body + 4), le16(body + 14)));
+        } else if id == b"data" {
+            data_len = Some(size);
+            break;
+        }
+        // RIFF chunks are word-aligned: an odd body is followed by a pad byte.
+        position = body + size as usize + (size as usize & 1);
+    }
+    let (channels, sample_rate, bits) = format?;
+    if channels == 0 || sample_rate == 0 || bits == 0 {
+        return None;
+    }
+    let frame_bytes = u32::from(channels) * u32::from(bits) / 8;
+    let duration_secs = match (data_len, frame_bytes) {
+        (Some(len), frame) if frame > 0 => f64::from(len / frame) / f64::from(sample_rate),
+        _ => 0.0,
+    };
+    Some(WavFacts {
+        sample_rate,
+        channels,
+        // Three decimals, the precision `build_render_asset` and the audio sidecar already record
+        // durations at.
+        duration_secs: (duration_secs * 1000.0).round() / 1000.0,
     })
 }
 
@@ -5319,6 +5660,76 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Resolve a project-relative deletion target without following linked parents.
+///
+/// Purge paths come from durable sidecars and the derived index, both of which can
+/// be modified outside the application. A lexical `..` check is therefore not
+/// enough: an otherwise-normal component can be a symlink or Windows reparse
+/// point that redirects the later trash/remove operation outside the project.
+fn confined_deletion_target(
+    project_path: &Path,
+    relative_path: &str,
+    label: &str,
+) -> ProjectStoreResult<PathBuf> {
+    if !is_safe_relative_path(relative_path) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{label} path must be project-relative"
+        )));
+    }
+
+    let root = fs::canonicalize(project_path)?;
+    let components = Path::new(relative_path).components().collect::<Vec<_>>();
+    let mut target = root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path must be project-relative"
+            )));
+        };
+        target.push(component);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                for remainder in components.iter().skip(index + 1) {
+                    if let std::path::Component::Normal(remainder) = remainder {
+                        target.push(remainder);
+                    }
+                }
+                return Ok(target);
+            }
+            Err(error) => return Err(ProjectStoreError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path contains a symlink or reparse point"
+            )));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path contains a non-directory parent"
+            )));
+        }
+        if !fs::canonicalize(&target)?.starts_with(&root) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path escapes the project"
+            )));
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 /// Remove a source sibling poster without ever traversing a symlinked parent.
@@ -5686,6 +6097,9 @@ fn safe_filename(value: &str, fallback: &str) -> String {
     }
 }
 
+/// The sidecar `type` an upload's mime maps to. `"audio"` since sc-18650 — the same string
+/// `build_generated_asset_sidecar` dispatches on for an Audio Studio render, so an imported clip and
+/// a rendered one are one asset kind rather than two.
 fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
     if mime_type.starts_with("image/") {
         return Ok("image");
@@ -5693,8 +6107,11 @@ fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
     if mime_type.starts_with("video/") {
         return Ok("video");
     }
+    if mime_type.starts_with("audio/") {
+        return Ok("audio");
+    }
     Err(ProjectStoreError::BadRequest(
-        "Only image and video uploads are supported".to_owned(),
+        "Only image, video and audio uploads are supported".to_owned(),
     ))
 }
 
@@ -5713,6 +6130,9 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
                 Some("heif") => Some("image/heif".to_owned()),
                 Some("avif") => Some("image/avif".to_owned()),
                 Some("tif" | "tiff") => Some("image/tiff".to_owned()),
+                // OpenEXR (sc-18790). `image/x-exr` is inert and starts with `image/`, which
+                // is what admits it to SAFE_UPLOAD_EXTENSIONS and to the `?thumbnail=` route.
+                Some("exr") => Some("image/x-exr".to_owned()),
                 _ => None,
             }
         })
@@ -5729,12 +6149,20 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
 /// document/script extension.
 ///
 /// Every extension here re-derives, through `guess_mime_from_filename`, to a mime that starts with
-/// `image/` or `video/` and is NOT `image/svg+xml` — the property the tests pin.
+/// `image/`, `video/` or `audio/` and is NOT `image/svg+xml` — the property the tests pin.
+///
+/// `wav` is the only audio entry and that is not an oversight (sc-18650): `normalize_audio_upload`
+/// converts EVERY audio upload to PCM-16 RIFF/WAVE, so `.wav` is the only extension an audio asset
+/// is ever stored under. An `.mp3` is admitted at the door and stored `.wav`; the source extension
+/// never reaches the filesystem, so it never needs to be on this list.
 const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
     // Raster images (SVG deliberately omitted — it is script-capable).
-    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", // Video.
-    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp", "3g2",
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic", "heif",
+    // Scene-linear HDR frames (sc-18790) — stored as-is, previewed as a derivative.
+    "exr", // Video.
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp",
+    "3g2", // Audio: the single canonical stored form.
+    "wav",
 ];
 
 /// True when `extension` (no leading dot, already lowercased) is an allow-listed media extension
@@ -5798,7 +6226,8 @@ mod tests {
     use super::{
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
         connect_project_db, ensure_project_db_ready, fail_next_asset_index_db_mutation,
-        fail_next_asset_sidecar_remove, find_timeline_file, guess_mime_from_filename,
+        fail_next_asset_poster_db_read, fail_next_asset_sidecar_remove,
+        fail_next_upscale_lineage_db_read, find_timeline_file, guess_mime_from_filename,
         index_timeline, install_ensure_ready_before_lock_hook, is_safe_relative_path,
         is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
         read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
@@ -6339,7 +6768,7 @@ mod tests {
         );
         drop(connection);
 
-        let group = upscale_lineage_group(&project_path, "grandchild");
+        let group = upscale_lineage_group(&project_path, "grandchild").expect("lineage query");
         assert_eq!(group.first().map(String::as_str), Some("grandchild"));
         assert_eq!(group.len(), 3);
         assert!(group.contains(&"base".to_owned()));
@@ -7201,6 +7630,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn injected_sqlite_reads_abort_or_record_asset_moves() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Move DB failure")
+            .expect("project creates");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_move",
+                &json!({
+                    "assetId": "move_me",
+                    "mediaPath": "assets/images/genset_move/move_me.png",
+                    "mimeType": "image/png",
+                    "displayName": "Move me",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "character_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "safe",
+                }),
+            )
+            .expect("asset persists");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let sidecar = project_path.join("assets/images/genset_move/move_me.sceneworks.json");
+        let media = project_path.join("assets/images/genset_move/move_me.png");
+        std::fs::write(&media, b"image").expect("media writes");
+
+        fail_next_upscale_lineage_db_read();
+        assert!(matches!(
+            store.move_asset_to_library(&project.id, "move_me"),
+            Err(ProjectStoreError::Sqlite(_))
+        ));
+        assert!(project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+        assert_eq!(
+            read_json(&sidecar).expect("unmoved sidecar")["origin"],
+            json!("character_studio"),
+            "the group query failed before changing a partial move"
+        );
+        store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("dirty marker repairs after failed group query");
+
+        fail_next_asset_poster_db_read();
+        let error = store
+            .move_asset_to_library(&project.id, "move_me")
+            .expect_err("poster database failure propagates");
+        assert!(matches!(error, ProjectStoreError::Sqlite(_)), "{error:?}");
+        assert!(project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+        let repaired = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("dirty marker records and repairs the post-index failure");
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0]["origin"], json!("image_studio"));
+        assert!(!project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+    }
+
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
     /// its assets are still on disk as `.sceneworks.json` sidecars (these DBs
     /// predate the asset index / `sidecar_path` column and were never reindexed).
@@ -7268,6 +7756,54 @@ mod tests {
             .list_assets(&project.id, false, false, AssetScope::All)
             .expect("second list");
         assert_eq!(again.len(), 1, "result is stable on subsequent opens");
+    }
+
+    #[test]
+    fn list_assets_rebuild_skips_a_corrupt_sidecar_and_stays_recovered() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Corrupt rebuild")
+            .expect("project creates");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_ok",
+                &json!({
+                    "assetId": "healthy",
+                    "mediaPath": "assets/images/genset_ok/healthy.png",
+                    "mimeType": "image/png",
+                    "displayName": "Healthy",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "safe",
+                }),
+            )
+            .expect("healthy asset persists");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        std::fs::write(
+            project_path.join("assets/images/genset_ok/corrupt.sceneworks.json"),
+            b"{not valid json",
+        )
+        .expect("corrupt sidecar writes");
+        connect_project_db(&project_path)
+            .expect("open db")
+            .execute("delete from assets", [])
+            .expect("clear index to force automatic rebuild");
+
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("corrupt sidecar does not disable listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], json!("healthy"));
+        let repeated = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("successful rebuild is recorded despite corrupt sidecar");
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0]["id"], json!("healthy"));
     }
 
     #[test]
@@ -9136,6 +9672,69 @@ mod tests {
         assert_eq!(asset["file"]["frameCount"], Value::Null);
     }
 
+    /// sc-19577: `file.hasAudio` is THREE-STATE, and each state is asserted against a fact that
+    /// genuinely has it.
+    ///
+    /// This is the acute case for the sc-19488 "a test asserting a default passes whether or not the
+    /// code ran" trap: `true` alone would pass against a hard-coded `true`, and `false` alone against
+    /// an omission. So all three facts are built and all three outcomes pinned:
+    ///
+    /// * a render that produced audio → `true`;
+    /// * a render that produced none → `false` (NOT absent — "measured, and silent" is a fact);
+    /// * a fact written before sc-19577 → ABSENT (NOT `false` — claiming an LTX clip from last month
+    ///   is silent is a fresh lie about a file on disk).
+    #[test]
+    fn video_sidecar_records_the_muxed_soundtrack_as_three_distinct_states() {
+        let fact = |audio: Option<bool>| {
+            let mut fact = json!({
+                "type": "video",
+                "assetId": "asset-av",
+                "mediaPath": "assets/videos/av.mp4",
+                "mimeType": "video/mp4",
+                "width": 1344, "height": 768, "duration": 5.1667, "fps": 24,
+                "encodedFrameCount": 124, "encodedDuration": 5.1667, "encodedFps": 24,
+                "quality": "balanced", "family": "minimax-h3",
+                "seed": 7, "displayName": "AV", "createdAt": "2026-08-15T00:00:00Z",
+                "mode": "text_to_video", "model": "minimax_h3", "adapter": "mlx_minimax_h3",
+                "prompt": "a lighthouse keeper hums", "negativePrompt": "", "loras": [],
+                "rawAdapterSettings": {},
+                "timelineContext": {},
+            });
+            if let (Some(audio), Some(object)) = (audio, fact.as_object_mut()) {
+                object.insert("hasAudio".to_owned(), json!(audio));
+            }
+            build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact)
+        };
+
+        assert_eq!(fact(Some(true))["file"]["hasAudio"], json!(true));
+        assert_eq!(
+            fact(Some(false))["file"]["hasAudio"],
+            json!(false),
+            "a render that produced no audio must record that it did not — the SAME model id \
+             produces both, so the record is the only place the difference lives"
+        );
+        assert!(
+            fact(None)["file"].get("hasAudio").is_none(),
+            "a pre-sc-19577 fact must leave the key ABSENT; defaulting it to false would claim \
+             every existing LTX render is silent"
+        );
+
+        // A non-boolean `hasAudio` is not a measurement and must not be carried through as one.
+        let mut junk = json!({
+            "type": "video", "assetId": "a", "mediaPath": "assets/videos/j.mp4",
+            "mimeType": "video/mp4", "width": 16, "height": 16, "duration": 1.0, "fps": 24,
+            "quality": "balanced", "family": "ltx", "seed": 1, "displayName": "J",
+            "createdAt": "2026-08-15T00:00:00Z", "mode": "text_to_video", "model": "ltx_2_3",
+            "adapter": "mlx_ltx", "prompt": "j", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {}, "timelineContext": {},
+        });
+        junk.as_object_mut()
+            .expect("object")
+            .insert("hasAudio".to_owned(), json!("yes"));
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &junk);
+        assert!(asset["file"].get("hasAudio").is_none());
+    }
+
     /// sc-12345: the fit and the list-valued source ids survive onto `recipe.normalizedSettings`
     /// so the sc-12324 replay can rebuild the form, and every source asset lands in
     /// `lineage.parents` — not just the singular ones. ads2v is the densest mode.
@@ -9201,8 +9800,31 @@ mod tests {
         let old_normalized = &old["recipe"]["normalizedSettings"];
         assert_eq!(old_normalized["referenceAssetIds"], json!([]));
         assert_eq!(old_normalized["sourceClipAssetIds"], json!([]));
+        assert_eq!(old_normalized["referenceAudioAssetIds"], json!([]));
         assert_eq!(old_normalized["fitMode"], Value::Null);
         assert_eq!(old["lineage"]["parents"], json!([]));
+
+        // sc-17160: the audio references replay and count as parents for the same reason the
+        // image and clip lists do — a re-run that omits them renders the same prompt with its
+        // audio conditioning silently gone, which is invisible in the output.
+        let ref2va = json!({
+            "type": "video",
+            "assetId": "asset-ref2va",
+            "mediaPath": "assets/videos/ref2va.mp4",
+            "mimeType": "video/mp4",
+            "mode": "reference_to_video", "model": "minimax_h3",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["voice-1", "music-1"],
+        });
+        let multimodal = build_generated_asset_sidecar("project-1", "job-4", "genset-1", &ref2va);
+        assert_eq!(
+            multimodal["recipe"]["normalizedSettings"]["referenceAudioAssetIds"],
+            json!(["voice-1", "music-1"])
+        );
+        assert_eq!(
+            multimodal["lineage"]["parents"],
+            json!(["ref-1", "voice-1", "music-1"])
+        );
     }
 
     #[test]
@@ -11050,13 +11672,15 @@ mod tests {
         );
         // SVG is script-capable and deliberately excluded, so it never survives as `.svg`.
         assert_eq!(upload_extension("logo.svg", "image/svg+xml"), ".bin");
-        // Every allow-listed extension re-derives to an inert image/video serve mime — never
+        // Every allow-listed extension re-derives to an inert image/video/audio serve mime — never
         // `text/html` or `image/svg+xml` — which is the property `project_file` relies on.
         for extension in SAFE_UPLOAD_EXTENSIONS {
             let mime = guess_mime_from_filename(&format!("stored.{extension}"))
                 .unwrap_or_else(|| format!("no mime for .{extension}"));
             assert!(
-                mime.starts_with("image/") || mime.starts_with("video/"),
+                mime.starts_with("image/")
+                    || mime.starts_with("video/")
+                    || mime.starts_with("audio/"),
                 ".{extension} serves inert media mime, got {mime}"
             );
             assert_ne!(mime, "image/svg+xml", ".{extension} must not serve svg");
@@ -11127,6 +11751,145 @@ mod tests {
         assert!(webm_rel.ends_with(".webm"), "webm kept, got {webm_rel}");
         let webm_served = store.project_file(&project.id, webm_rel).expect("serves");
         assert_eq!(webm_served.content_type, "video/webm");
+    }
+
+    /// A minimal RIFF/WAVE file carrying `samples` frames of 32-bit FLOAT PCM (`audioFormat = 3`).
+    ///
+    /// Float on purpose: it is a perfectly ordinary `.wav` that `read_wav_pcm16` REFUSES ("must be
+    /// PCM 16-bit"), so a store that admitted audio without converting it would produce an asset
+    /// the product cannot read. It is the cheapest fixture that proves the conversion RAN rather
+    /// than that the bytes were copied.
+    #[cfg(test)]
+    fn float_wav(sample_rate: u32, channels: u16, samples: usize) -> Vec<u8> {
+        let bits = 32u16;
+        let block_align = channels * bits / 8;
+        let data_len = samples * usize::from(block_align);
+        let mut wav = Vec::with_capacity(44 + data_len);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes()); // WAVE_FORMAT_IEEE_FLOAT
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * u32::from(block_align)).to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for index in 0..samples {
+            let value = ((index % 64) as f32 / 64.0) - 0.5;
+            wav.extend_from_slice(&value.to_le_bytes());
+        }
+        wav
+    }
+
+    /// sc-18650: an AUDIO upload is admitted, typed `audio`, normalized to the PCM-16 RIFF/WAVE the
+    /// product's only audio decoder reads, and carries the clip facts an Audio Studio render does.
+    ///
+    /// This is the whole reason the reference-audio picker's dropzone existed with a zero success
+    /// rate: `import_asset` refused everything but `image/`+`video/`, so a user handed
+    /// "Could not import the selected audio file." for every file they chose. Each assertion below
+    /// is one link in the chain that had to hold for that dropzone to mean anything.
+    ///
+    /// Soft-skips where no ffmpeg is reachable, the same posture as the sibling transcode test —
+    /// there is no `sips` equivalent for audio, so ffmpeg is the only converter on every platform.
+    #[test]
+    fn import_asset_admits_audio_and_normalizes_it_to_pcm16_wav() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Audio").expect("project creates");
+
+        let source = temp_dir.path().join("upload-take");
+        std::fs::write(&source, float_wav(24_000, 1, 6_000)).expect("source writes");
+        // `content_type: None` drives the `guess_mime_from_filename` path — the shape a browser
+        // produces when it reports `application/octet-stream` for a media file it does not know.
+        let imported = match store.import_asset(
+            &project.id,
+            UploadAsset {
+                filename: "take.wav".to_owned(),
+                content_type: None,
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        ) {
+            Ok(asset) => asset,
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("ffmpeg") {
+                    println!("sc-18650: no ffmpeg reachable on this host ({message}); skipping");
+                    return;
+                }
+                panic!("an audio upload must import: {message}");
+            }
+        };
+
+        // 1. It is an AUDIO asset, the same kind an Audio Studio render produces — so it appears in
+        //    `VideoStudio`'s `assets.filter((asset) => asset.type === "audio")` and satisfies the
+        //    picker's `assetCanRenderAsAudio`.
+        assert_eq!(imported["type"], json!("audio"));
+        assert_eq!(imported["origin"], json!("upload"));
+        assert_eq!(imported["file"]["mimeType"], json!("audio/wav"));
+
+        // 2. It is stored under an allow-listed extension and SERVES an inert audio mime, the
+        //    sc-8872 property every upload has to keep.
+        let rel = imported["file"]["path"].as_str().expect("path");
+        assert!(rel.ends_with(".wav"), "audio stores as .wav, got {rel}");
+        let served = store.project_file(&project.id, rel).expect("serves");
+        assert!(
+            served.content_type.starts_with("audio/"),
+            "an audio asset serves an audio mime, got {}",
+            served.content_type
+        );
+
+        // 3. The stored bytes are PCM 16-bit — the source was 32-bit float, which `read_wav_pcm16`
+        //    refuses. A store that copied the upload through would fail here, and only here.
+        let stored = std::fs::read(Path::new(&project.path).join(rel)).expect("stored reads");
+        assert_eq!(&stored[0..4], b"RIFF");
+        assert_eq!(&stored[8..12], b"WAVE");
+        assert_eq!(
+            u16::from_le_bytes([stored[20], stored[21]]),
+            1,
+            "the stored WAV declares PCM (audioFormat 1), not the source's IEEE float"
+        );
+        assert_eq!(
+            u16::from_le_bytes([stored[34], stored[35]]),
+            16,
+            "the stored WAV is 16-bit"
+        );
+
+        // 4. The sidecar carries the clip facts the audio tile, transport and waveform read — and
+        //    they are the SOURCE's rate and layout, because the conversion normalizes the ENCODING
+        //    and nothing else.
+        assert_eq!(imported["file"]["sampleRate"], json!(24_000));
+        assert_eq!(imported["file"]["channels"], json!(1));
+        let duration = imported["file"]["duration"].as_f64().expect("duration");
+        assert!(
+            (duration - 0.25).abs() < 0.01,
+            "6000 frames @ 24 kHz is 0.25 s, got {duration}"
+        );
+
+        // 5. Everything that is not media is still refused — widening the gate must not have
+        //    turned it into "anything goes".
+        let script = temp_dir.path().join("upload-script");
+        std::fs::write(&script, b"#!/bin/sh\nrm -rf /\n").expect("source writes");
+        let refused = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "payload.sh".to_owned(),
+                    content_type: Some("text/x-shellscript".to_owned()),
+                    source_path: script,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect_err("a non-media upload is still refused");
+        assert!(
+            refused.to_string().contains("image, video and audio"),
+            "the refusal names what IS supported: {refused}"
+        );
     }
 
     /// sc-6143: a valid-but-unsupported image (BMP here) is transcoded to lossless PNG at import,
@@ -11283,6 +12046,312 @@ mod tests {
     }
 
     #[test]
+    fn purge_asset_rejects_unsafe_sidecar_media_paths_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Assets").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let image_dir = project_path.join("assets/images");
+
+        let absolute_target = temp_dir.path().join("absolute-victim.png");
+        let traversal_target = project_path.join("../../traversal-victim.png");
+        std::fs::write(&absolute_target, b"absolute").expect("absolute victim writes");
+        std::fs::write(&traversal_target, b"traversal").expect("traversal victim writes");
+
+        for (asset_id, media_path, target) in [
+            (
+                "purge-absolute",
+                absolute_target.to_string_lossy().into_owned(),
+                &absolute_target,
+            ),
+            (
+                "purge-traversal",
+                "../../traversal-victim.png".to_owned(),
+                &traversal_target,
+            ),
+        ] {
+            let sidecar_path = image_dir.join(format!("{asset_id}.sceneworks.json"));
+            std::fs::write(
+                &sidecar_path,
+                serde_json::to_string_pretty(&json!({
+                    "id": asset_id,
+                    "type": "image",
+                    "displayName": asset_id,
+                    "createdAt": "2026-06-15T00:00:00Z",
+                    "file": {"path": media_path},
+                    "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false}
+                }))
+                .expect("json"),
+            )
+            .expect("sidecar writes");
+
+            for permanent in [false, true] {
+                let error = store
+                    .purge_asset(&project.id, asset_id, permanent)
+                    .expect_err("unsafe media path rejected");
+                assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+                assert!(target.exists(), "purge must not delete outside media");
+                assert!(sidecar_path.exists(), "purge must not delete the sidecar");
+            }
+        }
+    }
+
+    #[test]
+    fn purge_asset_rejects_unsafe_indexed_sidecar_paths_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for (asset_id, indexed_sidecar_path) in [
+            (
+                "indexed-absolute",
+                temp_dir.path().join("outside.sceneworks.json"),
+            ),
+            (
+                "indexed-traversal",
+                temp_dir.path().join("data/traversal.sceneworks.json"),
+            ),
+        ] {
+            let project = store.create_project(asset_id).expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-06-15T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("asset persists");
+            let media_path = project_path.join(&media_rel);
+            std::fs::write(&media_path, b"media").expect("media writes");
+            let safe_sidecar_path = media_path.with_extension("sceneworks.json");
+            std::fs::write(&indexed_sidecar_path, b"outside sidecar")
+                .expect("outside sidecar writes");
+
+            let indexed_value = if asset_id == "indexed-traversal" {
+                "../../traversal.sceneworks.json".to_owned()
+            } else {
+                indexed_sidecar_path.to_string_lossy().into_owned()
+            };
+            connect_project_db(&project_path)
+                .expect("project db")
+                .execute(
+                    "update assets set sidecar_path = ?1 where id = ?2",
+                    params![indexed_value, asset_id],
+                )
+                .expect("indexed sidecar path updates");
+
+            for permanent in [false, true] {
+                let error = store
+                    .purge_asset(&project.id, asset_id, permanent)
+                    .expect_err("unsafe indexed sidecar path rejected");
+                assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+                assert!(
+                    indexed_sidecar_path.exists(),
+                    "outside sidecar is untouched"
+                );
+                assert!(safe_sidecar_path.exists(), "safe sidecar is untouched");
+                assert!(media_path.exists(), "media is untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn purge_asset_rejects_linked_media_and_sidecar_parents_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for permanent in [false, true] {
+            let mode = if permanent { "permanent" } else { "trash" };
+            let project = store
+                .create_project(&format!("Linked media {mode}"))
+                .expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let asset_id = format!("linked-media-{mode}");
+            let safe_media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": safe_media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-08-28T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("safe asset persists");
+            let safe_sidecar = project_path
+                .join(&safe_media_rel)
+                .with_extension("sceneworks.json");
+
+            let external_dir = temp_dir.path().join(format!("external-media-{mode}"));
+            std::fs::create_dir_all(&external_dir).expect("external dir creates");
+            let linked_parent = project_path.join("assets").join(format!("linked-{mode}"));
+            if let Err(error) = create_dir_symlink(&external_dir, &linked_parent) {
+                eprintln!("symlink privilege unavailable; skipping purge fixture: {error}");
+                return;
+            }
+            let external_media = external_dir.join(format!("{asset_id}.png"));
+            std::fs::write(&external_media, b"external media").expect("external media writes");
+
+            let mut sidecar: Value =
+                serde_json::from_slice(&std::fs::read(&safe_sidecar).expect("safe sidecar reads"))
+                    .expect("sidecar decodes");
+            sidecar["file"]["path"] = Value::String(format!("assets/linked-{mode}/{asset_id}.png"));
+            write_json(&safe_sidecar, &sidecar).expect("sidecar media path updates");
+            let sidecar_before = std::fs::read(&safe_sidecar).expect("sidecar snapshots");
+
+            let error = store
+                .purge_asset(&project.id, &asset_id, permanent)
+                .expect_err("linked media parent is refused");
+            assert!(matches!(
+                error,
+                ProjectStoreError::BadRequest(ref detail)
+                    if detail == "Asset media path contains a symlink or reparse point"
+            ));
+            assert_eq!(
+                std::fs::read(&external_media).expect("external media remains"),
+                b"external media"
+            );
+            assert_eq!(
+                std::fs::read(&safe_sidecar).expect("sidecar remains"),
+                sidecar_before
+            );
+        }
+
+        for permanent in [false, true] {
+            let mode = if permanent { "permanent" } else { "trash" };
+            let project = store
+                .create_project(&format!("Linked sidecar {mode}"))
+                .expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let external_dir = temp_dir.path().join(format!("external-sidecar-{mode}"));
+            std::fs::create_dir_all(&external_dir).expect("external dir creates");
+            let linked_parent = project_path
+                .join("assets")
+                .join(format!("linked-sidecar-{mode}"));
+            if let Err(error) = create_dir_symlink(&external_dir, &linked_parent) {
+                eprintln!("symlink privilege unavailable; skipping purge fixture: {error}");
+                return;
+            }
+
+            let asset_id = format!("linked-sidecar-{mode}");
+            let media_rel = format!("assets/linked-sidecar-{mode}/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-08-28T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("linked fixture persists");
+            let external_media = external_dir.join(format!("{asset_id}.png"));
+            let external_sidecar = external_media.with_extension("sceneworks.json");
+            std::fs::write(&external_media, b"external media").expect("external media writes");
+            let sidecar_before = std::fs::read(&external_sidecar).expect("sidecar snapshots");
+
+            let error = store
+                .purge_asset(&project.id, &asset_id, permanent)
+                .expect_err("linked sidecar parent is refused");
+            assert!(matches!(
+                error,
+                ProjectStoreError::BadRequest(ref detail)
+                    if detail == "Asset sidecar path contains a symlink or reparse point"
+            ));
+            assert_eq!(
+                std::fs::read(&external_media).expect("external media remains"),
+                b"external media"
+            );
+            assert_eq!(
+                std::fs::read(&external_sidecar).expect("external sidecar remains"),
+                sidecar_before
+            );
+        }
+    }
+
+    #[test]
+    fn purge_asset_removes_safe_media_and_sidecar_in_trash_and_permanent_modes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for permanent in [false, true] {
+            let project = store
+                .create_project(if permanent {
+                    "Permanent purge"
+                } else {
+                    "Trash purge"
+                })
+                .expect("project creates");
+            let asset_id = if permanent {
+                "permanent-purge"
+            } else {
+                "trash-purge"
+            };
+            let media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-06-15T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("asset persists");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let media_path = project_path.join(&media_rel);
+            std::fs::write(&media_path, b"media").expect("media writes");
+            let sidecar_path = media_path.with_extension("sceneworks.json");
+
+            let result = store
+                .purge_asset(&project.id, asset_id, permanent)
+                .expect("safe asset purges");
+            assert_eq!(result.status, "purged");
+            assert!(!media_path.exists(), "media is removed");
+            assert!(!sidecar_path.exists(), "sidecar is removed");
+            assert!(matches!(
+                store.get_asset(&project.id, asset_id),
+                Err(ProjectStoreError::NotFound(_))
+            ));
+        }
+    }
+
+    #[test]
     fn find_timeline_file_ignores_unsafe_indexed_path() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
@@ -11318,6 +12387,58 @@ mod tests {
             found.relative_path,
             "timelines/main.sceneworks.timeline.json"
         );
+    }
+
+    #[test]
+    fn renaming_a_timeline_removes_the_stale_file_before_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Timeline rename")
+            .expect("project creates");
+        let original = store
+            .create_timeline(&project.id, "Old cut", "16:9", 24)
+            .expect("timeline creates");
+        let timeline_id = original["id"].as_str().expect("timeline id").to_owned();
+        let old_file = store
+            .timeline_file(&project.id, &timeline_id)
+            .expect("old timeline file")
+            .path;
+        let mut renamed = original;
+        renamed["name"] = json!("Final cut");
+        renamed["tracks"][0]["items"] = json!([]);
+        store
+            .save_existing_timeline(&project.id, &timeline_id, renamed)
+            .expect("rename saves");
+
+        let project_path = std::path::PathBuf::from(&project.path);
+        let files: Vec<_> = std::fs::read_dir(project_path.join("timelines"))
+            .expect("timeline directory")
+            .map(|entry| entry.expect("timeline entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "the old timeline file is removed");
+        assert!(
+            !old_file.exists(),
+            "the pre-rename file cannot be reindexed"
+        );
+        assert!(files[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("final-cut-")));
+
+        let counts = store
+            .reindex_project(&project.id)
+            .expect("reindex succeeds");
+        assert_eq!(counts.timelines, 1);
+        let recovered = store
+            .get_timeline(&project.id, &timeline_id)
+            .expect("renamed timeline remains authoritative");
+        assert_eq!(recovered["name"], json!("Final cut"));
     }
 
     // ---- Key Point Library (sc-4434) ---------------------------------------------------
@@ -11405,6 +12526,103 @@ mod tests {
         assert_eq!(user["name"], "My Front");
         assert_eq!(user["builtin"], false);
         assert!(user["sourceImageRef"].as_str().is_some());
+    }
+
+    #[test]
+    fn keypoint_presets_survive_schema_version_and_dirty_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let keypoints_project = store
+            .ensure_global_keypoints_project()
+            .expect("keypoint project provisions");
+        let project_path = std::path::PathBuf::from(&keypoints_project.path);
+        assert!(
+            project_path.join("assets/keypoints").is_dir(),
+            "provisioning creates the authoritative keypoint sidecar folder"
+        );
+
+        let upload = stage_kps_upload(&data_dir, "upload-reindex.png");
+        let preset = store
+            .create_keypoint_asset(&json!({
+                "name": "Reindex Angle",
+                "kps": front_kps(),
+                "sourceUploadPath": upload,
+            }))
+            .expect("preset persists");
+        let preset_id = preset["id"].as_str().expect("preset id").to_owned();
+        let collection = store
+            .upsert_keypoint_collection(&json!({
+                "name": "Reindex collection",
+                "orderedPresetIds": [preset_id],
+                "isDefault": true,
+            }))
+            .expect("collection persists");
+        let collection_id = collection["id"].as_str().expect("collection id").to_owned();
+
+        let assert_preset_lists_and_resolves = || {
+            let presets = store.list_keypoint_presets().expect("preset listing");
+            assert!(
+                presets
+                    .iter()
+                    .any(|preset| preset["id"] == json!(preset_id)),
+                "the recovered sidecar is visible through the Key Point Library"
+            );
+            let (resolved_collection_id, resolved) = store
+                .resolve_angle_collection(Some(&collection_id))
+                .expect("collection resolution");
+            assert_eq!(resolved_collection_id, collection_id);
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].preset_id, preset_id);
+            assert_eq!(resolved[0].name, "Reindex Angle");
+        };
+
+        // Simulate a schema-version rebuild: the persisted index was cleared and its version
+        // stamp is stale, while the user-owned keypoint sidecar remains authoritative on disk.
+        {
+            let connection = connect_project_db(&project_path).expect("open index");
+            connection
+                .execute("delete from assets", [])
+                .expect("clear index");
+            connection
+                .execute(
+                    "update project_metadata set value = ?1 where key = ?2",
+                    params![
+                        (PROJECT_SCHEMA_VERSION - 1).to_string(),
+                        ASSET_INDEX_VERSION_KEY
+                    ],
+                )
+                .expect("stale index version");
+            connection
+                .execute_batch(&format!(
+                    "pragma user_version = {}",
+                    PROJECT_SCHEMA_VERSION - 1
+                ))
+                .expect("stale schema version");
+        }
+        assert!(
+            project_path
+                .join(format!("assets/keypoints/{preset_id}.sceneworks.json"))
+                .exists(),
+            "precondition: keypoint sidecar survives the cleared index"
+        );
+        assert_preset_lists_and_resolves();
+
+        // Simulate a crashed index mutation: dirty-marker repair clears the rows again and must
+        // discover the same sidecar before it removes the marker.
+        {
+            let connection = connect_project_db(&project_path).expect("open index");
+            connection
+                .execute("delete from assets", [])
+                .expect("clear index for dirty repair");
+        }
+        std::fs::write(project_path.join(ASSET_INDEX_DIRTY_MARKER), b"repair")
+            .expect("write dirty marker");
+        assert_preset_lists_and_resolves();
+        assert!(
+            !project_path.join(ASSET_INDEX_DIRTY_MARKER).exists(),
+            "successful keypoint reindex clears the dirty marker"
+        );
     }
 
     #[test]

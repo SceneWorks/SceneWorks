@@ -16,9 +16,17 @@
  *   architecture: "cuda" | "mps" | "mlx" | null
  *   gpuLabel:     the human-readable GPU/device label (e.g. "Apple M2 Ultra")
  *
- * Vendor + architecture are best-effort heuristics over `worker.gpuName`. The
- * worker contract does not carry these as separate fields today; if it grows
- * them, switch to using them directly.
+ * `gpuId` is the authoritative field and is consulted FIRST: the worker publishes
+ * it (`gpu.rs` — the native Apple-Silicon worker is literally `"mlx"`), so the
+ * runtime never has to be inferred from a display string. Before this, the name
+ * heuristic below owned the answer alone and its Apple branch was hardcoded to
+ * `"mps"` — so the MLX worker, whose `gpuName` is "Apple Silicon (MLX)", matched
+ * on the word "Apple" and rendered as MPS. Nothing runs on MPS: the Python
+ * torch/MPS worker is no longer spawned at all (`apps/desktop/src/setup.rs`).
+ *
+ * Vendor + architecture stay best-effort heuristics over `worker.gpuName` for
+ * every worker `gpuId` does not name, which is what still classifies CUDA (whose
+ * ids are device indices, not a runtime) and the legacy MPS descriptor.
  */
 export function deriveWorkerHardware(worker) {
   if (!worker) {
@@ -32,6 +40,11 @@ export function deriveWorkerHardware(worker) {
 
   if (!isGpu) {
     return { device, vendor: null, architecture: null, gpuLabel };
+  }
+
+  const gpuId = (worker.gpuId ?? worker.gpu_id ?? "").trim().toLowerCase();
+  if (gpuId === "mlx") {
+    return { device, vendor: "Apple", architecture: "mlx", gpuLabel };
   }
 
   const name = (gpuLabel ?? "").toLowerCase();

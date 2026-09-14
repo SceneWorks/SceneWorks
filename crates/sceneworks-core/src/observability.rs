@@ -287,6 +287,40 @@ mod tests {
     use super::*;
     use crate::session_log::LogQuery;
 
+    /// Keep callsite `Interest` honest for the scoped capture below. `emit_event`'s per-level
+    /// callsites are shared with every subscriber-less test in this binary; while the capture's
+    /// subscriber is the process' only dispatcher, `tracing-core`'s single-dispatcher fast path
+    /// computes a first-hit callsite's interest from the *hitting thread's* (absent) dispatcher
+    /// and caches `Interest::never`, silently emptying the capture. A registered global default
+    /// whose `register_callsite` answers `sometimes` (and enables nothing) closes that hole. Full
+    /// mechanism: `sceneworks-worker/src/test_env.rs::install_tracing_interest_floor`.
+    fn install_tracing_interest_floor() {
+        struct InterestFloor;
+        impl tracing::Subscriber for InterestFloor {
+            fn register_callsite(
+                &self,
+                _: &'static tracing::Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                tracing::subscriber::Interest::sometimes()
+            }
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                false
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(InterestFloor);
+        });
+    }
+
     #[test]
     fn level_str_maps_tracing_levels() {
         assert_eq!(level_str(&Level::ERROR), "error");
@@ -309,6 +343,7 @@ mod tests {
     fn session_layer_renders_declared_level_into_buffer() {
         // A dedicated buffer + a scoped subscriber: the layer should flatten the
         // payload, carry the declared (warn) level, and stamp reportedAt.
+        install_tracing_interest_floor();
         let buffer: &'static SessionLog = Box::leak(Box::new(SessionLog::default()));
         let subscriber = tracing_subscriber::registry().with(SessionLogLayer { buffer });
         tracing::subscriber::with_default(subscriber, || {

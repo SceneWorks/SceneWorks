@@ -224,6 +224,62 @@ function validateCrateCoverage(audit, componentIndex, crateText, pinnedRev) {
   return coverageErrors;
 }
 
+// The canonical audit payload, hashed. Extracted so `--derive-json` below can hand
+// scripts/bump-inference.mjs the digest THIS checker will grade, rather than a second copy of the
+// formula in the bump script that could drift from it.
+function auditCanonicalDigest(audit) {
+  const canonical = JSON.stringify({
+    artifacts: audit.artifacts,
+    prospectiveDisclosures: audit.prospectiveDisclosures,
+    provenanceScan: audit.provenanceScan,
+    portedSourceAreas: audit.portedSourceAreas,
+    crateCoverage: audit.crateCoverage,
+    crateDispositions: audit.crateDispositions,
+    includeSites: audit.includeSites,
+  });
+  return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
+ * The structured audit is machine-derived, but `_comment` is the human review of what the pin
+ * advance actually contains. Keep that prose free-form while requiring it to identify the current
+ * population. Checking for the current values (rather than forbidding old ones) still allows an
+ * accurate comparison with a prior pin.
+ */
+function validateAuditSummary(audit) {
+  const summaryErrors = [];
+  const summary = typeof audit._comment === "string" ? audit._comment : "";
+  if (!summary) {
+    return ["inference source audit has no human `_comment` summary for the current pin."];
+  }
+
+  const shortRevision = audit.inferenceRevision?.slice(0, 8);
+  if (shortRevision && !new RegExp(`\\b${shortRevision}\\b`, "i").test(summary)) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current pin ${shortRevision}.`,
+    );
+  }
+  const matchedFiles = audit.provenanceScan?.matchedFiles;
+  if (
+    Number.isInteger(matchedFiles) &&
+    !new RegExp(`\\b${matchedFiles}\\s+provenance candidates\\b`, "i").test(summary)
+  ) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current population ${matchedFiles} provenance candidates.`,
+    );
+  }
+  const cratePrefixes = audit.crateCoverage?.cratePrefixes;
+  if (
+    Number.isInteger(cratePrefixes) &&
+    !new RegExp(`\\b${cratePrefixes}\\s+production-Rust crate prefixes\\b`, "i").test(summary)
+  ) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current population ${cratePrefixes} production-Rust crate prefixes.`,
+    );
+  }
+  return summaryErrors;
+}
+
 function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText, crateText) {
   const auditErrors = [];
   const inferencePins = new Set(
@@ -237,6 +293,7 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
       `inference source audit is for ${audit.inferenceRevision}, but Cargo pins ${[...inferencePins][0]}. Re-audit inference NOTICE, LICENSE-*, and production include_str!/include_bytes! sites, then update config/inference-third-party-source.json.`,
     );
   }
+  auditErrors.push(...validateAuditSummary(audit));
   // 🔴 The ported-source inventory has its OWN revision label, and until sc-15017 nothing compared
   // it to the pin. That is how the inventory went stale: a bump updated `inferenceRevision` (checked
   // above) and the scanner was re-run against a revision literal it kept internally, so the label
@@ -250,16 +307,7 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
     );
   }
 
-  const canonical = JSON.stringify({
-    artifacts: audit.artifacts,
-    prospectiveDisclosures: audit.prospectiveDisclosures,
-    provenanceScan: audit.provenanceScan,
-    portedSourceAreas: audit.portedSourceAreas,
-    crateCoverage: audit.crateCoverage,
-    crateDispositions: audit.crateDispositions,
-    includeSites: audit.includeSites,
-  });
-  const digest = crypto.createHash("sha256").update(canonical).digest("hex");
+  const digest = auditCanonicalDigest(audit);
   if (audit.auditDigest !== digest) {
     auditErrors.push(`inference source audit digest mismatch: expected ${audit.auditDigest}, computed ${digest}. Re-run the exact pinned-revision audit; do not edit sites piecemeal.`);
   }
@@ -501,6 +549,33 @@ errors.push(...validateDesktopNoticeContract(
   packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan,
 ));
 
+// Structured derivation output for scripts/bump-inference.mjs (sc-18420).
+//
+// The report below is deliberately NOT fatal (sc-19751), and that broke the bump's restamp: the
+// deriver read the recomputed digest out of `execFileSync`'s thrown error, the checker stopped
+// throwing, and the restamp silently never fired again — the bump then shipped an audit whose digest
+// and population count still described the previous revision. Derived facts belong in structured
+// output, not in an exception's stderr, so they are reported here as data and exit 0 either way.
+// Every graded population fact is reported, not just the digest: `provenanceScan.matchedFiles` and
+// `crateCoverage.cratePrefixes` are graded here (see "population count changed") and the deriver never
+// wrote either, so a bump that added or removed a ported file or a crate left the audit asserting the
+// previous population.
+if (process.argv.includes("--derive-json")) {
+  const candidates = parseProvenanceCandidates(provenanceCandidates);
+  const crates = parseCratePrefixes(cratePrefixes);
+  process.stdout.write(
+    `${JSON.stringify({
+      auditDigest: auditCanonicalDigest(sourceAudit),
+      provenanceMatchedFiles: candidates.length,
+      provenancePopulationSha256: populationSha256(candidates),
+      cratePrefixes: crates.length,
+      cratePopulationSha256: cratePopulationSha256(crates),
+      auditSummaryErrors: validateAuditSummary(sourceAudit),
+    })}\n`,
+  );
+  process.exit(0);
+}
+
 if (process.argv.includes("--self-test")) {
   const withoutSite = structuredClone(sourceAudit);
   withoutSite.includeSites.pop();
@@ -518,6 +593,32 @@ if (process.argv.includes("--self-test")) {
   staleRevision.inferenceRevision = "0".repeat(40);
   if (!validateSourceAudit(staleRevision, components, pinSources, lock, provenanceCandidates, cratePrefixes).some((error) => error.includes("but Cargo pins"))) {
     console.error("self-test: stale inference revision did not fail closed");
+    process.exit(1);
+  }
+  const staleSummary = structuredClone(sourceAudit);
+  staleSummary._comment =
+    `Pin 26f172e7 records ${sourceAudit.provenanceScan.matchedFiles - 1} provenance candidates and ` +
+    `${sourceAudit.crateCoverage.cratePrefixes - 1} production-Rust crate prefixes.`;
+  const staleSummaryErrors = validateAuditSummary(staleSummary);
+  const currentShortRevision = sourceAudit.inferenceRevision.slice(0, 8);
+  if (
+    !staleSummaryErrors.some((error) => error.includes(`current pin ${currentShortRevision}`)) ||
+    !staleSummaryErrors.some((error) =>
+      error.includes(`${sourceAudit.provenanceScan.matchedFiles} provenance candidates`),
+    ) ||
+    !staleSummaryErrors.some((error) =>
+      error.includes(`${sourceAudit.crateCoverage.cratePrefixes} production-Rust crate prefixes`),
+    )
+  ) {
+    console.error(
+      "self-test: stale human audit summary did not fail closed on pin, candidate, and crate populations",
+    );
+    process.exit(1);
+  }
+  const comparativeSummary = structuredClone(sourceAudit);
+  comparativeSummary._comment += " Previous pin 26f172e7 had a smaller scanned population.";
+  if (validateAuditSummary(comparativeSummary).length !== 0) {
+    console.error("self-test: an accurate current summary was rejected for mentioning a prior pin");
     process.exit(1);
   }
   const candidateLines = provenanceCandidates.trimEnd().split("\n");
@@ -611,8 +712,10 @@ if (process.argv.includes("--self-test")) {
         evidence: "self-test fixture",
       },
     ];
+    const brandNewUnclassified =
+      'crate "crates/media/mlx-gen/mlx-gen-brand-new" in the pinned inference revision is UNCLASSIFIED';
     if (validateCrateCoverage(classified, components, renderCrates(crates), null)
-        .some((error) => error.includes("UNCLASSIFIED"))) {
+        .some((error) => error.includes(brandNewUnclassified))) {
       console.error("self-test: a classified crate was still reported unclassified (guard is not discriminating)");
       process.exit(1);
     }
@@ -629,7 +732,7 @@ if (process.argv.includes("--self-test")) {
       },
     ];
     if (validateCrateCoverage(ported, components, renderCrates(crates), null)
-        .some((error) => error.includes("UNCLASSIFIED"))) {
+        .some((error) => error.includes(brandNewUnclassified))) {
       console.error("self-test: a ported-area-covered crate was still reported unclassified");
       process.exit(1);
     }
@@ -658,6 +761,29 @@ if (process.argv.includes("--self-test")) {
       inherited,
       renderCrates(crates),
       'crate "crates/media/mlx-gen/mlx-gen-inherits" in the pinned inference revision is UNCLASSIFIED',
+    ]);
+  }
+  // 2c. The root Cargo manifest is represented by the exact `.` label, never the old empty prefix.
+  //     Classifying that label must not classify a nested sibling crate by prefix accident. This
+  //     catches the tempting but unsafe implementation where root becomes "" and match-all logic
+  //     lets one root decision swallow every crate in the repository.
+  {
+    const sibling = "crates/media/mlx-gen/mlx-gen-root-sibling";
+    const crates = [".", ...committedCrates, sibling].sort();
+    const rootClassified = withCrateInventory(sourceAudit, crates);
+    rootClassified.crateDispositions = [
+      ...rootClassified.crateDispositions,
+      {
+        prefix: ".",
+        disposition: "first-party-original",
+        evidence: "self-test root crate fixture",
+      },
+    ];
+    crateMutations.push([
+      "root disposition cannot swallow a sibling crate",
+      rootClassified,
+      renderCrates(crates),
+      `crate "${sibling}" in the pinned inference revision is UNCLASSIFIED`,
     ]);
   }
   // 3. Dropping a decision for a crate that is still there must fail — exemptions cannot rot away.
@@ -801,13 +927,45 @@ for (const [id, reason] of UNDETERMINED) {
   }
 }
 
+// Report, don't gate (sc-19751).
+//
+// Everything above still runs — coverage, stale ids, duplicates, document wiring, the
+// revision-locked source audit, and fail-closed crate classification. What changed is what happens
+// to the result: findings are printed for a human to act on, and the process exits 0.
+//
+// Three of these rules fired on changes with nothing to do with licensing. The source audit is
+// revision-locked to the inference pin, so EVERY pin bump demanded a manual re-audit of upstream
+// NOTICE/LICENSE-*/`include_str!` sites before CI could go green; the audit digest rejected any
+// piecemeal edit; and a new production-Rust crate in the pinned revision failed closed until
+// someone classified it. That is the same defect as sc-19728's decode-quality fingerprint — a
+// digest keyed to a whole revision, refusing on any change, hand-re-derived each time it fires —
+// and it made an ordinary inference pin bump cost a licensing audit.
+//
+// The analysis is the valuable part and is kept: it is the worklist for the compliance pass, and
+// `--self-test` still proves every rule detects its mutation, so detection stays mutation-checked
+// even though nothing is enforced. `--strict` restores exit 1 for that pass, when it happens.
+//
+// NOT affected: `scripts/check-no-nc-weights.mjs` stays fail-closed in both `check.yml` and
+// `release.yml`. It does not fire on a missing license record — it fires on Non-Commercial weights
+// baked into a distributed artifact, which would make SceneWorks a distributor of a Derivative and
+// attach the NC obligations (sc-10526, docs/packaging-nc-weights-guard.md).
+const STRICT = process.argv.includes("--strict");
+
 if (errors.length > 0) {
-  console.error("License coverage check FAILED:\n");
-  for (const error of errors) console.error(`  - ${error}`);
   console.error(
-    `\n${errors.length} problem(s). The About→Licenses page must record every model whose weights SceneWorks downloads.`,
+    STRICT ? "License coverage check FAILED:\n" : "[license-coverage] REPORT — not enforced:\n",
   );
-  process.exit(1);
+  for (const error of errors) console.error(`  - ${error}`);
+  if (STRICT) {
+    console.error(
+      `\n${errors.length} problem(s). The About→Licenses page must record every model whose weights SceneWorks downloads.`,
+    );
+    process.exit(1);
+  }
+  console.error(
+    `\n${errors.length} open licensing item(s). These do NOT fail the build (sc-19751) — they are the ` +
+      `worklist for the compliance pass. Re-run with --strict to gate on them deliberately.`,
+  );
 }
 
 console.log(

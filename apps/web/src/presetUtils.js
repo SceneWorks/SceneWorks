@@ -215,8 +215,9 @@ export function loraMatchesModel(lora, model) {
     return false;
   }
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
-  // deployment can honour it — currently a Mage-Flow full fine-tune, whose native single-file
-  // loaders deliberately reject inference adapters, or a future backend-specific deployment gap.
+  // deployment can honour it — a Mage-Flow full fine-tune, whose native single-file loaders
+  // deliberately reject inference adapters, or a ComfyUI Qwen-Image tree whose registered
+  // provider accepts the imported transformer assembly but advertises no adapter format.
   // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
   // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
   // branch below and keep offering every LoRA — a selection the API now 400s on. The models the
@@ -242,7 +243,62 @@ export function loraMatchesModel(lora, model) {
   if (!modelFamilies.length) {
     return true;
   }
-  return families.length > 0 && families.some((family) => modelFamilies.includes(family));
+  if (!families.some((family) => modelFamilies.includes(family))) {
+    return false;
+  }
+  // The DECLARED-PARTITION gate (sc-19563), mirroring `validate_lora_specs_for_model`'s. A LoRA
+  // may name the exact model ids it is for, which is the case `family` cannot express: MiniMax-H3's
+  // `minimax_h3` and `minimax_h3_ref` are one architecture and one family, so the family test above
+  // passes both ways, and lightx2v's fl2v and ref2v turbo adapters are distilled for one partition
+  // each. Without this the picker keeps offering the mismatched adapter and the API 400s on it —
+  // the dead-end selection the sc-10509 comment above describes.
+  //
+  // Absent `modelIds` means family gating alone, so no existing LoRA is affected. Gated on the
+  // model actually having an id: with no model selected there is nothing to compare against, and
+  // the permissive branch above already covers that case.
+  const declaredModelIds = loraModelIds(lora);
+  if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
+    return false;
+  }
+  // LTX-2.3 and LTX-2.5 deliberately keep one architecture family for routing, but their adapter
+  // contracts are not interchangeable. Training/import outputs record `baseModel`; mirror the API
+  // gate so a 2.3 output is never offered in the 2.5 picker (or vice versa), and fail closed for an
+  // unstamped family-only adapter on 2.5. Eros is the same 2.3 backbone.
+  const trainedBase = lora?.baseModel ?? lora?.base_model;
+  if (
+    families.includes("ltx-video") &&
+    model?.id === "ltx_2_5" &&
+    !trainedBase &&
+    !declaredModelIds.length
+  ) {
+    return false;
+  }
+  if (families.includes("ltx-video") && trainedBase && model?.id) {
+    const ltx23 = new Set(["ltx_2_3", "ltx_2_3_eros"]);
+    return (
+      (ltx23.has(trainedBase) && ltx23.has(model.id)) ||
+      (trainedBase === "ltx_2_5" && model.id === "ltx_2_5")
+    );
+  }
+  return true;
+}
+
+// The exact model ids a LoRA declares it is for (sc-19563), or `[]` when it declares none.
+// Mirrors the API's `lora_model_ids`, including the snake_case alias an inline spec may carry.
+export function loraModelIds(lora) {
+  for (const key of ['modelIds', 'model_ids']) {
+    const raw = lora?.[key];
+    if (Array.isArray(raw)) {
+      const ids = raw
+        .filter((id) => typeof id === 'string')
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (ids.length) {
+        return ids;
+      }
+    }
+  }
+  return [];
 }
 
 // Resolve an edit-capable model whose family matches the asset's generating model.
@@ -381,17 +437,21 @@ export function presetLoraId(presetLora) {
   return typeof presetLora === "string" ? presetLora : presetLora?.id ?? presetLora?.loraId;
 }
 
-// Krea 2's distilled, CFG-free Turbo attenuates Raw-trained LoRAs (sc-7579 / sc-7932): the generic
-// 0.8 default under-expresses on the few-step student, so a krea-2-family LoRA defaults to a higher
-// apply weight (real-weight-validated coherent through scale 4). This is still a DEFAULT — an explicit
-// preset weight, a stored `defaultWeight`, or the LoRA's own `weight` still wins. Family token is the
-// normalized form (`normalizeLoraFamily`: krea_2 → krea-2).
-const KREA_LORA_DEFAULT_WEIGHT = 1.5;
+// The apply weight a LoRA starts at when nothing explicit is recorded for it — ONE neutral 1.0 for
+// every family. There is deliberately no per-family table: the sole exception used to be krea-2 at
+// 1.5 (sc-7579 / sc-7932 — Krea 2's distilled, CFG-free Turbo attenuates Raw-trained LoRAs), which
+// overshot in practice and landed fresh picks over-applied. A model that genuinely wants a
+// different starting point should ship `defaultWeight` on the LoRA's own manifest entry rather than
+// reintroduce a family branch here.
+//
+// ⚠️ Mirrored by the API's `DEFAULT_LORA_WEIGHT` (apps/rust-api/src/recipe_presets.rs); the two MUST
+// agree or a preset applies at a weight the studio never showed. This is still a DEFAULT — an
+// explicit preset weight, a stored `defaultWeight`, or the LoRA's own `weight` still wins.
+const DEFAULT_LORA_WEIGHT = 1.0;
 
 export function loraWeight(lora, presetLora = {}) {
-  const fallback = loraFamilies(lora).includes("krea-2") ? KREA_LORA_DEFAULT_WEIGHT : 0.8;
-  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? fallback);
-  return Number.isFinite(value) ? value : fallback;
+  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? DEFAULT_LORA_WEIGHT);
+  return Number.isFinite(value) ? value : DEFAULT_LORA_WEIGHT;
 }
 
 // Resolve a preset's declared LoRAs into [{ id, weight }] entries ready to seed into the

@@ -586,7 +586,7 @@ async fn download_snapshot_resumes_existing_partial_blob() {
     };
     let mut progress = DownloadProgress::new(
         "owner/model",
-        4,
+        0,
         snapshot.total_bytes(),
         Duration::from_secs(3600),
     );
@@ -636,7 +636,7 @@ async fn download_snapshot_fresh_retry_discards_partial_blob() {
     };
     let mut progress = DownloadProgress::new(
         "owner/model",
-        3,
+        0,
         snapshot.total_bytes(),
         Duration::from_secs(3600),
     );
@@ -2045,4 +2045,439 @@ async fn resolve_follows_tree_pagination_across_pages() {
         vec!["q8/unet/model.safetensors"],
         "the q8 file from page 2 must be resolved (pagination followed)"
     );
+}
+
+// ---- sc-20636: managed model import is transactional end to end -----------------------------
+
+/// An API stub that always reports the job as cancelled, so `check_cancel` trips on the import
+/// job's first poll.
+async fn spawn_cancelling_job_stub() -> String {
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(_body): Json<Value>,
+    ) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat_route));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+/// A minimal single-file Krea 2 native DiT the base-weight detector and the checkpoint inspector
+/// both recognise, with deterministic bytes.
+fn write_krea_native_safetensors(path: &std::path::Path, fill: u8) {
+    let entries = [
+        ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+        ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+        ("model.diffusion_model.first.weight", "BF16"),
+    ];
+    let mut header = serde_json::Map::new();
+    let mut offset = 0_u64;
+    for (name, dtype) in entries {
+        header.insert(
+            name.to_owned(),
+            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + 2]}),
+        );
+        offset += 2;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).expect("header serializes");
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, fill);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir creates");
+    std::fs::write(path, bytes).expect("fixture writes");
+}
+
+fn sha256_hex(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(path).expect("fixture reads"));
+    format!("{:x}", hasher.finalize())
+}
+
+struct ManagedImportFixture {
+    _temp: tempfile::TempDir,
+    settings: Settings,
+    source: PathBuf,
+    install_dir: PathBuf,
+    manifest_path: PathBuf,
+    model_id: String,
+}
+
+async fn managed_import_fixture(base_url: String) -> ManagedImportFixture {
+    managed_import_fixture_with_id(base_url, "managed_krea").await
+}
+
+async fn managed_import_fixture_with_id(
+    base_url: String,
+    model_id: &str,
+) -> ManagedImportFixture {
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.data_dir = temp.path().join("data");
+    settings.config_dir = temp.path().join("config");
+    let manifests = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).expect("manifest dir creates");
+    let manifest_path = manifests.join("user.models.jsonc");
+    std::fs::write(&manifest_path, r#"{ "schemaVersion": 1, "models": [] }"#)
+        .expect("manifest writes");
+    let source = settings.data_dir.join("models/incoming/kreamania.safetensors");
+    write_krea_native_safetensors(&source, 0x5a);
+    let install_dir = settings
+        .data_dir
+        .join("models/imports")
+        .join(model_id);
+    ManagedImportFixture {
+        _temp: temp,
+        settings,
+        source,
+        install_dir,
+        manifest_path,
+        model_id: model_id.to_owned(),
+    }
+}
+
+impl ManagedImportFixture {
+    fn job(&self, expected_sha256: Option<&str>) -> JobSnapshot {
+        let mut job_json = job_snapshot_json("job-1", false);
+        job_json["type"] = json!("model_import");
+        job_json["payload"] = json!({
+            "modelId": self.model_id,
+            "modelName": "Managed Krea",
+            "sourcePath": self.source.to_str().expect("utf-8 source"),
+            "targetDir": self.install_dir.to_str().expect("utf-8 target"),
+            "manifestPath": self.manifest_path.to_str().expect("utf-8 manifest"),
+            "expectedSha256": expected_sha256,
+            "ownershipMode": "managed",
+            "importProvenance": {
+                "source": "civitai",
+                "reference": "modelVersion/9931",
+                "url": "https://civitai.com/api/download/models/9931?type=Model",
+                "versionId": "9931",
+                "fileId": "40277",
+                "credentialHost": "civitai.com"
+            },
+            "manifestEntry": {
+                "id": self.model_id,
+                "name": "Managed Krea",
+                "type": "image",
+                "family": "krea_2",
+                "source": {
+                    "provider": "civitai",
+                    "path": format!("models/imports/{}", self.model_id),
+                },
+            },
+        });
+        serde_json::from_value(job_json).expect("job deserializes")
+    }
+
+    fn manifest_entry(&self) -> Option<Value> {
+        let raw = std::fs::read_to_string(&self.manifest_path).expect("manifest reads");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&raw))
+                .expect("manifest parses");
+        parsed
+            .get("models")?
+            .as_array()?
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(self.model_id.as_str()))
+            .cloned()
+    }
+
+    /// The invariant a refused import must satisfy: nothing installed, nothing in the manifest,
+    /// nothing in the checkpoint store, and no staging left behind.
+    fn assert_nothing_installed(&self, context: &str) {
+        assert!(
+            !self.install_dir.exists(),
+            "{context}: a partial install survived at {}",
+            self.install_dir.display()
+        );
+        assert!(
+            self.manifest_entry().is_none(),
+            "{context}: a manifest entry was written for a refused import"
+        );
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &self.settings.data_dir,
+        );
+        assert!(
+            store
+                .record(&format!("managed/{}", self.model_id))
+                .is_err(),
+            "{context}"
+        );
+        assert_eq!(
+            store.inventory().map(|inventory| inventory.records.len()),
+            Ok(0),
+            "{context}"
+        );
+        let staging = store.staging_root().join(&self.model_id);
+        assert!(!staging.exists(), "{context}: staging survived");
+        assert!(
+            self.source.is_file(),
+            "{context}: the user's own source file must never be touched"
+        );
+    }
+}
+
+/// AC1 + AC2 + AC3: a legacy-shaped local-copy import runs through the transactional managed path,
+/// commits atomically, publishes a resolvable plan, and stamps the manifest entry so the install is
+/// selectable through the plan route.
+#[tokio::test]
+async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
+    let _env = isolate_hf_cache();
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture(base_url).await;
+    let expected = sha256_hex(&fixture.source);
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    // A LINKED twin of the very bytes about to be imported, compiled before the import runs. The
+    // compile reports it as a duplicate; neither copy is ever deleted, because keeping both is a
+    // legitimate choice. Which makes it the user's decision — so it has to reach the user, and a
+    // `tracing::info!` never does (sc-20636 review).
+    let library = fixture.source.parent().expect("source has a parent");
+    let twin_store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    let root = twin_store
+        .approve_root(library)
+        .expect("the incoming dir approves as a library root");
+    let twin = twin_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .expect("a linked twin compiles");
+
+    super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &fixture.job(Some(&expected)),
+    )
+    .await
+    .expect("a valid managed import succeeds");
+
+    // The duplicate is on the JOB RESULT, naming the checkpoint the user already has.
+    let completed = posts
+        .lock()
+        .expect("posts lock")
+        .iter()
+        .rev()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("completed"))
+        .cloned()
+        .expect("the import posts a completed update");
+    assert_eq!(
+        completed["result"]["duplicateCheckpointIds"],
+        json!([twin.checkpoint_id]),
+        "the import must report the checkpoint the user already has: {completed}"
+    );
+    // ...and both copies survive: reporting is never acting.
+    assert!(fixture.install_dir.join("kreamania.safetensors").is_file());
+    assert!(twin_store.resolve(&twin.checkpoint_id).is_ok());
+
+    // Committed: the install is at the path imported models have always occupied.
+    assert!(fixture.install_dir.join("kreamania.safetensors").is_file());
+    assert_eq!(sha256_hex(&fixture.install_dir.join("kreamania.safetensors")), expected);
+    assert!(fixture.source.is_file(), "a local copy never moves the user's file");
+
+    // Published: the plan resolves and re-verifies, and its locator is MANAGED with provenance.
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+    let resolved = store
+        .resolve("managed/managed_krea")
+        .expect("the published plan resolves");
+    assert_eq!(resolved.family(), "krea_2");
+    let sceneworks_core::checkpoint_import::SourceLocatorV1::Managed {
+        install_id,
+        sha256,
+        provenance,
+        ..
+    } = &resolved.plan.layers[0].source
+    else {
+        panic!("a managed import must compile managed locators");
+    };
+    assert_eq!(install_id, "managed_krea");
+    assert_eq!(sha256, &expected);
+    assert_eq!(provenance.source, "civitai");
+    assert_eq!(provenance.version_id.as_deref(), Some("9931"));
+    assert_eq!(provenance.credential_host.as_deref(), Some("civitai.com"));
+
+    // Bound: the manifest entry carries the checkpoint identity the plan route resolves through,
+    // beside the installed path its family's bespoke lane still uses.
+    let entry = fixture.manifest_entry().expect("the import writes a manifest entry");
+    assert_eq!(entry["importPlan"]["checkpointId"], json!("managed/managed_krea"));
+    assert_eq!(entry["importSourceShape"], json!("transformer_file"));
+    assert_eq!(
+        entry["paths"]["model"],
+        json!(std::fs::canonicalize(&fixture.install_dir)
+            .expect("install dir canonicalizes")
+            .display()
+            .to_string()),
+        "the entry keeps the installed path its family's bespoke lane loads from"
+    );
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(
+            entry.as_object().expect("entry is an object")
+        ),
+        Some("managed/managed_krea")
+    );
+
+    // Nothing is left staged.
+    assert!(!store.staging_root().join("managed_krea").exists());
+}
+
+/// sc-11045 (minor f): an install committed under a REGISTERED managed variant's id is confirmed
+/// against that registration, and a mismatch fails the job.
+///
+/// `ManagedCheckpointVariantV1::confirm_installed` — including the `size_bytes` comparison its own
+/// doc comment calls the reason the field is not decorative — had no production caller at all. The
+/// registered size is what a client renders as "how much will this download"; with nothing reading
+/// it, it could drift arbitrarily far from the pinned artifact with nothing red anywhere.
+///
+/// The fixture's bytes are a few hundred, not the pinned 7.6 GB, so both the digest and the size
+/// disagree with the registration. The import's OWN integrity check passes (the job declares the
+/// digest of the bytes it is actually importing), so the refusal below can only come from the
+/// registration confirmation.
+///
+/// Failing mutation (run): delete the `if let Some(variant) = managed_nvfp4_variant(...)` block
+/// after the commit in `run_model_import_job`. The job then completes and records a curated
+/// variant's identity over bytes the registration does not describe.
+#[tokio::test]
+async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_registration() {
+    let _env = isolate_hf_cache();
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let variant_id = "nvfp4-krea-2-turbo";
+    assert!(
+        sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant(variant_id).is_some(),
+        "fixture check: the id under test is a registered variant"
+    );
+    let fixture = managed_import_fixture_with_id(base_url, variant_id).await;
+    // The digest of the bytes actually being imported, so the ingest's own verification PASSES and
+    // the only thing left to refuse is the registration mismatch.
+    let expected = sha256_hex(&fixture.source);
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &fixture.job(Some(&expected)),
+    )
+    .await
+    .expect("a registration mismatch fails the job rather than erroring the worker");
+
+    let posts = posts.lock().expect("posts lock");
+    let failure = posts
+        .iter()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("failed"))
+        .unwrap_or_else(|| panic!("expected a failed progress post, got {posts:?}"));
+    let detail = failure
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a failed import must carry an error detail: {failure:?}"));
+    assert!(
+        detail.contains("managed variant's registration"),
+        "the failure must name the registration confirmation, got {detail:?}"
+    );
+    assert!(
+        detail.contains("[managed-variant]"),
+        "and carry the registry's typed diagnostic, got {detail:?}"
+    );
+    // The manifest never records the curated identity over bytes the registration does not describe.
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "a refused confirmation must not leave a manifest entry: {detail:?}"
+    );
+}
+
+/// AC1: a hash-mismatched ingest leaves no runnable partial install — no install directory, no
+/// manifest entry, no plan, no catalog record — AND the terminal failure it reports NAMES the
+/// digest mismatch. "Nothing installed" alone is satisfied by any failure whatsoever (a 404, a
+/// panic in the compiler, a disk error), so without the message assertions this test would pass
+/// for a refusal that never checked a digest at all.
+#[tokio::test]
+async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
+    let _env = isolate_hf_cache();
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture(base_url).await;
+    // The digest the ingest will actually compute over the bytes it staged, derived here from the
+    // source file itself rather than restated — the declared digest below is deliberately not it.
+    let actual = sha256_hex(&fixture.source);
+    let declared = "a".repeat(64);
+    assert_ne!(actual, declared, "the fixture must really mismatch");
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &fixture.job(Some(&declared)))
+        .await
+        .expect("a hash mismatch fails the job rather than erroring the worker");
+
+    fixture.assert_nothing_installed("hash mismatch");
+
+    let posts = posts.lock().expect("posts lock");
+    let failure = posts
+        .iter()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("failed"))
+        .unwrap_or_else(|| panic!("expected a failed progress post, got {posts:?}"));
+    let detail = failure
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a failed import must carry an error detail: {failure:?}"));
+    assert!(
+        detail.contains("integrity check"),
+        "the failure must name the integrity check, got {detail:?}"
+    );
+    // Both digests, so the operator can see WHICH bytes arrived and what was expected.
+    assert!(
+        detail.contains(&actual),
+        "the failure must name the digest actually computed ({actual}), got {detail:?}"
+    );
+    assert!(
+        detail.contains(&declared),
+        "the failure must name the declared digest ({declared}), got {detail:?}"
+    );
+}
+
+/// AC1: a cancelled ingest leaves no runnable partial install. The cancel arrives through the same
+/// `check_cancel` the transfer already polls, and the staging session's destructor is what makes it
+/// leave nothing behind.
+#[tokio::test]
+async fn a_cancelled_managed_import_leaves_no_partial_install() {
+    let _env = isolate_hf_cache();
+    let base_url = spawn_cancelling_job_stub().await;
+    let fixture = managed_import_fixture(base_url).await;
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    let error = super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &fixture.job(None),
+    )
+    .await
+    .expect_err("a cancelled import stops the job");
+    assert!(
+        matches!(error, WorkerError::Canceled(_)),
+        "expected a cancellation, got {error:?}"
+    );
+
+    fixture.assert_nothing_installed("cancel");
 }

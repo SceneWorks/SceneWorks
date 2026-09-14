@@ -85,11 +85,11 @@ fn download_stall_timeout() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-use download_lock::DownloadLock;
+pub(crate) use download_lock::DownloadLock;
 
 mod download_lock {
     use super::{task_join_error, WorkerError, WorkerResult};
-    use fs2::FileExt as _;
+    use sceneworks_core::file_lock::FileLock;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -113,7 +113,10 @@ mod download_lock {
     /// the size check when no sha256 is available. The lock releases when the
     /// underlying handle drops. Mirrors `manifest::ManifestLock`.
     pub(crate) struct DownloadLock {
-        _file: std::fs::File,
+        /// A [`FileLock`], not a bare handle: the release is an explicit `LOCK_UN`, because
+        /// `close(2)` alone leaves the lock held while any forked child still references the same
+        /// open file description (sc-22738).
+        _lock: FileLock,
     }
 
     impl DownloadLock {
@@ -125,7 +128,7 @@ mod download_lock {
             if let Some(parent) = lock_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let file = std::fs::OpenOptions::new()
+            let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .read(true)
                 .write(true)
@@ -138,9 +141,10 @@ mod download_lock {
             // (same posture as `manifest::ManifestLock`, sc-8843).
             let contended = fs2::lock_contended_error().raw_os_error();
             loop {
-                match file.try_lock_exclusive() {
-                    Ok(()) => return Ok(Self { _file: file }),
-                    Err(error) if error.raw_os_error() == contended => {
+                match FileLock::try_exclusive_retryable(file) {
+                    Ok(lock) => return Ok(Self { _lock: lock }),
+                    Err((handle, error)) if error.raw_os_error() == contended => {
+                        file = handle;
                         if Instant::now() >= deadline {
                             return Err(WorkerError::Io(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
@@ -152,7 +156,7 @@ mod download_lock {
                         }
                         std::thread::sleep(DOWNLOAD_LOCK_POLL);
                     }
-                    Err(error) => return Err(error.into()),
+                    Err((_handle, error)) => return Err(error.into()),
                 }
             }
         }
@@ -184,6 +188,7 @@ mod download_lock {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use fs2::FileExt as _;
 
         /// sc-8900 / F-098: two holders of the same target's download lock are
         /// mutually exclusive — the second `try_lock_exclusive` sees contention while
@@ -223,6 +228,39 @@ mod download_lock {
             // A DIFFERENT target never contends with the first.
             let other = dir.path().join("weights").join("other.safetensors");
             let _first_other = DownloadLock::acquire(&other).expect("distinct target locks");
+        }
+
+        /// sc-22738: a released download lock must be free IMMEDIATELY, even while a descriptor
+        /// this process handed to a child still references the same open file description.
+        /// `flock(2)` locks live on the open file description, so a close-only release only takes
+        /// effect once every such reference is gone — and this pool forks constantly. The probe is
+        /// the non-blocking primitive, not `acquire`, so the failure is an assertion rather than a
+        /// one-hour spin-wait.
+        #[test]
+        fn a_released_download_lock_is_free_even_while_an_inherited_descriptor_survives() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join("weights").join("model.safetensors");
+
+            let held = DownloadLock::acquire(&target).expect("lock acquires");
+            let inherited = held
+                ._lock
+                .inherited_descriptor()
+                .expect("descriptor duplicates");
+            drop(held);
+
+            let probe = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(download_lock_path(&target))
+                .expect("probe opens lock file");
+            assert!(
+                probe.try_lock_exclusive().is_ok(),
+                "a download lock released by its owner must not stay held by an inherited \
+                 descriptor"
+            );
+            drop(inherited);
         }
 
         /// The lock file is a `.download.lock` sibling of the target (per-file scope),
@@ -466,6 +504,221 @@ pub(crate) async fn ensure_hf_cached_file(
         snapshot_file.sha256.as_deref(),
     )
     .await
+}
+
+/// Resolve one Hugging Face file into `target` without ever exposing an in-progress
+/// transfer at that path. The stable `<target>.partial` sibling is the resumable
+/// transfer state; only a file that has passed the source's size/digest checks is
+/// atomically renamed into the caller-visible cache entry.
+///
+/// This is intentionally separate from [`ensure_hf_cached_file`]. Most legacy
+/// first-use caches predate this publication contract and still use their target as
+/// their resumable state. Imported SDXL components are loader inputs shared by
+/// concurrent jobs, so a destination-path cache hit must be verified rather than
+/// inferred from `is_file()` (sc-21689).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn ensure_hf_cached_file_atomically(
+    context: &DownloadContext<'_>,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    target: &Path,
+) -> WorkerResult<PathBuf> {
+    let snapshot = HuggingFaceSnapshot::resolve(
+        context.client,
+        context.settings,
+        repo,
+        revision,
+        &[file.to_owned()],
+    )
+    .await?;
+    let Some(snapshot_file) = snapshot
+        .files
+        .into_iter()
+        .find(|candidate| candidate.path == file)
+    else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Hugging Face file {file} not found in {repo}."
+        )));
+    };
+    ensure_cached_file_verified_atomically(
+        context,
+        &snapshot_file.download_url,
+        target,
+        &snapshot_file.path,
+        snapshot_file.size,
+        snapshot_file.sha256.as_deref(),
+    )
+    .await
+}
+
+/// The atomic-publication variant of [`ensure_cached_file_verified`]. `target`
+/// itself is never a resumable download: retries continue from its stable
+/// [`partial_download_path`] sibling. A final cache hit is reused only after it is
+/// checked against the same size and (when available) SHA-256 identity used for a
+/// freshly downloaded file.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn ensure_cached_file_verified_atomically(
+    context: &DownloadContext<'_>,
+    url: &str,
+    target: &Path,
+    label: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> WorkerResult<PathBuf> {
+    let expected_size = match expected_size {
+        Some(size) => Some(size),
+        None => remote_content_length(context.client, url).await?,
+    };
+    let expected_sha256 = expected_sha256.and_then(normalize_sha256);
+    // Do not replace a weak `is_file()` cache hit with another weak publication.
+    // HF's tree response normally provides a size for every component and LFS adds
+    // a digest; if an upstream response provides neither, fail closed instead of
+    // claiming that arbitrary bytes are a complete imported-SDXL component.
+    if expected_size.is_none() && expected_sha256.is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{label} cannot be verified because the source declared neither a size nor a SHA-256 digest"
+        )));
+    }
+
+    // The final-target lock makes cache validation, partial promotion, and the
+    // replacement of a corrupt destination one transaction across worker processes.
+    let _target_lock = DownloadLock::acquire_async(target).await?;
+    if cached_file_matches_expected(context, target, expected_size, expected_sha256.as_deref())
+        .await?
+    {
+        return Ok(target.to_path_buf());
+    }
+
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let partial = partial_download_path(target);
+    ensure_cached_file_verified(
+        context,
+        url,
+        &partial,
+        label,
+        expected_size,
+        expected_sha256.as_deref(),
+    )
+    .await?;
+
+    // `ensure_cached_file_verified` validated the partial before returning. Sync
+    // the bytes before publication so an acknowledged promotion has durable file
+    // contents even if the process exits immediately after the rename.
+    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    promote_partial_download(&partial, target).await?;
+    sync_parent_directory(target).await?;
+    Ok(target.to_path_buf())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn partial_download_path(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".partial");
+    target.with_file_name(name)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn cached_file_matches_expected(
+    context: &DownloadContext<'_>,
+    path: &Path,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> WorkerResult<bool> {
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return Ok(false);
+    };
+    if !metadata.is_file() || expected_size.is_some_and(|expected| metadata.len() != expected) {
+        return Ok(false);
+    }
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(expected_size.is_some());
+    };
+    Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult<()> {
+    // POSIX rename replaces the prior entry atomically. Windows does not permit
+    // replacing an existing destination with `rename`, so its fallback removes
+    // only a fully verified old entry after the partial file has been synced.
+    #[cfg(not(windows))]
+    {
+        tokio::fs::rename(partial, target).await?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        remove_non_directory_file(target).await?;
+        tokio::fs::rename(partial, target).await?;
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    windows,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+async fn remove_non_directory_file(path: &Path) -> WorkerResult<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_dir() => Err(WorkerError::InvalidPayload(format!(
+            "cannot atomically publish download because {} is a directory",
+            path.display()
+        ))),
+        Ok(_) => {
+            tokio::fs::remove_file(path).await?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().map(Path::to_path_buf).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("download target {} has no parent", path.display()))
+        })?;
+        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| task_join_error("download directory sync", error))?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -973,6 +1226,9 @@ pub(crate) async fn download_snapshot(
             tokio::fs::create_dir_all(parent).await?;
         }
         let _lock = DownloadLock::acquire_async(&target_path).await?;
+        progress
+            .record_existing_file(&target_path, file.size)
+            .await?;
         download_file(
             context,
             &file.download_url,
@@ -1030,6 +1286,7 @@ pub(crate) async fn download_snapshot_into_cache(
             .unwrap_or_else(|| blob_fallback_name(&file.path));
         let blob_path = blobs_dir.join(&etag);
         let _lock = DownloadLock::acquire_async(&blob_path).await?;
+        progress.record_existing_file(&blob_path, file.size).await?;
         download_file(
             context,
             &file.download_url,
@@ -2265,6 +2522,23 @@ impl<'a> DownloadProgress<'a> {
         self.transferred_bytes = self.transferred_bytes.saturating_add(bytes);
     }
 
+    /// Add only the bytes already present for the exact snapshot file about to be handled.
+    ///
+    /// Snapshot callers used to seed `started_bytes` from the whole destination directory. That is
+    /// incorrect for filtered Hugging Face repositories: downloading `q4/*` would count cached q8,
+    /// bf16, and stale blobs in the numerator while [`HuggingFaceSnapshot::total_bytes`] contained
+    /// only q4 in the denominator. Account after taking the per-file download lock so a peer cannot
+    /// change the target between the size check and the cache-hit/resume decision.
+    async fn record_existing_file(
+        &mut self,
+        path: &Path,
+        expected_size: Option<u64>,
+    ) -> WorkerResult<()> {
+        let bytes = existing_download_bytes(path, expected_size).await?;
+        self.started_bytes = self.started_bytes.saturating_add(bytes);
+        Ok(())
+    }
+
     /// Reset the stall watchdog to "made progress just now", granting the next
     /// (re)connect a full stall window before it can be judged hung. Called at the
     /// start of each attempt so the idle gap spent re-issuing the request is not
@@ -2575,6 +2849,206 @@ mod resolve_hf_component_file_tests {
 }
 
 #[cfg(all(test, target_os = "macos"))]
+mod atomic_cache_publication_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{header::CONTENT_LENGTH, HeaderMap, Response, StatusCode},
+        routing::get,
+        Router,
+    };
+    use sha2::{Digest, Sha256};
+    use std::{sync::Arc, time::Duration};
+
+    fn test_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:1".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "sc-21689".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    async fn fixture_server(bytes: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let bytes = Arc::new(bytes);
+        let app = Router::new().route(
+            "/component",
+            get(move |headers: HeaderMap| {
+                let bytes = bytes.clone();
+                async move {
+                    let start = headers
+                        .get(reqwest::header::RANGE)
+                        .and_then(|range| range.to_str().ok())
+                        .and_then(|range| range.strip_prefix("bytes="))
+                        .and_then(|range| range.strip_suffix('-'))
+                        .and_then(|start| start.parse::<usize>().ok())
+                        .unwrap_or(0)
+                        .min(bytes.len());
+                    let partial = start > 0;
+                    let body = bytes[start..].to_vec();
+                    let mut response = Response::builder()
+                        .status(if partial {
+                            StatusCode::PARTIAL_CONTENT
+                        } else {
+                            StatusCode::OK
+                        })
+                        .header(CONTENT_LENGTH, body.len().to_string());
+                    if partial {
+                        response = response.header(
+                            reqwest::header::CONTENT_RANGE,
+                            format!("bytes {start}-{} / {}", bytes.len() - 1, bytes.len())
+                                .replace(" / ", "/"),
+                        );
+                    }
+                    response.body(Body::from(body)).expect("fixture response")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+        (format!("http://{address}/component"), task)
+    }
+
+    async fn publish_fixture(target: &Path, url: &str, bytes: &[u8]) -> WorkerResult<PathBuf> {
+        let settings = test_settings(target.parent().expect("target parent").to_path_buf());
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("fixture client");
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "sc-21689-fixture",
+            cancel_message: "fixture canceled",
+            fresh_download: false,
+        };
+        ensure_cached_file_verified_atomically(
+            &context,
+            url,
+            target,
+            "imported SDXL fixture",
+            Some(bytes.len() as u64),
+            Some(&format!("{:x}", Sha256::digest(bytes))),
+        )
+        .await
+    }
+
+    /// Required fixture: an interrupted transfer resumes from the durable partial
+    /// sibling, and never turns the target path into its transfer scratch space.
+    #[tokio::test]
+    async fn interrupted_download_resumes_from_partial_then_promotes_atomically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("tokenizer.json");
+        let bytes = b"imported SDXL component bytes".to_vec();
+        let partial = partial_download_path(&target);
+        tokio::fs::write(&partial, &bytes[..11])
+            .await
+            .expect("seed interrupted partial");
+        let (url, server) = fixture_server(bytes.clone()).await;
+
+        publish_fixture(&target, &url, &bytes)
+            .await
+            .expect("resume and promote");
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("published bytes"),
+            bytes
+        );
+        assert!(
+            !partial.exists(),
+            "the resumable scratch file is consumed only by successful promotion"
+        );
+        server.abort();
+    }
+
+    /// Required fixture: a same-size corrupt destination cannot pass as a cache hit
+    /// when the pinned source declares an identity digest.
+    #[tokio::test]
+    async fn corrupt_existing_destination_is_replaced_after_verification() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("tokenizer.json");
+        let bytes = b"verified imported SDXL bytes".to_vec();
+        let corrupt = vec![b'x'; bytes.len()];
+        tokio::fs::write(&target, corrupt)
+            .await
+            .expect("seed corrupt same-size destination");
+        let (url, server) = fixture_server(bytes.clone()).await;
+
+        publish_fixture(&target, &url, &bytes)
+            .await
+            .expect("replace corrupt cache entry");
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("published bytes"),
+            bytes
+        );
+        assert!(!partial_download_path(&target).exists());
+        server.abort();
+    }
+
+    /// A completed entry still avoids a transfer, but only after its declared
+    /// identity has been checked. The unreachable URL proves the verified cache
+    /// hit happens before any network request.
+    #[tokio::test]
+    async fn verified_existing_destination_is_reused_without_downloading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("tokenizer.json");
+        let bytes = b"already verified imported SDXL bytes".to_vec();
+        tokio::fs::write(&target, &bytes)
+            .await
+            .expect("seed verified destination");
+
+        publish_fixture(&target, "http://127.0.0.1:1/unreachable", &bytes)
+            .await
+            .expect("verified cache hit");
+        assert_eq!(tokio::fs::read(&target).await.expect("cached bytes"), bytes);
+        assert!(!partial_download_path(&target).exists());
+    }
+
+    /// Required fixture: a fresh verified download publishes only its completed
+    /// result at the destination and leaves no partial cache entry behind.
+    #[tokio::test]
+    async fn verified_download_promotes_to_destination_without_leaving_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("nested").join("tokenizer.json");
+        let bytes = b"successful imported SDXL promotion".to_vec();
+        let (url, server) = fixture_server(bytes.clone()).await;
+
+        publish_fixture(&target, &url, &bytes)
+            .await
+            .expect("fresh promotion");
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("published bytes"),
+            bytes
+        );
+        assert!(!partial_download_path(&target).exists());
+        server.abort();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod ensure_cached_file_tests {
     use super::{ensure_cached_file, DownloadContext};
     use crate::{
@@ -2773,5 +3247,37 @@ mod stall_watchdog_tests {
         assert!(progress.is_stalled(Duration::from_millis(1), DOWNLOAD_STALL_MIN_PROGRESS));
         progress.reset_stall_clock();
         assert!(!progress.is_stalled(Duration::from_secs(3600), DOWNLOAD_STALL_MIN_PROGRESS));
+    }
+}
+
+/// Snapshot progress must use the same selected-file scope as the snapshot total. In particular,
+/// another precision tier in the shared Hugging Face `blobs/` directory is not progress toward the
+/// tier currently being downloaded.
+#[cfg(test)]
+mod snapshot_progress_tests {
+    use super::DownloadProgress;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn ignores_unrelated_cached_blobs() {
+        let cache = tempfile::tempdir().expect("cache dir");
+        let selected = cache.path().join("selected-blob");
+        let unrelated = cache.path().join("unrelated-bf16-blob");
+        std::fs::write(&selected, b"q4!").expect("selected partial blob");
+        std::fs::write(&unrelated, vec![0_u8; 64]).expect("unrelated cached tier");
+
+        let mut progress =
+            DownloadProgress::new("owner/model", 0, Some(10), Duration::from_secs(5));
+        progress
+            .record_existing_file(&selected, Some(10))
+            .await
+            .expect("selected bytes are counted");
+
+        let payload = progress.payload();
+        assert!(
+            payload.message.contains("3 B of 10 B (7 B left)"),
+            "only the selected blob belongs in snapshot progress: {}",
+            payload.message
+        );
     }
 }

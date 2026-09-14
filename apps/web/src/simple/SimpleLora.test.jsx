@@ -232,8 +232,8 @@ describe("Simple studios — LoRA field", () => {
       "1 selected · installed and compatible",
     );
     expect(container.querySelector(".su-lora-add-count").textContent).toBe("· 1 available");
-    // Weight defaults to the LoRA's own default (0.8 here, via `loraWeight`).
-    expect(container.querySelector(".su-lora-weight-value").textContent).toBe("0.80");
+    // This LoRA declares no `defaultWeight`, so the slider seeds from the global 1.0 (`loraWeight`).
+    expect(container.querySelector(".su-lora-weight-value").textContent).toBe("1.00");
   });
 
   it("seeds the slider from the LoRA's declared defaultWeight", async () => {
@@ -260,7 +260,7 @@ describe("Simple studios — LoRA field", () => {
     expect(slotNames(container)).toEqual([]);
     // Re-adding starts from the LoRA's own default again, not the override we just cleared.
     await addLora(container, "Cinematic Grain 35mm");
-    expect(container.querySelector(".su-lora-weight-value").textContent).toBe("0.80");
+    expect(container.querySelector(".su-lora-weight-value").textContent).toBe("1.00");
   });
 
   it("appends a trigger keyword to the prompt when its chip is clicked", async () => {
@@ -378,7 +378,7 @@ describe("Simple studios — LoRA field", () => {
     await addLora(container, "Slow Dolly");
     await click(container.querySelector(".su-generate"));
     const request = context.createVideoJob.mock.calls[0][0];
-    expect(request.loras).toEqual([expect.objectContaining({ id: "lora_wan", weight: 0.8 })]);
+    expect(request.loras).toEqual([expect.objectContaining({ id: "lora_wan", weight: 1.0 })]);
   });
 });
 

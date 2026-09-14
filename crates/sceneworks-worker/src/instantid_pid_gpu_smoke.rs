@@ -138,7 +138,7 @@ fn base_request(w: u32, h: u32, use_pid: bool) -> InstantIdRequest {
 
 /// Detect + embed the largest face in `img` through the loaded InstantID face stack; the ArcFace
 /// embedding is the identity vector the likeness assertion compares.
-fn face_embedding(model: &InstantId, img: &Image, what: &str) -> Vec<f32> {
+fn face_embedding(model: &mut InstantId, img: &Image, what: &str) -> Vec<f32> {
     model
         .largest_face(img)
         .unwrap_or_else(|e| panic!("no detectable face in {what}: {e}"))
@@ -177,7 +177,7 @@ fn standing_skeleton() -> Vec<BodyPoint> {
 fn assert_pid_output(
     img: &Image,
     ref_embedding: &[f32],
-    model: &InstantId,
+    model: &mut InstantId,
     side: u32,
     label: &str,
     out_dir: &Path,
@@ -284,6 +284,12 @@ fn instantid_pid_gpu_smoke() {
                 ),
         )
         .expect("stage SDXL components"),
+        // Declare the two resident overlays the contract prices (epic sc-22657, E1) so this smoke
+        // loads the same composition the worker does: the OpenPose ControlNet (when the env dir is
+        // set) and the SCRFD + ArcFace dir. The `with_openpose` / `with_face` calls below re-seal
+        // onto the same composition, so the documented attach order is unchanged.
+        openpose: openpose.as_ref().map(|dir| WeightsSource::Dir(dir.clone())),
+        face_dir: Some(face_dir.clone()),
     })
     .expect("load candle InstantId");
     // Attach OpenPose (pose mode) BEFORE the face stack — the engine's documented order. Harmless for
@@ -310,7 +316,7 @@ fn instantid_pid_gpu_smoke() {
         .expect("attach pid_sdxl decoder");
 
     // Reference identity embedding — the target every output is scored against.
-    let ref_embedding = face_embedding(&model, &reference, "reference portrait");
+    let ref_embedding = face_embedding(&mut model, &reference, "reference portrait");
 
     // --- Identity: native VAE baseline (render-sized) then PiD (super-resolving) ---
     println!("[smoke] Identity native-VAE {w}x{h} ...");
@@ -320,7 +326,7 @@ fn instantid_pid_gpu_smoke() {
     let native_std = image_std(&native);
     let native_cos = cosine(
         &ref_embedding,
-        &face_embedding(&model, &native, "identity native output"),
+        &face_embedding(&mut model, &native, "identity native output"),
     );
     save_png(&native, &out_dir.join("instantid_identity_native.png"));
     println!(
@@ -348,7 +354,7 @@ fn instantid_pid_gpu_smoke() {
     assert_pid_output(
         &identity_pid,
         &ref_embedding,
-        &model,
+        &mut model,
         size,
         "identity",
         &out_dir,
@@ -365,7 +371,14 @@ fn instantid_pid_gpu_smoke() {
             &mut |_| {},
         )
         .unwrap_or_else(|e| panic!("instantid angle {angle:?} PiD generate: {e}"));
-    assert_pid_output(&angle_pid, &ref_embedding, &model, size, "angle", &out_dir);
+    assert_pid_output(
+        &angle_pid,
+        &ref_embedding,
+        &mut model,
+        size,
+        "angle",
+        &out_dir,
+    );
 
     // --- Poses: COCO-18 body skeleton + OpenPose CN, PiD decode (only when OpenPose was attached) ---
     if openpose.is_some() {
@@ -379,7 +392,14 @@ fn instantid_pid_gpu_smoke() {
                 &mut |_| {},
             )
             .expect("instantid pose PiD generate");
-        assert_pid_output(&pose_pid, &ref_embedding, &model, size, "pose", &out_dir);
+        assert_pid_output(
+            &pose_pid,
+            &ref_embedding,
+            &mut model,
+            size,
+            "pose",
+            &out_dir,
+        );
     }
 
     println!(

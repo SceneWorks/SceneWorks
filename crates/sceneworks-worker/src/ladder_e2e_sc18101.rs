@@ -48,18 +48,17 @@ use crate::mlx_fit_gate::{MlxRequestInputs, MlxRequestPlan};
 // ---------------------------------------------------------------------------------------------
 // The margins, taken FROM the policy rather than restated (sc-18101 review #4).
 //
-// Every margin-shaped literal in this file is derived from these two constants: the arithmetic
-// (`1.0 + …`) and the tracing substrings (`estimate_margin={…}`) alike. Editing a policy constant
-// therefore changes what these scenarios assert, instead of leaving them asserting a margin nobody
-// ships. `margin_substrings_match_the_emitted_tracing` pins the one step the compiler cannot check:
-// that `{}`-formatting a constant reproduces the token `tracing` actually writes.
+// sc-22508 retired the blanket per-backend margins. What the selector now emits is a NAMED term
+// plus the bytes it charged, so these scenarios assert the term and the arithmetic
+// (`widened == raw + allowance_bytes`) instead of a single fraction.
+// `margin_substrings_match_the_emitted_tracing` pins the one step the compiler cannot check: that
+// `{}`-formatting a constant reproduces the token `tracing` actually writes.
 //
 // BASELINE-CHECKOUT PATCH: `crate::ladder_margin_policy` does not exist before sc-18094, so a
-// pre-epic checkout replaces exactly these two lines with `= 0.10;` and `= 0.05;`. Nothing else in
-// this file differs there.
+// pre-epic checkout replaces exactly this line with `= 0.05;`. Nothing else in this file differs
+// there.
 // ---------------------------------------------------------------------------------------------
-const ESTIMATE_MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
-const STALE_MARGIN: f64 = crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN;
+const STALE_MARGIN: f64 = crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD;
 
 /// Where renders, selection logs, and the machine-readable evidence rows are written. Stable and
 /// outside the repo so a run's artifacts survive a `git clean` and can be diffed across commits.
@@ -110,6 +109,9 @@ impl Tee {
 /// Field ordering inside a `tracing` event is the macro's, not a map's, so the captured text is
 /// deterministic for a given build — which is what makes the cross-commit diff meaningful.
 pub(crate) fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
+    // Concurrent subscriber-less tests can first-hit the captured callsites and cache
+    // `Interest::never`, silently dropping events from this capture (see test_env).
+    crate::test_env::install_tracing_interest_floor();
     let tee = Tee::default();
     let writer = tee.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -170,30 +172,17 @@ fn quant_for_tier(tier: &str) -> Option<gen_core::Quant> {
     }
 }
 
-/// Routes for which `image_jobs::apply_measured_mlx_load_shape` (`image_jobs/base.rs`) forces
-/// `LoadShape::DeferredMaterialization` on a directory load — mirrored here rather than called.
-///
-/// WHY MIRRORED, given that calling the real function would be strictly better: `base.rs` is one of
-/// the sixteen sources `docs/generated/memory-matrix.json` fingerprints (`SOURCE_PATHS.imageRouting`
-/// in `scripts/generate-memory-matrix.mjs`). Widening that function's visibility by one keyword
-/// rotates `generatedFrom.sceneWorksRevision`, which reds `npm run check:memory-matrix` until the
-/// whole 860 KB artifact and every manifest binding's `matrixSourceRevision` are regenerated — a
-/// large, merge-queue-hostile diff for a test-only visibility change. A test harness is not worth
-/// that, so the predicate is restated here and [`load_shape_mirror_matches_the_documented_routes`]
-/// keeps the restatement honest.
-///
-/// This matters because the load shape decides which rungs exist at all: mlx-gen-z-image and
-/// mlx-gen-lens declare `BoundedTransformerResidency` `Implemented` only under
-/// `DeferredMaterialization`, while plain mlx-gen-krea requires that load shape together with the
-/// `OffloadPolicy::Sequential` selected independently by the load-time residency gate.
-const DEFERRED_MATERIALIZATION_ROUTES: &[&str] = &[
-    "qwen_image",
-    "qwen_image_edit",
-    "lens",
-    "lens_turbo",
-    "krea_2_turbo",
-    "sdxl",
-];
+/// Catalog routes whose exact bounded-transformer declaration intersects the typed production
+/// route registry. This deliberately parses the shipped manifest through the same typed helper as
+/// production; no Rust-source text or hand-maintained provider mirror participates.
+fn deferred_materialization_routes() -> std::collections::BTreeSet<String> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    crate::memory_route_registry::declared_mlx_deferred_routes(
+        manifest["models"].as_array().expect("models array"),
+    )
+}
 
 /// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
 /// provider AND tier — `None` only when no such binding exists.
@@ -260,7 +249,7 @@ fn production_spec(engine: &str, tier_dir: &std::path::Path, tier: &str) -> Load
     let deferred = match engine {
         "lens" => quant == Some(gen_core::Quant::Q4),
         "lens_turbo" => quant.is_none(),
-        other => DEFERRED_MATERIALIZATION_ROUTES.contains(&other),
+        other => deferred_materialization_routes().contains(other),
     };
     if deferred {
         spec = spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization);
@@ -429,6 +418,7 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Cold,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )?;
                 Ok::<_, crate::WorkerError>((generator, evaluation, load_policy))
@@ -481,21 +471,26 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         ),
         "criterion 1 requires the SELECTION to be estimate-scoped:\n{log}"
     );
-    let estimate_margin_field = format!("estimate_margin={ESTIMATE_MARGIN}");
+    // sc-22508: the image lane's estimate candidates are weights+headroom FLOORS, so the allowance
+    // the selector charges must be the headroom term — named in the event, not a blanket fraction.
+    let allowance_term_field = format!(
+        "allowance_term={}",
+        crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key()
+    );
     assert!(
-        log.contains(&estimate_margin_field),
-        "criterion 1 requires the applied MLX estimate margin ({ESTIMATE_MARGIN}) in the logs:\n{log}"
+        log.contains(&allowance_term_field),
+        "criterion 1 requires the per-term allowance ({allowance_term_field}) in the logs:\n{log}"
     );
 
     // The admitted ceiling is the WIDENED peak, not `context.predicted_peak_bytes`.
     //
     // `mlx_fit_gate.rs:2404-2417` deliberately puts the estimate's RAW peak on the run context: the
-    // context carries the rung's incremental working-set demand, while the margin lives in the
+    // context carries the rung's incremental working-set demand, while the allowance lives in the
     // admission arithmetic (`memory_strategy::select_strategy` grades against
-    // `raw * (1 + estimate_margin)` and the refusal message quotes that widened number). Comparing
+    // `raw + allowance_bytes` and the refusal message quotes that widened number). Comparing
     // the observed peak against the raw context value would be checking the prediction WITHOUT its
-    // margin — a stricter test than the policy promises, and not the one the story specifies. Both
-    // numbers are recorded; the assertion is against the widened one.
+    // allowance — a stricter test than the policy promises, and not the one the story specifies.
+    // Both numbers are recorded; the assertion is against the widened one.
     let raw_peak_bytes = field_in_line(
         &log,
         "memory-strategy selection uses an estimate-backed candidate at the widened peak",
@@ -508,10 +503,16 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         "widened_peak_bytes=",
     )
     .expect("the selection event carries widened_peak_bytes");
+    let allowance_bytes = field_in_line(
+        &log,
+        "memory-strategy selection uses an estimate-backed candidate at the widened peak",
+        "allowance_bytes=",
+    )
+    .expect("the selection event carries allowance_bytes");
     assert_eq!(
         admitted_ceiling_bytes,
-        (raw_peak_bytes as f64 * (1.0 + ESTIMATE_MARGIN)).ceil() as u64,
-        "the admitted ceiling must be the raw estimate times the MLX estimate margin"
+        raw_peak_bytes + allowance_bytes,
+        "the admitted ceiling must be the raw estimate plus exactly the named per-term allowance"
     );
 
     let render_memory = evaluation.memory;
@@ -575,7 +576,8 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         "rawEstimateGib": gib(raw_peak_bytes),
         "admittedCeilingBytes": admitted_ceiling_bytes,
         "admittedCeilingGib": gib(admitted_ceiling_bytes),
-        "estimateMargin": ESTIMATE_MARGIN,
+        "allowanceTerm": crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allowanceFraction": crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
         "contextPredictedPeakGib": gib(evaluation.context.predicted_peak_bytes),
         "observedPeakBytes": observed_peak_bytes,
         "observedPeakGib": gib(observed_peak_bytes),
@@ -759,6 +761,7 @@ fn c0_production_loadspec_probe() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -820,10 +823,16 @@ fn c2_measured_current_cell_selection() {
     let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live, binding_digest,
-        "criterion 2 requires the shipped SC-18237 Qwen q8 binding and evidence record to match \
-         the live provider closure; binding={binding_digest}, live={live}"
+    // sc-22738: currency is a note, not a precondition — the runtime grades the shipped binding
+    // identically whether or not the provider closure has moved since SC-18237.
+    eprintln!(
+        "[sc18101/c2] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {live} ({})",
+        if live == binding_digest {
+            "current"
+        } else {
+            "moved since capture — a re-capture signal for the tooling only"
+        }
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -843,6 +852,7 @@ fn c2_measured_current_cell_selection() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -915,10 +925,10 @@ fn c3_current_lane_enforces_exact_static_boundary() {
     let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live, binding_digest,
-        "criterion 3 requires the current shipped SC-18237 Qwen lane; \
-         binding={binding_digest}, live={live}"
+    // sc-22738: currency is a note, not a precondition (see c2).
+    eprintln!(
+        "[sc18101/c3] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {live}"
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -937,6 +947,7 @@ fn c3_current_lane_enforces_exact_static_boundary() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -958,7 +969,7 @@ fn c3_current_lane_enforces_exact_static_boundary() {
     );
     assert!(
         !log.contains("stale-closure")
-            && !log.contains("stale_margin=")
+            && !log.contains("allowance_term=same_cell_recapture_spread")
             && !log.contains("widened peak"),
         "criterion 3 requires current evidence to be graded at the raw peak without stale \
          widening:\n{log}"
@@ -969,14 +980,8 @@ fn c3_current_lane_enforces_exact_static_boundary() {
         "current exact evidence must still install the request-scoped MLX process ceiling"
     );
 
-    let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
-        .expect("packaged evidence must parse")
-    {
-        sceneworks_core::memory_calibration::BundleLoad::Ready(bundle) => bundle,
-        sceneworks_core::memory_calibration::BundleLoad::Stale(reason) => {
-            panic!("packaged evidence unexpectedly stale: {reason:?}")
-        }
-    };
+    let bundle = sceneworks_core::memory_calibration::load_packaged_bundle()
+        .expect("packaged evidence must parse");
     let envelope = bundle
         .records
         .iter()
@@ -1111,11 +1116,11 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
     let Some((_, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_eq!(
-        live_qwen_closure_digest(),
-        binding_digest,
-        "the fitted-curve arm requires the shipped SC-18237 Qwen q8 binding and records to match \
-         the live provider closure"
+    // sc-22738: a moved provider closure no longer disqualifies a basis; noted, not asserted.
+    eprintln!(
+        "[sc18101/c5] shipped SC-18237 Qwen q8 binding closure {binding_digest}; live provider \
+         closure {}",
+        live_qwen_closure_digest()
     );
     assert!(
         matches!(
@@ -1156,6 +1161,7 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Cold,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1201,7 +1207,8 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
         "fittedRawPeakBytes": raw,
         "fittedRawPeakGib": gib(raw),
         "firstWidenedPeakBytes": widened,
-        "estimateMargin": ESTIMATE_MARGIN,
+        "allowanceTerm": crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allowanceFraction": crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
         "tierDir": tier_dir.display().to_string(),
     }));
 }
@@ -1281,6 +1288,7 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1320,6 +1328,7 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1343,50 +1352,34 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
 
 // ---------------------------------------------------------------------------------------------
 
-/// The deferred-materialization mirror must name exactly the routes `image_jobs/base.rs` names.
-///
-/// `apply_measured_mlx_load_shape_for_request` is private and lives in an `include!`d,
-/// macOS-gated file, so the coupling cannot be a direct call without rotating the memory-matrix
-/// source fingerprint (see [`DEFERRED_MATERIALIZATION_ROUTES`]). It can still be a TEXT coupling:
-/// the engine ids are single-line double-quoted literals in that source, which is exactly the shape
-/// the matrix's own comment-stripping fingerprint guarantees stays load-bearing. A route added to
-/// or removed from the production list therefore reds this test instead of silently changing what
-/// the ignored scenarios exercise.
+/// The deferred-materialization population is derived from typed manifest declarations, including
+/// the alias route whose catalog id differs from its provider id.
 #[test]
-fn load_shape_mirror_matches_the_documented_routes() {
-    let base = include_str!("image_jobs/base.rs");
-    let start = base
-        .find("fn apply_measured_mlx_load_shape_for_request")
-        .expect("image_jobs/base.rs declares apply_measured_mlx_load_shape_for_request");
-    // Bound the slice to the function itself: the first line-start `}` after the signature. A
-    // fixed-width window would run into the neighbouring test module, whose fixtures are full of
-    // quoted component names.
-    let end = base[start..]
-        .find("\n}\n")
-        .expect("the function has a line-start closing brace");
-    let body = &base[start..start + end];
-    for route in DEFERRED_MATERIALIZATION_ROUTES {
-        assert!(
-            body.contains(&format!("\"{route}\"")),
-            "{route} is mirrored here but no longer named by apply_measured_mlx_load_shape_for_request"
-        );
+fn load_shape_population_is_typed_and_manifest_derived() {
+    let routes = deferred_materialization_routes();
+    for route in [
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
+        "kolors",
+        "z_image",
+        "z_image_edit",
+    ] {
+        assert!(routes.contains(route), "missing declared route {route}");
     }
-    // And the converse: no OTHER engine id appears in that function. Counting quoted literals is
-    // enough — the function names engine ids and nothing else.
-    let quoted = body.match_indices('"').count();
-    assert_eq!(
-        quoted,
-        DEFERRED_MATERIALIZATION_ROUTES.len() * 2,
-        "apply_measured_mlx_load_shape_for_request names a route this harness does not mirror"
-    );
+    assert!(!routes.contains("z_image_turbo"));
+    assert!(!routes.contains("z_image_turbo_control"));
 }
 
 /// The one margin coupling the compiler cannot check: that `{}`-formatting a policy constant
 /// reproduces the exact token `tracing` writes into the event.
 ///
-/// The scenarios above grep for `estimate_margin={ESTIMATE_MARGIN}`. `tracing` records an `f64`
-/// field with `Display`, so `0.10` is emitted as `0.1` — a substring built with `{:.2}` would never
-/// match, and a substring built from a literal would silently stop matching if the policy moved.
+/// The scenarios above grep for `allowance_term=…` and for `{STALE_MARGIN}`. `tracing` records an
+/// `f64` field with `Display`, so a rounded substring would never match the corpus-derived policy
+/// token, and a substring built from a literal would silently stop matching if the policy moved.
 /// Building it from the constant with `{}` is correct only as long as both sides agree, which is
 /// what this asserts.
 #[test]
@@ -1395,19 +1388,24 @@ fn margin_substrings_match_the_emitted_tracing() {
 
     // Reproduce exactly how `tracing`'s field formatter renders the value the gate passes it.
     let mut rendered = String::new();
-    write!(rendered, "{ESTIMATE_MARGIN}").expect("f64 formats");
-    assert_eq!(rendered, "0.1", "MLX estimate margin token drifted");
-    rendered.clear();
     write!(rendered, "{STALE_MARGIN}").expect("f64 formats");
-    assert_eq!(rendered, "0.05", "MLX stale-measured margin token drifted");
-
-    // And the constants really are the policy's, not a local copy that happens to agree.
     assert_eq!(
-        ESTIMATE_MARGIN,
-        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN
+        rendered, "0.1260183508475594",
+        "MLX same-cell recapture spread token drifted"
     );
+
+    // And the constant really is the policy's, not a local copy that happens to agree.
     assert_eq!(
         STALE_MARGIN,
-        crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN
+        crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD
+    );
+    // The term keys the scenarios grep for are the policy's own, not restated literals.
+    assert_eq!(
+        crate::ladder_margin_policy::AdmissionTerm::AllocatorEnvelopeOverActivation.as_key(),
+        "allocator_envelope_over_activation"
+    );
+    assert_eq!(
+        crate::ladder_margin_policy::AdmissionTerm::SameCellRecaptureSpread.as_key(),
+        "same_cell_recapture_spread"
     );
 }

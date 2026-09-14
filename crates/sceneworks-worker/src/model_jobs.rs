@@ -1,8 +1,13 @@
 use super::*;
 
 use sceneworks_core::base_weights::{
-    detect_base_weight_file, import_detection_supported, BaseWeightDetection,
+    detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
+    BaseWeightDetection, ComponentRole,
 };
+use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+use sceneworks_core::checkpoint_ingest::ManagedIngest;
+use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+use sceneworks_core::file_lock::FileLock;
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -201,7 +206,7 @@ pub(crate) async fn run_model_download_job(
 
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
@@ -441,7 +446,7 @@ pub(crate) async fn run_lora_download_job(
 
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
@@ -1795,10 +1800,7 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
 /// [`resolve_optional_component`] key off whether the manifest row *declares* a `revision` at all,
 /// which is a different question — a row declaring `"main"` is unpinned here but `Some` there.
 pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
-    revision.len() == 40
-        && revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    sceneworks_core::model_artifacts::validate_immutable_revision(revision).is_ok()
 }
 
 /// Whether a convert job's declared source file is already materialized in the HF cache — the
@@ -1849,20 +1851,194 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     repo: &str,
     revision: &str,
 ) -> Option<PathBuf> {
-    if !is_pinned_hf_revision(revision) {
-        return None;
-    }
-    let dir = safe_join(
-        &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
-        revision,
-    )
-    .ok()?;
-    if !dir.is_dir() {
-        return None;
-    }
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let (_, dir) = resolver
+        .discover_source_snapshot(repo, Some(revision))
+        .ok()?;
     #[cfg(windows)]
     materialize_snapshot_hardlinks(&dir);
     Some(dir)
+}
+
+/// Resolve the one immutable file whose Hugging Face repository was renamed upstream.
+///
+/// HF's cache namespace includes the repository id, so correcting a manifest from a dead alias to
+/// its canonical id would otherwise strand already-downloaded multi-GB blobs under the old cache
+/// directory. The shared core declaration is deliberately exact (old id, new id, revision, and
+/// files): this is a cache-only migration, never a network fallback and never permission to borrow
+/// bytes from a different revision. The shared validator returns the confined plain blob path behind
+/// a normal HF snapshot symlink. Returning that file path, rather than the snapshot directory, is
+/// important on Windows: opening the snapshot reparse point can fail with
+/// `ERROR_UNTRUSTED_MOUNT_POINT` even after the link target was independently validated.
+///
+/// The preferred result is a hard-linked canonical entry with no duplicate storage. If that
+/// cache-only materialization cannot be completed safely (for example, the filesystem does not
+/// support hardlinks or a pre-existing destination escapes the canonical cache namespace), return
+/// the already-validated plain legacy source directly. Never repair or copy the legacy snapshot:
+/// this exact single-file seam must not duplicate the ~3.95 GB blob on a no-hardlink filesystem.
+fn resolve_renamed_hf_single_file(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> Option<PathBuf> {
+    resolve_renamed_hf_single_file_using(data_dir, repo, revision, files, |source, destination| {
+        std::fs::hard_link(source, destination)
+    })
+}
+
+/// Create or resolve a relative directory below an already-canonical cache root without following
+/// a pre-existing component symlink outside that root. Components are handled one at a time so no
+/// `create_dir_all` call can write through an unvalidated parent.
+fn ensure_confined_subdirectory(canonical_root: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut current = canonical_root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return None;
+        };
+        let next = current.join(component);
+        match std::fs::symlink_metadata(&next) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&next) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return None,
+                }
+            }
+            Err(_) => return None,
+        }
+        let canonical_next = std::fs::canonicalize(&next).ok()?;
+        if !canonical_next.is_dir() || !canonical_next.starts_with(canonical_root) {
+            return None;
+        }
+        current = canonical_next;
+    }
+    Some(current)
+}
+
+fn resolve_renamed_hf_single_file_using(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+    hard_link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Option<PathBuf> {
+    let rename =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, files)?;
+    let [file] = rename.files else {
+        return None;
+    };
+    let hub_cache_root = huggingface_hub_cache_dir(data_dir);
+
+    // Prefer an already-complete canonical cache, but use the validator-returned plain source path
+    // rather than joining through its snapshot entry. This is both the fast path and the Windows
+    // reparse-safe path.
+    if let Some(source) = confined_renamed_hf_single_file(data_dir, rename.current_repo, rename) {
+        return Some(source);
+    }
+
+    let legacy_repo_dir = huggingface_repo_cache_path(data_dir, rename.legacy_repo)?;
+    let legacy_snapshot = safe_join(&legacy_repo_dir.join("snapshots"), revision).ok()?;
+    let (_legacy_snapshot, sources) =
+        sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+            &hub_cache_root,
+            &legacy_repo_dir,
+            &legacy_snapshot,
+            rename,
+        )?;
+    let [legacy_source] = sources.as_slice() else {
+        return None;
+    };
+    let legacy_source = legacy_source.to_path_buf();
+
+    // Build the canonical destination only after proving both its repository root and snapshot
+    // remain inside the configured Hub cache. `safe_join` prevents lexical traversal, while the
+    // canonical checks also reject pre-existing directory symlinks that redirect writes outside
+    // the cache.
+    let current_source = (|| {
+        std::fs::create_dir_all(&hub_cache_root).ok()?;
+        let canonical_hub_root = std::fs::canonicalize(&hub_cache_root).ok()?;
+        let current_repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+        std::fs::create_dir_all(&current_repo_dir).ok()?;
+        let canonical_current_root = std::fs::canonicalize(&current_repo_dir).ok()?;
+        if !canonical_current_root.starts_with(&canonical_hub_root) {
+            return None;
+        }
+        let current_snapshot = ensure_confined_subdirectory(
+            &canonical_current_root,
+            &Path::new("snapshots").join(revision),
+        )?;
+
+        let relative = Path::new(file);
+        let relative_parent = relative.parent()?;
+        let canonical_parent = ensure_confined_subdirectory(&current_snapshot, relative_parent)?;
+        let destination = canonical_parent.join(relative.file_name()?);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                // A racing writer or pre-existing entry is accepted only through the same exact
+                // confinement validator used by the API. Do not traverse it here.
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match hard_link(&legacy_source, &destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return None,
+                }
+            }
+            Err(_) => return None,
+        }
+        confined_renamed_hf_single_file(data_dir, rename.current_repo, rename)
+    })();
+
+    if let Some(current_source) = current_source {
+        tracing::info!(
+            event = "hf_renamed_repo_cache_relinked",
+            legacy_repo = rename.legacy_repo,
+            repo,
+            revision,
+            source = %current_source.display(),
+            "re-linked a renamed Hugging Face repository file from the existing cache"
+        );
+        Some(current_source)
+    } else {
+        tracing::info!(
+            event = "hf_renamed_repo_cache_legacy_fallback",
+            legacy_repo = rename.legacy_repo,
+            repo,
+            revision,
+            source = %legacy_source.display(),
+            "using the validated plain legacy Hugging Face file because canonical cache materialization is unavailable"
+        );
+        Some(legacy_source)
+    }
+}
+
+/// Resolve the validator-proven plain file behind one side of an exact repository rename. The
+/// returned path is confined to that repository cache and never requires the caller to traverse the
+/// snapshot's final symlink/reparse point.
+fn confined_renamed_hf_single_file(
+    data_dir: &Path,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+) -> Option<PathBuf> {
+    let [_file] = rename.files else {
+        return None;
+    };
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    let snapshot = safe_join(&repo_root.join("snapshots"), rename.revision).ok()?;
+    sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        &huggingface_hub_cache_dir(data_dir),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .and_then(|(_, sources)| match sources.as_slice() {
+        [source] => Some(source.to_path_buf()),
+        _ => None,
+    })
 }
 
 /// Resolve a model's **caller-provisioned components** (epic 13657, sc-13679) — the generic worker
@@ -1874,9 +2050,11 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
 /// `componentId`), and this resolves each to a local [`gen_core::WeightsSource`].
 ///
 /// Driven PURELY by `descriptor.required_components`: for each declared id it finds the manifest
-/// `coRequisite` download whose `componentId` matches (never inferred from repo names, sc-13679),
-/// then resolves that repo's cached snapshot ENV-CORRECTLY, cache-only. A co-requisite that pins an
-/// immutable `revision` (F-029) reads that exact `snapshots/<sha>/` via
+/// hard `coRequisite` download whose `componentId` matches (never inferred from repo names,
+/// sc-13679), then resolves that repo's cached snapshot ENV-CORRECTLY, cache-only. A soft component
+/// is request-specific and must use [`resolve_optional_component`] or a stricter dedicated route;
+/// it can never satisfy a provider's unconditional `required_components` advertisement. A
+/// co-requisite that pins an immutable `revision` (F-029) reads that exact `snapshots/<sha>/` via
 /// [`huggingface_pinned_snapshot_dir`]; an unpinned one falls back to the `refs/main`-preferring
 /// [`huggingface_snapshot_dir`] — the same seams the PiD-gemma / Wan-Lightning co-requisites use, so
 /// a custom `HF_HOME`/hub is honored and nothing is fetched here.
@@ -1933,15 +2111,28 @@ pub(crate) fn resolve_co_requisites_for_tier(
             .filter(|download| {
                 download.get("coRequisite").and_then(Value::as_bool) == Some(true)
                     && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+                    && download.get("required").and_then(Value::as_str) != Some("soft")
             })
             .collect();
         let download = match candidates.as_slice() {
             [] => {
+                if downloads.iter().any(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                        && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+                        && download.get("required").and_then(Value::as_str) == Some("soft")
+                }) {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model_id} requires the model component '{component_id}', but its catalog \
+                         row is `required: soft` — optional components cannot satisfy \
+                         descriptor.required_components and must be resolved only by the \
+                         request-specific route"
+                    )));
+                }
                 return Err(WorkerError::InvalidPayload(format!(
                 "{model_id} requires the model component '{component_id}', but its catalog entry \
                      declares no `coRequisite` download tagged `componentId: \"{component_id}\"` — \
                      the model manifest entry is misconfigured"
-            )))
+            )));
             }
             [only] => *only,
             many => {
@@ -1979,15 +2170,41 @@ pub(crate) fn resolve_co_requisites_for_tier(
                     "{model_id}: the '{component_id}' co-requisite download declares no `repo`"
                 ))
             })?;
-        // Resolve the co-requisite's snapshot cache-only. A co-requisite pins an immutable `revision`
+        let files: Vec<String> = download
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Resolve the co-requisite's cache location cache-only. A co-requisite pins an immutable `revision`
         // (F-029, required by sc-13659) — read THAT exact `snapshots/<sha>/` (like the inference-side
         // `hf_get_pinned`), never `refs/main`, so a companion weight pinned to a non-main commit in a
         // SHARED repo (chatterbox's `ve.safetensors` @ 5bb1f6ee, alongside the primary `refs/main`
         // snapshot) resolves correctly. An unpinned co-requisite falls back to the `refs/main`-preferring
         // resolver.
-        let snapshot = match download.get("revision").and_then(Value::as_str) {
-            Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision),
-            None => huggingface_snapshot_dir(&settings.data_dir, repo),
+        enum ComponentCacheLocation {
+            ExactRenamedFile(PathBuf),
+            Snapshot(PathBuf),
+        }
+        let location = match download.get("revision").and_then(Value::as_str) {
+            Some(revision)
+                if sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(
+                    repo, revision, &files,
+                )
+                .is_some() =>
+            {
+                resolve_renamed_hf_single_file(&settings.data_dir, repo, revision, &files)
+                    .map(ComponentCacheLocation::ExactRenamedFile)
+            }
+            Some(revision) => huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+                .map(ComponentCacheLocation::Snapshot),
+            None => huggingface_snapshot_dir(&settings.data_dir, repo)
+                .map(ComponentCacheLocation::Snapshot),
         }
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -1996,47 +2213,48 @@ pub(crate) fn resolve_co_requisites_for_tier(
                  predownload {repo} for an offline install"
             ))
         })?;
-        let files: Vec<&str> = download
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|files| files.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        let source = match files.as_slice() {
-            // A single LITERAL filename resolves to that file (chatterbox's `ve.safetensors`). A
-            // single GLOB does not: it names a set, so it must take the directory arm below like any
-            // other multi-entry predicate (sc-14980 — Mage's `["q4/text_encoder/*"]`). Without this
-            // guard the pattern is `safe_join`ed verbatim, `is_file()` is false for a path with a
-            // literal `*` in it, and a correctly-installed component reports as missing.
-            [file] if !file.contains(['*', '?', '[']) => {
-                // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
-                // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
-                // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
-                let path = safe_join(&snapshot, file)?;
-                if !path.is_file() {
-                    return Err(WorkerError::InvalidPayload(format!(
+        let source = match location {
+            // The exact rename validator already proved this plain path is the one declared file,
+            // readable and confined to the current or legacy repository cache. Do not join back
+            // through the snapshot symlink: Windows may reject that reparse point at open time.
+            ComponentCacheLocation::ExactRenamedFile(path) => gen_core::WeightsSource::File(path),
+            ComponentCacheLocation::Snapshot(snapshot) => match files.as_slice() {
+                // A single LITERAL filename resolves to that file (chatterbox's `ve.safetensors`). A
+                // single GLOB does not: it names a set, so it must take the directory arm below like any
+                // other multi-entry predicate (sc-14980 — Mage's `["q4/text_encoder/*"]`). Without this
+                // guard the pattern is `safe_join`ed verbatim, `is_file()` is false for a path with a
+                // literal `*` in it, and a correctly-installed component reports as missing.
+                [file] if !file.contains(['*', '?', '[']) => {
+                    // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
+                    // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
+                    // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
+                    let path = safe_join(&snapshot, file)?;
+                    if !path.is_file() {
+                        return Err(WorkerError::InvalidPayload(format!(
                         "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
                          from the cached snapshot — reinstall {model_id} to repair it"
                     )));
+                    }
+                    gen_core::WeightsSource::File(path)
                 }
-                gen_core::WeightsSource::File(path)
-            }
-            [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
-            _ => {
-                // Multi-file components are staged as directories because providers join their own
-                // internal paths, but the pre-load all-or-nothing contract still requires every
-                // manifest-declared file or pattern to be present. The declared patterns are
-                // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
-                // what the provider is handed — so check against the snapshot, stage the subdir.
-                for file in &files {
-                    if !snapshot_contains_declared_file(&snapshot, file)? {
-                        return Err(WorkerError::InvalidPayload(format!(
+                [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
+                _ => {
+                    // Multi-file components are staged as directories because providers join their own
+                    // internal paths, but the pre-load all-or-nothing contract still requires every
+                    // manifest-declared file or pattern to be present. The declared patterns are
+                    // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
+                    // what the provider is handed — so check against the snapshot, stage the subdir.
+                    for file in &files {
+                        if !snapshot_contains_declared_file(&snapshot, file)? {
+                            return Err(WorkerError::InvalidPayload(format!(
                             "{model_id}: the '{component_id}' component file {repo}/{file} is missing \
                              from the cached snapshot — reinstall {model_id} to repair it"
                         )));
+                        }
                     }
+                    gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
                 }
-                gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
-            }
+            },
         };
         components.insert(component_id.to_owned(), source);
     }
@@ -2180,19 +2398,8 @@ pub(crate) fn resolve_optional_component(
 /// when every recorded file exists in one snapshot directory; a torn set returns `None` atomically.
 /// `model_id` narrows primary-model receipts, while the repo-wide fallback also covers co-requisite
 /// downloads whose marker directory is not known to the loader.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactIdentity {
-    pub(crate) repository: String,
-    pub(crate) revision: String,
-    pub(crate) variant: String,
-    pub(crate) fingerprint: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactProvenance {
-    pub(crate) identity: ResolvedArtifactIdentity,
-    pub(crate) fixed_artifact_tier: Option<String>,
-}
+pub(crate) type ResolvedArtifactIdentity = sceneworks_core::model_artifacts::ArtifactIdentity;
+pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::ArtifactProvenance;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -2302,31 +2509,7 @@ fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn update_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) {
-    digest.update(metadata.len().to_le_bytes());
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-    digest.update(
-        modified
-            .map_or(0, |duration| duration.as_secs())
-            .to_le_bytes(),
-    );
-    digest.update(
-        modified
-            .map_or(0, |duration| duration.subsec_nanos())
-            .to_le_bytes(),
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.dev().to_le_bytes());
-        digest.update(metadata.ino().to_le_bytes());
-        digest.update(metadata.ctime().to_le_bytes());
-        digest.update(metadata.ctime_nsec().to_le_bytes());
-    }
-}
+use sceneworks_core::download_receipt::update_metadata_stamp;
 
 fn artifact_tree_stamp(root: &Path) -> WorkerResult<String> {
     let mut digest = Sha256::new();
@@ -2356,33 +2539,7 @@ pub(crate) fn resolved_files_tree_stamp(
     root: &Path,
     files: &[impl AsRef<str>],
 ) -> WorkerResult<String> {
-    let mut names = files.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-    names.sort_unstable();
-    let mut digest = Sha256::new();
-    for name in names {
-        let relative = Path::new(name);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "artifact receipt contains unsafe resolved file {name:?}"
-            )));
-        }
-        let path = root.join(relative);
-        let metadata = std::fs::symlink_metadata(&path)?;
-        digest.update(name.as_bytes());
-        digest.update([0]);
-        update_metadata_stamp(&mut digest, &metadata);
-        if metadata.file_type().is_symlink() {
-            digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
-            digest.update(b"followed-target");
-            update_metadata_stamp(&mut digest, &std::fs::metadata(&path)?);
-        }
-        digest.update([0xff]);
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
+    Ok(sceneworks_core::download_receipt::resolved_files_tree_stamp(root, files)?)
 }
 
 fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
@@ -2526,6 +2683,30 @@ pub(crate) fn app_managed_artifact_provenance(
 mod artifact_provenance_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tree_stamp_repair_fills_null_revision_and_refuses_a_replaced_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = temp.path().join(rev);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let marker = temp.path().join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":"owner/model","variant":"q4","snapshotRevision":null,"resolvedFiles":["model.safetensors"]});
+        let mut top = receipt.clone();
+        top["receipts"] = json!([receipt]);
+        std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+        establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"]).unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(after["snapshotRevision"], rev);
+        assert_eq!(after["receipts"][0]["snapshotRevision"], rev);
+        let before = std::fs::read(&marker).unwrap();
+        assert!(
+            establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"])
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
 
     #[test]
     fn app_managed_receipt_detects_same_path_mutation_and_rejects_bad_identity() {
@@ -2720,9 +2901,11 @@ mod artifact_provenance_tests {
             ConvertSourceState::RepoNotCached
         );
 
+        let revision = "0123456789abcdef0123456789abcdef01234567";
         let snapshot = huggingface_repo_cache_path(data.path(), repo)
             .expect("cache")
-            .join("snapshots/rev-shared");
+            .join("snapshots")
+            .join(revision);
         std::fs::create_dir_all(snapshot.join("split_files/diffusion_models")).expect("dit dir");
         std::fs::write(snapshot.join(alpha), b"weights").expect("alpha weights");
         assert_eq!(
@@ -2932,8 +3115,20 @@ pub(crate) fn huggingface_receipt_weights_dir(
 ) -> Option<PathBuf> {
     // Path-only callers never read provenance, so they must not trigger a receipt write as a side
     // effect of locating weights. Repair belongs to the provenance consumer.
-    huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)
-        .map(|resolved| resolved.path)
+    let resolved =
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+    // sc-19707: the receipt resolves and PROVES its install against the authoritative source
+    // (its tree stamp is a source-tree fact and must stay one); only the path handed to the loader
+    // is then served from a leased app-owned bundle covering that exact snapshot. Inert without an
+    // active lease.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    Some(
+        sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+            library.root(),
+            &resolved.path,
+        )
+        .unwrap_or(resolved.path),
+    )
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -3013,6 +3208,11 @@ fn establish_receipt_tree_stamp(
     snapshot: &Path,
     files: &[&str],
 ) -> WorkerResult<String> {
+    let _receipt_lock = sceneworks_core::download_receipt::lock(
+        marker
+            .parent()
+            .ok_or_else(|| WorkerError::InvalidPayload("receipt has no parent".to_owned()))?,
+    )?;
     let stamp = resolved_files_tree_stamp(snapshot, files)?;
     let revision = snapshot
         .file_name()
@@ -3036,9 +3236,17 @@ fn establish_receipt_tree_stamp(
         );
         // A backfilled receipt carries no revision, so resolution leans on the exact file set
         // identifying exactly one snapshot. Record what we just resolved to remove that ambiguity.
-        object
-            .entry("snapshotRevision".to_owned())
-            .or_insert_with(|| Value::String(revision.to_owned()));
+        if object.get("snapshotRevision").is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|revision| revision.trim().is_empty())
+        }) {
+            object.insert(
+                "snapshotRevision".to_owned(),
+                Value::String(revision.to_owned()),
+            );
+        }
     };
 
     let mut top = serde_json::from_slice::<Value>(&std::fs::read(marker)?).map_err(|error| {
@@ -3047,6 +3255,24 @@ fn establish_receipt_tree_stamp(
             marker.display()
         ))
     })?;
+    // The caller read before acquiring the write lock. A concurrent download or discovery
+    // repair may have replaced that identity; never stamp the replacement with the old tree.
+    let current = top
+        .get("receipts")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![&top]);
+    if !current.iter().any(|entry| identity(entry))
+        || current.iter().filter(|entry| identity(entry)).any(|entry| {
+            ["resolvedFiles", "snapshotRevision", "artifactTreeStamp"]
+                .iter()
+                .any(|key| entry.get(*key) != receipt.get(*key))
+        })
+    {
+        return Err(WorkerError::InvalidPayload(
+            "install receipt changed during provenance repair".to_owned(),
+        ));
+    }
     // `write_model_download_receipt` mirrors the newest receipt at the top level AND in `receipts`.
     // Patch both when they name the same artifact, so neither copy contradicts the other.
     if identity(&top) {
@@ -3057,9 +3283,7 @@ fn establish_receipt_tree_stamp(
             patch(entry);
         }
     }
-    let temporary = marker.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&top)?)?;
-    std::fs::rename(temporary, marker)?;
+    sceneworks_core::download_receipt::write(marker, &top)?;
     Ok(stamp)
 }
 
@@ -3124,7 +3348,7 @@ fn receipt_weights_dir_from_marker(
                 snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
             })
             .filter(|snapshot| {
-                recorded_revision.map_or(true, |revision| {
+                recorded_revision.is_none_or(|revision| {
                     snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
                 })
             })
@@ -3245,7 +3469,10 @@ pub(crate) fn receipt_markers_read() -> usize {
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
-    let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let repo_dir = resolver.source_library().repository_root(repo).ok()?;
     let snapshots = repo_dir.join("snapshots");
     // Prefer `refs/main`, but ONLY when the snapshot it names actually holds files. A polluted
     // `refs/main` — e.g. a test that clobbered it to an empty placeholder snapshot (sc-13834) —
@@ -3253,21 +3480,50 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     // substitute for a correct `refs/main`: it distinguishes a materialized snapshot from an
     // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
-        let candidate = snapshots.join(rev.trim());
+        let revision = rev.trim();
+        let candidate = snapshots.join(revision);
         if snapshot_has_any_file(&candidate) {
-            return Some(candidate);
+            // The name is read off disk, so it is resolved as an installed snapshot rather than
+            // admitted as a caller-supplied revision: an install materialized under a mutable name
+            // (the endpoint omitted `X-Repo-Commit`) is still installed. Demanding an immutable
+            // name here returned `None` for it — and, because this arm returns, without even
+            // trying the fallback scan below.
+            return resolver
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
+                .ok();
         }
     }
     // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
     // fully materialized sibling (the old "first dir wins" scan happily returned an empty snapshot).
-    std::fs::read_dir(&snapshots)
-        .ok()?
+    let from_source_library = std::fs::read_dir(&snapshots)
+        .ok()
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .map(|path| (snapshot_file_count(&path), path))
         .filter(|(count, _)| *count > 0)
         .max_by_key(|(count, _)| *count)
+        .and_then(|(_, path)| {
+            let revision = path.file_name()?.to_str()?;
+            resolver
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
+                .ok()
+        });
+    if from_source_library.is_some() {
+        return from_source_library;
+    }
+    // Last resort (sc-19707): the configured library cannot name a revision at all — it is
+    // disconnected, or was never installed here. The typed resolver answers from a leased
+    // app-owned bundle when exactly one revision of this repository is being served, which is what
+    // keeps a complete local model loadable while the drive is unplugged. With no active lease it
+    // still returns nothing, so an uninstalled model keeps its established behavior.
+    resolver
+        .discover_source_snapshot(repo, None)
+        .ok()
         .map(|(_, path)| path)
 }
 
@@ -3482,16 +3738,67 @@ where
     Ok(())
 }
 
+/// Cross-platform: the conversion locks are taken on every backend, so this module is NOT gated on
+/// macOS the way the converter tests below are.
+#[cfg(test)]
+mod conversion_lock_tests {
+    use super::*;
+    use fs2::FileExt as _;
+
+    /// sc-22738: released conversion locks must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every such
+    /// reference is gone — and conversion forks converter processes throughout, which would park
+    /// the next finalize (and the startup sweep) behind an already-released lock for up to the
+    /// 30-second timeout.
+    #[test]
+    fn released_conversion_locks_are_free_even_while_an_inherited_descriptor_survives() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let lock_root = temporary.path().join("locks");
+        std::fs::create_dir_all(&lock_root).expect("lock root");
+        let target = temporary.path().join("models").join("converted");
+
+        let locks = ConversionFinalizeLocks::acquire(&lock_root, &target).expect("locks acquire");
+        let inherited = [
+            locks
+                ._lifecycle
+                .inherited_descriptor()
+                .expect("descriptor duplicates"),
+            locks
+                ._target
+                .inherited_descriptor()
+                .expect("descriptor duplicates"),
+        ];
+        drop(locks);
+
+        // The lifecycle lock is taken SHARED by finalizers and EXCLUSIVE by the startup sweep, so
+        // the sweep's acquisition is what a stuck release blocks; probe it that way.
+        let lifecycle = open_conversion_lock(&lock_root.join(CONVERSION_LIFECYCLE_LOCK))
+            .expect("lifecycle lock opens");
+        assert!(
+            lifecycle.try_lock_exclusive().is_ok(),
+            "a released lifecycle lock must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
+    }
+}
+
 struct ConversionFinalizeLocks {
-    _lifecycle: std::fs::File,
-    _target: std::fs::File,
+    /// [`FileLock`]s, not bare handles: each releases with an explicit `LOCK_UN`, because
+    /// `close(2)` alone leaves the lock held while any forked child still references the same open
+    /// file description (sc-22738), and this process forks converters throughout a conversion.
+    _lifecycle: FileLock,
+    _target: FileLock,
 }
 
 impl ConversionFinalizeLocks {
     fn acquire(lock_root: &Path, final_dir: &Path) -> WorkerResult<Self> {
         let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
-        let lifecycle = open_conversion_lock(&lifecycle_path)?;
-        lock_conversion_file(&lifecycle, &lifecycle_path, true)?;
+        let lifecycle = lock_conversion_file(
+            open_conversion_lock(&lifecycle_path)?,
+            &lifecycle_path,
+            true,
+        )?;
 
         // Hash the canonical target path so arbitrary/custom model ids can never alias the
         // lifecycle lock or another model's lock-file pathname.
@@ -3500,8 +3807,8 @@ impl ConversionFinalizeLocks {
             Sha256::digest(final_dir.to_string_lossy().as_bytes())
         );
         let target_path = lock_root.join(format!("target-{target_digest}.lock"));
-        let target = open_conversion_lock(&target_path)?;
-        lock_conversion_file(&target, &target_path, false)?;
+        let target =
+            lock_conversion_file(open_conversion_lock(&target_path)?, &target_path, false)?;
         Ok(Self {
             _lifecycle: lifecycle,
             _target: target,
@@ -3625,18 +3932,20 @@ fn resolve_conversion_managed_roots(data_dir: &Path) -> WorkerResult<ConversionM
     })
 }
 
-fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> WorkerResult<()> {
+fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> WorkerResult<FileLock> {
     let deadline = std::time::Instant::now() + CONVERSION_LOCK_TIMEOUT;
     let contended = fs2::lock_contended_error().raw_os_error();
+    let mut file = file;
     loop {
         let result = if shared {
-            fs2::FileExt::try_lock_shared(file)
+            FileLock::try_shared_retryable(file)
         } else {
-            fs2::FileExt::try_lock_exclusive(file)
+            FileLock::try_exclusive_retryable(file)
         };
         match result {
-            Ok(()) => return Ok(()),
-            Err(error) if error.raw_os_error() == contended => {
+            Ok(lock) => return Ok(lock),
+            Err((handle, error)) if error.raw_os_error() == contended => {
+                file = handle;
                 if std::time::Instant::now() >= deadline {
                     return Err(WorkerError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -3649,7 +3958,7 @@ fn lock_conversion_file(file: &std::fs::File, path: &Path, shared: bool) -> Work
                 }
                 std::thread::sleep(CONVERSION_LOCK_POLL);
             }
-            Err(error) => return Err(error.into()),
+            Err((_handle, error)) => return Err(error.into()),
         }
     }
 }
@@ -3675,8 +3984,11 @@ fn sweep_stranded_conversion_backups_blocking(data_dir: &Path) -> WorkerResult<(
         lock_root,
     } = resolve_conversion_managed_roots(data_dir)?;
     let lifecycle_path = lock_root.join(CONVERSION_LIFECYCLE_LOCK);
-    let lifecycle = open_conversion_lock(&lifecycle_path)?;
-    lock_conversion_file(&lifecycle, &lifecycle_path, false)?;
+    let _lifecycle = lock_conversion_file(
+        open_conversion_lock(&lifecycle_path)?,
+        &lifecycle_path,
+        false,
+    )?;
 
     let mut by_target: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for entry in std::fs::read_dir(&backup_root)? {
@@ -3795,7 +4107,7 @@ pub(crate) async fn ensure_hf_files_cached(
     if !snapshot.files.is_empty() {
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&repo_dir.join("blobs")).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4039,7 +4351,7 @@ pub(crate) async fn run_lora_import_job(
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&target_dir).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4137,7 +4449,31 @@ pub(crate) async fn run_lora_import_job(
         }
     }
 
-    // One header read, two answers (sc-14057). The declared half matters most for the repo/URL
+    // Validate the exact MiniMax-H3 trainer namespace after a repo/URL transfer, at the first point
+    // where those routes have a local header. Local/upload imports already run the same shared
+    // validator in rust-api. A partial/lookalike export must fail before its install marker is
+    // written and long before a render tries to bind `lora_unet_blocks_*` at the engine.
+    if let Some(adapter_path) = first_safetensors_path(&target_dir) {
+        if let Ok(header) = sceneworks_core::lora_family::read_safetensors_header(&adapter_path) {
+            let h3_expected =
+                optional_payload_string(&job.payload, "family").is_some_and(|family| {
+                    sceneworks_core::lora_family::canonical_lora_family(family) == "minimax-h3"
+                });
+            if let Err(error) = validate_minimax_h3_trainer_header(&header, h3_expected) {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "LoRA import failed.",
+                    Some(format!(
+                        "Unsupported MiniMax-H3 adapter namespace or layout: {error}"
+                    )),
+                )
+                .await;
+            }
+        }
+    }
+
+    // Family plus declared metadata (sc-14057). The declared half matters most for the repo/URL
     // routes: their file did not exist when the API queued the job, so this is the only point at
     // which the adapter can describe itself.
     let (detected_family, adapter_metadata) = match inspect_adapter_in_dir(&target_dir) {
@@ -4181,6 +4517,9 @@ pub(crate) async fn run_lora_import_job(
             .await;
         }
     };
+    if let Some(detail) = ltx_import_base_model_error(resolved_family.as_deref(), &job.payload) {
+        return fail_job(api, &job.id, "LoRA import failed.", Some(detail)).await;
+    }
 
     write_lora_install_marker(&target_dir, &job.payload, &job.id).await?;
     if let Some(manifest_entry) = job
@@ -4237,6 +4576,51 @@ pub(crate) async fn run_lora_import_job(
     )
     .await?;
     Ok(())
+}
+
+fn ltx_import_base_model_error(
+    resolved_family: Option<&str>,
+    payload: &JsonObject,
+) -> Option<String> {
+    if resolved_family != Some("ltx-video") {
+        return None;
+    }
+    let recorded = optional_payload_string(payload, "baseModel").or_else(|| {
+        payload
+            .get("manifestEntry")
+            .and_then(Value::as_object)
+            .and_then(|entry| entry.get("baseModel"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+    });
+    match recorded {
+        None => Some(
+            "LTX LoRA imports require an exact base model. Re-import in Model Manager, choose the \
+             ltx-video family, and select LTX-2.3 or LTX-2.5 before queueing."
+                .to_owned(),
+        ),
+        Some("ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") => None,
+        Some(other) => Some(format!(
+            "LTX LoRA imports require baseModel ltx_2_3, ltx_2_3_eros, or ltx_2_5; got {other}."
+        )),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn ltx_import_base_model_gate_rejects_only_unstamped_ltx() {
+    let unstamped = JsonObject::new();
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &unstamped)
+        .is_some_and(|detail| detail.contains("require an exact base model")));
+    assert!(ltx_import_base_model_error(Some("wan-video"), &unstamped).is_none());
+
+    let mut stamped = JsonObject::new();
+    stamped.insert("baseModel".to_owned(), json!("ltx_2_5"));
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &stamped).is_none());
+    stamped.insert("baseModel".to_owned(), json!("wan_2_2"));
+    assert!(ltx_import_base_model_error(Some("ltx-video"), &stamped)
+        .is_some_and(|detail| detail.contains("got wan_2_2")));
 }
 
 /// A single `expectedSha256` cannot identify both files in a paired Wan MoE upload. Reject that
@@ -4398,12 +4782,371 @@ async fn stable_model_file_sha256(
     Ok((hash, after))
 }
 
+/// The `(importSourceShape, importQuantFormat)` pair a single checkpoint file's safetensors header
+/// proves, or `None` when it proves nothing a manifest entry may claim (sc-11045, epic 11037).
+///
+/// The managed import branch derives the same pair inline, because it can do more: it holds staged
+/// bytes it is about to install, so it REFUSES an unsupported triple and a bare `mage-flow` file
+/// outright. A linked import has already compiled a verified plan over the user's own file and must
+/// not retroactively refuse it, so an unrecognized header stamps nothing here rather than failing
+/// the job. What must not differ is the PAIR — two copies of one rule disagreeing about what a
+/// checkpoint is stored as is the sc-13542 resolver-drift class, and
+/// `linked_classification_tests::the_linked_classifier_matches_the_managed_branchs_mapping` pins
+/// them together.
+///
+/// A component that is not a whole model (a text encoder, a VAE) yields `None`: it is not
+/// registerable as an imported model at all, so it has no source shape to advertise.
+pub(crate) fn base_weight_manifest_classification(
+    path: &Path,
+) -> Option<(&'static str, &'static str)> {
+    let BaseWeightDetection::Recognized(verdict) = detect_base_weight_file(path).ok()? else {
+        return None;
+    };
+    let source = match verdict.component {
+        ComponentRole::Transformer => "transformer_file",
+        ComponentRole::Checkpoint => "fused_checkpoint",
+        ComponentRole::TextEncoder | ComponentRole::Vae => return None,
+    };
+    Some((source, verdict.quant.as_str()))
+}
+
+/// The manifest entry a compiled linked checkpoint becomes (epic 20398, sc-20635).
+///
+/// This is the stamp that makes a linked checkpoint REACHABLE. `importPlan.checkpointId` is the
+/// persisted identity — `rootId + relativePath`, never an absolute path (E6) — and it is the single
+/// discriminator every consumer keys on: the scheduler's imported claim
+/// (`jobs_store::checkpoint_plan_checkpoint_id`), the worker's route selection
+/// (`image_jobs::checkpoint_plan`), and every bespoke imported lane's decline. Without it a
+/// compiled plan is a file on disk nothing can select.
+///
+/// A plan-backed entry carries NO `paths.model`. The plan-driven route resolves the plan's own
+/// layers through the plan store; writing an install path here would both be a lie (nothing was
+/// installed) and hand the entry to a bespoke lane as well, breaking the single-claim invariant.
+///
+/// # The header classification rides too (sc-11045, epic 11037)
+///
+/// `classification` is the `(importSourceShape, importQuantFormat)` pair
+/// [`base_weight_manifest_classification`] proved from the linked file's own safetensors header —
+/// the SAME detector the managed branch runs, over the same bytes.
+///
+/// It was managed-only, and that made a LINKED copy of an NVFP4 checkpoint invisible to every E8
+/// surface even though the bytes are identical: `imported_entry_source_codec` answered `None`, so
+/// admission's native claim was false, the catalog emitted no `runtimeQuantTiers` (the provider
+/// surface early-returns without an `importSourceShape`), the asset receipt and the
+/// `generation_metrics` row carried no source codec, and — worst — the worker's dispatch guard
+/// `krea_imported_native_nvfp4` was false, so `imported_model_quant` would happily hand `Quant::Q4`
+/// to packed E2M1 bytes. E8 is a property of the CHECKPOINT, not of who owns the copy, so the
+/// classification is stamped in both ownership modes.
+///
+/// `None` stamps nothing. A header that proves no base-weight verdict is not a reason to invent
+/// one, and an absent key is what every consumer already handles.
+pub(crate) fn linked_checkpoint_manifest_entry(
+    mut entry: JsonObject,
+    compiled: &sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1,
+    classification: Option<(&str, &str)>,
+) -> JsonObject {
+    entry
+        .entry("family")
+        .or_insert_with(|| Value::String(compiled.plan.family.clone()));
+    entry.insert(
+        "importPlan".to_owned(),
+        json!({
+            "checkpointId": compiled.checkpoint_id,
+            "planId": compiled.plan.plan_id,
+            "semanticDigest": compiled.record.plan.semantic_digest,
+        }),
+    );
+    if let Some((source_shape, quant_format)) = classification {
+        entry.insert(
+            "importSourceShape".to_owned(),
+            Value::String(source_shape.to_owned()),
+        );
+        entry.insert(
+            "importQuantFormat".to_owned(),
+            Value::String(quant_format.to_owned()),
+        );
+    }
+    // A linked checkpoint is referenced in place; nothing was copied into an app-owned install
+    // directory, so any inherited install path would name a directory that does not exist.
+    if let Some(paths) = entry.get_mut("paths").and_then(Value::as_object_mut) {
+        paths.remove("model");
+    }
+    let model_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("image")
+        .to_owned();
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    apply_model_manifest_defaults(&mut entry, &model_type, family.as_deref());
+    entry
+}
+
+/// Compile a linked checkpoint under an approved root and register it as a selectable model.
+///
+/// Nothing is downloaded, copied, moved or deleted: the only writes are the plan store's own
+/// documents under `<data>/checkpoints/` and the manifest entry (E6).
+async fn run_linked_checkpoint_import_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    root_id: &str,
+    relative_path: &str,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Importing,
+            0.1,
+            "Inspecting the linked checkpoint.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    // The absolute path of the linked file, resolved through the APPROVED root — the same
+    // confinement `compile_linked` applies, never a path built from the payload. It is what the
+    // header classification below reads; a root that no longer resolves simply yields no
+    // classification (the compile below produces the typed refusal for that case).
+    let linked_file = store
+        .resolve_root(root_id)
+        .ok()
+        .zip(
+            sceneworks_core::checkpoint_plan_store::portable_relative_path_parts(relative_path)
+                .ok(),
+        )
+        .map(|(root, parts)| root.join(parts));
+    let root_id = root_id.to_owned();
+    let relative_path = relative_path.to_owned();
+    // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
+    let compiled =
+        match tokio::task::spawn_blocking(move || store.compile_linked(&root_id, &relative_path))
+            .await
+        {
+            Ok(Ok(compiled)) => compiled,
+            // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
+            // wrong with the source; surface it verbatim rather than flattening it to "import failed".
+            Ok(Err(error)) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(error.to_string()),
+                )
+                .await;
+            }
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(format!("Checkpoint inspection task failed: {error}")),
+                )
+                .await;
+            }
+        };
+
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        // The SAME header classification the managed branch runs, over the user's own file. Reading
+        // a safetensors header is a bounded seek-and-parse, but it is still blocking I/O.
+        let classification = match linked_file {
+            Some(path) => {
+                tokio::task::spawn_blocking(move || base_weight_manifest_classification(&path))
+                    .await
+                    .unwrap_or(None)
+            }
+            None => None,
+        };
+        let manifest_entry =
+            linked_checkpoint_manifest_entry(manifest_entry, &compiled, classification);
+        let manifest_path = model_manifest_target(settings, &job.payload)?;
+        upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "modelId".to_owned(),
+        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert(
+        "checkpointId".to_owned(),
+        Value::String(compiled.checkpoint_id.clone()),
+    );
+    result.insert(
+        "importPlanId".to_owned(),
+        Value::String(compiled.plan.plan_id.clone()),
+    );
+    result.insert(
+        "family".to_owned(),
+        Value::String(compiled.plan.family.clone()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Linked checkpoint registered.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The managed install id for a resolved model-import target directory (sc-20636).
+///
+/// The install id is the target directory's own name, so a managed install occupies exactly the
+/// path imported models have always occupied (`<data>/models/imports/<name>`) and every existing
+/// consumer of `paths.model` keeps working. The store's own [`CheckpointPlanStore::install_dir`] is
+/// then required to reproduce that same path, which is what proves the id addresses the intended
+/// directory rather than merely looking plausible.
+fn managed_install_id_for_target(
+    store: &CheckpointPlanStore,
+    target_dir: &Path,
+) -> WorkerResult<String> {
+    let install_id = target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Model import target {} does not name an install directory",
+                target_dir.display()
+            ))
+        })?
+        .to_owned();
+    // Normalized the same way `resolve_model_import_target` normalized `target_dir`: on macOS a
+    // data dir under `/var` canonicalizes to `/private/var`, so a lexical comparison would reject
+    // the very directory the store derived.
+    let derived = store
+        .install_dir(&install_id)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let derived = crate::paths::normalize_existing_or_absolute(&derived)?;
+    if derived != target_dir {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Model import target {} is not the managed install directory for {install_id:?} ({})",
+            target_dir.display(),
+            derived.display()
+        )));
+    }
+    Ok(install_id)
+}
+
+/// The provenance a managed install records, taken from the `importProvenance` the API normalised
+/// from either the discriminated source or the legacy flat fields.
+///
+/// A payload with no provenance is a job queued by an older API build; it records the ingest source
+/// as `legacy-import` rather than guessing, so the field is never silently wrong.
+fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<ManagedProvenanceV1> {
+    let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
+        return Ok(ManagedProvenanceV1::of_source("legacy-import"));
+    };
+    let field = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let provenance = ManagedProvenanceV1 {
+        source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
+        reference: field("reference"),
+        url: field("url"),
+        version_id: field("versionId"),
+        file_id: field("fileId"),
+        credential_host: field("credentialHost"),
+    };
+    provenance
+        .validate()
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    Ok(provenance)
+}
+
+/// A staged artifact's path relative to the staging root, in the portable `/`-separated spelling
+/// the plan contract uses.
+fn managed_staged_relative_path(staging_dir: &Path, file: &Path) -> WorkerResult<String> {
+    let relative = file.strip_prefix(staging_dir).map_err(|_| {
+        WorkerError::InvalidPayload(format!(
+            "Imported checkpoint {} is not inside the import staging directory {}",
+            file.display(),
+            staging_dir.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "Imported checkpoint path {} is not valid UTF-8",
+                            relative.display()
+                        ))
+                    })?
+                    .to_owned(),
+            ),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Imported checkpoint path {} is not a confined relative path",
+                    relative.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Imported checkpoint path is empty".to_owned(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
 pub(crate) async fn run_model_import_job(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // Linked (in-place) ownership is its own transaction: no transfer, no install directory, no
+    // `paths.model` (sc-20635). Dispatched before anything below so the download-oriented path
+    // cannot reach a plan-backed entry at all.
+    if let Some(root_id) = optional_payload_string(&job.payload, "linkedRootId") {
+        let Some(relative_path) = optional_payload_string(&job.payload, "linkedRelativePath")
+        else {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(
+                    "A linked checkpoint import requires both linkedRootId and \
+                     linkedRelativePath."
+                        .to_owned(),
+                ),
+            )
+            .await;
+        };
+        let (root_id, relative_path) = (root_id.to_owned(), relative_path.to_owned());
+        return run_linked_checkpoint_import_job(api, settings, job, &root_id, &relative_path)
+            .await;
+    }
     let repo = optional_payload_string(&job.payload, "repo");
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
@@ -4417,8 +5160,31 @@ pub(crate) async fn run_model_import_job(
             .data_dir
             .join("models")
             .join("imports")
-            .join(target_name),
+            .join(&target_name),
     )?;
+
+    // sc-20636 (epic 20398): every managed source — HF repo, source URL, Civitai, upload, local
+    // copy — transfers into a STAGING directory and reaches `target_dir` only through one atomic
+    // rename in `ManagedIngest::finalize`, after its bytes have been hashed and fully validated. A
+    // cancel, a crash, a full disk, or a hash mismatch therefore all end with no directory at
+    // `target_dir` at all, so no partially-transferred model is ever addressable, selectable, or
+    // written to the manifest. The transfer code below is unchanged and simply points at staging.
+    let plan_store = CheckpointPlanStore::open(&settings.data_dir);
+    let install_id = managed_install_id_for_target(&plan_store, &target_dir)?;
+    let provenance = managed_provenance_from_payload(&job.payload)?;
+    let ingest = match ManagedIngest::begin(&plan_store, &install_id, provenance) {
+        Ok(ingest) => ingest,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    let staging_dir = ingest.staging_dir().to_path_buf();
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -4453,7 +5219,7 @@ pub(crate) async fn run_model_import_job(
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&target_dir).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4466,7 +5232,7 @@ pub(crate) async fn run_model_import_job(
                 cancel_message: "Model import canceled by user.",
                 fresh_download: false,
             },
-            &target_dir,
+            &staging_dir,
             &snapshot,
             &mut progress,
         )
@@ -4484,7 +5250,7 @@ pub(crate) async fn run_model_import_job(
         )?;
         import_lora_source_path(
             &source_path,
-            &target_dir,
+            &staging_dir,
             payload_bool(&job.payload, "uploadedSourcePath"),
         )
         .await?;
@@ -4499,7 +5265,7 @@ pub(crate) async fn run_model_import_job(
                 fresh_download: false,
             },
             source_url,
-            &target_dir,
+            &staging_dir,
         )
         .await?;
     } else {
@@ -4512,7 +5278,7 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
-    let imported_model_file = first_safetensors_path(&target_dir);
+    let imported_model_file = imported_model_primary_weight_file(&staging_dir);
     let mut model_file_sha256 = None;
     let mut verified_model_file_identity = None;
 
@@ -4560,7 +5326,9 @@ pub(crate) async fn run_model_import_job(
     // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
     // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
     // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
-    let base_weight_family = match imported_model_file.as_ref() {
+    let (base_weight_family, import_source_shape, import_quant_format) = match imported_model_file
+        .as_ref()
+    {
         Some(weight_file) => match detect_base_weight_file(weight_file) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
@@ -4572,6 +5340,26 @@ pub(crate) async fn run_model_import_job(
                     )
                     .await;
                 }
+                if matches!(
+                    &detection,
+                    BaseWeightDetection::Recognized(verdict)
+                        if verdict.family.as_deref() == Some("mage-flow")
+                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&staging_dir)
+                {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import is not supported for this file.",
+                        Some(
+                            "Model import for the 'mage-flow' family requires a complete \
+                             transformer directory containing config.json and \
+                             diffusion_pytorch_model.safetensors; a bare weights file is refused \
+                             because the loader cannot derive its architecture."
+                                .to_owned(),
+                        ),
+                    )
+                    .await;
+                }
                 // sc-14108: a single-file base checkpoint is a bare DiT — neither a diffusers
                 // directory nor a LoRA — so the LoRA-oriented `detect_model_family` below returns
                 // None for it. Reuse the family the gate's base-weight verdict already resolved so
@@ -4580,8 +5368,34 @@ pub(crate) async fn run_model_import_job(
                 // the family (sc-14019 `MLX_ROUTED_FAMILIES`), "Not On Mac" — so the model can't be
                 // selected in the Image Studio.
                 match detection {
-                    BaseWeightDetection::Recognized(verdict) => verdict.family,
-                    BaseWeightDetection::Unrecognized { .. } => None,
+                    BaseWeightDetection::Recognized(verdict) => {
+                        let source = match verdict.component {
+                            ComponentRole::Transformer
+                                if verdict.family.as_deref() == Some("mage-flow")
+                                    && sceneworks_core::base_weights::is_mage_flow_transformer_dir(
+                                        &staging_dir,
+                                    ) =>
+                            {
+                                "transformer_directory"
+                            }
+                            ComponentRole::Transformer => "transformer_file",
+                            ComponentRole::Checkpoint => "fused_checkpoint",
+                            ComponentRole::TextEncoder | ComponentRole::Vae => {
+                                return fail_job(
+                                    api,
+                                    &job.id,
+                                    "Model import is not supported for this file.",
+                                    Some(format!(
+                                        "A {:?} component cannot be registered as a complete imported model.",
+                                        verdict.component
+                                    )),
+                                )
+                                .await;
+                            }
+                        };
+                        (verdict.family, Some(source), Some(verdict.quant.as_str()))
+                    }
+                    BaseWeightDetection::Unrecognized { .. } => (None, None, None),
                 }
             }
             Err(error) => {
@@ -4609,7 +5423,7 @@ pub(crate) async fn run_model_import_job(
         }
     };
 
-    let detected_family = match detect_model_family(&target_dir) {
+    let detected_family = match detect_model_family(&staging_dir) {
         // A diffusers dir / LoRA is classified here; a bare base DiT is not, so fall back to the
         // base-weight verdict's family (sc-14108).
         Ok(detected) => detected.or(base_weight_family),
@@ -4650,8 +5464,10 @@ pub(crate) async fn run_model_import_job(
             verified_model_file_identity = Some(identity);
         }
     }
+    // Written into STAGING, so the tree that commits is already complete. The marker is a hidden
+    // dot-file, which the inspector skips, so it is not part of the compiled plan.
     write_model_install_marker(
-        &target_dir,
+        &staging_dir,
         &job.payload,
         repo.unwrap_or(""),
         &job.id,
@@ -4659,6 +5475,87 @@ pub(crate) async fn run_model_import_job(
         model_file_sha256.as_deref(),
     )
     .await?;
+
+    // ---- commit ---------------------------------------------------------------------------
+    // Everything above ran against staged bytes. This is the point of no return: one rename, then
+    // the plan/record/bindings publication. A refusal here still leaves nothing at `target_dir`.
+    let primary_relative = match imported_model_file.as_ref() {
+        Some(file) => managed_staged_relative_path(&staging_dir, file)?,
+        None => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import is not supported for this file.",
+                Some("No safetensors base-weight file was found in the imported model.".to_owned()),
+            )
+            .await
+        }
+    };
+    // The DECLARED digest, not the one just computed from these bytes. Handing `finalize` the
+    // file's own hash would make its integrity check compare the bytes to themselves and pass
+    // unconditionally — a disabled guard that still looks like a guard. The block above verifies
+    // and fails first with a more actionable message; this is the transactional line of defence
+    // behind it, so a caller that reaches `finalize` by any other route is still checked.
+    let declared_sha256 =
+        optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
+    let install = match ingest.finalize(&primary_relative, declared_sha256.as_deref()) {
+        Ok(install) => install,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    // The commit landed where the job was told to install. `managed_install_id_for_target` already
+    // proved the two agree; re-checked here against the normalized form because everything below
+    // records `target_dir` as the entry's installed path.
+    debug_assert_eq!(
+        crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
+        Some(target_dir.clone())
+    );
+    // A CURATED managed NVFP4 variant confirms against its registration (sc-11045, epic 11037).
+    //
+    // `ManagedCheckpointVariantV1::confirm_installed` compares the committed install id, checkpoint
+    // id, path, digest and — the reason it exists — the registered `size_bytes` against the file on
+    // disk. It had no production caller at all, which made the registered size the decorative
+    // number its own doc comment says it must not be: it is what a client renders as "how much will
+    // this download", and nothing compared it to anything.
+    //
+    // Post-commit rather than at finalize: this is the one verb that checks a COMMITTED install
+    // against the registration as a whole, and the digest verification inside `finalize` has
+    // already refused substituted bytes by the time it runs. A failure here is a registration
+    // defect (a stale or invented size), so it fails the job with the diagnostic rather than
+    // recording a curated identity the registry does not actually describe. Non-variant imports —
+    // every ordinary user import — have no registration and skip it entirely.
+    if let Some(variant) =
+        sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant(&install.install_id)
+    {
+        if let Err(error) = variant.confirm_installed(&install) {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(format!(
+                    "The installed bytes do not match the managed variant's registration: {error}"
+                )),
+            )
+            .await;
+        }
+    }
+    if !install.duplicate_checkpoint_ids().is_empty() {
+        // Reported, never acted on: a user may legitimately keep both a linked library copy and a
+        // managed one, so neither is deleted and the import still succeeds (AC2).
+        tracing::info!(
+            checkpoint_id = %install.checkpoint_id,
+            duplicates = %install.duplicate_checkpoint_ids().join(", "),
+            "imported checkpoint duplicates checkpoints already known to this install"
+        );
+    }
+
     if let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
@@ -4671,6 +5568,29 @@ pub(crate) async fn run_model_import_job(
                 .entry("family")
                 .or_insert(Value::String(family));
         }
+        if let Some(source) = import_source_shape {
+            manifest_entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String(source.to_owned()),
+            );
+            // The plan binding (epic 20398): a managed install is selectable through the
+            // plan-driven route by the checkpoint identity its published plan carries. Stamped
+            // beside `importSourceShape` because the scheduler's imported claim requires BOTH — a
+            // source shape and a source hint — and only an entry the base-weight gate classified
+            // has a shape. `paths.model` is written too: the plan-driven route serves plain
+            // text-to-image only, and the family's bespoke lane keeps every shape it does not
+            // serve, so importing through the plan never removes a capability the entry had.
+            manifest_entry.insert(
+                "importPlan".to_owned(),
+                json!({ "checkpointId": install.checkpoint_id }),
+            );
+        }
+        if let Some(quant) = import_quant_format {
+            manifest_entry.insert(
+                "importQuantFormat".to_owned(),
+                Value::String(quant.to_owned()),
+            );
+        }
         let model_type = manifest_entry
             .get("type")
             .and_then(Value::as_str)
@@ -4681,6 +5601,14 @@ pub(crate) async fn run_model_import_job(
             .and_then(Value::as_str)
             .map(str::to_owned);
         apply_model_manifest_defaults(&mut manifest_entry, &model_type, family.as_deref());
+        // `paths.model` names the directory this job actually INSTALLED into, so every entry that
+        // reaches here gets one — including a MANAGED plan-backed entry, which carries both the
+        // install path and `importPlan.checkpointId` and whose bespoke lane still serves the
+        // request shapes the plan route does not (sc-20636).
+        //
+        // A LINKED import never reaches this code at all: it is dispatched to
+        // `run_linked_checkpoint_import_job` at the top of this function and installs nothing, and
+        // `linked_checkpoint_manifest_entry` strips any inherited `paths.model` itself (sc-20635).
         if let Some(paths) = manifest_entry
             .entry("paths")
             .or_insert_with(|| json!({}))
@@ -4718,6 +5646,20 @@ pub(crate) async fn run_model_import_job(
     result.insert(
         "family".to_owned(),
         resolved_family.map(Value::String).unwrap_or(Value::Null),
+    );
+    result.insert(
+        "importQuantFormat".to_owned(),
+        import_quant_format
+            .map(|quant| Value::String(quant.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    // sc-20636: the duplicates the compile found, on the JOB RESULT and not only in a log line.
+    // "This is the same checkpoint you already have as X" is the user's decision to make — nothing
+    // deletes either copy — and a `tracing::info!` never reaches them. Always present (an empty
+    // array when there are none) so a client can render it without probing for the key.
+    result.insert(
+        "duplicateCheckpointIds".to_owned(),
+        json!(install.duplicate_checkpoint_ids()),
     );
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(
@@ -5520,6 +6462,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["perth", "voice_embedding"],
             control_kinds: None,
         }
@@ -5623,6 +6567,58 @@ mod co_requisite_tests {
         }
     }
 
+    /// Soft co-requisites are install companions for request-specific features. Even when their
+    /// bytes are already cached, neither backend's generic descriptor resolver may reinterpret one
+    /// as an unconditional component and attach it to every ordinary job.
+    #[test]
+    fn resolve_co_requisites_rejects_soft_components_on_both_backends() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "xinsir/controlnet-openpose-sdxl-1.0";
+        let revision = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+        stage_snapshot_file(
+            data_dir.path(),
+            repo,
+            revision,
+            "diffusion_pytorch_model.safetensors",
+        );
+        let manifest = json!({
+            "id": "sdxl_probe",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "revision": revision,
+                "coRequisite": true,
+                "required": "soft",
+                "componentId": "controlnet_openpose",
+                "files": ["diffusion_pytorch_model.safetensors"]
+            }]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+
+        for backend in ["mlx", "candle"] {
+            let descriptor = gen_core::ModelDescriptor {
+                id: "sdxl_probe",
+                family: "sdxl",
+                backend,
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+                required_components: &["controlnet_openpose"],
+                control_kinds: None,
+            };
+            let error = resolve_co_requisites(&descriptor, &manifest, &settings)
+                .expect_err("a soft component cannot satisfy required_components");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message)
+                    if message.contains("required: soft")
+                        && message.contains("request-specific route")),
+                "{backend}: an installed soft component must still be rejected by the generic seam, got {error:?}"
+            );
+        }
+    }
+
     /// sc-13583 / F-002 (co-requisite seam, 5th site): `revision` reaches
     /// [`huggingface_pinned_snapshot_dir`] straight from the payload `modelManifestEntry`. A `..`
     /// revision must NOT resolve to a directory OUTSIDE `snapshots/`, even when that directory exists
@@ -5679,6 +6675,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["bundle"],
             control_kinds: None,
         };
@@ -5737,6 +6735,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["voice_embedding"],
             control_kinds: None,
         };
@@ -5802,7 +6802,9 @@ mod co_requisite_tests {
         let snapshots = repo_dir.join("snapshots");
 
         // The real, fully materialized snapshot …
-        let populated = snapshots.join("b88090c7");
+        let populated_revision = "b88090c7b88090c7b88090c7b88090c7b88090c7";
+        let empty_revision = "abc12300abc12300abc12300abc12300abc12300";
+        let populated = snapshots.join(populated_revision);
         std::fs::create_dir_all(populated.join("q8/transformer")).expect("populated tree");
         std::fs::write(
             populated.join("q8/transformer/diffusion_pytorch_model.safetensors"),
@@ -5810,11 +6812,12 @@ mod co_requisite_tests {
         )
         .expect("write real weight");
         // … alongside an EMPTY placeholder snapshot (tier dirs only, no files) …
-        std::fs::create_dir_all(snapshots.join("abc123/q8/transformer"))
+        std::fs::create_dir_all(snapshots.join(empty_revision).join("q8/transformer"))
             .expect("empty placeholder");
         // … with `refs/main` clobbered to point at the empty one.
         std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-        std::fs::write(repo_dir.join("refs").join("main"), "abc123").expect("write refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), empty_revision)
+            .expect("write refs/main");
 
         let resolved = resolve_huggingface_snapshot_dir(data_dir.path(), repo)
             .expect("a populated snapshot exists, so resolution must succeed");
@@ -5825,11 +6828,118 @@ mod co_requisite_tests {
 
         // Sanity: a VALID `refs/main` (populated) is still honored on the fast path — the fallback
         // only engages when `refs/main` names an empty/absent snapshot.
-        std::fs::write(repo_dir.join("refs").join("main"), "b88090c7").expect("repoint refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), populated_revision)
+            .expect("repoint refs/main");
         assert_eq!(
             resolve_huggingface_snapshot_dir(data_dir.path(), repo).expect("still resolves"),
             populated,
             "a populated refs/main must resolve to exactly that snapshot"
+        );
+    }
+
+    /// A snapshot directory whose name is not a 40-hex commit is still an installed snapshot.
+    ///
+    /// Routing discovery through the typed artifact seam (sc-19704) started admitting the on-disk
+    /// directory name as if it were a caller-supplied revision, so `ArtifactSourceLibrary`'s
+    /// immutability rule applied to it and every such snapshot resolved to `None` — the model read
+    /// as not installed, silently, on every lane. This is reachable in production:
+    /// `downloads::download_snapshot_into_cache` falls back to
+    /// `commit.unwrap_or_else(|| revision.to_owned())`, so an endpoint that omits `X-Repo-Commit`
+    /// materializes a complete install under `snapshots/main`.
+    ///
+    /// Both arms are asserted because the `refs/main` arm *returns*: when it rejected the name it
+    /// did not fall through to the scan, so a repository with a valid `refs/main` resolved to
+    /// nothing even though the populated snapshot was sitting right there.
+    #[test]
+    fn snapshot_resolution_accepts_a_snapshot_named_by_a_mutable_revision() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "SceneWorks/krea-2-raw-mlx";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshot = repo_dir.join("snapshots").join("main");
+        std::fs::create_dir_all(snapshot.join("q8/transformer")).expect("snapshot tree");
+        std::fs::write(
+            snapshot.join("q8/transformer/diffusion_pytorch_model.safetensors"),
+            b"real",
+        )
+        .expect("write weight");
+
+        // The scan arm: no `refs/main` at all, exactly like the seeded turnkey fixtures the candle
+        // image lanes resolve against.
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("a populated snapshot exists, so resolution must succeed"),
+            snapshot,
+            "a snapshot directory named by a mutable revision is still installed"
+        );
+
+        // The `refs/main` fast-path arm, which is what a real mirror-endpoint install looks like:
+        // the pointer and the snapshot directory both carry the mutable name.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join("main"), "main").expect("write refs/main");
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("refs/main names a populated snapshot, so resolution must succeed"),
+            snapshot,
+            "a refs/main naming a populated mutable snapshot must resolve to exactly that snapshot"
+        );
+    }
+
+    /// A repository installed ONLY at a pinned `snapshots/<40-hex>` — no `refs/main` — still
+    /// resolves through the UNPINNED repo-string seam every native LLM consumer uses.
+    ///
+    /// This is the production shape of a manifest download that carries a `revision` (F-029):
+    /// `download_snapshot_into_cache` writes the receipt pointer as `refs/<revision>`, so a pinned
+    /// install leaves `refs/main` ABSENT. The consumers, however, resolve by repo string with no
+    /// revision at all — `prompt_refine_jobs` (`DEFAULT_REFINE_MODEL`), `caption_jobs`,
+    /// `dataset_analysis_jobs` — so the pin's correctness depends entirely on the scan arm below
+    /// finding the 40-hex snapshot after the `refs/main` read fails.
+    ///
+    /// The neighbouring mutable-name test exercises the OTHER branch of
+    /// `discover_installed_snapshot_path` (a non-immutable directory name is admitted as an
+    /// installed path); an immutable name is delegated to `discover_snapshot` instead, so a pinned
+    /// install would go unguarded without this case. Asserted through
+    /// `resolve_app_managed_model_dir`, the seam the jobs actually call, not just the inner
+    /// resolver — a pinned model that resolves inwardly but is rejected at the job seam is still a
+    /// model that cannot load.
+    #[test]
+    fn snapshot_resolution_finds_a_pinned_install_that_has_no_refs_main() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "TheDrummer/Anubis-Mini-8B-v1";
+        let revision = "696f5b956f0511168d98cd32106299cebc3cc12b";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshot = repo_dir.join("snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+        std::fs::write(snapshot.join("config.json"), b"{}").expect("write config");
+        std::fs::write(
+            snapshot.join("model-00001-of-00004.safetensors"),
+            b"weights",
+        )
+        .expect("write weight");
+        // The receipt pointer a PINNED download leaves — named by the revision, never `main`.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join(revision), revision).expect("write refs/<rev>");
+        assert!(
+            !repo_dir.join("refs").join("main").exists(),
+            "the fixture must reproduce a pinned install: no refs/main"
+        );
+
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("a pinned install is installed, so resolution must succeed"),
+            snapshot,
+        );
+        assert_eq!(
+            crate::paths::resolve_app_managed_model_dir(
+                &settings_at(data_dir.path().to_path_buf()),
+                repo,
+                "prompt-refine model path",
+            )
+            .expect("the job seam must resolve a pinned install"),
+            snapshot,
         );
     }
 
@@ -5958,6 +7068,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         };
@@ -5973,6 +7085,29 @@ mod co_requisite_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_sdxl_descriptor_stages_none_of_the_carried_candle_components() {
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl")
+            .expect("the macOS MLX SDXL provider is registered");
+        assert_eq!(descriptor.backend, "mlx");
+        assert!(
+            descriptor.required_components.is_empty(),
+            "the self-contained MLX SDXL provider requires no caller-staged components"
+        );
+
+        let components = resolve_co_requisites(
+            &descriptor,
+            &builtin_manifest_entry("realvisxl"),
+            &settings_at(PathBuf::from("/nonexistent/sc-20747-mlx-sdxl")),
+        )
+        .expect("an empty MLX descriptor ignores carried Candle-only component metadata");
+        assert!(
+            components.is_empty(),
+            "the generic resolver stages no components for self-contained MLX SDXL"
+        );
+    }
+
     // --- SDXL shared components (epic 13657, sc-13682) -----------------------------------------------
 
     /// The candle `sdxl` generator descriptor shape at the inference pin: it advertises the three
@@ -5984,6 +7119,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
             control_kinds: None,
         }
@@ -6038,8 +7175,9 @@ mod co_requisite_tests {
             stage_snapshot_file(data_dir.path(), repo, revision, file);
         }
 
-        // Every candle-SDXL base + InstantID declares the SAME three coRequisites by `componentId`, so
-        // resolving the candle `sdxl` descriptor against each live entry must map ALL THREE.
+        // Every Candle-SDXL base + InstantID declares the SAME three hard coRequisites by
+        // `componentId`. The five pose backbones also declare soft OpenPose, which this generic
+        // descriptor seam must ignore. Resolving against each live entry maps exactly the hard three.
         for model_id in [
             "sdxl",
             "realvisxl",
@@ -6115,6 +7253,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["codec"],
             control_kinds: None,
         }
@@ -6150,6 +7290,8 @@ mod co_requisite_tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["text_encoder", "vae"],
             control_kinds: None,
         }
@@ -6362,6 +7504,8 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &["clip", "synchformer", "dit", "vae", "vocoder"],
             control_kinds: None,
         }
@@ -6381,7 +7525,7 @@ mod co_requisite_tests {
         const MMAUDIO_REV: &str = "eb13a1a98fdbec91753775c57b074ccdfc60587c";
         const CLIP: (&str, &str, &str, &str) = (
             "clip",
-            "apple/DFN5B-CLIP-ViT-H-14-384",
+            "apple/DFN5B-CLIP-ViT-H-14-378",
             "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
             "open_clip_pytorch_model.bin",
         );
@@ -6489,6 +7633,432 @@ mod co_requisite_tests {
     }
 
     #[test]
+    fn mmaudio_clip_repo_rename_relinks_the_existing_pinned_cache_without_a_fetch() {
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let (_, canonical_clip_repo, clip_revision, clip_file) = *components
+            .iter()
+            .find(|(id, _, _, _)| *id == "clip")
+            .expect("clip component present");
+        let legacy_clip = stage_snapshot_file(
+            data_dir.path(),
+            rename.legacy_repo,
+            clip_revision,
+            clip_file,
+        );
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+        }
+
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect("the canonical manifest re-links the exact legacy pinned CLIP cache");
+        let gen_core::WeightsSource::File(canonical_clip) =
+            resolved.get("clip").expect("resolved CLIP component")
+        else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        let expected = huggingface_repo_cache_path(data_dir.path(), canonical_clip_repo)
+            .expect("canonical repo cache")
+            .join("snapshots")
+            .join(clip_revision)
+            .join(clip_file);
+        assert_eq!(
+            canonical_clip,
+            &std::fs::canonicalize(&expected).expect("canonical linked file")
+        );
+        assert_eq!(
+            std::fs::read(canonical_clip).expect("read canonical link"),
+            b"weights"
+        );
+        assert!(legacy_clip.is_file(), "the source cache remains intact");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(
+                std::fs::metadata(&legacy_clip)
+                    .expect("legacy metadata")
+                    .ino(),
+                std::fs::metadata(canonical_clip)
+                    .expect("canonical metadata")
+                    .ino(),
+                "the corrected repo must hard-link the existing blob, not copy or fetch it"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_current_snapshot_symlink_resolves_to_its_validated_plain_blob() {
+        use std::os::unix::fs::symlink;
+
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let current_repo =
+            huggingface_repo_cache_path(data_dir.path(), rename.current_repo).unwrap();
+        let current_snapshot = current_repo.join("snapshots").join(rename.revision);
+        let current_blob = current_repo.join("blobs").join("clip-blob");
+        std::fs::create_dir_all(&current_snapshot).unwrap();
+        std::fs::create_dir_all(current_blob.parent().unwrap()).unwrap();
+        std::fs::write(&current_blob, b"canonical blob bytes").unwrap();
+        symlink(&current_blob, current_snapshot.join(rename.files[0])).unwrap();
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(data_dir.path(), repo, revision, file);
+            }
+        }
+
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(data_dir.path().to_path_buf()),
+        )
+        .expect("the exact current cache resolves without traversing its snapshot symlink");
+        let gen_core::WeightsSource::File(resolved_clip) = &resolved["clip"] else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            resolved_clip,
+            &std::fs::canonicalize(&current_blob).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(resolved_clip).unwrap(),
+            b"canonical blob bytes"
+        );
+        assert!(
+            !huggingface_repo_cache_path(data_dir.path(), rename.legacy_repo)
+                .unwrap()
+                .exists(),
+            "a valid current cache must not consult or create the legacy namespace"
+        );
+    }
+
+    #[test]
+    fn renamed_snapshot_migration_uses_validated_legacy_when_hardlinks_are_unavailable() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_file = stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        let resolved = resolve_renamed_hf_single_file_using(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "fixture filesystem has no hardlinks",
+                ))
+            },
+        )
+        .expect("an unsupported hardlink must fall back to the validated legacy file");
+
+        let canonical_file = huggingface_repo_cache_path(temp.path(), rename.current_repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rename.revision)
+            .join(rename.files[0]);
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&legacy_file).unwrap(),
+            "a no-hardlink filesystem must not duplicate a multi-GB immutable blob"
+        );
+        assert!(
+            !canonical_file.exists(),
+            "the direct legacy fallback must not copy the blob into the canonical namespace"
+        );
+        assert_eq!(std::fs::read(&legacy_file).unwrap(), b"weights");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_single_file_symlink_source_bypasses_reparse_when_hardlinks_are_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_repo = huggingface_repo_cache_path(temp.path(), rename.legacy_repo).unwrap();
+        let legacy_snapshot = legacy_repo.join("snapshots").join(rename.revision);
+        let legacy_blob = legacy_repo.join("blobs").join("clip-blob");
+        std::fs::create_dir_all(&legacy_snapshot).unwrap();
+        std::fs::create_dir_all(legacy_blob.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_blob, b"validated blob bytes").unwrap();
+        symlink(&legacy_blob, legacy_snapshot.join(rename.files[0])).unwrap();
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        let resolved = resolve_renamed_hf_single_file_using(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "fixture filesystem has no hardlinks",
+                ))
+            },
+        )
+        .expect("the validated plain blob is the no-hardlink fallback");
+
+        assert_eq!(resolved, std::fs::canonicalize(&legacy_blob).unwrap());
+        assert_eq!(std::fs::read(&resolved).unwrap(), b"validated blob bytes");
+        assert!(
+            std::fs::symlink_metadata(legacy_snapshot.join(rename.files[0]))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the exact rename seam must not rewrite the legacy snapshot symlink"
+        );
+        assert!(
+            !huggingface_repo_cache_path(temp.path(), rename.current_repo)
+                .unwrap()
+                .join("snapshots")
+                .join(rename.revision)
+                .join(rename.files[0])
+                .exists(),
+            "the fallback must not copy the blob into the canonical namespace"
+        );
+
+        // Exercise the actual co-requisite resolver through the same fallback. Poisoning only the
+        // canonical snapshot directory makes materialization unavailable while the validated
+        // legacy blob remains exactly the cache state the API reports as installed.
+        let current_repo = huggingface_repo_cache_path(temp.path(), rename.current_repo).unwrap();
+        std::fs::remove_dir_all(&current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+        let outside_snapshots = temp.path().join("outside-snapshots");
+        std::fs::create_dir_all(&outside_snapshots).unwrap();
+        symlink(&outside_snapshots, current_repo.join("snapshots")).unwrap();
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(temp.path(), repo, revision, file);
+            }
+        }
+        let resolved_components = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(temp.path().to_path_buf()),
+        )
+        .expect("production resolution uses the validated plain legacy blob");
+        let gen_core::WeightsSource::File(resolved_clip) = &resolved_components["clip"] else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            resolved_clip,
+            &std::fs::canonicalize(&legacy_blob).unwrap(),
+            "production must return the validator-proven plain blob path, not its snapshot symlink"
+        );
+        assert_eq!(
+            std::fs::read(resolved_clip).unwrap(),
+            b"validated blob bytes"
+        );
+        assert!(
+            !outside_snapshots.join(rename.revision).exists(),
+            "production must not create through the poisoned canonical snapshot directory"
+        );
+    }
+
+    #[test]
+    fn renamed_snapshot_migration_is_race_safe_and_rejects_wrong_revision() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                resolve_renamed_hf_single_file(
+                    temp.path(),
+                    rename.current_repo,
+                    rename.revision,
+                    &files,
+                )
+            });
+            let second = scope.spawn(|| {
+                resolve_renamed_hf_single_file(
+                    temp.path(),
+                    rename.current_repo,
+                    rename.revision,
+                    &files,
+                )
+            });
+            assert!(first.join().unwrap().is_some());
+            assert!(second.join().unwrap().is_some());
+        });
+        assert!(resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            "wrong-revision",
+            &files,
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_snapshot_migration_rejects_a_legacy_file_escaping_its_repo_cache() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_snapshot = huggingface_repo_cache_path(temp.path(), rename.legacy_repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rename.revision);
+        std::fs::create_dir_all(&legacy_snapshot).unwrap();
+        let outside = temp.path().join("outside.bin");
+        std::fs::write(&outside, b"not cache-owned").unwrap();
+        symlink(&outside, legacy_snapshot.join(rename.files[0])).unwrap();
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+
+        assert!(resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renamed_snapshot_migration_falls_back_to_validated_legacy_for_destination_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("temporary cache");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let legacy_file = stage_snapshot_file(
+            temp.path(),
+            rename.legacy_repo,
+            rename.revision,
+            rename.files[0],
+        );
+        let files = rename
+            .files
+            .iter()
+            .map(|file| (*file).to_owned())
+            .collect::<Vec<_>>();
+        let current_repo = huggingface_repo_cache_path(temp.path(), rename.current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+
+        let outside_snapshots = temp.path().join("outside-snapshots");
+        std::fs::create_dir_all(&outside_snapshots).unwrap();
+        symlink(&outside_snapshots, current_repo.join("snapshots")).unwrap();
+        let resolved_file = resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .expect("a poisoned canonical directory must fall back to the valid legacy file");
+        assert_eq!(resolved_file, std::fs::canonicalize(&legacy_file).unwrap());
+        assert!(
+            !outside_snapshots.join(rename.revision).exists(),
+            "validation must happen before creating a directory through an escaping parent"
+        );
+
+        std::fs::remove_file(current_repo.join("snapshots")).unwrap();
+        let current_snapshot = current_repo.join("snapshots").join(rename.revision);
+        std::fs::create_dir_all(&current_snapshot).unwrap();
+        let outside_file = temp.path().join("outside-destination.bin");
+        std::fs::write(&outside_file, b"outside must not be accepted").unwrap();
+        symlink(&outside_file, current_snapshot.join(rename.files[0])).unwrap();
+        let resolved_file = resolve_renamed_hf_single_file(
+            temp.path(),
+            rename.current_repo,
+            rename.revision,
+            &files,
+        )
+        .expect("a poisoned canonical file must fall back to the valid legacy file");
+        assert_eq!(resolved_file, std::fs::canonicalize(&legacy_file).unwrap());
+        assert_eq!(
+            std::fs::read(&outside_file).unwrap(),
+            b"outside must not be accepted"
+        );
+
+        let (model_id, components) = mmaudio_component_snapshots()
+            .into_iter()
+            .next()
+            .expect("MMAudio tier fixture");
+        for (id, repo, revision, file) in &components {
+            if *id != "clip" {
+                stage_snapshot_file(temp.path(), repo, revision, file);
+            }
+        }
+        let resolved = resolve_co_requisites(
+            &mmaudio_descriptor(model_id),
+            &builtin_manifest_entry(model_id),
+            &settings_at(temp.path().to_path_buf()),
+        )
+        .expect("production must use the validated legacy snapshot without following the poison");
+        let gen_core::WeightsSource::File(resolved_clip) =
+            resolved.get("clip").expect("resolved CLIP component")
+        else {
+            panic!("the CLIP component must resolve to a single file");
+        };
+        assert_eq!(
+            std::fs::canonicalize(resolved_clip).unwrap(),
+            std::fs::canonicalize(&legacy_file).unwrap(),
+            "the worker must load the confined legacy file that made the catalog ready"
+        );
+        assert_eq!(
+            std::fs::read(&outside_file).unwrap(),
+            b"outside must not be accepted",
+            "the poisoned canonical destination remains untouched"
+        );
+    }
+
+    #[test]
     fn a_missing_mmaudio_component_fails_with_an_actionable_error_naming_id_and_repo() {
         for (model_id, components) in mmaudio_component_snapshots() {
             let _env = isolate_hf_cache();
@@ -6524,6 +8094,310 @@ mod co_requisite_tests {
                 "{model_id}: the error must name the missing `vocoder` component + its repo BEFORE engine \
                  load, got: {message}"
             );
+        }
+    }
+}
+
+/// The linked half of E8: a LINKED copy of an NVFP4 checkpoint is exposed exactly as a managed one
+/// (sc-11045, epic 11037).
+///
+/// Ungated on purpose. The stamp and the resolvers that read it are platform-independent — the
+/// backend-specific dispatch half lives in `image_jobs::tests` — and this is the layer where "the
+/// same bytes, owned differently, are the same checkpoint" is decided.
+#[cfg(test)]
+mod linked_classification_tests {
+    use super::*;
+    use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
+    use std::path::PathBuf;
+
+    fn write_header_file(
+        path: &Path,
+        metadata: Value,
+        entries: &[(String, &'static str, Vec<u64>)],
+    ) {
+        let mut header = serde_json::Map::new();
+        header.insert("__metadata__".to_owned(), metadata);
+        let mut offset = 0_u64;
+        for (name, dtype, shape) in entries {
+            let width = match *dtype {
+                "F32" => 4,
+                "BF16" | "F16" => 2,
+                _ => 1,
+            };
+            let bytes = shape.iter().product::<u64>().max(1) * width;
+            header.insert(
+                name.clone(),
+                json!({"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + bytes]}),
+            );
+            offset += bytes;
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset as usize, 0x5a);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A single-file NVFP4 transformer whose header carries everything the classifier proves: the
+    /// `_quantization_metadata` layer map, and one complete packed triplet per projection.
+    fn write_nvfp4_transformer(path: &Path) {
+        let layers = 6;
+        let mut declared = serde_json::Map::new();
+        for index in 0..layers {
+            declared.insert(
+                format!("blocks.{index}.attn.wq"),
+                json!({"format": "nvfp4", "group_size": 16}),
+            );
+        }
+        let mut entries: Vec<(String, &'static str, Vec<u64>)> = vec![(
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            "BF16",
+            vec![128, 128],
+        )];
+        for index in 0..layers {
+            let base = format!("blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "U8", vec![128, 32]));
+            entries.push((format!("{base}.weight_scale"), "F8_E4M3", vec![128, 4]));
+            entries.push((format!("{base}.weight_scale_2"), "F32", vec![]));
+        }
+        write_header_file(
+            path,
+            json!({
+                "format": "pt",
+                "_quantization_metadata": serde_json::to_string(&json!({"layers": declared}))
+                    .unwrap(),
+            }),
+            &entries,
+        );
+    }
+
+    /// The same family surface, stored DENSE — the control row.
+    fn write_dense_transformer(path: &Path) {
+        write_header_file(
+            path,
+            json!({ "format": "pt" }),
+            &[
+                (
+                    "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+                (
+                    "model.diffusion_model.blocks.0.attn.wq.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+                (
+                    "model.diffusion_model.first.weight".to_owned(),
+                    "BF16",
+                    vec![128, 128],
+                ),
+            ],
+        )
+    }
+
+    struct LinkedFixture {
+        _data: tempfile::TempDir,
+        _library: tempfile::TempDir,
+        store: CheckpointPlanStore,
+        library_dir: PathBuf,
+        root_id: String,
+    }
+
+    fn linked_fixture(label: &str) -> LinkedFixture {
+        let data = tempfile::Builder::new()
+            .prefix(&format!("linked-e8-{label}-data-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library = tempfile::Builder::new()
+            .prefix(&format!("linked-e8-{label}-lib-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library_dir = std::fs::canonicalize(library.path()).unwrap();
+        let store = CheckpointPlanStore::open(data.path());
+        let root_id = store.approve_root(&library_dir).unwrap().root_id;
+        LinkedFixture {
+            _data: data,
+            _library: library,
+            store,
+            library_dir,
+            root_id,
+        }
+    }
+
+    /// The queued entry the API hands the worker, before any stamp.
+    fn queued_entry(root_id: &str, relative_path: &str) -> JsonObject {
+        json!({
+            "id": "linked_kreamania_nvfp4",
+            "name": "kreamania nvfp4",
+            "type": "image",
+            "catalogScope": "user",
+            "source": {
+                "provider": "linked-library",
+                "rootId": root_id,
+                "relativePath": relative_path,
+            },
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    /// A LINKED NVFP4 checkpoint resolves to the `nvfp4-v1` SOURCE CODEC, exactly as a managed copy
+    /// of the identical bytes does.
+    ///
+    /// This is the one fact every E8 surface reads: admission's native claim, the catalog's
+    /// `runtimeQuantTiers`, the telemetry `source_codec`, the asset receipt's facts object, and the
+    /// worker's dispatch guard. Before the stamp it answered `None` for a linked entry, so all five
+    /// were silently absent for a checkpoint that is stored packed.
+    ///
+    /// Failing mutation (run): delete the `if let Some((source_shape, quant_format)) =
+    /// classification` block in `linked_checkpoint_manifest_entry`.
+    #[test]
+    fn a_linked_nvfp4_checkpoint_is_stamped_and_resolves_to_the_nvfp4_source_codec() {
+        let fx = linked_fixture("codec");
+        let relative = "kreamania_nvfp4.safetensors";
+        let file = fx.library_dir.join(relative);
+        write_nvfp4_transformer(&file);
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+
+        let classification = base_weight_manifest_classification(&file);
+        assert_eq!(
+            classification,
+            Some(("transformer_file", "nvfp4")),
+            "the header proves a packed single-file transformer"
+        );
+
+        let entry = linked_checkpoint_manifest_entry(
+            queued_entry(&fx.root_id, relative),
+            &compiled,
+            classification,
+        );
+
+        assert_eq!(
+            entry.get("importQuantFormat").and_then(Value::as_str),
+            Some("nvfp4")
+        );
+        assert_eq!(
+            entry.get("importSourceShape").and_then(Value::as_str),
+            Some("transformer_file"),
+            "without a source shape the catalog's provider surface early-returns and emits no \
+             runtimeQuantTiers at all"
+        );
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            Some(NVFP4_CODEC_ID),
+            "the linked entry answers the SAME source-codec question a managed one does"
+        );
+        // The linked invariants sc-20635 established are untouched.
+        assert_eq!(
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+            Some(compiled.checkpoint_id.as_str())
+        );
+        assert!(
+            sceneworks_core::jobs_store::imported_entry_loadable_path(&entry).is_none(),
+            "a linked entry still owns no installed bytes, so no bespoke lane can claim it"
+        );
+    }
+
+    /// A DENSE linked checkpoint is stamped with its own classification and never with NVFP4 —
+    /// the stamp is a reading of the header, not a constant.
+    #[test]
+    fn a_linked_dense_checkpoint_is_not_stamped_nvfp4() {
+        let fx = linked_fixture("dense");
+        let relative = "kreamania_dense.safetensors";
+        let file = fx.library_dir.join(relative);
+        write_dense_transformer(&file);
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+
+        let classification = base_weight_manifest_classification(&file);
+        assert_eq!(classification, Some(("transformer_file", "bf16")));
+        let entry = linked_checkpoint_manifest_entry(
+            queued_entry(&fx.root_id, relative),
+            &compiled,
+            classification,
+        );
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            Some("dense-bf16-v1")
+        );
+    }
+
+    /// A header that proves nothing stamps nothing — an absent key, never an invented one.
+    ///
+    /// Two halves, because the plan store refuses to COMPILE a file it cannot assign a component
+    /// role and a family, so the unclassifiable file never reaches the stamp in production. The
+    /// reachable shape is a file that compiles while the base-weight detector still declines it, so
+    /// the classifier's `None` and the stamp's handling of `None` are pinned separately.
+    #[test]
+    fn an_unclassifiable_linked_file_stamps_neither_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mystery = dir.path().join("mystery.safetensors");
+        write_header_file(
+            &mystery,
+            json!({ "format": "pt" }),
+            &[("some.random.weight".to_owned(), "F32", vec![4, 4])],
+        );
+        assert_eq!(
+            base_weight_manifest_classification(&mystery),
+            None,
+            "a header with no base-weight evidence proves no classification"
+        );
+
+        let fx = linked_fixture("unknown");
+        let relative = "kreamania_dense.safetensors";
+        write_dense_transformer(&fx.library_dir.join(relative));
+        let compiled = fx.store.compile_linked(&fx.root_id, relative).unwrap();
+        let entry =
+            linked_checkpoint_manifest_entry(queued_entry(&fx.root_id, relative), &compiled, None);
+        assert!(entry.get("importQuantFormat").is_none());
+        assert!(entry.get("importSourceShape").is_none());
+        assert_eq!(
+            sceneworks_core::jobs_store::imported_entry_source_codec(&entry),
+            None
+        );
+        // ...and the plan stamp is unaffected, so an unclassified linked entry is still selectable.
+        assert_eq!(
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+            Some(compiled.checkpoint_id.as_str())
+        );
+    }
+
+    /// The linked classifier and the managed branch's inline mapping answer the same pair for one
+    /// file. Two copies of one rule that can disagree about what a checkpoint is stored as is the
+    /// sc-13542 resolver-drift class; this is the witness that they do not.
+    ///
+    /// The managed mapping is restated here from `run_model_import_job` (it is inlined inside a
+    /// `fail_job`-returning `match` and cannot be called from a test), so this compares the two
+    /// TRANSCRIPTIONS. A future edit to either that changes the pair turns it red.
+    #[test]
+    fn the_linked_classifier_matches_the_managed_branchs_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, write) in [
+            ("nvfp4", write_nvfp4_transformer as fn(&Path)),
+            ("dense", write_dense_transformer as fn(&Path)),
+        ] {
+            let file = dir.path().join(format!("{label}.safetensors"));
+            write(&file);
+            let detection = detect_base_weight_file(&file).expect("the header parses");
+            let managed = match detection {
+                BaseWeightDetection::Recognized(verdict) => {
+                    let source = match verdict.component {
+                        ComponentRole::Transformer => Some("transformer_file"),
+                        ComponentRole::Checkpoint => Some("fused_checkpoint"),
+                        ComponentRole::TextEncoder | ComponentRole::Vae => None,
+                    };
+                    source.map(|source| (source, verdict.quant.as_str()))
+                }
+                BaseWeightDetection::Unrecognized { .. } => None,
+            };
+            assert_eq!(
+                base_weight_manifest_classification(&file),
+                managed,
+                "{label}: the linked and managed classifications must not drift"
+            );
+            assert!(managed.is_some(), "{label}: fixture check — it classifies");
         }
     }
 }

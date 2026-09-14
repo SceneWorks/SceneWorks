@@ -59,6 +59,8 @@ const WORKER_IMAGE_MAGE_FINETUNED: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/mage_finetuned.rs");
 const WORKER_IMAGE_SDXL_IMPORTED: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/sdxl_imported.rs");
+const WORKER_IMAGE_CHECKPOINT_PLAN: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/checkpoint_plan.rs");
 const WORKER_ENGINE_TABLE: &str = include_str!("../../../../sceneworks-worker/src/engines.rs");
 const WORKER_GPU_CAPABILITIES: &str = include_str!("../../../../sceneworks-worker/src/gpu.rs");
 const WORKER_VIDEO_DISPATCH: &str =
@@ -271,6 +273,11 @@ struct ManifestModel {
     candle: Value,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
+    /// Declarative non-routability (sc-19708): the entry is an installable component bundle
+    /// loaded by owning routes, never a routable `model` of any job. Keyed on manifest data so
+    /// adding component entries never adds a model-id branch here.
+    #[serde(rename = "componentOnly", default)]
+    component_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +371,18 @@ struct PreviewRoot {
 
 /// Build the complete, deterministic matrix without loading model weights.
 pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
+    backend_capability_matrix_from_runtime_sources(MLX_RUNTIME_FACTS, CANDLE_RUNTIME_FACTS)
+}
+
+/// Build the matrix from the same production derivation with supplied native runtime snapshots.
+///
+/// The public generator always uses the checked-in artifacts. Keeping the derivation injectable
+/// lets the focused tests prove a one-cell native-fact regression changes the resulting matrix,
+/// instead of restating a mirror of its expected cells.
+fn backend_capability_matrix_from_runtime_sources(
+    mlx_runtime_source: &str,
+    candle_runtime_source: &str,
+) -> Result<BackendCapabilityMatrix, String> {
     let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST))
         .map_err(|error| format!("parse builtin.models.jsonc: {error}"))?;
     let preview: PreviewRoot = serde_json::from_str(&strip_jsonc_comments(PREVIEW))
@@ -376,8 +395,8 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
             exceptions.schema_version
         ));
     }
-    let mlx_facts = runtime_facts(MLX_RUNTIME_FACTS, "mlx")?;
-    let candle_facts = runtime_facts(CANDLE_RUNTIME_FACTS, "candle")?;
+    let mlx_facts = runtime_facts(mlx_runtime_source, "mlx")?;
+    let candle_facts = runtime_facts(candle_runtime_source, "candle")?;
     validate_runtime_pair(&mlx_facts, &candle_facts)?;
     validate_exceptions(&exceptions)?;
 
@@ -413,7 +432,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
         schema_version: 4,
         generated_by: GENERATOR.to_owned(),
         summary,
-        sources: source_digests(),
+        sources: source_digests_for_runtime_sources(mlx_runtime_source, candle_runtime_source),
         models,
         imported_families,
         gpu_job_types,
@@ -487,6 +506,24 @@ fn matrix_summary(
     }
 }
 
+/// True when EVERY video capability this entry advertises is a row in
+/// [`catalog::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`] — i.e. the catalog has already filed, with a
+/// rationale and a deletion trigger, that no lane can claim any of them.
+///
+/// Deliberately `all`, not `any`: a model with one unroutable mode among several is still a defect
+/// and must keep reaching the canonical-mode error. The constant is currently EMPTY (sc-18650
+/// deleted its last row when Ref2VA became claimable), so this returns false for every entry and
+/// every video model rejoins the probes; the mechanism stays for the next owned in-between state.
+fn video_model_is_wholly_unclaimable(model: &ManifestModel) -> bool {
+    model.model_type == "video"
+        && !model.capabilities.is_empty()
+        && model.capabilities.iter().all(|capability| {
+            super::catalog::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES
+                .iter()
+                .any(|(entry, mode, _)| *entry == model.id && mode == capability)
+        })
+}
+
 fn model_row(
     model: &ManifestModel,
     preview: Option<&BTreeMap<String, bool>>,
@@ -497,6 +534,17 @@ fn model_row(
     let evaluated_operations = evaluated_operations(model);
     let is_image = model.model_type == "image";
     let is_video = model.model_type == "video";
+    // A video entry whose EVERY advertised capability is a row in
+    // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` has no routed mode by design. It stays a video entry —
+    // it is not reclassified — but it is EXCLUDED from the canonical probes below rather than
+    // handed a fabricated request, because probing it would manufacture a shape the product cannot
+    // serve. The constant is currently empty (its last row, `minimax_h3_ref` /
+    // `reference_to_video`, was deleted by sc-18650 when the route became claimable), so today no
+    // entry is excused.
+    //
+    // A PARTIALLY broken model is deliberately NOT excused — `all` means one unroutable mode among
+    // several still reaches `canonical_model_request` and still errors there.
+    let probes_are_excused = video_model_is_wholly_unclaimable(model);
     let mut operation_and_mode = Vec::new();
     let mut conditioning_shape = Vec::new();
     let mut user_adapters = Vec::new();
@@ -533,8 +581,10 @@ fn model_row(
                 true,
             )?);
         }
-        for network_type in ["lora", "lokr"] {
-            user_adapters.push(adapter_cell(model, network_type, mlx_facts, candle_facts)?);
+        if !probes_are_excused {
+            for network_type in ["lora", "lokr"] {
+                user_adapters.push(adapter_cell(model, network_type, mlx_facts, candle_facts)?);
+            }
         }
     }
 
@@ -545,11 +595,13 @@ fn model_row(
     // Descriptor axes apply to every registered generator modality. In particular, audio
     // generators live in the Candle audio registry even in a macOS runtime snapshot, and utility
     // manifest rows such as MMAudio still carry generator conditioning that must not disappear.
-    for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
-        conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
-    }
-    for tier in precision_union(model, mlx_facts, candle_facts)? {
-        precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
+    if !probes_are_excused {
+        for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
+            conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
+        }
+        for tier in precision_union(model, mlx_facts, candle_facts)? {
+            precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
+        }
     }
     for method in guidance_method_union(model) {
         guidance_method.push(guidance_method_cell(
@@ -653,7 +705,28 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
         // Each file compiles one shared sink-bearing request closure around backend-specific MLX
         // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
         // comment from preserving this claim after the production request drops its sink.
-        "krea_2" | "sdxl" => source_has_ordered_fragments(
+        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver;
+        // Krea and Mage generate through the memory-scoped seam rather than calling
+        // `model.generate` directly, so their fragments and order differ from the SDXL lane. The claim
+        // being proven is unchanged: the production request literal carries `preview`, that request
+        // is what actually generates, and the per-item driver is what supplies the live sink.
+        // The chain is required TWICE because this lane has two production request builders — the
+        // single-pass renderer and the multi-phase one — and a live preview that reaches only one
+        // of them is a half-wired sink. Demanding the pair also keeps the check fail-closed against
+        // a single removal, which a one-shot chain would survive by matching the other builder.
+        "krea_2" => source_has_ordered_fragments(
+            source,
+            &[
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+            ],
+        ),
+        "sdxl" => source_has_ordered_fragments(
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
@@ -666,11 +739,29 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
-                "let request = mage_finetuned_generation_request(",
+                "let mut request = mage_finetuned_generation_request(",
                 "guidance,",
                 "preview,",
                 "&cancel,",
-                "model.generate(&request",
+                "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
+            ],
+        ),
+        // The flux2 single-file import generates through the PLAN-DRIVEN route (epic 20398), whose
+        // shared `generate_one` builds the one production request literal both platform drivers
+        // call. The chain proves the literal carries `preview` (anchored between the literal open
+        // and its `cancel:` field so a comment cannot preserve the claim), that it generates
+        // through the memory-scoped seam, and that BOTH per-item drivers supply the live sink.
+        "flux2" => source_has_ordered_fragments(
+            source,
+            &[
+                "let mut generation = GenerationRequest {",
+                "preview,",
+                "cancel: cancel.clone(),",
+                "crate::memory_strategy::generate_with_scope(",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "preview,",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "preview,",
             ],
         ),
         _ => false,
@@ -684,10 +775,28 @@ fn imported_family_rows(
     let mut rows = Vec::new();
     for family in crate::base_weights::IMPORT_SUPPORTED_FAMILIES {
         let synthetic_model_id = format!("sc18481_import_probe_{}", family.replace('-', "_"));
+        // The on-disk shape a real imported entry of this family records. Imported routing resolves
+        // its provider from (family, source, operation), so a probe without this field selects no
+        // route at all and would silently prove nothing about every family at once.
+        let source_shape = match *family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            // sc-11043 (epic 11037): the pinned FLUX.2 Klein NVFP4 artifact is a single
+            // transformer file, the same source shape Krea imports use — deliberately not the
+            // `comfy_ui_tree` shape the FLUX.2-dev import records.
+            "flux2" => "transformer_file",
+            other => {
+                return Err(format!(
+                    "unmapped imported probe source shape for {other:?}"
+                ))
+            }
+        };
         let mut entry = json!({
             "id": synthetic_model_id.clone(),
             "family": family,
             "type": "image",
+            "importSourceShape": source_shape,
             "modelPath": "/probe/imported-model.safetensors"
         })
         .as_object()
@@ -708,10 +817,31 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "operation", operation),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default {operation:?} does not route on both native backends"
-                ));
+            // The expectation is DERIVED from each backend's engine facts, not asserted as "both".
+            // The two native engines genuinely declare different imported coverage — candle
+            // registers no `mage-flow` imported model, and no `krea_2` Pose provider — so demanding
+            // parity here asserted a declaration neither engine backs.
+            //
+            // This stays a real gate, and a two-sided one:
+            //   * declared but NOT routable  -> a lane the facts promise and the worker cannot reach
+            //   * routable but NOT declared  -> a lane reachable without any declaration behind it
+            // Both are failures. Only "declared and routable" or "undeclared and unroutable" pass.
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declares_route(&job.payload, backend);
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} is DECLARED by the {backend} \
+                         engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} routes on {backend} but no \
+                         {backend} engine fact declares that imported provider"
+                    ));
+                }
             }
             operation_and_mode.push(support);
         }
@@ -733,10 +863,37 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "conditioning", shape),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default conditioning {shape:?} does not route on both native backends"
-                ));
+            // Same two-sided, facts-derived rule as the operation loop above, one level finer: the
+            // declaration here is the conditioning kind on the route the payload selects, so a
+            // backend whose facts omit `multi_reference` is expected NOT to route it.
+            let declared_kind = match shape {
+                "reference" => "reference",
+                "multiReference" => "multi_reference",
+                other => {
+                    return Err(format!(
+                        "unmapped imported conditioning probe shape {other:?}"
+                    ))
+                }
+            };
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declared_route(&job.payload, backend)
+                        .is_some_and(|route| {
+                            route.conditioning.iter().any(|kind| kind == declared_kind)
+                        });
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} is DECLARED by the \
+                         {backend} engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} routes on {backend} but \
+                         no {backend} engine fact declares that conditioning"
+                    ));
+                }
             }
             conditioning_shape.push(support);
         }
@@ -758,6 +915,7 @@ fn imported_family_rows(
             "krea_2" => WORKER_IMAGE_KREA_IMPORTED,
             "mage-flow" => WORKER_IMAGE_MAGE_FINETUNED,
             "sdxl" => WORKER_IMAGE_SDXL_IMPORTED,
+            "flux2" => WORKER_IMAGE_CHECKPOINT_PLAN,
             _ => "",
         };
         let preview_sink = imported_preview_sink(family, preview_source);
@@ -820,21 +978,148 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
     Ok(facts)
 }
 
+/// The product-to-runtime trainer identity contract. Capability flags alone cannot distinguish
+/// architecture-compatible-looking trainers from the exact model version a product target names:
+/// LTX-2.3 and LTX-2.5 both advertise LoRA, but accepting either for either target trains the wrong
+/// base. Keep the product target id, base id, and worker kernel in the key, and allow the value to be
+/// backend-local because inference deliberately registers the future LTX-2.5 trainer under different
+/// MLX and Candle ids.
+fn expected_backend_local_trainer_id(
+    target: &crate::training::TrainingTarget,
+    backend: &str,
+) -> Result<&'static str, String> {
+    let (mlx, candle) = match (
+        target.id.as_str(),
+        target.base_model.as_str(),
+        target.kernel.as_str(),
+    ) {
+        ("z_image_turbo_lora", "z_image_turbo", "z_image_lora") => {
+            ("z_image_turbo", "z_image_turbo")
+        }
+        ("sdxl_lora", "sdxl", "sdxl_lora")
+        | ("illustrious_xl_v1_lora", "illustrious_xl_v1", "sdxl_lora")
+        | ("illustrious_xl_v2_lora", "illustrious_xl_v2", "sdxl_lora") => ("sdxl", "sdxl"),
+        ("kolors_lora", "kolors", "kolors_lora") => ("kolors", "kolors"),
+        ("lens_turbo_lora", "lens", "lens_lora") => ("lens", "lens"),
+        ("krea_2_raw_lora", "krea_2_raw", "krea_lora") => ("krea_2_raw", "krea_2_raw"),
+        ("krea_2_control", "krea_2_raw", "krea_control") => ("krea_2_control", "krea_2_control"),
+        ("sd3_5_large_lora", "sd3_5_large", "sd3_lora") => ("sd3_5_large", "sd3_5_large"),
+        ("sd3_5_medium_lora", "sd3_5_medium", "sd3_lora") => ("sd3_5_medium", "sd3_5_medium"),
+        ("anima_base_lora", "anima_base", "anima_lora") => ("anima_base", "anima_base"),
+        ("ltx_video_lora", "ltx_2_3", "ltx_mlx_lora") => ("ltx_2_3", "ltx_2_3"),
+        ("ltx_2_5_video_lora", "ltx_2_5", "ltx_mlx_lora") => ("ltx_2_5", "ltx_2_5_distilled"),
+        ("wan_lora", "wan_2_2", "wan_lora") => ("wan2_2_ti2v_5b", "wan2_2_ti2v_5b"),
+        ("wan_t2v_14b_lora", "wan_2_2_t2v_14b", "wan_moe_lora") => {
+            ("wan2_2_t2v_14b", "wan2_2_t2v_14b")
+        }
+        ("wan_i2v_14b_lora", "wan_2_2_i2v_14b", "wan_moe_lora") => {
+            ("wan2_2_i2v_14b", "wan2_2_i2v_14b")
+        }
+        ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
+            ("mage_flow_base", "mage_flow_base")
+        }
+        _ => {
+            return Err(format!(
+                "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",
+                target.id, target.base_model, target.kernel
+            ));
+        }
+    };
+    match backend {
+        "mlx" => Ok(mlx),
+        "candle" => Ok(candle),
+        other => Err(format!(
+            "production training target {:?} requested an identity for unknown backend {other:?}",
+            target.id
+        )),
+    }
+}
+
+fn validate_backend_local_trainer_identity(
+    target: &crate::training::TrainingTarget,
+    backend: &str,
+    engine: &str,
+) -> Result<(), String> {
+    let expected_engine = expected_backend_local_trainer_id(target, backend)?;
+    if engine != expected_engine {
+        return Err(format!(
+            "{backend} production trainer mapping {:?} -> {:?} violates the explicit identity contract for base {:?}/kernel {:?}; expected {:?}",
+            target.id, engine, target.base_model, target.kernel, expected_engine,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_runtime_pair(
     mlx: &RuntimeDescriptorFacts,
     candle: &RuntimeDescriptorFacts,
 ) -> Result<(), String> {
-    if mlx.generated_from.inference_revision != candle.generated_from.inference_revision {
-        return Err(format!(
-            "runtime descriptor revisions differ: mlx={} candle={}",
-            mlx.generated_from.inference_revision, candle.generated_from.inference_revision
-        ));
-    }
+    // The two halves are DELIBERATELY not required to carry the same revision label (sc-19758,
+    // main `e14171984`). The media candle dump can only be produced on a lane that links the candle
+    // media engines — off-Mac — while the MLX half is rewritten by any Mac-side dump. Requiring the
+    // labels to match therefore put a second machine on the critical path of every pin bump: an
+    // ordinary Mac-side bump left the tree in a state this refused outright, with no way to clear it
+    // short of dispatching a Windows run.
+    //
+    // That commit removed the same label check from `previewSupportCatalog.test.js`,
+    // `previewSupportDerivation.js` and `bump-inference.mjs` on exactly this reasoning — "a
+    // capability dump goes stale when a provider gains or loses a capability, a property of the
+    // dump's CONTENT, not when the revision label attached to it moves" — but did not reach this
+    // Rust sibling. Nothing is weakened by dropping it: the checks below compare the actual
+    // mappings and descriptor populations, so a real divergence between the halves still fails here
+    // regardless of what revision either was stamped at.
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
-    if mlx.trainer_mappings != candle.trainer_mappings {
-        return Err("matching-platform production trainer mappings differ".to_owned());
+    // Training target ids are shared product coordinates, but mapped engine ids are native
+    // backend implementation details. LTX 2.5 is deliberately `ltx_2_5` on MLX and
+    // `ltx_2_5_distilled` on Candle, so compare target populations rather than values.
+    for facts in [mlx, candle] {
+        for (target, engine) in &facts.trainer_mappings {
+            if target.trim().is_empty() || engine.trim().is_empty() {
+                return Err(format!(
+                    "{} runtime artifact contains an incomplete trainer mapping {:?} -> {:?}",
+                    facts.snapshot.backend, target, engine
+                ));
+            }
+        }
+    }
+    let mlx_training_targets: BTreeSet<_> =
+        mlx.trainer_mappings.keys().map(String::as_str).collect();
+    let candle_training_targets: BTreeSet<_> =
+        candle.trainer_mappings.keys().map(String::as_str).collect();
+    if mlx_training_targets != candle_training_targets {
+        let mlx_only: Vec<_> = mlx_training_targets
+            .difference(&candle_training_targets)
+            .copied()
+            .collect();
+        let candle_only: Vec<_> = candle_training_targets
+            .difference(&mlx_training_targets)
+            .copied()
+            .collect();
+        return Err(format!(
+            "matching-platform production training targets differ (MLX only: {mlx_only:?}; Candle only: {candle_only:?})"
+        ));
+    }
+    let builtin_training_targets = crate::training::builtin_training_targets();
+    let training_targets_by_id: BTreeMap<_, _> = builtin_training_targets
+        .targets
+        .iter()
+        .map(|target| (target.id.as_str(), target))
+        .collect();
+    let builtin_training_target_ids: BTreeSet<_> = training_targets_by_id.keys().copied().collect();
+    if mlx_training_targets != builtin_training_target_ids {
+        let missing: Vec<_> = builtin_training_target_ids
+            .difference(&mlx_training_targets)
+            .copied()
+            .collect();
+        let unknown: Vec<_> = mlx_training_targets
+            .difference(&builtin_training_target_ids)
+            .copied()
+            .collect();
+        return Err(format!(
+            "production trainer mappings do not exactly cover builtin training targets (missing: {missing:?}; unknown: {unknown:?})"
+        ));
     }
     for facts in [mlx, candle] {
         if facts.snapshot.generator_capabilities.is_empty() {
@@ -864,6 +1149,77 @@ fn validate_runtime_pair(
                     "{} runtime audio generator {:?} has backend/modality drift",
                     facts.snapshot.backend, descriptor.id
                 ));
+            }
+        }
+        let mut trainer_descriptors = BTreeMap::new();
+        for descriptor in &facts.snapshot.trainer_capabilities {
+            if descriptor.id.trim().is_empty() || descriptor.backend != facts.snapshot.backend {
+                return Err(format!(
+                    "{} runtime trainer {:?} has backend/identity drift",
+                    facts.snapshot.backend, descriptor.id
+                ));
+            }
+            if trainer_descriptors
+                .insert(descriptor.id.as_str(), descriptor)
+                .is_some()
+            {
+                return Err(format!(
+                    "{} runtime artifact repeats trainer descriptor {:?}",
+                    facts.snapshot.backend, descriptor.id
+                ));
+            }
+        }
+        for (target, engine) in &facts.trainer_mappings {
+            let target_contract = training_targets_by_id
+                .get(target.as_str())
+                .expect("trainer target population checked above");
+            validate_backend_local_trainer_identity(
+                target_contract,
+                &facts.snapshot.backend,
+                engine,
+            )?;
+            let mut routed_network_types = Vec::new();
+            for network_type in target_network_types(target_contract)? {
+                let job_type = if network_type == "control" {
+                    JobType::ControlTraining
+                } else {
+                    JobType::LoraTrain
+                };
+                let job = probe_job(
+                    job_type,
+                    "",
+                    training_payload(target_contract, &network_type),
+                )?;
+                if backend_supports(&job, facts)? {
+                    routed_network_types.push(network_type);
+                }
+            }
+            if routed_network_types.is_empty() {
+                // Product target population is cross-platform even when one backend intentionally
+                // has no provider (currently MLX Krea Control). An unrouted lane must stay false;
+                // only a lane the production scheduler admits is required to resolve a provider.
+                continue;
+            }
+            let Some(descriptor) = trainer_descriptors.get(engine.as_str()) else {
+                return Err(format!(
+                    "{} routed production trainer mapping {:?} -> {:?} names no registered local trainer descriptor",
+                    facts.snapshot.backend, target, engine,
+                ));
+            };
+            for network_type in routed_network_types {
+                let supported = match network_type.as_str() {
+                    "lora" => descriptor.supports_lora,
+                    "lokr" => descriptor.supports_lokr,
+                    "control" => descriptor.supports_control,
+                    "full" => descriptor.supports_full_finetune,
+                    _ => unreachable!("target_network_types validates the network type"),
+                };
+                if !supported {
+                    return Err(format!(
+                        "{} routed production trainer mapping {:?} -> {:?} lacks {:?} support in its registered local descriptor",
+                        facts.snapshot.backend, target, engine, network_type
+                    ));
+                }
             }
         }
     }
@@ -1163,6 +1519,14 @@ fn bespoke_image_lane_support(
                         | ("conditioning", "control")
                         | ("conditioning", "reference")
                 )
+        }
+        // The terminal CUDA campaign accepted this exact five-model route. Keep the semantic
+        // supplement tied to the production route table rather than the shared `sdxl` descriptor:
+        // the latter is intentionally broader than the product's OpenPose admission boundary.
+        CandleImageLane::SdxlControl => {
+            super::candle::is_sdxl_control_model(model)
+                && category == "conditioning"
+                && capability == "control"
         }
         CandleImageLane::QwenEdit => {
             matches!(
@@ -1617,6 +1981,40 @@ fn conditioning_cell(
         // example) visible without falsely claiming that the video wrapper constructs that shape.
         let requirement_shape = match shape {
             "reduxRefs" => "multiReference",
+            // MiniMax-H3 is a JOINT audio+video family, so its Ref2VA descriptor advertises a
+            // reference-audio axis alongside the reference images — `Ref2VaReferences` carries both
+            // halves of one reference bundle. The production mode that consumes that bundle is
+            // `reference_to_video`, whose requirement shape is `multiReference`, so this maps the
+            // same way `reduxRefs` does: a model-specific descriptor spelling pointed at the
+            // production requirement it actually serves.
+            //
+            // This deliberately does NOT make reference audio required — requirements describe what
+            // a mode needs, and mapping here only gives the axis a semantic so the pair check can
+            // report it as routed-or-not rather than erroring on an axis it cannot classify.
+            "referenceAudio" => "multiReference",
+            // The reference-VIDEO axis of the same family, and it maps exactly where its audio
+            // sibling above does — to `multiReference`, i.e. `reference_to_video`.
+            //
+            // 🔴 It read `videoClip` until sc-18650's pre-merge review, on the reasonable-sounding
+            // premise that a clip-shaped reference is what `reference_video_to_video` and `ads2v`
+            // consume. It is not what THIS descriptor's model routes. `minimax_h3_ref`'s only
+            // production mode is `reference_to_video`, whose requirement group is
+            // `["multiReference", "reference"]` — it has no `videoClip` mapping at all — so the
+            // `videoClip` spelling selected six probe modes the model never routes,
+            // `native_video_route_descriptors` came back empty on every one of them, and the cell
+            // fell to false with no error: `modes` was non-empty, so the "no production mode
+            // semantic" guard below never fired. The committed matrix therefore recorded
+            // `minimax_h3_ref/conditioningShape/referenceVideo` as unsupported on both backends
+            // while the manifest declares `maxSourceClipAssets: 3` and the worker decodes those
+            // clips into `Conditioning::ReferenceVideo`.
+            //
+            // The axis is the third modality of ONE ordered reference bundle (`Ref2VaReferences`
+            // carries images, clips and soundtracks together), which is why all three members —
+            // `reference`, `referenceAudio`, `referenceVideo` — resolve to the same production
+            // requirement. The engine deliberately does NOT advertise `videoClip`: it has no
+            // in-context clip mechanism, and `minimax_h3.rs` refuses to downgrade
+            // `ReferenceVideo` to `Conditioning::VideoClip` for exactly that reason.
+            "referenceVideo" => "multiReference",
             other => other,
         };
         let modes: Vec<&str> = VIDEO_UI_MODES
@@ -1641,10 +2039,31 @@ fn conditioning_cell(
         let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
             for mode in &modes {
                 let job = super::canonical_video_route_probe(&model.id, mode)?;
-                let descriptor_supports = native_video_route_descriptors(facts, &model.id, mode)
-                    .into_iter()
+                let descriptors = native_video_route_descriptors(facts, &model.id, mode);
+                let descriptor_supports = descriptors
+                    .iter()
                     .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape));
-                if descriptor_supports && backend_supports(&job, facts)? {
+                // sc-18650 widened `reference_to_video`'s requirement to
+                // `multiReference | reference` so the ordered omni-reference engines
+                // (MiniMax-H3) can claim the mode. On an engine that declares the heterogeneous
+                // `multiReference` bundle (bernini), the production video wrapper constructs the
+                // BUNDLE from `referenceAssetIds` — its singular `reference` kind is the
+                // still-image surface, and no production video request exercises it. So the
+                // singular axis carries `reference_to_video` only on engines with no
+                // `multiReference` declaration; otherwise this cell would claim a video shape
+                // the wrapper never constructs.
+                let singular_shadowed_by_bundle = shape == "reference"
+                    && *mode == "reference_to_video"
+                    && descriptors.iter().any(|descriptor| {
+                        descriptor
+                            .conditioning
+                            .iter()
+                            .any(|kind| kind == "multiReference")
+                    });
+                if descriptor_supports
+                    && !singular_shadowed_by_bundle
+                    && backend_supports(&job, facts)?
+                {
                     return Ok(true);
                 }
             }
@@ -1843,9 +2262,18 @@ fn precision_cell(
         let backend = facts.snapshot.backend.as_str();
         let descriptor = descriptor_tier_support(facts, &model.id, video_mode, tier);
         // Runtime descriptors and exact backend-specific manifest artifacts are independent
-        // authorities. A macOS-only exact tier must not veto a native Candle descriptor merely
-        // because Candle installs an unvarianted whole-repository snapshot (and vice versa).
-        // The production scheduler predicate below remains mandatory for either source of truth.
+        // authorities for WHICH TIER a lane serves: a macOS-only exact tier must not veto a native
+        // Candle descriptor merely because Candle installs an unvarianted whole-repository
+        // snapshot (and vice versa).
+        //
+        // They are NOT the whole cell: `manifest_artifact_tier_support` reads only
+        // `model.downloads[].variant` and `.platforms`, a SHIPPING fact that says nothing about a
+        // route existing. What supplies the missing conjunct is `backend_supports` below, which
+        // runs the production scheduler predicate `worker_supports_job` — the same per-model
+        // `job_is_mlx_eligible` / candle-eligibility tables the real router uses. The join is
+        // therefore `(descriptor || artifact) && production route`, and the per-family probe in
+        // `rich_runtime_mutations_change_descriptor_and_dispatch_answers` proves it holds for
+        // every family rather than for one spot-checked model (sc-20799).
         descriptor || manifest_artifact_tier_support(model, tier, backend)
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
@@ -2005,8 +2433,10 @@ fn utility_model_cells(
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<Vec<CapabilityCell>, String> {
     // PiD rows are decoder overlays loaded by their owning image model; they are not standalone
-    // person detectors (or any other independently routable utility job).
-    if model.id.starts_with("pid_") {
+    // person detectors (or any other independently routable utility job). `componentOnly` entries
+    // (sc-19708) declare the same shape in manifest data: an installable component bundle staged
+    // by owning lanes (the InstantID face stack), never a routable `model` of any job.
+    if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
     }
     let engine_request = match model.id.as_str() {
@@ -2193,12 +2623,57 @@ fn video_job_type(mode: &str) -> JobType {
     }
 }
 
+/// Stamp the optional asset carriers the API sends on EVERY request of this family, in the shape it
+/// sends them when the user supplied none: an `Option<String>` carrier serializes as an explicit
+/// `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest` in
+/// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`). Only keys the probe
+/// left ABSENT are filled, so a probe that populates a carrier keeps its own value.
+///
+/// sc-20530 batch item A. The probes used to spell only the carriers a mode needs and leave the rest
+/// missing, which is an encoding NO production request ever has. That gap is what let the sc-20525
+/// defect class hide: a gate that read `null` as "malformed" enforce-failed every real SANA
+/// text-to-image submission while this matrix — probing with the key absent — reported the cell
+/// supported. Probing in the production encoding is what makes the matrix able to see that class.
+fn stamp_absent_optional_carriers(job_type: &JobType, payload: &mut Map<String, Value>) {
+    let (scalars, plurals): (&[&str], &[&str]) = match job_type {
+        JobType::ImageGenerate | JobType::ImageEdit => (
+            &["sourceAssetId", "referenceAssetId", "maskAssetId"],
+            &["referenceAssetIds"],
+        ),
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => (
+            &[
+                "sourceAssetId",
+                "lastFrameAssetId",
+                "sourceClipAssetId",
+                "bridgeRightClipAssetId",
+                "referenceClipAssetId",
+            ],
+            &["referenceAssetIds", "sourceClipAssetIds"],
+        ),
+        // Every other probed job type has a required-carrier request shape (VQA/interleave/detail)
+        // or no asset carriers at all; nothing to normalize.
+        _ => (&[], &[]),
+    };
+    for key in scalars {
+        payload.entry((*key).to_owned()).or_insert(Value::Null);
+    }
+    for key in plurals {
+        payload
+            .entry((*key).to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
 fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapshot, String> {
     let mut payload = payload
         .as_object()
         .cloned()
         .ok_or_else(|| "probe payload must be an object".to_owned())?;
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    stamp_absent_optional_carriers(&job_type, &mut payload);
     validate_probe_structure(&job_type, &payload)?;
     Ok(JobSnapshot {
         id: "capability-matrix-probe".to_owned(),
@@ -3016,7 +3491,15 @@ fn validate_obligations(
     }
 }
 
+#[cfg(test)]
 fn source_digests() -> BTreeMap<String, String> {
+    source_digests_for_runtime_sources(MLX_RUNTIME_FACTS, CANDLE_RUNTIME_FACTS)
+}
+
+fn source_digests_for_runtime_sources(
+    mlx_runtime_source: &str,
+    candle_runtime_source: &str,
+) -> BTreeMap<String, String> {
     [
         ("manifest", MANIFEST),
         ("routerCatalog", ROUTING_CATALOG),
@@ -3058,8 +3541,8 @@ fn source_digests() -> BTreeMap<String, String> {
         ("descriptorMlxFacts", MLX_DESCRIPTOR_FACTS),
         ("descriptorCandleFacts", CANDLE_DESCRIPTOR_FACTS),
         ("descriptorAudioFacts", AUDIO_DESCRIPTOR_FACTS),
-        ("descriptorMlxRuntime", MLX_RUNTIME_FACTS),
-        ("descriptorCandleRuntime", CANDLE_RUNTIME_FACTS),
+        ("descriptorMlxRuntime", mlx_runtime_source),
+        ("descriptorCandleRuntime", candle_runtime_source),
         ("descriptorPreviewFacts", PREVIEW),
         ("webImageRequest", WEB_IMAGE_REQUEST),
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
@@ -3092,14 +3575,547 @@ mod tests {
 
     const CHECKED_IN: &str = include_str!("../../../../../config/backend-capabilities/matrix.json");
 
+    fn valid_capture_digest(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    /// Compare the durable capability claim independently from capture-time source provenance.
+    ///
+    /// `sources` records which authoritative inputs were captured and their hashes when the
+    /// checked-in artifact was produced. A non-capability edit inside one of those whole-file
+    /// inputs legitimately changes its live hash without changing a capability cell (sc-19708:
+    /// the API jobs/lib and worker dispatch files are hashed inputs, and the model-source seam
+    /// edits them without moving a single cell). The key set and digest shape remain strict so
+    /// sources cannot disappear, appear unreviewed, or carry malformed provenance; every
+    /// semantic field remains exact.
+    fn checked_in_matrix_matches_live(
+        mut checked_in: BackendCapabilityMatrix,
+        mut live: BackendCapabilityMatrix,
+    ) -> Result<(), String> {
+        if checked_in.sources.keys().collect::<Vec<_>>() != live.sources.keys().collect::<Vec<_>>()
+        {
+            return Err("capability source key set drifted".to_owned());
+        }
+        for (origin, sources) in [("checked-in", &checked_in.sources), ("live", &live.sources)] {
+            for (name, digest) in sources {
+                if !valid_capture_digest(digest) {
+                    return Err(format!(
+                        "{origin} capability source {name:?} has an invalid capture digest"
+                    ));
+                }
+            }
+        }
+        checked_in.sources.clear();
+        live.sources.clear();
+        if checked_in != live {
+            return Err("capability semantics drifted".to_owned());
+        }
+        Ok(())
+    }
+
     #[test]
     fn checked_in_matrix_matches_all_authoritative_sources() {
         let expected: BackendCapabilityMatrix =
             serde_json::from_str(CHECKED_IN).expect("checked-in capability matrix parses");
         let actual = backend_capability_matrix().expect("capability matrix generates");
+        checked_in_matrix_matches_live(expected, actual).unwrap_or_else(|error| {
+            panic!(
+                "backend capability matrix drifted ({error}); run `{GENERATOR} -- config/backend-capabilities/matrix.json` only for an intentional capability recapture"
+            )
+        });
+    }
+
+    #[test]
+    fn source_capture_digest_values_are_provenance_not_semantics() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        let mut live = checked_in.clone();
+        let digest = live.sources.values_mut().next().unwrap();
+        *digest = "0".repeat(64);
+        assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
+    }
+
+    fn valid_runtime_pair() -> (RuntimeDescriptorFacts, RuntimeDescriptorFacts) {
+        (
+            runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap(),
+            runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap(),
+        )
+    }
+
+    fn runtime_pair_with_same_capability_wrong_ltx_version(
+    ) -> (RuntimeDescriptorFacts, RuntimeDescriptorFacts) {
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        for (facts, engine) in [(&mut mlx, "ltx_2_5"), (&mut candle, "ltx_2_5_distilled")] {
+            facts
+                .trainer_mappings
+                .insert("ltx_video_lora".to_owned(), engine.to_owned());
+            if !facts
+                .snapshot
+                .trainer_capabilities
+                .iter()
+                .any(|descriptor| descriptor.id == engine)
+            {
+                facts
+                    .snapshot
+                    .trainer_capabilities
+                    .push(TrainerCapabilityFacts {
+                        id: engine.to_owned(),
+                        backend: facts.snapshot.backend.clone(),
+                        supports_lora: true,
+                        supports_lokr: false,
+                        supports_control: false,
+                        supports_full_finetune: false,
+                    });
+            }
+        }
+        (mlx, candle)
+    }
+
+    #[test]
+    fn runtime_pair_accepts_platform_local_trainer_ids_for_the_same_target() {
+        let (mlx, candle) = valid_runtime_pair();
+        validate_runtime_pair(&mlx, &candle).unwrap();
+
+        let mut ltx_2_5 = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "ltx_video_lora")
+            .unwrap();
+        ltx_2_5.id = "ltx_2_5_video_lora".to_owned();
+        ltx_2_5.base_model = "ltx_2_5".to_owned();
         assert_eq!(
-            expected, actual,
-            "backend capability matrix drifted; run `{GENERATOR} > config/backend-capabilities/matrix.json`"
+            expected_backend_local_trainer_id(&ltx_2_5, "mlx").unwrap(),
+            "ltx_2_5"
+        );
+        assert_eq!(
+            expected_backend_local_trainer_id(&ltx_2_5, "candle").unwrap(),
+            "ltx_2_5_distilled"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_training_target_population_drift() {
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle.trainer_mappings.remove("ltx_video_lora");
+
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("production training targets differ")
+                && error.contains("ltx_video_lora"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_unregistered_or_wrong_backend_local_trainers() {
+        let (mlx, candle) = runtime_pair_with_same_capability_wrong_ltx_version();
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("violates the explicit identity contract")
+                && error.contains("ltx_video_lora")
+                && error.contains("ltx_2_3"),
+            "a same-capability LTX-2.5 trainer must not satisfy the LTX-2.3 product target: {error}"
+        );
+
+        let mut ltx_2_5 = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "ltx_video_lora")
+            .unwrap();
+        ltx_2_5.id = "ltx_2_5_video_lora".to_owned();
+        ltx_2_5.base_model = "ltx_2_5".to_owned();
+        for backend in ["mlx", "candle"] {
+            let error = validate_backend_local_trainer_identity(&ltx_2_5, backend, "ltx_2_3")
+                .expect_err("LTX-2.3 must not satisfy the future LTX-2.5 target");
+            assert!(
+                error.contains("violates the explicit identity contract")
+                    && error.contains("ltx_2_5_video_lora"),
+                "the future LTX-2.5 product target must reject LTX-2.3 on {backend}: {error}"
+            );
+        }
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .retain(|descriptor| descriptor.id != "ltx_2_3");
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("routed production trainer mapping")
+                && error.contains("names no registered local trainer descriptor"),
+            "unexpected error: {error}"
+        );
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .iter_mut()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .supports_lora = false;
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("lacks \"lora\" support"),
+            "unexpected error: {error}"
+        );
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .iter_mut()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .backend = "mlx".to_owned();
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("runtime trainer") && error.contains("backend/identity drift"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_ambiguous_or_incomplete_trainer_facts() {
+        let (mlx, mut candle) = valid_runtime_pair();
+        let duplicate = candle
+            .snapshot
+            .trainer_capabilities
+            .iter()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .clone();
+        candle.snapshot.trainer_capabilities.push(duplicate);
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("repeats trainer descriptor"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert(String::new(), "ltx_2_3".to_owned());
+        candle
+            .trainer_mappings
+            .insert(String::new(), "ltx_2_3".to_owned());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("incomplete trainer mapping"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert("ltx_video_lora".to_owned(), String::new());
+        candle
+            .trainer_mappings
+            .insert("ltx_video_lora".to_owned(), String::new());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("incomplete trainer mapping"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert("unknown_training_target".to_owned(), "ltx_2_3".to_owned());
+        candle
+            .trainer_mappings
+            .insert("unknown_training_target".to_owned(), "ltx_2_3".to_owned());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("unknown: [\"unknown_training_target\"]"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// sc-20530 (adversarial review). `stamp_absent_optional_carriers` is the whole reason this
+    /// matrix can see the sc-20525 defect class — a gate that misreads the `null` the API stamps on
+    /// every unset optional carrier. It was completely unpinned when it landed: deleting the
+    /// function left every test in the crate green, because with sc-20525 merged no CELL value
+    /// moves. Cell drift therefore cannot witness it; the probe payload itself has to be asserted.
+    ///
+    /// The probe must carry the production encoding: an `Option<String>` carrier serializes as an
+    /// explicit `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest`,
+    /// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`).
+    #[test]
+    fn probes_carry_the_production_optional_carrier_encoding() {
+        let image = probe_job(
+            JobType::ImageGenerate,
+            "sana_1600m",
+            json!({ "mode": "text_to_image", "prompt": "p" }),
+        )
+        .expect("image probe is structurally valid");
+        for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+            assert_eq!(
+                image.payload.get(key),
+                Some(&Value::Null),
+                "an image probe must stamp {key} as the explicit null production sends, not omit it"
+            );
+        }
+        assert_eq!(
+            image.payload.get("referenceAssetIds"),
+            Some(&Value::Array(Vec::new())),
+            "the plural image carrier is a Vec<String>, so production sends [] not null"
+        );
+
+        let video = probe_job(
+            JobType::VideoGenerate,
+            "wan_2_2",
+            json!({ "mode": "text_to_video", "prompt": "p" }),
+        )
+        .expect("video probe is structurally valid");
+        for key in [
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "referenceClipAssetId",
+        ] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Null),
+                "a video probe must stamp {key} as the explicit null production sends"
+            );
+        }
+        for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Array(Vec::new())),
+                "{key} is a Vec<String>, so production sends [] not null"
+            );
+        }
+
+        // A carrier the probe SUPPLIES is never overwritten — stamping is fill-the-absent only, or
+        // every conditioned probe in the matrix would silently degrade to an unconditioned one.
+        let edit = probe_job(
+            JobType::ImageEdit,
+            "sdxl",
+            json!({ "mode": "edit_image", "prompt": "p", "sourceAssetId": "asset_1" }),
+        )
+        .expect("edit probe is structurally valid");
+        assert_eq!(
+            edit.payload.get("sourceAssetId").and_then(Value::as_str),
+            Some("asset_1"),
+            "a probe-supplied carrier must survive the stamp"
+        );
+        assert_eq!(edit.payload.get("maskAssetId"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn source_capture_contract_rejects_key_and_digest_shape_mutations() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in ["missing", "extra", "empty", "short", "uppercase", "nonhex"] {
+            let mut live = checked_in.clone();
+            let first = live.sources.keys().next().unwrap().clone();
+            match mutation {
+                "missing" => {
+                    live.sources.remove(&first);
+                }
+                "extra" => {
+                    live.sources
+                        .insert("unreviewedSource".to_owned(), "0".repeat(64));
+                }
+                "empty" => {
+                    live.sources.insert(first, String::new());
+                }
+                "short" => {
+                    live.sources.insert(first, "0".repeat(63));
+                }
+                "uppercase" => {
+                    live.sources.insert(first, "A".repeat(64));
+                }
+                "nonhex" => {
+                    live.sources.insert(first, "g".repeat(64));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} source provenance must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_capability_semantic_field_remains_exact() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in [
+            "schema",
+            "generator",
+            "summary",
+            "model",
+            "imported-family",
+            "gpu-job",
+            "training-kernel",
+            "exception",
+        ] {
+            let mut live = checked_in.clone();
+            match mutation {
+                "schema" => live.schema_version += 1,
+                "generator" => live.generated_by.push_str(" --changed"),
+                "summary" => live.summary.cell_count += 1,
+                "model" => live.models[0].id.push_str("_changed"),
+                "imported-family" => live.imported_families[0].family.push_str("_changed"),
+                "gpu-job" => live.gpu_job_types[0].job_type.push_str("_changed"),
+                "training-kernel" => live.training_kernels[0].kernel.push_str("_changed"),
+                "exception" => live.exceptions[0].evidence.push_str(" changed"),
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} capability semantics must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register() {
+        let baseline = backend_capability_matrix().expect("production matrix derives");
+        // `scail2_14b`/`multiReference` was here until epic 20398's pin refresh (sc-20644). It was
+        // a genuine sc-19059 row while SCAIL-2 declared the shape on both engines. At inference
+        // `725c6bc59` BOTH authoritative dumps drop it — MLX's runtime snapshot no longer lists it
+        // under `scail2_14b`, the Candle snapshot does not either, and upstream pins the absence
+        // deliberately rather than incidentally:
+        //
+        //     // candle-gen-scail2/src/pipeline.rs, at the pinned revision
+        //     assert!(!d.capabilities.accepts(ConditioningKind::MultiReference));
+        //
+        // So the derivation emits no such cell at all, and a row asserting the cell is RESOLVED on
+        // both backends has lost its subject. It is removed rather than flipped to an expectation
+        // of absence: this test's question is "did a cell Candle actually resolved get left behind
+        // in the residual register", which a retired capability cannot be an instance of. The
+        // symmetric retirement itself is held by
+        // `scail2_replace_person_still_routes_to_mlx_without_a_multireference_declaration`, which
+        // proves the modes SCAIL-2 serves still route end to end without the declaration.
+        let resolved = [
+            ("realvisxl", "control"),
+            ("realvisxl_lightning", "control"),
+            ("sdxl", "control"),
+        ];
+        for (model, shape) in resolved {
+            let cell = baseline
+                .models
+                .iter()
+                .find(|row| row.id == model)
+                .and_then(|row| {
+                    row.conditioning_shape
+                        .iter()
+                        .find(|cell| cell.capability == shape)
+                })
+                .unwrap_or_else(|| panic!("production derivation emits {model}/{shape}"));
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{model}/{shape} is backed by both native engine facts"
+            );
+            assert!(cell.parity_obligation.is_none());
+        }
+        assert!(
+            !baseline
+                .exceptions
+                .iter()
+                .any(|record| record.id == "epic-8588-conditioning-sequencing"),
+            "the resolved epic-8588 record must be removed rather than retained empty"
+        );
+
+        // Mutate the actual Candle runtime snapshot and feed it through the production derivation;
+        // this is deliberately not a copied matrix fixture. The accepted SDXL OpenPose product
+        // route is now an independent authority, so losing the shared descriptor's conditioning
+        // annotation must not revoke any of the exact five claims or recreate a residual gap.
+        let mut missing_candle_control: Value = serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
+        let generators = missing_candle_control["snapshot"]["generator_capabilities"]
+            .as_array_mut()
+            .expect("Candle snapshot has generator capabilities");
+        let sdxl = generators
+            .iter_mut()
+            .find(|entry| entry["id"] == "sdxl")
+            .expect("Candle snapshot has the SDXL provider");
+        sdxl["conditioning"] = Value::Array(Vec::new());
+        let mutated = backend_capability_matrix_from_runtime_sources(
+            MLX_RUNTIME_FACTS,
+            &serde_json::to_string(&missing_candle_control).unwrap(),
+        )
+        .expect("mutated production facts still derive a matrix");
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            let cell = mutated
+                .models
+                .iter()
+                .find(|row| row.id == model)
+                .and_then(|row| {
+                    row.conditioning_shape
+                        .iter()
+                        .find(|cell| cell.capability == "control")
+                })
+                .unwrap_or_else(|| panic!("mutated derivation emits {model}/control"));
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+            assert!(cell.parity_obligation.is_none());
+        }
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        assert!(
+            checked_in_matrix_matches_live(checked_in, mutated).is_ok(),
+            "the route-backed exact five must survive descriptor-only capture drift"
+        );
+
+        // The asymmetry guard, INVERTED at epic 20398's pin refresh (sc-20644).
+        //
+        // This block used to strip `multiReference` from the CANDLE snapshot and prove the cell
+        // became an MLX-only residual carrying a parity obligation. That mutation depended on MLX
+        // still DECLARING the shape — and at inference `725c6bc59` it no longer does: both engines
+        // retired it symmetrically, upstream pinning the absence with a negative assertion. So the
+        // old mutation produced no cell at all and the guard silently lost its subject.
+        //
+        // The property being guarded is unchanged and is still worth guarding: an ASYMMETRIC
+        // declaration must surface as a flagged residual rather than pass quietly. Against the new
+        // baseline the way to create that asymmetry is to add the shape back on the MLX side, so
+        // the mutation is inverted rather than deleted. Deleting it would have removed the only
+        // check that SCAIL-2 conditioning asymmetry still fails closed.
+        let mut extra_mlx_multi_reference: Value = serde_json::from_str(MLX_RUNTIME_FACTS).unwrap();
+        let scail = extra_mlx_multi_reference["snapshot"]["generator_capabilities"]
+            .as_array_mut()
+            .expect("MLX snapshot has generator capabilities")
+            .iter_mut()
+            .find(|entry| entry["id"] == "scail2_14b")
+            .expect("MLX snapshot has the SCAIL-2 provider");
+        scail["conditioning"] = Value::Array(vec![
+            Value::String("reference".to_owned()),
+            Value::String("mask".to_owned()),
+            Value::String("multiReference".to_owned()),
+            Value::String("controlClip".to_owned()),
+        ]);
+        let mutated_scail = backend_capability_matrix_from_runtime_sources(
+            &serde_json::to_string(&extra_mlx_multi_reference).unwrap(),
+            CANDLE_RUNTIME_FACTS,
+        )
+        .expect("mutated SCAIL-2 facts still derive a matrix");
+        let scail_cell = mutated_scail
+            .models
+            .iter()
+            .find(|row| row.id == "scail2_14b")
+            .and_then(|row| {
+                row.conditioning_shape
+                    .iter()
+                    .find(|cell| cell.capability == "multiReference")
+            })
+            .expect("mutated derivation emits scail2_14b/multiReference");
+        assert_eq!(
+            (scail_cell.mlx, scail_cell.candle),
+            (Some(true), Some(false))
+        );
+        assert_eq!(
+            scail_cell
+                .parity_obligation
+                .as_ref()
+                .map(|obligation| obligation.work_item.as_str()),
+            Some("epic-8588")
         );
     }
 
@@ -3374,14 +4390,43 @@ mod tests {
                 "{} must be proven through a novel imported id, not a builtin proxy",
                 row.family
             );
-            let (manifest_operations, evaluated_operations) = match row.family.as_str() {
-                "krea_2" => (
-                    &["edit_image", "text_to_image"][..],
-                    &["edit_image", "image_to_image", "text_to_image"][..],
-                ),
-                "mage-flow" | "sdxl" => (&["text_to_image"][..], &["text_to_image"][..]),
-                family => panic!("unreviewed supported import family {family}"),
-            };
+            // Per family: its literal defaults, its UI-derived operation set, and which backends
+            // actually serve it. The last pair is spelled out rather than derived so a silent
+            // capability LOSS still flips a tuple.
+            let (manifest_operations, evaluated_operations, mlx_serves, candle_serves) =
+                match row.family.as_str() {
+                    "krea_2" => (
+                        &["edit_image", "text_to_image"][..],
+                        &["edit_image", "image_to_image", "text_to_image"][..],
+                        true,
+                        true,
+                    ),
+                    "sdxl" => (&["text_to_image"][..], &["text_to_image"][..], true, true),
+                    // Candle's engine facts declare no `mage-flow` imported provider at all, so
+                    // its cells are legitimately false there and MLX-only — which is exactly what
+                    // a parity obligation records.
+                    "mage-flow" => (&["text_to_image"][..], &["text_to_image"][..], true, false),
+                    // FLUX.2 (sc-11043, epic 11037). The import GATE admits the Klein NVFP4
+                    // single file, and the provider row that serves it is engine DATA that
+                    // arrives with the inference pin carrying sc-21485's `flux2` +
+                    // `transformer_file` registration — present since the epic's terminal pin
+                    // (sc-11045). Both cells therefore read the live facts: with the row the
+                    // candle cells are true, without it the family is admitted and routes
+                    // nowhere. MLX stays false permanently: it has no consumer for packed E2M1
+                    // weights.
+                    //
+                    // The generator's own two-sided rule is what keeps this honest across the
+                    // bump — "declared and routable" or "undeclared and unroutable", never one
+                    // without the other — so when the row lands, the cells and this expectation
+                    // move together or the artifact fails to generate at all.
+                    "flux2" => (
+                        &["text_to_image"][..],
+                        &["text_to_image"][..],
+                        imported_transformer_file_route_registered("mlx", "flux2"),
+                        imported_transformer_file_route_registered("candle", "flux2"),
+                    ),
+                    family => panic!("unreviewed supported import family {family}"),
+                };
             assert_eq!(
                 row.manifest_operations, manifest_operations,
                 "imported {} literal defaults drifted",
@@ -3392,15 +4437,24 @@ mod tests {
                 "imported {} UI-derived operation set drifted",
                 row.family
             );
+            // Per-backend, not parity: the two native engines genuinely declare different imported
+            // coverage, and a family may be admitted by the import gate while no engine serves it
+            // yet.
             for cell in &row.operation_and_mode {
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "imported {}/{} must traverse the live family route on both backends",
+                    (Some(mlx_serves), Some(candle_serves)),
+                    "imported {}/{} must match the live per-backend family route",
                     row.family,
                     cell.capability
                 );
-                assert!(cell.parity_obligation.is_none());
+                assert_eq!(
+                    cell.parity_obligation.is_some(),
+                    mlx_serves && !candle_serves,
+                    "imported {}/{} must carry a parity obligation exactly when MLX serves it alone",
+                    row.family,
+                    cell.capability
+                );
             }
             let expected_conditioning = if row.family == "krea_2" {
                 &["multiReference", "reference"][..]
@@ -3420,9 +4474,18 @@ mod tests {
                 .all(|cell| { (cell.mlx, cell.candle) == (Some(true), Some(true)) }));
             let adapters_should_route = matches!(row.family.as_str(), "krea_2" | "sdxl");
             for adapter in &row.user_adapters {
+                // flux2 adapter truth moves with the pin like its serving cells (sc-11043 /
+                // sc-11045): the klein single-file registration arrives declaring LoRA/LoKr
+                // support, so once the route exists the candle adapter cell is live engine data —
+                // per backend, since MLX has no packed-E2M1 consumer and never gains the route.
+                let expected = if row.family == "flux2" {
+                    (Some(mlx_serves), Some(candle_serves))
+                } else {
+                    (Some(adapters_should_route), Some(adapters_should_route))
+                };
                 assert_eq!(
                     (adapter.mlx, adapter.candle),
-                    (Some(adapters_should_route), Some(adapters_should_route)),
+                    expected,
                     "imported {}/{} adapter truth must come from the live family gate",
                     row.family,
                     adapter.capability
@@ -3432,24 +4495,43 @@ mod tests {
             assert!(row.guidance_method.is_empty());
             assert_eq!(
                 (row.preview.mlx, row.preview.candle),
-                (Some(true), Some(true)),
-                "imported {} preview must retain its production worker sink",
+                (Some(mlx_serves), Some(candle_serves)),
+                "imported {} preview must retain its production worker sink on every backend that \
+                 serves the family",
                 row.family
             );
         }
     }
 
+    /// Whether the live engine facts register a single-transformer-file imported provider for a
+    /// family on a backend.
+    ///
+    /// Read from the facts rather than hardcoded because for `flux2` (sc-11043) it is the one
+    /// expectation that legitimately MOVES with the inference pin: the row arrives with
+    /// sc-21485's registration. Everything else about the family stays asserted by value.
+    fn imported_transformer_file_route_registered(backend: &str, family: &str) -> bool {
+        super::super::catalog::imported_provider_routes(backend, family)
+            .any(|route| route.source == "transformer_file")
+    }
+
     #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
-        for (family, source) in [
-            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
+        // The indent is part of the fixture, not decoration: it is what pins the mutation to the
+        // real request literal instead of some similarly-worded block. Imported Krea builds its
+        // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
+        // per-item closure (20). A mutation that silently fails to apply would make this test pass
+        // while proving nothing, which is why the "mutation must apply" assertion is here.
+        for (family, source, indent) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
         ] {
             assert!(imported_preview_sink(family, source));
             let normalized = source.replace("\r\n", "\n");
             let without_request_sink = normalized.replacen(
-                "                    preview,\n                    cancel: cancel.clone(),\n                    ..Default::default()",
-                "                    cancel: cancel.clone(),\n                    ..Default::default()",
+                &format!(
+                    "{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()"
+                ),
+                &format!("{indent}cancel: cancel.clone(),\n{indent}..Default::default()"),
                 1,
             );
             assert_ne!(
@@ -3474,6 +4556,58 @@ mod tests {
         );
         assert_ne!(without_mage_sink, normalized_mage);
         assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
+
+        let without_mage_scope = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(",
+            "removed_memory_scope(",
+            1,
+        );
+        assert_ne!(without_mage_scope, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &without_mage_scope),
+            "Mage preview support must remain bound to the request-scoped production generator",
+        );
+
+        let crossed_mage_request = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            1,
+        );
+        assert_ne!(crossed_mage_request, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &crossed_mage_request),
+            "Mage preview support must not borrow a scope that generates another request",
+        );
+
+        // flux2 rides the plan-driven route (sc-11045): one shared request literal, two drivers.
+        // Dropping `preview,` from the literal — anchored on its `cancel:` neighbour at the
+        // literal's 12-space indent — must fail the claim; a comment or the drivers' own closure
+        // parameters must not preserve it.
+        assert!(imported_preview_sink("flux2", WORKER_IMAGE_CHECKPOINT_PLAN));
+        let normalized_plan = WORKER_IMAGE_CHECKPOINT_PLAN.replace("\r\n", "\n");
+        let without_plan_sink = normalized_plan.replacen(
+            "            preview,\n            cancel: cancel.clone(),",
+            "            cancel: cancel.clone(),",
+            1,
+        );
+        assert_ne!(
+            without_plan_sink, normalized_plan,
+            "flux2 mutation must apply"
+        );
+        assert!(
+            !imported_preview_sink("flux2", &without_plan_sink),
+            "flux2 must not inherit preview from the drivers' closure parameters"
+        );
+        let without_plan_scope = normalized_plan.replacen(
+            "crate::memory_strategy::generate_with_scope(",
+            "removed_memory_scope(",
+            1,
+        );
+        assert_ne!(without_plan_scope, normalized_plan);
+        assert!(
+            !imported_preview_sink("flux2", &without_plan_scope),
+            "flux2 preview support must remain bound to the request-scoped production generator",
+        );
     }
 
     #[test]
@@ -3537,7 +4671,7 @@ mod tests {
     }
 
     #[test]
-    fn sc18481_strict_pose_control_uses_only_real_base_model_lanes() {
+    fn sc20739_strict_pose_control_uses_only_real_product_lanes() {
         let matrix = backend_capability_matrix().unwrap();
         for model in [
             "z_image_turbo",
@@ -3561,6 +4695,60 @@ mod tests {
             );
             assert!(control.parity_obligation.is_none());
         }
+
+        let exact_sdxl_openpose_models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
+        for model in exact_sdxl_openpose_models {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let control = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "control")
+                .expect("promoted OpenPose model must expose the control axis");
+            assert_eq!(
+                (control.mlx, control.candle),
+                (Some(true), Some(true)),
+                "{model} must preserve the accepted cross-backend OpenPose claim"
+            );
+            assert!(control.parity_obligation.is_none());
+        }
+
+        assert_eq!(
+            super::super::candle::SDXL_CONTROL_MODELS,
+            exact_sdxl_openpose_models.as_slice(),
+            "the generic SDXL OpenPose model allowlist must remain the accepted exact five"
+        );
+        let manifest: ManifestRoot =
+            serde_json::from_str(&strip_jsonc_comments(MANIFEST)).expect("manifest parses");
+        let actual_sdxl_openpose_models: BTreeSet<_> = manifest
+            .models
+            .iter()
+            .filter_map(|model| {
+                let job = probe_job(
+                    JobType::ImageGenerate,
+                    &model.id,
+                    json!({
+                        "mode": "text_to_image",
+                        "prompt": "probe",
+                        "advanced": { "poses": [{}] }
+                    }),
+                )
+                .expect("control probe is structurally valid");
+                (super::super::candle::image_job_candle_lane(&job)
+                    == Some(super::super::candle::CandleImageLane::SdxlControl))
+                .then_some(model.id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            actual_sdxl_openpose_models,
+            exact_sdxl_openpose_models.into_iter().collect(),
+            "the generic SDXL OpenPose route must not broaden beyond the accepted exact five"
+        );
 
         // These edit models consume the pose image as an ordinary reference; they do not own the
         // strict control lane and must not inherit the base-model supplement above.
@@ -3923,8 +5111,9 @@ mod tests {
 
         // LTX clip append/control routes require the IC-LoRA carried by the canonical probe. The
         // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
-        // that both production routers correctly reject.
-        for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
+        // that both production routers correctly reject. SC-18902's failed exact-head CUDA render
+        // withdrew Eros from every Candle lane; the newer advanced routes must not restore it.
+        for model_id in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
             let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let cell = row
@@ -3934,10 +5123,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "{model_id}/{mode} uses the complete IC-LoRA probe on both backends"
+                    (Some(true), Some(model_id != "ltx_2_3_eros")),
+                    "{model_id}/{mode} uses the complete IC-LoRA probe while honoring the Eros withdrawal"
                 );
-                assert!(cell.parity_obligation.is_none());
+                if model_id != "ltx_2_3_eros" {
+                    assert!(cell.parity_obligation.is_none());
+                }
             }
         }
 
@@ -4348,7 +5539,7 @@ mod tests {
         validate_exceptions(&register).expect("approved exception register validates");
 
         assert_eq!(register.schema_version, 2);
-        assert_eq!(register.authorized_approvers.len(), 4);
+        assert_eq!(register.authorized_approvers.len(), 6);
         let authorized: BTreeSet<_> = register
             .authorized_approvers
             .iter()
@@ -4361,28 +5552,108 @@ mod tests {
                 ("Michael Trefry", "epic-8433"),
                 ("Michael Trefry", "epic-8588"),
                 ("Michael Trefry", "epic-7434"),
+                // sc-19721's pin bump made MiniMax-H3 visible to the generated matrix for the
+                // first time (75d66db5 is the first revision registering the MLX provider), and
+                // the same regeneration surfaced the two Qwen edit preview cells.
+                ("Michael Trefry", "epic-17137"),
+                ("Michael Trefry", "epic-18803"),
             ])
         );
 
-        assert_eq!(register.records.len(), 7);
-        let expected_groups = BTreeMap::from([
-            (("epic-9083", "precision"), 27usize),
-            (("epic-8433", "operation"), 3usize),
-            (("epic-8433", "conditioning"), 2usize),
-            (("epic-8433", "adapter"), 2usize),
-            (("epic-8433", "precision"), 3usize),
-            (("epic-8588", "conditioning"), 6usize),
-            (("epic-7434", "guidance"), 4usize),
+        // Keyed by record id, not by (authority, category): one epic can approve more than one
+        // record in the same category on different days. Under the old (authority, category) key
+        // those would collapse into one entry, silently losing a record from the comparison.
+        let expected_records = BTreeMap::from([
+            (
+                "epic-9083-precision-sequencing",
+                ("epic-9083", "precision", 14usize),
+            ),
+            (
+                "epic-8433-krea-realtime-operation-sequencing",
+                ("epic-8433", "operation", 3usize),
+            ),
+            (
+                "epic-8433-krea-realtime-conditioning-sequencing",
+                ("epic-8433", "conditioning", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-adapter-sequencing",
+                ("epic-8433", "adapter", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-precision-sequencing",
+                ("epic-8433", "precision", 3usize),
+            ),
+            (
+                "epic-7434-cfg-pp-guidance-sequencing",
+                ("epic-7434", "guidance", 4usize),
+            ),
+            (
+                "epic-18803-eros-candle-operation-withdrawal",
+                ("epic-18803", "operation", 6usize),
+            ),
+            (
+                // 4 -> 5 at epic 20398's pin refresh (sc-20644). This count is a frozen-shape
+                // assertion, so it moves in the same PR as the register it pins. The MLX
+                // `ltx_2_3` engine gained `multiReference` at inference `725c6bc59`, and
+                // `engines.rs` maps `ltx_2_3_eros` to that MLX engine and to no Candle engine at
+                // all, so Eros's conditioning surface grew a fifth member that the already-approved
+                // route-level Candle withdrawal covers. No new approval: same approver, authority
+                // and date, and no Candle control becomes newly hidden because Eros has no Candle
+                // route to hide one on.
+                "epic-18803-eros-candle-conditioning-withdrawal",
+                ("epic-18803", "conditioning", 5usize),
+            ),
+            (
+                "epic-18803-eros-candle-adapter-withdrawal",
+                ("epic-18803", "adapter", 2usize),
+            ),
+            (
+                "epic-18803-eros-candle-precision-withdrawal",
+                ("epic-18803", "precision", 1usize),
+            ),
         ]);
+        assert_eq!(register.records.len(), expected_records.len());
         let actual_groups: BTreeMap<_, _> = register
             .records
             .iter()
             .map(|record| {
                 assert_eq!(record.approver, "Michael Trefry");
-                assert_eq!(record.approved_date, "2026-08-14");
-                assert_eq!(record.decision_type, DecisionType::SequencingChoice);
-                assert!(record.evidence.contains("directly approved"));
-                assert!(record.evidence.contains("#activity-19457"));
+                // SHAPE, not a frozen literal (main `bf22a913e`): a pinned date and a pinned
+                // activity link froze this register to one approval batch, so a later approval —
+                // epic-17137's, on a different day with its own citation — could not be recorded
+                // without editing the guard. What actually matters is that every record carries a
+                // well-formed date and cites a real approval, and that is what is asserted.
+                // epic-18803's Eros Candle withdrawal is the one product decision in the register;
+                // its record-specific evidence citations are kept verbatim from that epic's guard.
+                assert_eq!(
+                    record.approved_date.len(),
+                    10,
+                    "approvedDate must be YYYY-MM-DD"
+                );
+                assert!(
+                    record
+                        .approved_date
+                        .split('-')
+                        .enumerate()
+                        .all(|(index, part)| part.len() == if index == 0 { 4 } else { 2 }
+                            && part.chars().all(|character| character.is_ascii_digit())),
+                    "approvedDate must be YYYY-MM-DD: {}",
+                    record.approved_date
+                );
+                if record.authority == "epic-18803" {
+                    assert_eq!(record.decision_type, DecisionType::ProductDecision);
+                    assert!(record.evidence.contains("SC-18902"));
+                    assert!(record.evidence.contains("run 31766800005"));
+                    assert!(record.evidence.contains("artifact 9207109616"));
+                } else {
+                    assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                    assert!(record.evidence.contains("directly approved"));
+                    assert!(
+                        record.evidence.contains("#activity-") || record.evidence.contains("epic-"),
+                        "evidence must cite the approval it records"
+                    );
+                }
                 assert!(record.user_facing_behavior.contains("hidden or disabled"));
                 assert!(record.user_facing_behavior.contains("explanation"));
                 assert!(record.user_facing_behavior.contains("fail closed"));
@@ -4390,21 +5661,30 @@ mod tests {
                 assert!(record.revisit_condition.contains("routing tests"));
                 assert!(record.revisit_condition.contains("runtime evidence"));
                 (
-                    (record.authority.as_str(), record.category.as_str()),
-                    record.cells.len(),
+                    record.id.as_str(),
+                    (
+                        record.authority.as_str(),
+                        record.category.as_str(),
+                        record.cells.len(),
+                    ),
                 )
             })
             .collect();
-        assert_eq!(actual_groups, expected_groups);
+        assert_eq!(actual_groups, expected_records);
 
         let exception_paths: BTreeSet<_> = register
             .records
             .iter()
             .flat_map(|record| record.cells.iter().cloned())
             .collect();
+        // Derived from the table above rather than a second frozen literal: the set is compared
+        // against the generated residual below, so all this pins is that no cell is approved TWICE.
         assert_eq!(
             exception_paths.len(),
-            47,
+            expected_records
+                .values()
+                .map(|(_, _, cells)| *cells)
+                .sum::<usize>(),
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4418,7 +5698,9 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        assert_eq!(matrix.summary.exception_count, 7);
+        // The generated summary must count exactly the records the register carries; the register's
+        // own population is pinned by the table above, so this asserts the join, not a literal.
+        assert_eq!(matrix.summary.exception_count, register.records.len());
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [
@@ -4541,20 +5823,21 @@ mod tests {
             .find(|model| model.id == "sana_1600m")
             .unwrap();
         assert!(manifest_artifact_tier_support(sana, "bf16", "mlx"));
-        assert!(!manifest_artifact_tier_support(sana, "bf16", "candle"));
+        assert!(manifest_artifact_tier_support(sana, "bf16", "candle"));
         let dense = precision_cell(sana, "bf16", &original, &candle).unwrap();
         assert_eq!((dense.mlx, dense.candle), (Some(true), Some(true)));
 
-        // Removing the Candle descriptor loses Candle dense support even though the manifest still
-        // contains a macOS bf16 artifact. Conversely, removing the MLX descriptor does not erase the
-        // exact macOS artifact. These mutations guard both independent sides of the union.
+        // The exact platform artifact independently preserves each lane's dense support when its
+        // runtime descriptor is removed, because the PRODUCTION SCHEDULER PREDICATE still routes
+        // the model. That second authority is what makes the artifact disjunct legitimate; the
+        // per-family probe below proves it is load-bearing for every family, not just this one.
         let mut no_candle_descriptor = candle.clone();
         no_candle_descriptor.model_mappings.remove("sana_1600m");
         no_candle_descriptor
             .video_model_mappings
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &original, &no_candle_descriptor).unwrap();
-        assert_eq!(dense.candle, Some(false));
+        assert_eq!(dense.candle, Some(true));
 
         let mut no_mlx_descriptor = original.clone();
         no_mlx_descriptor.model_mappings.remove("sana_1600m");
@@ -4563,6 +5846,92 @@ mod tests {
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &no_mlx_descriptor, &candle).unwrap();
         assert_eq!(dense.mlx, Some(true));
+
+        // sc-20799: the artifact row is a SHIPPING fact, not a routing one. Joined with nothing it
+        // let `"variant": "bf16"` on a `["windows","linux"]` download entry claim the candle cell
+        // outright. Prove the join is actually constructed by keeping the artifact rows EXACTLY as
+        // they are and removing only the routing: a family id in neither the runtime descriptors
+        // nor the production route tables must claim no cell on either lane.
+        //
+        // The probe manifest is the real one with every model id suffixed: identical download rows
+        // (so `manifest_artifact_tier_support` answers exactly as before), an id nothing routes.
+        let mut probe_value: Value = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        for entry in probe_value["models"].as_array_mut().unwrap() {
+            let renamed = format!("{}_unrouted_probe", entry["id"].as_str().unwrap());
+            entry["id"] = Value::String(renamed);
+        }
+        let probe_manifest: ManifestRoot = serde_json::from_value(probe_value).unwrap();
+        let unrouted_twin = |model: &ManifestModel| {
+            let id = format!("{}_unrouted_probe", model.id);
+            probe_manifest
+                .models
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .unwrap()
+        };
+        let unrouted = unrouted_twin(sana);
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "candle"),
+            "the probe must keep the exact candle artifact row that used to sustain the cell"
+        );
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "mlx"),
+            "the probe must keep the exact mlx artifact row that used to sustain the cell"
+        );
+        let unrouted_cell = precision_cell(unrouted, "bf16", &original, &candle).unwrap();
+        assert_eq!(
+            (unrouted_cell.mlx, unrouted_cell.candle),
+            (Some(false), Some(false)),
+            "a shipped tier artifact must not claim a lane that routes nothing"
+        );
+
+        // The join has to hold for EVERY family the matrix can claim a precision cell for, not
+        // only the one that exposed the hole. The family set is DERIVED from the manifest and the
+        // live fixtures — never a hand-typed list, never a population count — so it grows with the
+        // corpus. Each family must land in the partition: a claimed cell is backed by a runtime
+        // descriptor or by the production router, and stripping BOTH always drops it.
+        let mut asserted_families = BTreeSet::new();
+        for model in &manifest.models {
+            for tier in ["bf16", "q8", "q4"] {
+                let Ok(baseline) = precision_cell(model, tier, &original, &candle) else {
+                    continue;
+                };
+                let (job_type, payload) =
+                    precision_payload(model, tier, &original, &candle).unwrap();
+                let job = probe_job(job_type, &model.id, payload).unwrap();
+                for (lane, claimed) in [("mlx", baseline.mlx), ("candle", baseline.candle)] {
+                    if claimed != Some(true) {
+                        continue;
+                    }
+                    let facts = if lane == "mlx" { &original } else { &candle };
+                    assert!(
+                        backend_supports(&job, facts).unwrap(),
+                        "{} {tier} {lane}: a claimed precision cell must satisfy the production \
+                         scheduler predicate, never the artifact row alone",
+                        model.id
+                    );
+                    // Removing the routing while KEEPING the artifact row must drop the cell. A
+                    // video model fails even earlier — the probe cannot resolve a routed canonical
+                    // mode — which is the same fail-closed conclusion, so `Err` counts as dropped.
+                    let stripped = precision_cell(unrouted_twin(model), tier, &original, &candle)
+                        .map(|cell| if lane == "mlx" { cell.mlx } else { cell.candle })
+                        .unwrap_or(Some(false));
+                    assert_eq!(
+                        stripped,
+                        Some(false),
+                        "{} {tier} {lane}: the artifact row must not sustain the cell once nothing \
+                         routes the model",
+                        model.id
+                    );
+                    asserted_families.insert(model.id.clone());
+                }
+            }
+        }
+        assert!(
+            asserted_families.contains("sana_1600m"),
+            "the derived family set must cover the family that exposed this hole, got \
+             {asserted_families:?}"
+        );
 
         // Neither authority bypasses production routing: a snapshot without image dispatch cannot
         // claim the precision cell even when both its descriptor and manifest artifact remain.
@@ -4611,6 +5980,29 @@ mod tests {
             .unwrap()
             .engine_ids = vec!["wan2_2_t2v_14b".to_owned()];
         assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
+    }
+
+    #[test]
+    fn trainer_mappings_allow_native_engine_ids_and_fail_closed() {
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        let target = "ltx_2_5_video_lora";
+
+        assert_ne!(
+            mlx.trainer_mappings.get(target),
+            candle.trainer_mappings.get(target),
+            "the regression requires distinct native LTX 2.5 trainer engines"
+        );
+        validate_runtime_pair(&mlx, &candle).unwrap();
+        assert!(trainer_supports(&mlx, target, "lora"));
+        assert!(trainer_supports(&candle, target, "lora"));
+
+        let mut missing_target = candle.clone();
+        missing_target.trainer_mappings.remove(target);
+        assert_eq!(
+            validate_runtime_pair(&mlx, &missing_target).unwrap_err(),
+            "matching-platform production training targets differ (MLX only: [\"ltx_2_5_video_lora\"]; Candle only: [])"
+        );
     }
 
     #[test]
@@ -4674,12 +6066,19 @@ mod tests {
         let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
         for original in [&mlx, &candle] {
+            let mut routed_mappings = 0;
             for index in 0..original.video_model_mappings.len() {
                 let mapping = &original.video_model_mappings[index];
                 let job =
                     super::super::canonical_video_route_probe(&mapping.model_id, &mapping.mode)
                         .unwrap();
-                assert!(backend_supports(&job, original).unwrap());
+                // Runtime descriptors can retain a provider that product routing intentionally
+                // rejects (Eros/Candle after SC-18902). Only a mapping that participates in a live
+                // route is a valid subject for this deletion mutation.
+                if !backend_supports(&job, original).unwrap() {
+                    continue;
+                }
+                routed_mappings += 1;
                 let mut mutated = original.clone();
                 mutated.video_model_mappings.remove(index);
                 assert!(routed_cell(
@@ -4701,6 +6100,11 @@ mod tests {
                 )
                 .is_err());
             }
+            assert!(
+                routed_mappings > 0,
+                "{} must exercise at least one routed video mapping",
+                original.snapshot.backend
+            );
         }
     }
 

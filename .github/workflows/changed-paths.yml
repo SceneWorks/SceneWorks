@@ -71,8 +71,19 @@ jobs:
           MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -uo pipefail
+          # A terminal feature-to-main PR always runs every lane unfiltered: path filtering on the
+          # final merge only postpones a lane failure to merge day, one CI round at a time (the
+          # epic 18755 closeout hit exactly this, twice). Cheap PRs keep the filter; the one PR
+          # that lands an epic pays for the full matrix once, in parallel.
+          if [ "${PR_BASE_REF:-}" = "main" ] && [ "${PR_HEAD_REF#feature/}" != "${PR_HEAD_REF:-}" ]; then
+            echo "feature-to-main terminal PR; running the lane unconditionally."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "${GITHUB_EVENT_NAME}" in
             merge_group)
               # Two-dot: the merge group ref is built directly on base_sha, so this is exactly the

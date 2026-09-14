@@ -149,6 +149,7 @@ where
 
     /// Load or reuse the resident model while also reporting the request's true cold/warm cache
     /// access state.
+    #[cfg(test)]
     pub(crate) fn with_model_access<R>(
         &mut self,
         key: K,
@@ -156,9 +157,27 @@ where
         run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
         entry_missing_msg: &str,
     ) -> WorkerResult<R> {
+        self.with_model_access_after_cold_admission(key, |_| Ok(()), load, run, entry_missing_msg)
+    }
+
+    /// [`Self::with_model_access`] with a hook that runs only for a genuine miss, while the previous
+    /// resident entry is still alive. A live-memory gate can therefore observe the raw budget before
+    /// replacement, account for the entry the cache is about to drop, and avoid touching an exact-key
+    /// warm hit. The hook receives the different resident model itself (or `None` on an empty cold
+    /// start), so callers can credit only metadata bound to that exact entry rather than a stale
+    /// process-global high-water. The entry is cleared only after admission succeeds.
+    pub(crate) fn with_model_access_after_cold_admission<R>(
+        &mut self,
+        key: K,
+        cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()>,
+        load: impl FnOnce() -> WorkerResult<M>,
+        run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
+        entry_missing_msg: &str,
+    ) -> WorkerResult<R> {
         let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
             CacheAccess::Warm
         } else {
+            cold_admission(self.entry.as_ref().map(|entry| &entry.model))?;
             self.entry = None;
             if self.evict_before_load {
                 release_backend_cache_after_evict();
@@ -348,7 +367,7 @@ pub(crate) struct SeamMessages {
 /// fails THIS request with a clean [`WorkerError::Engine`] built from `msgs.panic_reset`, evicts the
 /// resident model (post-abort backend state is suspect), and leaves the shared thread serving.
 pub(crate) async fn run_cached<K, M, R>(
-    worker: &'static mpsc::Sender<CacheJob<K, M>>,
+    worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M) -> WorkerResult<R> + Send + 'static,
@@ -364,8 +383,26 @@ where
 
 /// [`run_cached`] plus the true cold/warm access state for request-scoped policy evaluation.
 pub(crate) async fn run_cached_with_access<K, M, R>(
-    worker: &'static mpsc::Sender<CacheJob<K, M>>,
+    worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
+    load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
+    run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
+    msgs: SeamMessages,
+) -> WorkerResult<R>
+where
+    K: Clone + PartialEq + Send + 'static,
+    M: 'static,
+    R: Send + 'static,
+{
+    run_cached_with_access_after_cold_admission(worker, key, |_| Ok(()), load, run, msgs).await
+}
+
+/// [`run_cached_with_access`] with an admission hook that executes atomically on the cache thread
+/// only for a miss and before the old entry is dropped.
+pub(crate) async fn run_cached_with_access_after_cold_admission<K, M, R>(
+    worker: &mpsc::Sender<CacheJob<K, M>>,
+    key: K,
+    cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()> + Send + 'static,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
     msgs: SeamMessages,
@@ -382,7 +419,13 @@ where
         // The cached model is evicted on panic — post-abort backend state is suspect, so the next
         // job reloads fresh.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.with_model_access(key, load, run, msgs.entry_missing)
+            cache.with_model_access_after_cold_admission(
+                key,
+                cold_admission,
+                load,
+                run,
+                msgs.entry_missing,
+            )
         })) {
             Ok(result) => result,
             Err(panic) => {

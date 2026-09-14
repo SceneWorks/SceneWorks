@@ -147,4 +147,42 @@ describe("DatasetEditorPanel delete affordance", () => {
     // Nothing dataset-scoped to delete, but the panel still renders its draft shell.
     expect(container.querySelector(".dataset-identity-actions")).not.toBeNull();
   });
+
+  it("keeps Parquet-import failures visible and handled at the parent boundary", async () => {
+    const onImportParquet = vi.fn(() => Promise.reject({ message: { detail: "not renderable" } }));
+    const { props } = makeSessions();
+    props.datasetSession.onImportParquet = onImportParquet;
+    const unhandled = [];
+    const onUnhandled = (event) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+
+    try {
+      await act(async () => root.render(<DatasetEditorPanel {...props} />));
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((button) => button.textContent === "Import Parquet").click();
+      });
+      const input = [...document.body.querySelectorAll("label")]
+        .find((label) => label.textContent.includes("Parquet file or folder"))
+        .querySelector("input");
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+        setter.call(input, "D:\\broken.parquet");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await act(async () => {
+        [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start import").click();
+        await Promise.resolve();
+      });
+
+      expect(onImportParquet).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Could not start the Parquet import.");
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
 });

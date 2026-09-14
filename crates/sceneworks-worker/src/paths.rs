@@ -97,6 +97,27 @@ pub(crate) fn normalized_data_dir(settings: &Settings) -> WorkerResult<PathBuf> 
     normalize_absolute_path(&settings.data_dir)
 }
 
+/// Every operator-controlled root from which read-only model files may be loaded.
+///
+/// Keep both lexical and canonical forms: callers first confine the retained lexical loader entry,
+/// then the exact target captured by [`gen_core::PinnedWeightsFile`]. A missing external root is
+/// intentionally inert rather than fatal, matching the pre-existing model/LoRA policy.
+pub(crate) fn allowed_model_roots(settings: &Settings) -> WorkerResult<Vec<PathBuf>> {
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
 pub(crate) fn ensure_path_under(
     path: PathBuf,
     roots: &[PathBuf],
@@ -171,15 +192,33 @@ pub(crate) fn normalize_app_managed_model_path(
     if raw_path.is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    normalize_app_managed_model_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// `Path`-valued sibling of [`normalize_app_managed_model_path`], for callers that already hold a
+/// built `PathBuf` rather than a payload string (sc-20524: the data-dir anchoring of a manifest
+/// entry's provenance path). Such a caller must NOT round-trip through `to_string_lossy` to reach
+/// the `&str` form — a non-UTF-8 component becomes U+FFFD there, and the confinement check would
+/// then judge a path that is not the one the caller holds.
+pub(crate) fn normalize_app_managed_model_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
     // Canonicalize the input and allow either the lexical or canonical form of each
     // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
     // matching `normalize_app_managed_lora_path` (same roots).
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // The shared helper carries every root (data dir, HF cache, declared external roots — both
+    // lexical and canonical forms); the source library binding below feeds the sc-19707 leased
+    // redirect.
+    let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
     // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
     // files (DiT / text-encoder / VAE) in place from the configured tree, so those paths must
@@ -187,14 +226,134 @@ pub(crate) fn normalize_app_managed_model_path(
     // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
     // widen the allow-list), and the list is empty by default and on macOS, so confinement is
     // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(raw_path, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
+        })?;
+    // sc-19707: a model directory the API already resolved to a concrete source-library path
+    // (training base models, captioners, analyzers) is served from the leased app-owned bundle
+    // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied
+    // only while a runtime lease is active and only when the bundle really holds the path — with
+    // no lease this is inert and the authoritative source path is returned unchanged.
+    Ok(prefer_leased_local_path(&source_library, confined))
+}
+
+/// Redirect one already-confined source-library path into the leased app-owned bundle that holds
+/// it (sc-19707). Inert without an active runtime lease, and inert for any path the bundle does not
+/// hold, so the authoritative source path is what survives in every other case. Shared by the model
+/// and adapter confinement seams so neither can drift into serving a different tier than the other.
+fn prefer_leased_local_path(
+    source_library: &sceneworks_core::model_artifacts::ArtifactSourceLibrary,
+    confined: PathBuf,
+) -> PathBuf {
+    sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+        source_library.root(),
+        &confined,
+    )
+    .unwrap_or(confined)
+}
+
+/// Confine a payload-supplied model **file** while retaining the lexical, extension-bearing path the
+/// runtime must re-open (sc-18306). Both the lexical entry and canonical target cross the trust
+/// boundary: an outside entry cannot be admitted merely because it currently points inward, and an
+/// inside entry cannot escape through its target. Both are checked against the same data/HF/operator roots as
+/// [`normalize_app_managed_model_path`]. Once that target is proven confined, return the absolute
+/// pre-canonical path when it resolves to exactly the vetted file. This lets inference pin the entry
+/// with `lstat` and re-open it for transformer windows; returning only the canonical HF blob path would
+/// discard both the user-visible filename extension and the symlink-entry identity.
+#[cfg(all(test, unix))]
+pub(crate) fn normalize_app_managed_model_file_path(
+    settings: &Settings,
+    raw_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
-    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
-    ensure_path_under(path, &roots, label)
+    normalize_app_managed_model_file_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// Path-valued sibling of [`normalize_app_managed_model_file_path`], used after an install directory
+/// has selected its lone checkpoint entry. Re-running the canonical confinement check on that child
+/// is essential: a confined directory can contain a `.safetensors` symlink whose target escapes every
+/// app-managed root.
+#[cfg(all(test, unix))]
+pub(crate) fn normalize_app_managed_model_file_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    Ok(pin_app_managed_model_file(settings, raw_path, label)?
+        .loader_path()
+        .to_path_buf())
+}
+
+/// Pin a model file before resolving it, then confine both the retained lexical entry and the exact
+/// target captured by that same pin. This is the file trust-boundary primitive for prepared
+/// [`gen_core::LoadSpec`]s: there is no authorize-then-re-resolve gap, and the extension-bearing
+/// loader path is preserved for format dispatch.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn pin_app_managed_model_file(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let roots = allowed_model_roots(settings)?;
+    let lexical = normalize_absolute_path(raw_path)?;
+    ensure_path_under(lexical.clone(), &roots, label)?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    ensure_path_under(pin.canonical_target_path().to_path_buf(), &roots, label)?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Pin an operator-only model file without applying payload model-root confinement. Used only for
+/// `SCENEWORKS_CONTROLNET_KREA`, whose pre-existing contract deliberately admits an absolute
+/// operator path outside the managed roots. The exact entry/target identity is still retained and
+/// revalidated like every prepared File source.
+#[cfg(target_os = "macos")]
+pub(crate) fn pin_operator_model_file(
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let lexical = normalize_absolute_path(raw_path)?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Atomically finalize a complete prepared token set, deduplicating repeated lexical File slots
+/// (for example the same adapter selected twice at different scales) before calling the strict
+/// gen-core preparation API.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn prepare_load_spec_with_file_pins(
+    spec: &mut gen_core::LoadSpec,
+    pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<()> {
+    let mut unique = BTreeMap::new();
+    for pin in pins {
+        unique.entry(pin.loader_path().to_path_buf()).or_insert(pin);
+    }
+    spec.prepare_with_file_pins(unique.into_values())
+        .map_err(|error| crate::classify_engine_error(label, error))
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -219,27 +378,32 @@ pub(crate) fn normalize_app_managed_lora_path(
     settings: &Settings,
     path: &Path,
 ) -> WorkerResult<PathBuf> {
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // The shared helper carries every root (both forms of the data dir, HF cache, and declared
+    // external roots); the source library binding feeds the sc-19707 leased redirect below.
+    let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Both the lexical and canonical form of each external root, matching the posture
     // above: `resolved` is canonical, and a canonical path never `starts_with` a
     // lexical root when the two differ (a symlinked or `..`-bearing root, macOS
     // `/var` -> `/private/var`). A root that cannot be canonicalized (unmounted drive)
     // contributes its lexical form only, and simply never matches.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
-    }
     let normalized = normalize_absolute_path(path)?;
-    let resolved = normalize_existing_or_absolute(&normalized)?;
-    let confined = ensure_path_under(resolved, &roots, "LoRA path")?;
-    Ok(loadable_confined_lora_path(&normalized, confined))
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(&normalized, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(
+                "LoRA path must be inside an app-managed directory.".to_owned(),
+            )
+        })?;
+    // The loadable (extension-bearing) form first: an HF-cached adapter confines to its
+    // extensionless `blobs/<sha>` target, and only the snapshot-shaped form can be matched against
+    // a leased bundle — which stores real files, so the redirected path keeps its extension.
+    Ok(prefer_leased_local_path(
+        &source_library,
+        loadable_confined_lora_path(&normalized, confined),
+    ))
 }
 
 /// Return a *loadable* form of a confined adapter path (sc-11649). mlx-rs's safetensors

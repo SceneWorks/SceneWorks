@@ -8,14 +8,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-/// Schema v4 adds the required per-record `loadShape` axis. v3 bundles (including the currently
-/// packaged production evidence, whose records were measured before the shape was typed) load as
-/// `BundleLoad::Stale` and every consumer falls back to the legacy admission path until the
-/// evidence is re-collected under the new harness.
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 4;
+/// Schema v6 (epic 18755) adds the LTX-2.5 target axes — `target.transformerVariant`,
+/// `target.decoder`, and typed `quality.audio` — to the record and source-session shapes. The
+/// additions are purely additive, but every shape here is `deny_unknown_fields`, so a v5 *reader*
+/// rejects a v6 document outright; the version bump is what keeps that rejection legible instead
+/// of surfacing as an unknown-field parse error.
+///
+/// Schema v5 (sc-18864) REMOVES the per-phase `deviceBytes` and `wiredBytes` counters. Both
+/// adapters emitted them as verbatim copies of `allocatorBytes`, so a v4 record could — and every
+/// committed MLX record did — assert wired residency above the probed wired ceiling as a pure
+/// artifact of that aliasing. A v4 bundle is not upgradeable in place by a reader (it carries no
+/// way to tell a measured field from an aliased one), and its aliased counters fail `EvidenceBundle`'s
+/// `deny_unknown_fields` parse outright.
+///
+/// Schema v4 added the required per-record `loadShape` axis.
+///
+/// TOOLING CONSTANTS, NOT A RUNTIME GATE (sc-22738). The packaged bundle is asserted to carry these
+/// versions by `cargo test` (`packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out`)
+/// and the harness stamps them; [`load_bundle`] does NOT compare them. A bundle whose version fields
+/// drifted but whose records still parse and validate serves those records exactly as a current one
+/// would — version drift is a re-capture signal for the probe tooling, never a runtime demotion.
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 6;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
 ///
@@ -45,8 +61,18 @@ pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
 /// (`mlx-gen-krea`) and on candle (`candle-gen-krea`), which are different code paths that must
 /// never be compared against each other.
 ///
-/// `None` is a real answer and callers must fail closed on it rather than admitting: an undeclared
-/// lane means nobody derived what code its measurements were taken against.
+/// A RE-CAPTURE SIGNAL FOR THE PROBE TOOLING, NEVER A RUNTIME INPUT (sc-22738). The runtime
+/// admission seam — `mlx_fit_gate`, `candle_memory_strategy`, `vram_gate`, `krea_control_fit`,
+/// `video_admission`, `memory_strategy` — does not call this and carries no field to compare it
+/// against: a measured record is admitted exactly as if it were current whether or not its
+/// provider's closure has since moved, because a fix to shared engine code touches nearly every
+/// closure and shipping it must neither wait on hours of re-measurement nor silently move what a
+/// live request gets. The scripts that decide what to re-capture (`measure-memory-catalog.mjs`,
+/// `stale-lane-report.mjs`, `generate-memory-matrix.mjs`) read the same ledger from JavaScript;
+/// this accessor exists for tests that stamp fixtures at the declared digest.
+///
+/// `None` is a real answer: the lane carries no currency term, so nobody derived what code its
+/// measurements were taken against (sc-22512, epic requirement E8: absence never blocks).
 pub fn packaged_closure_digest(backend: &str, provider: &str) -> Option<String> {
     serde_json::from_str::<Value>(PACKAGED_INFERENCE_PROVIDER_CLOSURES)
         .ok()?
@@ -177,7 +203,24 @@ pub struct SourceTarget {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub rung: StrategyRung,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25Decoder {
+    Conv,
+    #[serde(rename = "diffvae")]
+    DiffVae,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -195,6 +238,8 @@ pub enum SourceOutputRole {
     Request,
     SelectedRgb,
     ReferenceRgb,
+    SelectedAv,
+    ReferenceAv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -356,7 +401,15 @@ pub struct Target {
     pub provider: String,
     pub tier: String,
     pub mode: String,
+    /// Explicit conditioning cardinality for new reference-bearing captures. Older records omit it.
+    pub reference_count: Option<u32>,
     pub overlay: String,
+    /// LTX-2.5's two transformer checkpoints are different memory workloads. Required for
+    /// `ltx_2_5` records; absent for older families whose target identity predates this axis.
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    /// LTX-2.5's ConvVAE and DiffVAE have different decode paths and ladder compositions.
+    /// Required for `ltx_2_5` records; absent for unrelated families.
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
 }
 
@@ -377,7 +430,7 @@ pub struct Strategy {
     pub parameters: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyRung {
     Resident,
@@ -528,9 +581,17 @@ impl ObservedMemory {
         }
     }
 
-    pub fn overall_device_or_active_bytes(&self) -> u64 {
+    /// The NON-RECLAIMABLE residency high-water mark — the only observed quantity that may be
+    /// compared against a hardware ceiling.
+    ///
+    /// This used to read `overall.device_bytes`, which the adapters emitted as a copy of
+    /// `allocatorBytes` = peak-active + end-of-phase cache. That sum is an upper bound across TWO
+    /// INSTANTS, so it legitimately exceeds physical memory on a capture that completed — every
+    /// committed LTX record reported 142.6 GB against a 137.4 GB host and was refused promotion
+    /// for it (sc-18864). The allocator cache is released under pressure; the live arrays are not.
+    pub fn overall_non_reclaimable_bytes(&self) -> u64 {
         match self {
-            Self::Full(value) => value.overall.device_bytes,
+            Self::Full(value) => value.overall.active_bytes,
             Self::RuntimeOverall(value) => value.overall.active_bytes,
         }
     }
@@ -557,14 +618,30 @@ pub struct PhaseMetrics {
     pub overall: Phase,
 }
 
+/// One phase's memory counters, each a SINGLE named backend reading or a derived function of two.
+///
+/// `deny_unknown_fields` plus the absence of `device_bytes` / `wired_bytes` is what makes
+/// `wiredBytes > wiredLimitBytes` UNREPRESENTABLE rather than merely rejected: schemaVersion 5
+/// carries no wired field, and the wired-eligible residency is derived from
+/// [`Phase::non_reclaimable_bytes`], which cannot diverge from the active peak.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Phase {
+    /// MLX `get_peak_memory()` / CUDA `nvidia-smi memory.used` delta — the peak live residency.
     pub active_bytes: u64,
+    /// Derived: `active_bytes + reclaimable_bytes`, an upper bound on co-existence across two
+    /// instants. [`validate_phase_metrics`] enforces the identity.
     pub allocator_bytes: u64,
-    pub device_bytes: u64,
-    pub wired_bytes: u64,
+    /// MLX `get_cache_memory()` at the phase boundary / CUDA 0 — elastic, never charged as wired.
     pub reclaimable_bytes: u64,
+}
+
+impl Phase {
+    /// The residency that must physically fit, and the only figure a hardware or wired ceiling may
+    /// be checked against. The allocator cache is reclaimed under pressure, so it is excluded.
+    pub fn non_reclaimable_bytes(&self) -> u64 {
+        self.active_bytes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -573,6 +650,12 @@ pub struct Quality {
     pub contract: Option<String>,
     pub identical_inputs: Option<bool>,
     pub identical_latents: Option<bool>,
+    /// How many warm passes the capture ran after its measured render (sc-22738). `Some(0)` is a
+    /// video-lane receipt whose determinism comparison was NOT run: `result` is `not_run` and the
+    /// comparison figures are absent, and the runtime-complete validator accepts exactly that
+    /// shape rather than refusing the record or reading a synthetic zero. Absent on every record
+    /// captured before the declaration existed, which keeps the previous requirements.
+    pub warm_passes: Option<u32>,
     pub result: Option<QualityResult>,
     pub maximum_error: Option<f64>,
     pub mean_error: Option<f64>,
@@ -580,6 +663,24 @@ pub struct Quality {
     pub maximum_error_threshold: Option<f64>,
     pub mean_error_threshold: Option<f64>,
     pub root_mean_square_error_threshold: Option<f64>,
+    pub audio: Option<AudioQuality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioQuality {
+    pub result: QualityResult,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub sample_count: u64,
+    pub selected_pcm_sha256: String,
+    pub reference_pcm_sha256: String,
+    pub maximum_absolute_error: f64,
+    pub mean_absolute_error: f64,
+    pub root_mean_square_error: f64,
+    pub maximum_absolute_error_threshold: f64,
+    pub mean_absolute_error_threshold: f64,
+    pub root_mean_square_error_threshold: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -668,18 +769,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleBundleReason {
-    SchemaVersion { found: Option<u64> },
-    HarnessVersion { found: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BundleLoad {
-    Ready(EvidenceBundle),
-    Stale(StaleBundleReason),
-}
-
 #[derive(Debug)]
 pub enum BundleLoadError {
     Json(serde_json::Error),
@@ -699,52 +788,20 @@ impl fmt::Display for BundleLoadError {
 
 impl std::error::Error for BundleLoadError {}
 
-pub fn load_bundle(source: &str) -> Result<BundleLoad, BundleLoadError> {
-    let raw: Value = serde_json::from_str(source).map_err(BundleLoadError::Json)?;
-    let schema_version = raw.get("schemaVersion").and_then(Value::as_u64);
-    if schema_version.is_some()
-        && schema_version != Some(u64::from(MEMORY_CALIBRATION_SCHEMA_VERSION))
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::SchemaVersion {
-            found: schema_version,
-        }));
-    }
-    let harness_version = raw
-        .get("harnessVersion")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if harness_version.is_some()
-        && harness_version.as_deref() != Some(MEMORY_CALIBRATION_HARNESS_VERSION)
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-            found: harness_version,
-        }));
-    }
-    if let Some(found) = raw
-        .get("records")
-        .and_then(Value::as_array)
-        .and_then(|records| {
-            records.iter().find_map(|record| {
-                record
-                    .get("harnessVersion")
-                    .and_then(Value::as_str)
-                    .filter(|found| *found != MEMORY_CALIBRATION_HARNESS_VERSION)
-                    .map(|found| Some(found.to_owned()))
-            })
-        })
-    {
-        return Ok(BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-            found,
-        }));
-    }
-
-    let bundle: EvidenceBundle = serde_json::from_value(raw).map_err(BundleLoadError::Json)?;
+/// Parse and validate a bundle. Well-formed records are served regardless of the bundle's or the
+/// records' `schemaVersion` / `harnessVersion` stamps (sc-22738): those stamps tell the probe
+/// tooling what to re-capture and are pinned against the packaged file by tests, but a reader that
+/// demoted every record on a version drift would be a currency gate in the runtime, which this
+/// repository has none of. What still fails here is a bundle that does not PARSE or does not
+/// VALIDATE — a malformed record is not a measurement of anything.
+pub fn load_bundle(source: &str) -> Result<EvidenceBundle, BundleLoadError> {
+    let bundle: EvidenceBundle = serde_json::from_str(source).map_err(BundleLoadError::Json)?;
     validate_bundle(&bundle).map_err(BundleLoadError::Invalid)?;
-    Ok(BundleLoad::Ready(bundle))
+    Ok(bundle)
 }
 
 /// Load the exact bundle compiled into the product.
-pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
+pub fn load_packaged_bundle() -> Result<EvidenceBundle, BundleLoadError> {
     load_bundle(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
 }
 
@@ -752,18 +809,19 @@ pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
 pub struct CalibrationBinding {
     pub abi: u32,
     /// Materialization shape the manifest's opt-in claims its receipts were measured under.
-    /// Compared record-by-record; a mismatch is [`StaleEvidenceReason::LoadShape`].
+    /// Compared record-by-record; a mismatch is [`EvidenceMismatchReason::LoadShape`].
     pub load_shape: LoadShapeKey,
     pub fingerprint: String,
     pub scene_works_revision: String,
     pub matrix_source_revision: String,
-    /// Capture provenance only — NEVER compared (sc-17774). See [`Self::inference_closure_digest`].
+    /// Capture provenance only — NEVER compared (sc-17774).
     pub inference_revision: String,
-    /// The provider compile-closure digest this calibration is in force for (sc-17774).
+    /// The provider compile-closure digest the manifest binding was measured under (sc-17774).
     ///
-    /// One mechanism for every model: a record is current exactly when the closure of the provider
-    /// it measured is unchanged. A change to any other model's code path cannot move this value, so
-    /// it cannot demote this calibration.
+    /// CAPTURE PROVENANCE ONLY since sc-22738: neither [`EvidenceBundle::evidence_for`] nor any
+    /// runtime selector compares it against the record's digest or against the live packaged
+    /// closure. A moved closure is what the probe tooling re-captures on
+    /// (`scripts/stale-lane-report.mjs`); it never changes what a live request is admitted at.
     pub inference_closure_digest: String,
     pub artifact_repository: String,
     pub artifact_resolved_revision: String,
@@ -779,28 +837,28 @@ pub struct EvidenceQuery {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
     pub rung: StrategyRung,
     pub parameters: Map<String, Value>,
     pub calibration: CalibrationBinding,
 }
 
+/// Why a record that matches the query's cell is nonetheless not the measurement the manifest
+/// binding cites. Every reason is an IDENTITY mismatch — a different ABI, materialization shape,
+/// provider-declared calibration campaign, receipt provenance, or artifact bytes — i.e. the record
+/// measured something other than what would run. None of them is a currency term: the provider's
+/// inference compile closure is deliberately absent (sc-22738), so a record captured under a
+/// closure that has since moved verifies exactly as a fresh capture would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StaleEvidenceReason {
+pub enum EvidenceMismatchReason {
     CalibrationAbi,
     LoadShape,
     CalibrationFingerprint,
-    /// The measured provider's own inference compile closure moved (sc-17774).
-    ///
-    /// Replaces the former `InferenceRevision`, which fired whenever the inference pin moved at all
-    /// — including for a commit to an unrelated model.
-    InferenceClosure,
-    /// A record carried no closure digest, so currency cannot be decided (sc-17774).
-    ///
-    /// Separate from [`Self::InferenceClosure`] on purpose: "we could not tell" must never be
-    /// reported as "the code changed", and neither may silently fall back to revision equality.
-    MissingClosureDigest,
-    /// A current Qwen q4/bf16 record omitted the physical MLX receipt required by SC-18353.
+    /// A Qwen q4/bf16 MLX record omitted the physical MLX receipt required by SC-18353. Before
+    /// sc-22738 this was asked only of closure-current records; it is now asked of every one,
+    /// because it is a statement about how the number was measured, not about when.
     PhysicalMlxProvenance,
     ArtifactRepository,
     ArtifactResolvedRevision,
@@ -811,7 +869,7 @@ pub enum StaleEvidenceReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvidenceVerdict<'a> {
     Verified(&'a EvidenceRecord),
-    Stale(StaleEvidenceReason),
+    Mismatch(EvidenceMismatchReason),
     OutOfEnvelope,
     Unknown,
 }
@@ -837,6 +895,8 @@ impl EvidenceBundle {
                     && record.target.tier == query.tier
                     && record.target.mode == query.mode
                     && record.target.overlay == query.overlay
+                    && record.target.transformer_variant == query.transformer_variant
+                    && record.target.decoder == query.decoder
                     && record.strategy.rung == query.rung
             })
             .peekable();
@@ -844,55 +904,48 @@ impl EvidenceBundle {
             return EvidenceVerdict::Unknown;
         }
         if query.calibration.abi != MEMORY_CALIBRATION_ABI {
-            return EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationAbi);
+            return EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationAbi);
         }
 
-        let mut saw_current_identity = false;
-        let mut stale = None;
+        let mut saw_matching_identity = false;
+        let mut mismatched = None;
         for record in candidates {
+            // sc-22738: `record.repositories.inference.closure_digest` is deliberately not read
+            // here. The closure digest is capture provenance the probe tooling keys re-captures on;
+            // comparing it against the binding (or the live ledger) would make a moved closure
+            // demote this record, which the runtime must never do.
             let mismatch = if record.load_shape != query.calibration.load_shape {
-                Some(StaleEvidenceReason::LoadShape)
+                Some(EvidenceMismatchReason::LoadShape)
             } else if record.calibration_fingerprint != query.calibration.fingerprint {
-                Some(StaleEvidenceReason::CalibrationFingerprint)
-            } else if record.repositories.inference.closure_digest.is_none() {
-                Some(StaleEvidenceReason::MissingClosureDigest)
+                Some(EvidenceMismatchReason::CalibrationFingerprint)
             } else if record.backend == Backend::Mlx
                 && record.target.model_id == "qwen_image"
                 && matches!(record.target.tier.as_str(), "q4" | "bf16")
-                && record.repositories.inference.closure_digest.as_deref()
-                    == Some(query.calibration.inference_closure_digest.as_str())
                 && record.source_provenance != Some(SourceProvenance::PhysicalMlxV1)
             {
-                Some(StaleEvidenceReason::PhysicalMlxProvenance)
-            } else if record.repositories.inference.closure_digest.as_deref()
-                != Some(query.calibration.inference_closure_digest.as_str())
-            {
-                // sc-17774: the provider's own compile closure, not the inference pin. The pin
-                // comparison this replaces demoted every calibrated provider on any inference
-                // commit — 2812 of 2812 non-merge commits over the 90 days to `fbb00d6b`.
-                Some(StaleEvidenceReason::InferenceClosure)
+                Some(EvidenceMismatchReason::PhysicalMlxProvenance)
             } else if record.artifact.repository != query.calibration.artifact_repository {
-                Some(StaleEvidenceReason::ArtifactRepository)
+                Some(EvidenceMismatchReason::ArtifactRepository)
             } else if record.artifact.resolved_revision
                 != query.calibration.artifact_resolved_revision
             {
-                Some(StaleEvidenceReason::ArtifactResolvedRevision)
+                Some(EvidenceMismatchReason::ArtifactResolvedRevision)
             } else if record.artifact.variant != query.calibration.artifact_variant {
-                Some(StaleEvidenceReason::ArtifactVariant)
+                Some(EvidenceMismatchReason::ArtifactVariant)
             } else if !matches!(
                 &record.loadability.resolved_path_fingerprint,
                 RequiredNullable::Value(value)
                     if value == &query.calibration.resolved_path_fingerprint
             ) {
-                Some(StaleEvidenceReason::ResolvedPathFingerprint)
+                Some(EvidenceMismatchReason::ResolvedPathFingerprint)
             } else {
                 None
             };
             if let Some(reason) = mismatch {
-                stale.get_or_insert(reason);
+                mismatched.get_or_insert(reason);
                 continue;
             }
-            saw_current_identity = true;
+            saw_matching_identity = true;
 
             let exact_geometry = record.target.geometry == query.geometry;
             let passed_exact_case = record.sweep.range_verified
@@ -904,10 +957,10 @@ impl EvidenceBundle {
             }
         }
 
-        if saw_current_identity {
+        if saw_matching_identity {
             EvidenceVerdict::OutOfEnvelope
-        } else if let Some(reason) = stale {
-            EvidenceVerdict::Stale(reason)
+        } else if let Some(reason) = mismatched {
+            EvidenceVerdict::Mismatch(reason)
         } else {
             EvidenceVerdict::Unknown
         }
@@ -1031,10 +1084,7 @@ impl EvidenceRecord {
             .min(hardware.wired_limit_bytes)
             .min(hardware.memory_bytes);
         let foreign_reserve_bytes = hardware.memory_bytes.saturating_sub(process_ceiling);
-        let non_reclaimable_wired = observed
-            .overall
-            .wired_bytes
-            .saturating_sub(observed.overall.reclaimable_bytes);
+        let non_reclaimable_wired = observed.overall.non_reclaimable_bytes();
         Some(MlxAdmissionEnvelope {
             peak_bytes: predicted.overall.max(non_reclaimable_wired),
             observed_non_reclaimable_wired_bytes: non_reclaimable_wired,
@@ -1168,7 +1218,7 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
         .map(|(parent, _)| parent);
     if session.kind == SourceSessionKind::PhysicalMlx && session.outputs.len() != 3 {
         return Err(format!(
-            "{} physical MLX session requires exactly request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session requires exactly request plus selected/reference RGB or A/V outputs",
             session.id
         ));
     }
@@ -1232,6 +1282,9 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
                 SourceOutputRole::SelectedRgb | SourceOutputRole::ReferenceRgb => {
                     physical_mlx_rgb_metadata(output)?;
                 }
+                SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv => {
+                    physical_mlx_av_metadata(output)?;
+                }
             }
         }
         if !is_sha256(&output.sha256) {
@@ -1241,16 +1294,22 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             ));
         }
     }
+    let rgb_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedRgb,
+        SourceOutputRole::ReferenceRgb,
+    ]);
+    let av_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedAv,
+        SourceOutputRole::ReferenceAv,
+    ]);
     if session.kind == SourceSessionKind::PhysicalMlx
-        && physical_output_roles
-            != BTreeSet::from([
-                SourceOutputRole::Request,
-                SourceOutputRole::SelectedRgb,
-                SourceOutputRole::ReferenceRgb,
-            ])
+        && physical_output_roles != rgb_roles
+        && physical_output_roles != av_roles
     {
         return Err(format!(
-            "{} physical MLX session must contain request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session must contain request plus an exact selected/reference RGB or A/V pair",
             session.id
         ));
     }
@@ -1280,12 +1339,13 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     let stem = file_name
         .strip_suffix(".rgb")
         .ok_or_else(|| format!("physical MLX {role} receipt must end in .rgb"))?;
-    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
-        return Err(format!(
-            "physical MLX {role} receipt must begin with its logical case id"
-        ));
-    }
-    let logical_case_id = stem[..27].to_owned();
+    // `get(..27)` rather than `&stem[..27]`: the path is untrusted bundle text, and a multibyte
+    // byte 27 would panic the slice instead of failing the receipt closed.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
     let remainder = stem[27..]
         .strip_prefix(&format!("-{role}-"))
         .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
@@ -1318,10 +1378,93 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     Ok((logical_case_id, width, height))
 }
 
+fn physical_mlx_av_metadata(output: &SourceOutput) -> Result<(String, u32, u32, u32), String> {
+    let role = match output.role {
+        Some(SourceOutputRole::SelectedAv) => "selected_av",
+        Some(SourceOutputRole::ReferenceAv) => "reference_av",
+        _ => return Err("physical MLX A/V receipt has a non-A/V role".to_owned()),
+    };
+    let file_name = output.path.rsplit('/').next().unwrap_or_default();
+    let stem = file_name
+        .strip_suffix(".avbin")
+        .ok_or_else(|| format!("physical MLX {role} receipt must end in .avbin"))?;
+    // `get(..27)` rather than `&stem[..27]`: see the RGB sibling — an untrusted multibyte path
+    // must fail the receipt, not panic the reader.
+    let logical_case_id = stem
+        .get(..27)
+        .filter(|prefix| has_prefixed_hex(prefix, "implan-", 20))
+        .ok_or_else(|| format!("physical MLX {role} receipt must begin with its logical case id"))?
+        .to_owned();
+    let remainder = stem[27..]
+        .strip_prefix(&format!("-{role}-"))
+        .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
+    let (dimensions, framed_digest) = remainder
+        .split_once('-')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing geometry"))?;
+    let (width, height) = dimensions
+        .split_once('x')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing dimensions"))?;
+    let (frames, content_sha256) = framed_digest
+        .strip_prefix('f')
+        .and_then(|value| value.split_once('-'))
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing frames or digest"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt width is invalid"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt height is invalid"))?;
+    let frames = frames
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt frame count is invalid"))?;
+    // An A/V payload's size is not geometry-derivable (the audio track's length is not implied by
+    // width/height/frames), so unlike the RGB sibling there is no exactness check — but the
+    // receipt still has to CARRY a size. `bytes == Some(0)` alone let a `null` through, which is
+    // an incomplete receipt claiming to attest a rendered clip.
+    if width == 0 || height == 0 || frames == 0 || output.bytes.is_none_or(|bytes| bytes == 0) {
+        return Err(format!(
+            "physical MLX {role} receipt dimensions are invalid"
+        ));
+    }
+    if !is_sha256(content_sha256) || content_sha256 != output.sha256 {
+        return Err(format!(
+            "physical MLX {role} receipt digest does not match its content-addressed path"
+        ));
+    }
+    Ok((logical_case_id, width, height, frames))
+}
+
 fn validate_physical_mlx_outputs_against_record(
     record: &EvidenceRecord,
     session: &SourceSession,
 ) -> Result<(), String> {
+    // A typed audio comparison is selected-versus-REFERENCE PCM, so it is coupled to the
+    // `reference_av` receipt, not to the A/V kind as such: a single-render video session
+    // (sc-22738) carries a `selected_av` receipt and no audio comparison, and a session may not
+    // carry a reference without a selected render to compare it against.
+    let has_selected_av = session
+        .outputs
+        .iter()
+        .any(|output| output.role == Some(SourceOutputRole::SelectedAv));
+    let has_reference_av = session
+        .outputs
+        .iter()
+        .any(|output| output.role == Some(SourceOutputRole::ReferenceAv));
+    if has_reference_av && !has_selected_av {
+        return Err(format!(
+            "{} physical MLX reference_av receipt has no selected_av render to compare against",
+            record.id
+        ));
+    }
+    if has_reference_av != record.quality.audio.is_some() {
+        return Err(format!(
+            "{} physical MLX reference A/V receipt and typed audio quality must be present together",
+            record.id
+        ));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
+    }
     for output in &session.outputs {
         if matches!(
             output.role,
@@ -1338,6 +1481,49 @@ fn validate_physical_mlx_outputs_against_record(
                 ));
             }
         }
+        if matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
+        ) {
+            let (logical_case_id, width, height, frames) = physical_mlx_av_metadata(output)?;
+            if logical_case_id != record.logical_case_id
+                || width != record.target.geometry.width
+                || height != record.target.geometry.height
+                || frames != record.target.geometry.frames
+            {
+                return Err(format!(
+                    "{} physical MLX A/V receipt does not match its logical case geometry",
+                    record.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_audio_quality(audio: &AudioQuality, id: &str) -> Result<(), String> {
+    let finite_nonnegative = [
+        audio.maximum_absolute_error,
+        audio.mean_absolute_error,
+        audio.root_mean_square_error,
+        audio.maximum_absolute_error_threshold,
+        audio.mean_absolute_error_threshold,
+        audio.root_mean_square_error_threshold,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value >= 0.0);
+    if audio.result != QualityResult::Passed
+        || audio.sample_rate_hz == 0
+        || audio.channels == 0
+        || audio.sample_count == 0
+        || !is_sha256(&audio.selected_pcm_sha256)
+        || !is_sha256(&audio.reference_pcm_sha256)
+        || !finite_nonnegative
+        || audio.maximum_absolute_error > audio.maximum_absolute_error_threshold
+        || audio.mean_absolute_error > audio.mean_absolute_error_threshold
+        || audio.root_mean_square_error > audio.root_mean_square_error_threshold
+    {
+        return Err(format!("{id} audio quality evidence is invalid"));
     }
     Ok(())
 }
@@ -1371,6 +1557,7 @@ fn validate_derivation(
     let requires_qwen_mlx_provenance = is_authoritative_qwen_mlx
         && record.source_provenance == Some(SourceProvenance::PhysicalMlxV1);
     let requires_provenance = requires_z_image_provenance || requires_qwen_mlx_provenance;
+    let requires_audio_derivation = record.quality.audio.is_some();
     if requires_qwen_mlx_provenance && record.artifact.inventory_sha256.is_none() {
         return Err(format!(
             "{} authoritative Qwen MLX evidence requires an exact artifact inventory",
@@ -1380,6 +1567,11 @@ fn validate_derivation(
     let Some(derivation) = &record.derivation else {
         return if requires_provenance {
             Err(format!("{} requires source-session derivation", record.id))
+        } else if requires_audio_derivation {
+            Err(format!(
+                "{} typed audio quality requires physical source-session derivation",
+                record.id
+            ))
         } else {
             Ok(())
         };
@@ -1427,6 +1619,36 @@ fn validate_derivation(
                     inventory_inputs,
                     requires_qwen_mlx_provenance,
                 )?;
+            }
+            // `ltx_2_5` EXACTLY, not the `ltx_` family: the axes this demands
+            // (`transformerVariant`, `decoder`) are only *required* by `validate_record` for
+            // `ltx_2_5`, so a family-wide gate here would make a future `ltx_2_3` record with a
+            // physical derivation permanently unloadable — it could never satisfy axes the record
+            // schema does not ask it to carry.
+            if record.target.model_id == "ltx_2_5" {
+                let target = session.target.as_ref().ok_or_else(|| {
+                    format!(
+                        "{} LTX derivation source {id} has no target identity",
+                        record.id
+                    )
+                })?;
+                let exact_identity = target.tier == record.target.tier
+                    && target.mode == record.target.mode
+                    && target.overlay == record.target.overlay
+                    && target.rung == record.strategy.rung
+                    && target.transformer_variant == record.target.transformer_variant
+                    && target.decoder == record.target.decoder;
+                if !exact_identity
+                    || target.transformer_variant.is_none()
+                    || target.decoder.is_none()
+                    || record.target.transformer_variant.is_none()
+                    || record.target.decoder.is_none()
+                {
+                    return Err(format!(
+                        "{} source {id} does not exactly match the complete LTX pipeline identity",
+                        record.id
+                    ));
+                }
             }
             if let Some(target) = &session.target {
                 if matches!(
@@ -1490,6 +1712,38 @@ fn validate_derivation(
             .get(session_id)
             .expect("physical MLX derivation session was resolved above");
         validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.quality.audio.is_some() {
+        if derivation.quality.source_session_ids.len() != 1 {
+            return Err(format!(
+                "{} typed audio quality must bind exactly one physical A/V source session",
+                record.id
+            ));
+        }
+        let session_id = &derivation.quality.source_session_ids[0];
+        let session = sessions.get(session_id.as_str()).ok_or_else(|| {
+            format!(
+                "{} references missing source session {session_id}",
+                record.id
+            )
+        })?;
+        if session.kind != SourceSessionKind::PhysicalMlx {
+            return Err(format!(
+                "{} typed audio quality source must be physical_mlx",
+                record.id
+            ));
+        }
+        validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.target.model_id.starts_with("ltx_") {
+        for session_id in derivation_session_ids {
+            let session = sessions
+                .get(session_id)
+                .expect("all derivation sessions were resolved above");
+            if session.kind == SourceSessionKind::PhysicalMlx {
+                validate_physical_mlx_outputs_against_record(record, session)?;
+            }
+        }
     }
     if !matches!(
         derivation.memory.kind,
@@ -1567,7 +1821,7 @@ fn validate_source_inputs_against_record(
         let exact_overlay_source = session
             .target
             .as_ref()
-            .map_or(true, |target| target.overlay == record.target.overlay)
+            .is_none_or(|target| target.overlay == record.target.overlay)
             && matches!(
                 claim,
                 SourceClaim::Quality | SourceClaim::Loadability | SourceClaim::Overlay
@@ -1607,9 +1861,6 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
             record.id
         ));
     }
-    if record.harness_version != MEMORY_CALIBRATION_HARNESS_VERSION {
-        return Err(format!("{} has a stale harnessVersion", record.id));
-    }
     validate_git_state(&record.repositories.scene_works, true, &record.id)?;
     validate_git_state(&record.repositories.inference, false, &record.id)?;
     validate_hardware(&record.hardware, &record.id)?;
@@ -1643,6 +1894,14 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
     if !is_rfc3339_datetime(&record.captured_at) {
         return Err(format!("{} capturedAt is not RFC 3339", record.id));
     }
+    if record.target.model_id == "ltx_2_5"
+        && (record.target.transformer_variant.is_none() || record.target.decoder.is_none())
+    {
+        return Err(format!(
+            "{} LTX-2.5 target must identify transformerVariant and decoder",
+            record.id
+        ));
+    }
     if record
         .quality
         .contract
@@ -1661,6 +1920,9 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
         .any(|value| value < 0.0)
     {
         return Err(format!("{} quality fields violate the schema", record.id));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
     }
     if record
         .artifact
@@ -1757,7 +2019,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     let sole_case = record.sweep.cases.first();
     if !record.sweep.range_verified
         || record.sweep.cases.len() != 1
-        || sole_case.map_or(true, |case| {
+        || sole_case.is_none_or(|case| {
             case.result != SweepResult::Passed || case.parameters != record.strategy.parameters
         })
     {
@@ -1788,11 +2050,22 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     if let Some(observed) = observed.full() {
         validate_phase_metrics(observed, &record.id)?;
     }
-    if observed.overall_device_or_active_bytes() > record.hardware.memory_bytes() {
+    if observed.overall_non_reclaimable_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
-            "{} observed device memory exceeds hardware",
+            "{} observed resident memory exceeds hardware",
             record.id
         ));
+    }
+    // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
+    // runtime-complete `mlx:flux2_dev` records shipped asserting up to 26.0 GB more wired residency
+    // than the probed limit. Both statuses now carry the check, against the non-reclaimable figure.
+    if let (Hardware::Mlx(hardware), Some(observed)) = (&record.hardware, observed.full()) {
+        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+            return Err(format!(
+                "{} observed wired memory exceeds hardware",
+                record.id
+            ));
+        }
     }
     let scenarios: BTreeMap<_, _> = record
         .scenarios
@@ -1834,7 +2107,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
             .get(&name)
             .ok_or_else(|| format!("{} is missing scenario {name:?}", record.id))?;
         if scenario.result != ScenarioResult::NotRun
-            || scenario.reason.as_deref().map_or(true, str::is_empty)
+            || scenario.reason.as_deref().is_none_or(str::is_empty)
         {
             return Err(format!(
                 "{} scenario {name:?} must remain explicitly not_run",
@@ -1851,7 +2124,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     }
     let overlay = scenarios[&ScenarioName::Overlay];
     if overlay.result != ScenarioResult::NotApplicable
-        || overlay.reason.as_deref().map_or(true, str::is_empty)
+        || overlay.reason.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} runtime-complete evidence must be base-only",
@@ -1865,6 +2138,30 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
         ));
     }
     let quality = &record.quality;
+    // sc-22738: a receipt declaring `warmPasses: 0` ran no comparison render, so its quality is
+    // `not_run` by construction and carries no figure to check — the thresholds it WOULD have been
+    // judged by still travel. Degrades to "not measured"; never a refusal, never a synthetic 0.
+    if quality.warm_passes == Some(0) {
+        if quality.result != Some(QualityResult::NotRun) {
+            return Err(format!(
+                "{} declares quality.warmPasses 0, so its quality must be not_run",
+                record.id
+            ));
+        }
+        if quality.maximum_error.is_some()
+            || quality.mean_error.is_some()
+            || quality.root_mean_square_error.is_some()
+            || quality.audio.is_some()
+        {
+            return Err(format!(
+                "{} declares quality.warmPasses 0 but carries a comparison figure it cannot have \
+                 measured",
+                record.id
+            ));
+        }
+        require_quality_thresholds(quality, &record.id)?;
+        return require_runtime_complete_loadability(record);
+    }
     if quality.identical_inputs != Some(true) || quality.result != Some(QualityResult::Passed) {
         return Err(format!(
             "{} runtime-complete quality evidence did not pass",
@@ -1888,6 +2185,10 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     if rmse > rmse_threshold {
         return Err(format!("{} RMSE threshold was exceeded", record.id));
     }
+    require_runtime_complete_loadability(record)
+}
+
+fn require_runtime_complete_loadability(record: &EvidenceRecord) -> Result<(), String> {
     if record.loadability.result != LoadabilityResult::Passed
         || !matches!(
             &record.loadability.resolved_path_fingerprint,
@@ -2067,14 +2368,14 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         )
     })?;
     validate_phase_metrics(observed, &record.id)?;
-    if observed.overall.device_bytes > record.hardware.memory_bytes() {
+    if observed.overall.non_reclaimable_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
-            "{} observed device memory exceeds hardware",
+            "{} observed resident memory exceeds hardware",
             record.id
         ));
     }
     if let Hardware::Mlx(hardware) = &record.hardware {
-        if observed.overall.wired_bytes > hardware.wired_limit_bytes {
+        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
             return Err(format!(
                 "{} observed wired memory exceeds hardware",
                 record.id
@@ -2139,7 +2440,7 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         && scenarios[&ScenarioName::Overlay]
             .reason
             .as_deref()
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} overlay not_applicable requires a reason",
@@ -2262,12 +2563,11 @@ fn require_complete_quality_fields(
 
 fn validate_phase_metrics(metrics: &PhaseMetrics, id: &str) -> Result<(), String> {
     let phases = [&metrics.conditioning, &metrics.denoise, &metrics.decode];
-    for phase in phases {
-        if phase.allocator_bytes < phase.active_bytes
-            || phase.device_bytes < phase.active_bytes
-            || phase.wired_bytes < phase.active_bytes
-            || phase.reclaimable_bytes > phase.allocator_bytes
-        {
+    // `allocatorBytes` is DERIVED, so this is an identity, not an ordering. Before sc-18864 the
+    // rule was `allocator >= active`, which let three names carry one number and let the derived
+    // bound drift from its own definition.
+    for phase in phases.into_iter().chain([&metrics.overall]) {
+        if phase.allocator_bytes != phase.active_bytes.saturating_add(phase.reclaimable_bytes) {
             return Err(format!("{id} phase metrics are internally inconsistent"));
         }
     }
@@ -2285,22 +2585,6 @@ fn validate_phase_metrics(metrics: &PhaseMetrics, id: &str) -> Result<(), String
             phases
                 .iter()
                 .map(|phase| phase.allocator_bytes)
-                .max()
-                .unwrap_or(0),
-        ),
-        (
-            metrics.overall.device_bytes,
-            phases
-                .iter()
-                .map(|phase| phase.device_bytes)
-                .max()
-                .unwrap_or(0),
-        ),
-        (
-            metrics.overall.wired_bytes,
-            phases
-                .iter()
-                .map(|phase| phase.wired_bytes)
                 .max()
                 .unwrap_or(0),
         ),
@@ -2449,20 +2733,20 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use super::{
-        load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
-        CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
-        SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
-        MEMORY_CALIBRATION_ABI, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        load_bundle, load_packaged_bundle, validate_physical_mlx_outputs_against_record, Backend,
+        BundleLoadError, CalibrationBinding, EvidenceBundle, EvidenceMismatchReason, EvidenceQuery,
+        EvidenceRecord, EvidenceVerdict, Geometry, LoadShapeKey, Ltx25Decoder,
+        Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes,
+        RecordStatus, RequiredNullable, SourceSession, SourceSessionKind, StrategyRung,
+        MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
+        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
         json!({
             "activeBytes": value,
             "allocatorBytes": value + 10,
-            "deviceBytes": value + 20,
-            "wiredBytes": value + 30,
-            "reclaimableBytes": 0
+            "reclaimableBytes": 10
         })
     }
 
@@ -2594,7 +2878,7 @@ mod tests {
 
     fn bundle(record: Value) -> String {
         json!({
-            "schemaVersion": 4,
+            "schemaVersion": MEMORY_CALIBRATION_SCHEMA_VERSION,
             "harnessVersion": "sceneworks-memory-v5",
             "records": [record]
         })
@@ -2602,10 +2886,7 @@ mod tests {
     }
 
     fn loaded_bundle() -> EvidenceBundle {
-        match load_bundle(&bundle(complete_record())).expect("valid fixture") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        }
+        load_bundle(&bundle(complete_record())).expect("valid fixture")
     }
 
     #[test]
@@ -2688,21 +2969,158 @@ mod tests {
             "result": "passed"
         });
         let document = json!({
-            "schemaVersion": 4,
+            "schemaVersion": MEMORY_CALIBRATION_SCHEMA_VERSION,
             "harnessVersion": "sceneworks-memory-v5",
             "sourceSessions": [source_session],
             "records": [record]
         });
-        let loaded = match load_bundle(&document.to_string()).expect("physical MLX bundle parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => {
-                panic!("unexpected stale physical MLX fixture: {reason:?}")
-            }
-        };
+        let loaded = load_bundle(&document.to_string()).expect("physical MLX bundle parses");
         assert_eq!(
             loaded.source_sessions[0].kind,
             SourceSessionKind::PhysicalMlx
         );
+
+        let mut av_document = document.clone();
+        av_document["records"][0]["quality"]["audio"] = json!({
+            "result": "passed",
+            "sampleRateHz": 24000,
+            "channels": 2,
+            "sampleCount": 48000,
+            "selectedPcmSha256": "a".repeat(64),
+            "referencePcmSha256": "b".repeat(64),
+            "maximumAbsoluteError": 0.001,
+            "meanAbsoluteError": 0.0001,
+            "rootMeanSquareError": 0.0002,
+            "maximumAbsoluteErrorThreshold": 0.01,
+            "meanAbsoluteErrorThreshold": 0.01,
+            "rootMeanSquareErrorThreshold": 0.01
+        });
+        for (index, role) in ["selected_av", "reference_av"].into_iter().enumerate() {
+            let output = &mut av_document["sourceSessions"][0]["outputs"][index + 1];
+            output["role"] = json!(role);
+            output["path"] = json!(format!(
+                "docs/calibration/sc-test/{logical_case_id}-{role}-1024x1024-f1-{}.avbin",
+                output["sha256"].as_str().expect("output digest")
+            ));
+            output["bytes"] = json!(16);
+        }
+        assert!(load_bundle(&av_document.to_string()).is_ok());
+        let mut crossed_av = av_document.clone();
+        crossed_av["sourceSessions"][0]["outputs"][2]["role"] = json!("reference_rgb");
+        assert!(matches!(
+            load_bundle(&crossed_av.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+        let mut failed_audio = av_document.clone();
+        failed_audio["records"][0]["quality"]["audio"]["maximumAbsoluteError"] = json!(0.02);
+        assert!(matches!(
+            load_bundle(&failed_audio.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut failed_audio_result = av_document.clone();
+        failed_audio_result["records"][0]["quality"]["audio"]["result"] = json!("failed");
+        assert!(matches!(
+            load_bundle(&failed_audio_result.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut missing_audio_derivation = av_document.clone();
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("derivation");
+        assert!(matches!(
+            load_bundle(&missing_audio_derivation.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality requires physical source-session derivation")
+        ));
+        let mut non_physical_audio_source = av_document.clone();
+        non_physical_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        non_physical_audio_source["sourceSessions"][0]["kind"] = json!("unit_test");
+        assert!(matches!(
+            load_bundle(&non_physical_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
+        ));
+        let mut mismatched_audio_source = av_document.clone();
+        mismatched_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        let mismatched_session_id = format!("ims-{}", "f".repeat(20));
+        let mut mismatched_session = mismatched_audio_source["sourceSessions"][0].clone();
+        mismatched_session["id"] = json!(mismatched_session_id.clone());
+        mismatched_session["kind"] = json!("unit_test");
+        mismatched_session["sourcePath"] =
+            json!("docs/calibration/sc-test/mismatched-audio-source.log");
+        mismatched_audio_source["sourceSessions"]
+            .as_array_mut()
+            .expect("source sessions")
+            .push(mismatched_session);
+        mismatched_audio_source["records"][0]["derivation"]["quality"]["sourceSessionIds"] =
+            json!([mismatched_session_id]);
+        assert!(matches!(
+            load_bundle(&mismatched_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
+        ));
+
+        let mut ltx_document = document.clone();
+        let ltx_record = &mut ltx_document["records"][0];
+        ltx_record
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        ltx_record["target"]["modelId"] = json!("ltx_2_5");
+        ltx_record["target"]["provider"] = json!("ltx_2_5");
+        ltx_record["target"]["transformerVariant"] = json!("distilled");
+        ltx_record["target"]["decoder"] = json!("conv");
+        ltx_document["sourceSessions"][0]["target"] = json!({
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "transformerVariant": "distilled",
+            "decoder": "conv",
+            "rung": "bounded_decode"
+        });
+        assert!(load_bundle(&ltx_document.to_string()).is_ok());
+        for (field, value) in [
+            ("tier", "q8"),
+            ("mode", "image_to_video"),
+            ("overlay", "crossed"),
+            ("rung", "resident"),
+            ("transformerVariant", "dev"),
+            ("decoder", "diffvae"),
+        ] {
+            let mut crossed = ltx_document.clone();
+            crossed["sourceSessions"][0]["target"][field] = json!(value);
+            if field == "tier" {
+                crossed["sourceSessions"][0]["inputs"][0]["variant"] = json!(value);
+            }
+            assert!(
+                matches!(
+                    load_bundle(&crossed.to_string()),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("complete LTX pipeline identity")
+                ),
+                "LTX source target field {field} must match exactly"
+            );
+        }
+        let mut missing_ltx_target = ltx_document.clone();
+        missing_ltx_target["sourceSessions"][0]
+            .as_object_mut()
+            .expect("source session")
+            .remove("target");
+        assert!(matches!(
+            load_bundle(&missing_ltx_target.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("has no target identity")
+        ));
 
         let mut missing_receipts = document.clone();
         missing_receipts["sourceSessions"][0]["outputs"] = json!([]);
@@ -2765,6 +3183,13 @@ mod tests {
     fn mlx_record(total: u64, memory_limit: u64, wired_limit: u64) -> Value {
         let mut record = complete_record();
         record["backend"] = json!("mlx");
+        // sc-18864: the observed RESIDENT peak must differ from `predictedPeakBytes.overall` (200)
+        // or the envelope's "observed telemetry is not overwritten by the predicted maximum"
+        // assertion is vacuous. Before this story the two differed only because `wiredBytes` was
+        // `active + 30` — an offset invented by the fixture to stand in for a counter MLX never had.
+        record["observedMemory"]["overall"] = json!({
+            "activeBytes": 230, "allocatorBytes": 240, "reclaimableBytes": 10,
+        });
         record["hardware"] = json!({
             "probe": "mlx-rs",
             "memoryBytes": total,
@@ -2781,12 +3206,8 @@ mod tests {
     #[test]
     fn mlx_admission_envelope_derives_foreign_demand_and_keeps_observed_distinct() {
         let gib = 1024_u64.pow(3);
-        let small = match load_bundle(&bundle(mlx_record(8 * gib, 6 * gib, 7 * gib)))
-            .expect("valid small-host evidence")
-        {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        };
+        let small = load_bundle(&bundle(mlx_record(8 * gib, 6 * gib, 7 * gib)))
+            .expect("valid small-host evidence");
         let small = small.records[0]
             .mlx_admission_envelope()
             .expect("MLX complete record");
@@ -2802,12 +3223,8 @@ mod tests {
             "one byte below the exact host requirement must fail"
         );
 
-        let mid = match load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
-            .expect("valid mid-host evidence")
-        {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        };
+        let mid = load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
+            .expect("valid mid-host evidence");
         let mid = mid.records[0]
             .mlx_admission_envelope()
             .expect("MLX complete record");
@@ -2881,6 +3298,8 @@ mod tests {
             tier: "q4".to_owned(),
             mode: "text_to_image".to_owned(),
             overlay: "none".to_owned(),
+            transformer_variant: None,
+            decoder: None,
             geometry: Geometry {
                 width: 1024,
                 height: 1024,
@@ -2911,9 +3330,9 @@ mod tests {
     #[test]
     fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
         // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
-        // Existing MLX measurements remain available as history under their truthful load shapes;
-        // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
-        // one deferred current-pin Z-Image records without rewriting that historical provenance.
+        // Existing MLX measurements remain available under their truthful load shapes and source
+        // provenance. SC-15510 adds four eager and one deferred Z-Image records without rewriting
+        // the earlier capture provenance.
         // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
         // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
         // runtime records and seven physical sessions without replacing any prior source receipt.
@@ -2921,14 +3340,13 @@ mod tests {
         // 768/1024 geometries.
         // SC-18353 adds thirteen physical MLX source sessions for the exact deferred Qwen bf16/q4
         // captures, without replacing the historical Qwen evidence they supersede for admission.
+        // SC-19753 adds five Z-Image q4 records, one for each ladder rung, while
+        // retaining the five historical Z-Image captures as provenance.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
         // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
         // re-dated onto a pin it never ran against (sc-16482).
-        let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
-        };
+        let bundle = load_packaged_bundle().expect("compiled bundle must parse");
         let preserved_session_ids = BTreeSet::from([
             "ims-4b4ab770efa632199d23",
             "ims-4fbfb599c1fc3e3e9dfb",
@@ -3063,21 +3481,141 @@ mod tests {
                 ("bf16", StrategyRung::BoundedTransformerResidency),
             ),
         ]);
-        let actual_session_ids = bundle
-            .source_sessions
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<BTreeSet<_>>();
-        let expected_session_ids = preserved_session_ids
+        // Beyond the frozen history above sits the newer verification cohort (first populated by
+        // sc-19721 at inference 75d66db5 after relevant provider-closure changes). That set is
+        // deliberately NOT pinned by id/tier/rung: its ids change at every legitimate re-capture,
+        // so an exact map here is a frozen-corpus gate on the one corpus that is SUPPOSED to move
+        // (it was hand-bumped five times on this epic alone). The frozen sets stay pinned — they
+        // are history and may never change — while the re-capture set is held to its SHAPE below:
+        // physical sessions, receipts named by id under one story directory of their own, a
+        // well-formed target on the shipped tier ladder, and the capture host's identity.
+        let frozen_session_ids = preserved_session_ids
             .iter()
             .copied()
             .chain(flux2_sessions.keys().copied())
             .chain(qwen_sessions.keys().copied())
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual_session_ids, expected_session_ids);
+        let actual_session_ids = bundle
+            .source_sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<BTreeSet<_>>();
+        // A re-capture ADDS evidence; the frozen history is retained verbatim, never rewritten.
+        for id in &frozen_session_ids {
+            assert!(
+                actual_session_ids.contains(id),
+                "frozen session {id} is missing"
+            );
+        }
         assert_eq!(
             bundle.source_sessions.len(),
-            preserved_session_ids.len() + flux2_sessions.len() + qwen_sessions.len()
+            actual_session_ids.len(),
+            "duplicate source-session ids"
+        );
+        let recapture_sessions = bundle
+            .source_sessions
+            .iter()
+            .filter(|session| !frozen_session_ids.contains(session.id.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !recapture_sessions.is_empty(),
+            "the bundle must carry a newer verification cohort beyond the frozen history"
+        );
+        // One campaign lands under ONE story directory of its own, and each receipt is the
+        // session's own log. The story id is PARSED, not pinned: the next campaign (a new story)
+        // passes unchanged, while a receipt filed under the frozen sc-18353 directory, named after
+        // a different session, or shaped like anything but a physical capture still fails.
+        let mut recapture_stories = BTreeSet::new();
+        let mut recapture_tiers = BTreeSet::new();
+        let mut recapture_rungs = BTreeSet::new();
+        for session in &recapture_sessions {
+            let id = session.id.as_str();
+            let suffix = id
+                .strip_prefix("ims-")
+                .unwrap_or_else(|| panic!("{id}: session id is not ims-prefixed"));
+            assert!(
+                suffix.len() == 20 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{id}: session id is not a 20-hex-digit ims id"
+            );
+            assert!(
+                matches!(
+                    session.kind,
+                    SourceSessionKind::PhysicalCuda | SourceSessionKind::PhysicalMlx
+                ),
+                "{id}: a re-capture session must be a physical capture, got {:?}",
+                session.kind
+            );
+            let (story, file) = session
+                .source_path
+                .strip_prefix("docs/calibration/")
+                .and_then(|rest| rest.split_once('/'))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id}: receipt outside docs/calibration/<story>/: {}",
+                        session.source_path
+                    )
+                });
+            assert!(
+                story
+                    .strip_prefix("sc-")
+                    .is_some_and(|digits| !digits.is_empty()
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())),
+                "{id}: receipt directory {story} is not a story directory"
+            );
+            assert_ne!(
+                story, "sc-18353",
+                "{id}: a re-capture receipt may not be filed under the frozen sc-18353 set"
+            );
+            assert_eq!(
+                file,
+                format!("{id}.log"),
+                "{id}: receipt is not the session's own log"
+            );
+            recapture_stories.insert(story);
+            let target = session
+                .target
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id}: re-capture session has no target receipt"));
+            assert!(
+                ["bf16", "q8", "q4"].contains(&target.tier.as_str()),
+                "{id}: tier {} is off the shipped ladder",
+                target.tier
+            );
+            assert_eq!(target.mode, "text_to_image", "{id}");
+            assert_eq!(target.overlay, "none", "{id}");
+            recapture_tiers.insert(target.tier.as_str());
+            recapture_rungs.insert(target.rung);
+            if session.kind == SourceSessionKind::PhysicalMlx {
+                let chip = session
+                    .hardware
+                    .extensions
+                    .get("chip")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                assert!(
+                    !chip.is_empty(),
+                    "{id}: MLX capture without a chip identity"
+                );
+            }
+            assert!(
+                session.hardware.memory_bytes > 0,
+                "{id}: capture host reports no memory"
+            );
+        }
+        assert_eq!(
+            recapture_stories.len(),
+            1,
+            "one re-capture campaign = one story directory, got {recapture_stories:?}"
+        );
+        // Coverage SHAPE, not population: a verification cohort must span the tier ladder (bf16
+        // plus at least one quantized tier) and more than one rung.
+        assert!(
+            recapture_tiers.contains("bf16") && recapture_tiers.len() >= 2,
+            "re-capture must cover bf16 plus a quantized tier, got {recapture_tiers:?}"
+        );
+        assert!(
+            recapture_rungs.len() >= 2,
+            "re-capture must cover more than one strategy rung, got {recapture_rungs:?}"
         );
         for session in &bundle.source_sessions {
             let Some((path, rung, mode, overlay)) = flux2_sessions.get(session.id.as_str()) else {
@@ -3092,6 +3630,8 @@ mod tests {
             assert_eq!(target.overlay, *overlay);
         }
         for session in &bundle.source_sessions {
+            // The frozen sc-18353 set, pinned exactly — it is history and may never change. The
+            // current re-capture set is shape-asserted above instead.
             let Some((tier, rung)) = qwen_sessions.get(session.id.as_str()) else {
                 continue;
             };
@@ -3130,7 +3670,11 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 65);
+        // Statuses are asserted as a PARTITION rather than as pinned totals: the totals grow at
+        // every re-capture (a re-capture retains superseded history and adds new records), so an
+        // exact count is the same frozen-corpus gate as a pinned id set. What must hold at any
+        // corpus size is that both populations exist and that together they are the whole bundle.
+        assert!(complete_count > 0, "the bundle must carry complete records");
         let runtime_keys = bundle
             .records
             .iter()
@@ -3151,27 +3695,47 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::RuntimeComplete)
             .count();
-        assert_eq!(runtime_complete_count, 19);
+        assert!(
+            runtime_complete_count > 0,
+            "the bundle must carry runtime-complete records"
+        );
+        // sc-21715: the partition runs over ALL FOUR `RecordStatus` variants, not over the two
+        // certifying ones. This used to read `records.len() == complete + runtime_complete` — the
+        // same identity `summary.calibrationRunsByStatus` published as a two-key tally, and true
+        // only while the corpus had never carried a `gated` or `negative_complete` receipt.
+        // Admitting one (the sc-11045 five-rung capture is exactly such a receipt) would have
+        // reddened this line with nothing actually wrong. Both certifying populations must still
+        // be non-empty — asserted above; what the partition asserts is that no record falls
+        // outside the four, so a fifth variant cannot be added without landing here.
+        let gated_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::Gated)
+            .count();
+        let negative_complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::NegativeComplete)
+            .count();
         assert_eq!(
             bundle.records.len(),
-            complete_count + runtime_complete_count
+            complete_count + runtime_complete_count + gated_count + negative_complete_count,
+            "every record must carry one of the four RecordStatus variants"
         );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
-                .count(),
-            54
-        );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
-                .count(),
-            30
-        );
+        // Same partition posture for the load shapes: both exist, and together they are the whole
+        // bundle — a record with any third shape (or none) breaks the identity.
+        let eager_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
+            .count();
+        let deferred_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
+            .count();
+        assert!(eager_count > 0 && deferred_count > 0);
+        assert_eq!(bundle.records.len(), eager_count + deferred_count);
     }
 
     #[test]
@@ -3180,10 +3744,7 @@ mod tests {
             .expect("packaged evidence JSON");
         extended["sourceSessions"][0]["hardware"]["futureProbeMetadata"] =
             json!({ "tool": "next-generation-probe", "version": 2 });
-        let bundle = match load_bundle(&extended.to_string()).expect("hardware extension parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("extended bundle must be current: {reason:?}"),
-        };
+        let bundle = load_bundle(&extended.to_string()).expect("hardware extension parses");
         assert_eq!(
             bundle.source_sessions[0].hardware.extensions["futureProbeMetadata"],
             json!({ "tool": "next-generation-probe", "version": 2 })
@@ -3248,16 +3809,13 @@ mod tests {
         let predicted = record["predictedPeakBytes"]["overall"]
             .as_u64()
             .expect("predicted overall");
-        let observed = record["observedMemory"]["overall"]["deviceBytes"]
+        let observed = record["observedMemory"]["overall"]["activeBytes"]
             .as_u64()
-            .expect("observed device overall");
+            .expect("observed active overall");
         record["predictedPeakBytes"] = json!({ "overall": predicted });
         record["observedMemory"] = json!({ "overall": { "activeBytes": observed } });
 
-        let bundle = match load_bundle(&sparse.to_string()).expect("sparse telemetry parses") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("sparse bundle must be current: {reason:?}"),
-        };
+        let bundle = load_bundle(&sparse.to_string()).expect("sparse telemetry parses");
         let record = bundle
             .records
             .iter()
@@ -3289,21 +3847,215 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn schema_and_harness_drift_are_stale_but_bad_json_is_an_error() {
-        assert_eq!(
-            load_bundle(
-                r#"{"schemaVersion":2,"harnessVersion":"sceneworks-memory-v3","records":[]}"#
-            )
-            .expect("version drift is not a parse failure"),
-            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
-        );
-        assert_eq!(
-            load_bundle(r#"{"schemaVersion":4,"harnessVersion":"old","records":[]}"#)
-                .expect("harness drift is not a parse failure"),
-            BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-                found: Some("old".to_owned())
+    /// sc-18864 helpers: reach the first MLX record carrying full phase telemetry in the packaged
+    /// bundle, by status. Kept separate from the `runtime_record` helpers above so a change to one
+    /// status's fixture cannot silently retarget the other's guards.
+    fn packaged_mlx_record<'a>(raw: &'a mut Value, status: &str) -> &'a mut Value {
+        raw["records"]
+            .as_array_mut()
+            .expect("records array")
+            .iter_mut()
+            .find(|record| {
+                record["status"] == status
+                    && record["hardware"]["wiredLimitBytes"].is_number()
+                    && record["observedMemory"]["conditioning"].is_object()
             })
+            .expect("packaged MLX record with full phase telemetry")
+    }
+
+    fn set_uniform_phases(record: &mut Value, active: u64, reclaimable: u64) {
+        let phase = json!({
+            "activeBytes": active,
+            "allocatorBytes": active + reclaimable,
+            "reclaimableBytes": reclaimable,
+        });
+        record["observedMemory"] = json!({
+            "conditioning": phase,
+            "denoise": phase,
+            "decode": phase,
+            "overall": phase,
+        });
+    }
+
+    /// sc-18864, GUARD 1 — the aliases are UNREPRESENTABLE, not merely rejected.
+    ///
+    /// `Phase` is `deny_unknown_fields` and carries no `deviceBytes`/`wiredBytes`, so a record
+    /// asserting `wiredBytes > wiredLimitBytes` cannot be parsed at all. Both aliases are mutated
+    /// individually: asserting them together would prove only that the pair is refused.
+    #[test]
+    fn phase_telemetry_cannot_represent_device_or_wired_aliases() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+        assert!(
+            load_bundle(&clean.to_string()).is_ok(),
+            "the unmutated packaged bundle must load, or the mutations below prove nothing"
+        );
+
+        for alias in ["deviceBytes", "wiredBytes"] {
+            let mut aliased = clean.clone();
+            let record = packaged_mlx_record(&mut aliased, "runtime_complete");
+            let wired_limit = record["hardware"]["wiredLimitBytes"]
+                .as_u64()
+                .expect("wired limit");
+            // The exact shape every committed MLX record used to carry: an alias above the ceiling.
+            record["observedMemory"]["overall"][alias] = json!(wired_limit + 1);
+            assert!(
+                matches!(
+                    load_bundle(&aliased.to_string()),
+                    Err(BundleLoadError::Json(_))
+                ),
+                "{alias} must be unrepresentable, not validated"
+            );
+        }
+    }
+
+    /// sc-18864, GUARD 2 — `allocatorBytes` is DERIVED, so the rule is an identity.
+    ///
+    /// The pre-fix rule was `allocator >= active`, which is what let one number wear three names.
+    /// Each side of the identity is broken on its own; breaking both at once would leave either
+    /// term untested.
+    #[test]
+    fn allocator_bytes_must_equal_active_plus_reclaimable() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+        assert!(load_bundle(&clean.to_string()).is_ok());
+
+        for field in ["allocatorBytes", "reclaimableBytes"] {
+            let mut drifted = clean.clone();
+            let record = packaged_mlx_record(&mut drifted, "complete");
+            let current = record["observedMemory"]["decode"][field]
+                .as_u64()
+                .expect("decode field");
+            record["observedMemory"]["decode"][field] = json!(current + 1);
+            assert!(
+                matches!(
+                    load_bundle(&drifted.to_string()),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("phase metrics are internally inconsistent")
+                ),
+                "{field} drifting from the derivation must be refused"
+            );
+        }
+    }
+
+    /// sc-18864, GUARD 3 — the wired ceiling is checked on `runtime_complete` too.
+    ///
+    /// It was checked only on `complete` before, which is exactly how three `mlx:flux2_dev`
+    /// runtime-complete records shipped claiming up to 26.0 GB more wired residency than the probed
+    /// limit. Both directions are exercised at the boundary: `limit` loads, `limit + 1` does not.
+    #[test]
+    fn runtime_complete_checks_the_wired_ceiling_against_resident_bytes() {
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+
+        let mut at_limit = clean.clone();
+        let record = packaged_mlx_record(&mut at_limit, "runtime_complete");
+        let wired_limit = record["hardware"]["wiredLimitBytes"]
+            .as_u64()
+            .expect("wired limit");
+        set_uniform_phases(record, wired_limit, 0);
+        assert!(
+            load_bundle(&at_limit.to_string()).is_ok(),
+            "resident bytes exactly at the wired ceiling must be admissible"
+        );
+
+        let mut over_limit = clean;
+        let record = packaged_mlx_record(&mut over_limit, "runtime_complete");
+        set_uniform_phases(record, wired_limit + 1, 0);
+        assert!(matches!(
+            load_bundle(&over_limit.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("observed wired memory exceeds hardware")
+        ));
+    }
+
+    /// sc-18864, GUARD 4 and the story's headline claim: a soundly-measured MLX capture whose
+    /// allocator BOUND exceeds the host is admissible, while one whose RESIDENT peak does is not.
+    ///
+    /// The numbers are `imc-2c064567893ea869006e`'s `observedMemory.overall` pair verbatim — a q8
+    /// LTX render that completed, returned all 121 frames and was bit-identical on warm repeat, yet
+    /// reported `observedMemory.overall.deviceBytes` of 142.6 GB against a 137.4 GB host and was
+    /// refused promotion for it. `allocatorBytes` still carries that 142.6 GB, because it is a real
+    /// upper bound across two instants; it is simply not the quantity a host-capacity check may use.
+    #[test]
+    fn a_sound_mlx_capture_reaches_runtime_complete_despite_an_over_host_allocator_bound() {
+        const LTX_RESIDENT: u64 = 37_931_479_408;
+        const LTX_RECLAIMABLE: u64 = 104_716_839_452;
+
+        let clean: Value =
+            serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).expect("packaged evidence");
+
+        let mut sound = clean.clone();
+        let record = packaged_mlx_record(&mut sound, "runtime_complete");
+        let host_bytes = record["hardware"]["memoryBytes"]
+            .as_u64()
+            .expect("host bytes");
+        assert!(
+            LTX_RESIDENT + LTX_RECLAIMABLE > host_bytes && LTX_RESIDENT < host_bytes,
+            "the fixture must be the discriminating case: bound over the host, resident under it"
+        );
+        set_uniform_phases(record, LTX_RESIDENT, LTX_RECLAIMABLE);
+        let record_id = record["id"].as_str().expect("record id").to_owned();
+        let bundle = load_bundle(&sound.to_string()).expect("sound capture parses");
+        let loaded = bundle
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .expect("sound record survives");
+        assert_eq!(loaded.status, RecordStatus::RuntimeComplete);
+        let RequiredNullable::Value(observed) = &loaded.observed_memory else {
+            panic!("sound record keeps its observed telemetry");
+        };
+        assert_eq!(observed.overall_non_reclaimable_bytes(), LTX_RESIDENT);
+        assert_eq!(
+            observed
+                .full()
+                .expect("full phases")
+                .overall
+                .allocator_bytes,
+            LTX_RESIDENT + LTX_RECLAIMABLE,
+            "the co-existence bound is retained, not clamped away"
+        );
+
+        // The host-capacity check is still live: move the RESIDENT peak over the host and it bites.
+        let mut over_host = clean;
+        let record = packaged_mlx_record(&mut over_host, "runtime_complete");
+        set_uniform_phases(record, host_bytes + 1, 0);
+        assert!(matches!(
+            load_bundle(&over_host.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("observed resident memory exceeds hardware")
+        ));
+    }
+
+    /// sc-22738: a version stamp is a re-capture signal for the probe tooling, not a runtime
+    /// input. A bundle (or a record) whose `schemaVersion` / `harnessVersion` drifted still loads
+    /// and still serves its well-formed records; only a bundle that does not parse or validate is
+    /// refused. MUTATION: restoring the pre-22738 version pre-scan in `load_bundle` (or the
+    /// per-record harness check in `validate_record`) turns the first three assertions red.
+    #[test]
+    fn version_drift_still_loads_but_bad_json_is_an_error() {
+        let drifted = load_bundle(
+            r#"{"schemaVersion":2,"harnessVersion":"sceneworks-memory-v3","records":[]}"#,
+        )
+        .expect("bundle version drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.schema_version, 2);
+        assert_eq!(drifted.harness_version, "sceneworks-memory-v3");
+        let drifted = load_bundle(r#"{"schemaVersion":6,"harnessVersion":"old","records":[]}"#)
+            .expect("harness drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.harness_version, "old");
+        let mut record_drifted = complete_record();
+        record_drifted["harnessVersion"] = json!("old-record");
+        let drifted = load_bundle(&bundle(record_drifted))
+            .expect("record harness drift is neither a parse failure nor a demotion");
+        assert_eq!(drifted.records.len(), 1);
+        assert_eq!(drifted.records[0].harness_version, "old-record");
+        assert!(
+            matches!(
+                drifted.evidence_for(&exact_query()),
+                EvidenceVerdict::Verified(_)
+            ),
+            "a record from an older harness is served exactly as a current one"
         );
         let mut missing_load_shape = complete_record();
         missing_load_shape
@@ -3315,15 +4067,7 @@ mod tests {
                 load_bundle(&bundle(missing_load_shape)),
                 Err(BundleLoadError::Json(_))
             ),
-            "a v4 record without its measured loadShape must fail to parse, not default"
-        );
-        let mut record_stale = complete_record();
-        record_stale["harnessVersion"] = json!("old-record");
-        assert_eq!(
-            load_bundle(&bundle(record_stale)).expect("record harness drift is stale"),
-            BundleLoad::Stale(StaleBundleReason::HarnessVersion {
-                found: Some("old-record".to_owned())
-            })
+            "a current record without its measured loadShape must fail to parse, not default"
         );
         assert!(matches!(
             load_bundle(r#"{"harnessVersion":"sceneworks-memory-v5","records":[]}"#),
@@ -3368,6 +4112,75 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_records_require_typed_transformer_and_decoder_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("diffvae");
+
+        let loaded = load_bundle(&bundle(ltx.clone())).expect("typed LTX-2.5 record parses");
+        assert_eq!(
+            loaded.records[0].target.transformer_variant,
+            Some(Ltx25TransformerVariant::Distilled)
+        );
+        assert_eq!(
+            loaded.records[0].target.decoder,
+            Some(Ltx25Decoder::DiffVae)
+        );
+
+        for field in ["transformerVariant", "decoder"] {
+            let mut missing = ltx.clone();
+            missing["target"]
+                .as_object_mut()
+                .expect("target object")
+                .remove(field);
+            assert!(
+                matches!(
+                    load_bundle(&bundle(missing)),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("must identify transformerVariant and decoder")
+                ),
+                "{field} must be required for LTX-2.5"
+            );
+        }
+
+        let mut invalid = ltx;
+        invalid["target"]["decoder"] = json!("native");
+        assert!(matches!(
+            load_bundle(&bundle(invalid)),
+            Err(BundleLoadError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn ltx25_queries_match_the_typed_pipeline_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("conv");
+        let bundle = load_bundle(&bundle(ltx)).expect("typed LTX-2.5 record parses");
+        let mut query = exact_query();
+        query.model_id = "ltx_2_5".to_owned();
+        query.provider = "ltx_2_5".to_owned();
+        query.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        assert!(matches!(
+            bundle.evidence_for(&query),
+            EvidenceVerdict::Verified(_)
+        ));
+
+        query.decoder = Some(Ltx25Decoder::DiffVae);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = None;
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        query.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+    }
+
+    #[test]
     fn both_hardware_contract_arms_parse_and_unknown_fields_fail_closed() {
         let mut mlx = complete_record();
         mlx["hardware"] = json!({
@@ -3381,10 +4194,7 @@ mod tests {
             "wiredLimitBytes": 80000
         });
         mlx["backend"] = json!("mlx");
-        assert!(matches!(
-            load_bundle(&bundle(mlx)),
-            Ok(BundleLoad::Ready(_))
-        ));
+        assert!(load_bundle(&bundle(mlx)).is_ok());
 
         let mut extra = complete_record();
         extra["target"]["futureField"] = json!(true);
@@ -3438,7 +4248,7 @@ mod tests {
         record["negativeMutation"]["parameters"] = strategy_parameters;
 
         assert!(
-            matches!(load_bundle(&bundle(record)), Ok(BundleLoad::Ready(_))),
+            load_bundle(&bundle(record)).is_ok(),
             "negative_complete requires thresholds, not positive-case measured quality"
         );
     }
@@ -3464,7 +4274,7 @@ mod tests {
         fingerprint.calibration.fingerprint.push_str("-mutated");
         assert_eq!(
             bundle.evidence_for(&fingerprint),
-            EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationFingerprint)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationFingerprint)
         );
 
         let mut scene_works = exact_query();
@@ -3484,13 +4294,16 @@ mod tests {
             EvidenceVerdict::Verified(_)
         ));
 
-        // The provider's own compile closure is the term that decides currency, and it is not blind.
+        // sc-22738: the provider's compile closure is capture provenance too. A binding whose
+        // digest no longer matches the record's verifies exactly as a matching one — currency is
+        // what the probe tooling re-captures on, never what the runtime demotes on. MUTATION:
+        // restoring an `InferenceClosure` arm in `evidence_for` turns this red.
         let mut closure = exact_query();
         closure.calibration.inference_closure_digest = "e".repeat(64);
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&closure),
-            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut matrix = exact_query();
         matrix.calibration.matrix_source_revision = "source-tree:2222222".to_owned();
@@ -3503,40 +4316,43 @@ mod tests {
         artifact_repository.calibration.artifact_repository = "other/repo".to_owned();
         assert_eq!(
             bundle.evidence_for(&artifact_repository),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactRepository)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactRepository)
         );
 
         let mut artifact_revision = exact_query();
         artifact_revision.calibration.artifact_resolved_revision = "d".repeat(40);
         assert_eq!(
             bundle.evidence_for(&artifact_revision),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactResolvedRevision)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactResolvedRevision)
         );
 
         let mut artifact_variant = exact_query();
         artifact_variant.calibration.artifact_variant = "q8".to_owned();
         assert_eq!(
             bundle.evidence_for(&artifact_variant),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ArtifactVariant)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ArtifactVariant)
         );
 
         let mut path = exact_query();
         path.calibration.resolved_path_fingerprint = "different".to_owned();
         assert_eq!(
             bundle.evidence_for(&path),
-            EvidenceVerdict::Stale(StaleEvidenceReason::ResolvedPathFingerprint)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::ResolvedPathFingerprint)
         );
 
         let mut abi = exact_query();
         abi.calibration.abi += 1;
         assert_eq!(
             bundle.evidence_for(&abi),
-            EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationAbi)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::CalibrationAbi)
         );
     }
 
+    /// SC-18353's physical-receipt requirement is a statement about HOW a Qwen q4/bf16 number was
+    /// measured, so since sc-22738 it is asked of every such record regardless of the closure it
+    /// was captured under — the closure no longer selects which records the rule applies to.
     #[test]
-    fn current_qwen_q4_evidence_without_physical_mlx_provenance_is_stale() {
+    fn qwen_q4_evidence_without_physical_mlx_provenance_is_a_mismatch_under_any_closure() {
         let mut record = mlx_record(
             128 * 1024 * 1024 * 1024,
             120 * 1024 * 1024 * 1024,
@@ -3546,11 +4362,7 @@ mod tests {
         record["target"]["provider"] = json!("qwen_image");
         record["target"]["tier"] = json!("q4");
         record["loadability"]["resolvedPathFingerprint"] = json!("fixture@resolved:q4");
-        let bundle =
-            match load_bundle(&bundle(record)).expect("legacy Qwen receipt remains history") {
-                BundleLoad::Ready(bundle) => bundle,
-                BundleLoad::Stale(reason) => panic!("unexpected stale bundle envelope: {reason:?}"),
-            };
+        let bundle = load_bundle(&bundle(record)).expect("legacy Qwen receipt remains history");
         let mut query = exact_query();
         query.backend = Backend::Mlx;
         query.model_id = "qwen_image".to_owned();
@@ -3558,14 +4370,14 @@ mod tests {
 
         assert_eq!(
             bundle.evidence_for(&query),
-            EvidenceVerdict::Stale(StaleEvidenceReason::PhysicalMlxProvenance)
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::PhysicalMlxProvenance)
         );
 
         query.calibration.inference_closure_digest = "e".repeat(64);
         assert_eq!(
             bundle.evidence_for(&query),
-            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure),
-            "pre-provenance records remain ordinary history once their captured closure is stale"
+            EvidenceVerdict::Mismatch(EvidenceMismatchReason::PhysicalMlxProvenance),
+            "the closure digest neither selects nor waives the provenance requirement"
         );
     }
 
@@ -3597,5 +4409,145 @@ mod tests {
             bundle.evidence_for(&unexecuted),
             EvidenceVerdict::OutOfEnvelope
         );
+    }
+
+    /// sc-22738: a runtime-complete record declaring `quality.warmPasses: 0` — a single-render
+    /// video capture — is accepted with `result: not_run` and no comparison figure, and refused
+    /// the moment it carries a figure it could not have measured or claims a pass it did not run.
+    /// Records without the declaration keep every previous requirement.
+    #[test]
+    fn runtime_complete_accepts_a_declared_zero_warm_pass_quality_as_not_measured() {
+        fn runtime_record(raw: &mut Value) -> &mut Value {
+            raw["records"]
+                .as_array_mut()
+                .expect("records array")
+                .iter_mut()
+                .find(|record| record["status"] == "runtime_complete")
+                .expect("packaged runtime-complete record")
+        }
+        let mut single: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let thresholds = runtime_record(&mut single)["quality"].clone();
+        runtime_record(&mut single)["quality"] = json!({
+            "contract": "one measured render; NOT MEASURED: no warm pass",
+            "result": "not_run",
+            "warmPasses": 0,
+            "maximumErrorThreshold": thresholds["maximumErrorThreshold"],
+            "meanErrorThreshold": thresholds["meanErrorThreshold"],
+            "rootMeanSquareErrorThreshold": thresholds["rootMeanSquareErrorThreshold"],
+        });
+        load_bundle(&single.to_string()).expect("a declared unrun comparison is not a refusal");
+
+        type Doctoring = (fn(&mut Value), &'static str);
+        let doctorings: [Doctoring; 4] = [
+            (
+                |quality| quality["result"] = json!("passed"),
+                "must be not_run",
+            ),
+            (
+                |quality| quality["maximumError"] = json!(0.0),
+                "cannot have measured",
+            ),
+            (
+                |quality| {
+                    quality
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("maximumErrorThreshold");
+                },
+                "threshold evidence is incomplete",
+            ),
+            // Without the declaration the previous requirement stands: not_run is refused.
+            (
+                |quality| {
+                    quality.as_object_mut().unwrap().remove("warmPasses");
+                },
+                "did not pass",
+            ),
+        ];
+        for (mutate, expected) in doctorings {
+            let mut doctored = single.clone();
+            mutate(&mut runtime_record(&mut doctored)["quality"]);
+            assert!(
+                matches!(
+                    load_bundle(&doctored.to_string()),
+                    Err(BundleLoadError::Invalid(message)) if message.contains(expected)
+                ),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_cardinality_is_an_optional_typed_capture_identity() {
+        use super::Target;
+        let raw: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).unwrap();
+        let mut target = raw["records"][0]["target"].clone();
+        let original: Target = serde_json::from_value(target.clone()).unwrap();
+        assert_eq!(original.reference_count, None);
+        target["referenceCount"] = json!(1);
+        let reference: Target = serde_json::from_value(target.clone()).unwrap();
+        assert_eq!(reference.reference_count, Some(1));
+        target["referenceCount"] = json!(-1);
+        assert!(serde_json::from_value::<Target>(target).is_err());
+    }
+
+    /// sc-22738: a physical A/V session of ONE render carries `selected_av` alone, and the typed
+    /// audio comparison is coupled to the `reference_av` receipt rather than to the A/V kind.
+    #[test]
+    fn a_single_render_av_session_needs_no_audio_comparison_and_a_reference_needs_one() {
+        let mut raw: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let repositories = raw["records"][0]["repositories"].clone();
+        let record: EvidenceRecord =
+            serde_json::from_value(raw["records"][0].take()).expect("packaged record parses");
+        let session = |roles: &[&str]| -> SourceSession {
+            serde_json::from_value(json!({
+                "id": "ims-0123456789abcdefabcd",
+                "kind": "physical_mlx",
+                "command": "[]",
+                "sourcePath": "docs/calibration/x/ims-0123456789abcdefabcd.log",
+                "capturedAt": record.captured_at,
+                "repositories": repositories,
+                "hardware": { "probe": "p", "memoryBytes": 1 },
+                "stdoutSha256": "a".repeat(64),
+                "inputs": [],
+                "outputs": roles.iter().map(|role| json!({
+                    "role": role,
+                    "path": format!(
+                        "docs/calibration/x/{}-{role}-{}x{}-f{}-{}.avbin",
+                        record.logical_case_id,
+                        record.target.geometry.width,
+                        record.target.geometry.height,
+                        record.target.geometry.frames,
+                        "b".repeat(64)
+                    ),
+                    "sha256": "b".repeat(64),
+                    "bytes": 1,
+                })).collect::<Vec<_>>(),
+                "claims": ["memory"],
+                "result": "passed",
+            }))
+            .expect("session parses")
+        };
+        assert!(
+            record.quality.audio.is_none(),
+            "the packaged record carries no audio"
+        );
+        validate_physical_mlx_outputs_against_record(&record, &session(&["selected_av"]))
+            .expect("one selected render, no comparison, no audio block");
+        let error = validate_physical_mlx_outputs_against_record(
+            &record,
+            &session(&["selected_av", "reference_av"]),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("reference A/V receipt and typed audio quality"),
+            "{error}"
+        );
+        let error =
+            validate_physical_mlx_outputs_against_record(&record, &session(&["reference_av"]))
+                .unwrap_err();
+        assert!(error.contains("no selected_av render"), "{error}");
     }
 }

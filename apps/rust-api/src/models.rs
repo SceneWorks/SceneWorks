@@ -1,6 +1,13 @@
 use super::*;
 
-use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
+// Keep the behavior-preserving legacy root helper available to this module while all production
+// consumers enter through `model_source_library`; taking the function item constructs no root.
+const _: fn(&FsPath) -> PathBuf = huggingface_hub_cache_dir;
+
+use sceneworks_core::base_weights::{
+    detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
+    BaseWeightDetection, ComponentRole,
+};
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
@@ -42,11 +49,42 @@ pub(crate) struct ModelCatalogCache {
 struct ModelCatalogCacheState {
     generation: u64,
     snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    /// Last observed resolved-cache publish key. `None` until the first observation, which is why
+    /// the first reading never counts as a change — an API that has not looked yet has nothing to
+    /// have gone stale against.
+    local_tier_key: Option<u64>,
 }
 
 impl ModelCatalogCache {
     pub(crate) fn invalidate(&self) {
         let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
+    }
+
+    /// Invalidates the snapshot when the resolved cache's published set has moved since the last
+    /// catalog read (sc-19712 F-4).
+    ///
+    /// Every other invalidation site is a mutation this process performed, but promotions are
+    /// published by the **worker**, in another process, so no in-process signal exists. Without
+    /// this the catalog kept serving a model's pre-promotion availability indefinitely — and
+    /// `modelLibraryUnavailable()` keys the Model Manager's blocked state on exactly that field,
+    /// so a model that had just completed a job with the drive unplugged was still presented as
+    /// needing the drive reconnected.
+    ///
+    /// A key check, not a timer: a TTL would leave the same wrong answer up for its whole window
+    /// and rebuild pointlessly for the rest of time. The key only moves when a bundle is published
+    /// or withdrawn, so a rebuild happens once per real change and never on a load.
+    pub(crate) fn note_local_tier_key(&self, key: u64) {
+        let mut state = self.state.lock();
+        if state.local_tier_key == Some(key) {
+            return;
+        }
+        let first_observation = state.local_tier_key.is_none();
+        state.local_tier_key = Some(key);
+        if first_observation {
+            return;
+        }
         state.generation = state.generation.wrapping_add(1);
         state.snapshot = None;
     }
@@ -465,6 +503,299 @@ impl HuggingFaceCacheHealth {
     }
 }
 
+/// Machine-readable code on the license-acknowledgment rejection (sc-17227). Mirrored in the web
+/// client as `LICENSE_ACK_ERROR_CODE` (`apps/web/src/licenseAcknowledgment.js`) so both halves of
+/// the gate name the same refusal rather than matching on prose.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE: &str = "license_acknowledgment_required";
+
+/// True when the catalog entry declares that the user must accept its license before the weights
+/// may be downloaded (`requiresLicenseAcknowledgment`, sc-17227). Deliberately does NOT include
+/// `gated`: see the call site for why the two are enforced differently.
+fn model_requires_license_acknowledgment(model: &Value) -> bool {
+    model
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The payload key every job-creation door uses to carry the caller's acknowledgment through to
+/// the queue (sc-17227). Stamped by `create_model_download_job` once its own gate has passed, so a
+/// RETRY of a legitimately-authorized download re-validates against the same assertion rather than
+/// being refused for a field the typed route never wrote.
+pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
+
+/// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
+/// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
+/// and `owner/name` to the same repository, so treating them as different would be a bypass.
+///
+/// A trailing `.git` is stripped for the same reason: `MiniMaxAI/MiniMax-H3.git` is the git-remote
+/// spelling of the same repository, it passes the worker's `validate_hf_repo_id`, and it was the
+/// one spelling that missed this index — leaving Hugging Face's own 401 as the only thing between
+/// the request and the weights. Stripped AFTER the trailing-slash trim (and re-trimmed) so
+/// `…/MiniMax-H3.git/` and `…/MiniMax-H3/.git` both normalize too.
+fn huggingface_repo_key(repo: &str) -> Option<String> {
+    let repo = repo.trim().trim_end_matches('/').trim();
+    let repo = match repo.rfind('.') {
+        // `rfind` yields a char boundary, so the slice is safe; compared case-insensitively
+        // because the lowercasing below happens only after this strip.
+        Some(dot) if repo[dot..].eq_ignore_ascii_case(".git") => repo[..dot].trim_end_matches('/'),
+        _ => repo,
+    };
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    Some(repo.to_ascii_lowercase())
+}
+
+/// The `owner/name` a huggingface.co URL addresses, or `None` for any other host. `/models/import`
+/// accepts a `sourceUrl` as an alternative to `repo`, and
+/// `https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/…` fetches exactly the same bytes as
+/// `repo: "MiniMaxAI/MiniMax-H3"`, so a repo-keyed gate that read only `repo` would leave the
+/// equivalent request open.
+fn huggingface_repo_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if host != "huggingface.co" && host != "www.huggingface.co" && host != "hf.co" {
+        return None;
+    }
+    // `/models/<owner>/<name>` and `/<owner>/<name>` both address a model repo; `datasets/…` and
+    // `spaces/…` are different namespaces and are left alone.
+    let path = path.strip_prefix("models/").unwrap_or(path);
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    if matches!(owner, "datasets" | "spaces" | "api") {
+        return None;
+    }
+    let name = segments.next()?;
+    Some(format!("{owner}/{name}"))
+}
+
+/// Every Hugging Face repo declared by a catalog entry that requires a license acknowledgment,
+/// mapped to the entry that declares it (sc-17227). Includes co-requisite rows: MiniMax-H3's text
+/// encoder and both VAEs come straight from `MiniMaxAI/MiniMax-H3`, which is the repo the review's
+/// bypass named, and a primary-only index would have missed it.
+///
+/// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
+/// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
+/// `platforms: ["windows", "linux"]`. An index built from the snapshot would therefore see only the
+/// subset that survived the filter on the running host, and the gate would be keyed on a partial
+/// view of the repos an entry can actually fetch — on exactly the hosts where the LAN-exposed jobs
+/// API (epic 4484) is most likely to be reachable. A licence requirement is not a platform
+/// capability.
+async fn license_acknowledgment_repo_index(
+    state: &AppState,
+) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
+    let (models, _) = merged_model_manifest_entries(state).await?;
+    let mut index = std::collections::BTreeMap::new();
+    for model in models {
+        if !model_requires_license_acknowledgment(&model) {
+            continue;
+        }
+        let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let model_name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(model_id)
+            .to_owned();
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(key) = download
+                .get("repo")
+                .and_then(Value::as_str)
+                .and_then(huggingface_repo_key)
+            else {
+                continue;
+            };
+            index
+                .entry(key)
+                .or_insert_with(|| LicenseAcknowledgmentSource {
+                    model_id: model_id.to_owned(),
+                    model_name: model_name.clone(),
+                });
+        }
+    }
+    Ok(index)
+}
+
+/// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
+/// with the id because the surfaces that have to explain the requirement — the LoRA rows on the
+/// Models screen — have no licence copy of their own and must point the user at the model card
+/// that does.
+#[derive(Clone)]
+pub(crate) struct LicenseAcknowledgmentSource {
+    pub(crate) model_id: String,
+    pub(crate) model_name: String,
+}
+
+/// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
+/// not itself a model (sc-17227). Written onto LoRA catalog rows by `list_loras`.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY: &str = "licenseAcknowledgmentModelId";
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY: &str = "licenseAcknowledgmentModelName";
+
+/// Stamp each catalog row whose Hugging Face source repo is licence-gated with the model that
+/// gates it (sc-17227), so a client can raise the SAME acknowledgment gate it raises on a model
+/// and send the assertion the server now requires.
+///
+/// Without this, `create_lora_download_job`'s repo-keyed gate is unsatisfiable from the shipped UI:
+/// the row carries nothing that says an acknowledgment is needed, `createLoraDownloadJob` sends no
+/// `licenseAcknowledged`, and the click yields a bare 403 with no checkbox anywhere to clear it.
+///
+/// Derived here rather than authored in `builtin.loras.jsonc` on purpose. A manifest flag is a
+/// second copy of a fact the model manifest already states, and the two drift; this reads the one
+/// source. It is also the only form that is correct on every host — the index is built from the
+/// UNFILTERED model manifest, so it does not evaporate on a platform where the gating model's
+/// download rows are filtered out, which is exactly where a client-side re-derivation would fail.
+///
+/// Applied at the CATALOG-READ door (`list_loras`) and not inside `lora_catalog`, which the
+/// per-job-create validation sweep also calls (sc-8819): the annotation is for rendering, and the
+/// enforcement path resolves the repo itself.
+pub(crate) async fn annotate_license_acknowledgment_sources(
+    state: &AppState,
+    rows: &mut [Value],
+    repo_of: impl Fn(&Value) -> Option<String>,
+) -> Result<(), ApiError> {
+    let keyed: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| {
+            repo_of(row)
+                .as_deref()
+                .and_then(huggingface_repo_key)
+                .map(|key| (position, key))
+        })
+        .collect();
+    if keyed.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    if index.is_empty() {
+        return Ok(());
+    }
+    for (position, key) in keyed {
+        let Some(source) = index.get(key.as_str()) else {
+            continue;
+        };
+        let Some(object) = rows[position].as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY.to_owned(),
+            Value::String(source.model_id.clone()),
+        );
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY.to_owned(),
+            Value::String(source.model_name.clone()),
+        );
+    }
+    Ok(())
+}
+
+/// The license-acknowledgment refusal for a request that named its weights by REPO (sc-17227).
+///
+/// [`create_model_download_job`] gates the typed `POST /api/v1/models/:id/download` by catalog id.
+/// That is not the only door: `POST /api/v1/jobs` enqueues a `model_download` payload VERBATIM
+/// (`repo` + `files` + `revision`, no catalog lookup anywhere between the request and
+/// `run_model_download_job`), and `POST /api/v1/models/import` fetches a caller-supplied repo or
+/// URL with no licence logic of its own. Both reached `MiniMaxAI/MiniMax-H3` — a PUBLIC repo, so
+/// nothing upstream refuses them — while the typed route answered 403. Keying on the repo rather
+/// than on the model id is what lets ONE mechanism close both: the payloads have no `modelId` to
+/// look up, but they must name the repo or they cannot fetch anything.
+///
+/// `repos` is a LIST because "the repo this request will fetch" is not always spelled `repo`: a
+/// `model_convert` payload names its download target in `baseRepo` (the LTX converter's
+/// `ensure_ltx_upscaler_cached` fetches it, and `upscalerFile` is a glob, so `"**"` pulls the whole
+/// repo). Checking every repo-bearing key of a payload is what keeps this ONE predicate rather than
+/// one per job type — a new key is an addition to the list, not a second gate.
+///
+/// `acknowledged` is the caller's own assertion, exactly as on the typed route: the gate obtains
+/// an affirmative acknowledgment, it is not an authorization check (see
+/// `docs/minimax-h3-use-restriction-safeguards.md`).
+pub(crate) async fn ensure_license_acknowledged_for_source(
+    state: &AppState,
+    repos: &[Option<&str>],
+    source_url: Option<&str>,
+    acknowledged: bool,
+) -> Result<(), ApiError> {
+    // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
+    // what was actually requested rather than the lowercased index key.
+    let candidates: Vec<(String, String)> = repos
+        .iter()
+        .copied()
+        .flatten()
+        .map(str::to_owned)
+        .chain(source_url.and_then(huggingface_repo_from_url))
+        .filter_map(|named| huggingface_repo_key(&named).map(|key| (named, key)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    let Some((requested, source)) = candidates
+        .iter()
+        .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
+    else {
+        return Ok(());
+    };
+    if acknowledged {
+        return Ok(());
+    }
+    let model_id = &source.model_id;
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "'{requested}' supplies '{model_id}', which requires accepting its license before \
+             download. Accept the license on the Models screen, or send \
+             `licenseAcknowledged: true` to assert that the user has accepted it."
+        ),
+        code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// Every payload key that can name a Hugging Face repo the WORKER will fetch (sc-17227). Keep this
+/// aligned with the worker's own readers: `run_model_download_job` / `run_model_import_job` /
+/// `run_lora_*_job` take `repo` (`crates/sceneworks-worker/src/model_jobs.rs`), and
+/// `resolve_convert_plan` takes `baseRepo` — which the LTX arm hands to `ensure_ltx_upscaler_cached`
+/// → `ensure_hf_files_cached`, a real download. `sourceRepo` is listed because it is the other repo
+/// a convert payload names; it resolves against the local cache today (`huggingface_snapshot_dir`),
+/// so gating it costs nothing and removes the question of which of the two a future arm fetches.
+const LICENSE_GATED_REPO_PAYLOAD_KEYS: &[&str] = &["repo", "baseRepo", "sourceRepo"];
+
+/// [`ensure_license_acknowledged_for_source`] over a raw job payload — the shape
+/// `POST /api/v1/jobs` (and the retry/duplicate re-validation) hands to the worker verbatim.
+pub(crate) async fn ensure_job_payload_license_acknowledged(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let repos: Vec<Option<&str>> = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        state,
+        &repos,
+        payload.get("sourceUrl").and_then(Value::as_str),
+        payload
+            .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -477,8 +808,35 @@ pub(crate) async fn create_model_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_downloadable(&model)?;
+    // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
+    //
+    // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+    // only runs in the client. This endpoint is reachable from a browser on another machine (the
+    // remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl,
+    // and no client-side check binds any of those.
+    //
+    // Scoped to `requiresLicenseAcknowledgment` — NOT to `gated`. A gated model's download fails at
+    // Hugging Face with a 401 without a saved credential, so an unacknowledged fetch never lands its
+    // weights; adding the requirement there would 4xx every existing gated download whose client
+    // predates the field, for no gain. A `requiresLicenseAcknowledgment` model's repo is PUBLIC —
+    // nothing upstream refuses it — so this rejection is the only thing between the request and the
+    // weights, which is why the flag defaults to `false` and must be asserted, not assumed.
+    if model_requires_license_acknowledgment(&model) && !payload.license_acknowledged {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "Model '{model_id}' requires accepting its license before download. Accept the \
+                 license on the Models screen, or send `licenseAcknowledged: true` to assert that \
+                 the user has accepted it."
+            ),
+            code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+            context: None,
+        });
+    }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.
@@ -505,12 +863,58 @@ pub(crate) async fn create_model_download_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
+    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
+    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
+    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
+    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
+    let selected_variant = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let co_requisites =
+        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+
+    // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
+    // in the PATH, so it fires only when the entry that id names declares
+    // `requiresLicenseAcknowledgment` itself. Every other door — `POST /api/v1/jobs`,
+    // `/models/import`, `/loras/import` — is keyed on the repo the request will FETCH, resolved
+    // against `license_acknowledgment_repo_index`. That asymmetry left two doors onto one set of
+    // weights: an entry that does not carry the flag but whose `downloads` name a repo a flagged
+    // entry declares would have been fetched here while the generic queue answered 403 for the same
+    // repo. Shared co-requisite rows are exactly that shape, and the manifest already uses it.
+    //
+    // Unreachable in the shipped catalog today — every restricted repo reference lives inside an
+    // entry that carries the flag, and the manifest audit's
+    // `test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps it that way —
+    // but that is a property of the current manifest, not of this route. An
+    // ADDITION, not a replacement: the id check above keeps its own refusal text, which names the
+    // model the caller asked for rather than the repo that supplies it.
+    let queued_repos: Vec<String> = std::iter::once(&download)
+        .chain(co_requisites.iter())
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let queued_repos: Vec<Option<&str>> = queued_repos
+        .iter()
+        .map(|repo| Some(repo.as_str()))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        &state,
+        &queued_repos,
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
+
     let job_payload = build_model_download_job_payload(
         &model,
         &model_id,
         &download,
         requested_variant,
         true,
+        payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
 
@@ -524,24 +928,17 @@ pub(crate) async fn create_model_download_job(
     // is a different artifact than the model's primary checkpoint and must not be reconciled
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
-    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
-    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
-    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
-    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
-    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
-    let selected_variant = download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    for co_requisite in
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
-    {
+    for co_requisite in &co_requisites {
+        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, co_requisite) {
+            continue;
+        }
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
-            &co_requisite,
+            co_requisite,
             None,
             false,
+            payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
         create_generation_job(
@@ -565,7 +962,26 @@ pub(crate) async fn create_model_download_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
+    ensure_model_not_cleanup_only(model)?;
+    if model.get("downloadable").and_then(Value::as_bool) == Some(false) {
+        return Err(ApiError::bad_request(
+            "This model is not available for download.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_model_not_cleanup_only(model: &Value) -> Result<(), ApiError> {
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Err(ApiError::bad_request(
+            "This model is retained only so its existing local files can be removed. No download, conversion, or generation route is available on this platform.",
+        ));
+    }
+    Ok(())
 }
 
 /// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
@@ -601,6 +1017,7 @@ fn build_model_download_job_payload(
     download: &Value,
     explicit_variant: Option<&str>,
     include_family: bool,
+    license_acknowledged: bool,
     data_dir: &FsPath,
 ) -> Result<JsonObject, ApiError> {
     let repo = required_string_field(download, "repo")?.to_owned();
@@ -631,6 +1048,28 @@ fn build_model_download_job_payload(
     // client request cannot supply or override this flag, and co-requisites stay inert because the
     // calibration artifact identity is the primary checkpoint.
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
+    // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
+    // non-test caller — has already refused the request unless the caller asserted it, so reaching
+    // here for a gated fetch means the assertion was made. Writing it into the payload is what
+    // keeps RETRY and DUPLICATE working: those re-run `validate_raw_job_payload` over the stored
+    // payload, and the repo-keyed gate there would otherwise refuse a download the typed route had
+    // already authorized. Co-requisites carry it too — `MiniMaxAI/MiniMax-H3` is itself a
+    // co-requisite repo, and it is the one the review's bypass named.
+    //
+    // Keyed on the FLAG OR the caller's own assertion, not on the flag alone. The two gates in
+    // `create_model_download_job` do not fire on the same predicate: the id gate reads the entry's
+    // flag, while the repo gate reads the repos the job will queue. For the shape the repo gate
+    // exists to catch — an entry with NO flag whose download names a repo a flagged entry declares
+    // — a flag-keyed stamp writes nothing, and the RETRY of that authorized download is then
+    // refused by the repo gate over its own stored `repo`. `license_acknowledged` is the caller's
+    // assertion carried verbatim, so the stamp records exactly what was asserted rather than
+    // re-deriving it from a predicate that already disagreed once.
+    if model_requires_license_acknowledgment(model) || license_acknowledged {
+        job_payload.insert(
+            LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     job_payload.insert(
         "provider".to_owned(),
         Value::String(required_string_field(download, "provider")?.to_owned()),
@@ -828,6 +1267,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             None,
             true,
+            false,
             data.path(),
         )
         .expect("primary payload");
@@ -841,6 +1281,7 @@ mod memory_calibration_job_payload_tests {
             "fixture-model",
             &download(),
             None,
+            false,
             false,
             data.path(),
         )
@@ -861,6 +1302,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             client.variant.as_deref(),
             true,
+            false,
             data.path(),
         )
         .expect("uncalibrated payload");
@@ -949,8 +1391,10 @@ pub(crate) async fn create_model_convert_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_not_cleanup_only(&model)?;
     let mlx = model
         .get("mlx")
         .and_then(Value::as_object)
@@ -1052,7 +1496,135 @@ pub(crate) async fn create_model_convert_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Distinct source repositories a model owns. Co-requisite downloads are excluded: they are
+/// shared dependencies rather than this model's own source, and resolved-cache entries are
+/// selected by *primary* provenance.
+pub(crate) fn owned_source_repositories(model: &Value) -> Vec<String> {
+    let mut repositories = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .filter(|repo| !repo.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Reconciles the resolved-model hot cache with a source that has just been deleted (sc-19710).
+///
+/// Without this, entries whose authoritative source is gone can never be reclaimed: automatic
+/// retention refuses to evict an artifact it cannot re-verify as a second copy, so an orphaned
+/// entry would be held `SourceUnverified` forever — exactly the stranded state the epic forbids.
+///
+/// Reconciliation failures never fail the delete, whose files are already removed; they are logged
+/// and returned as warnings so the orphan is surfaced rather than silently stranded.
+async fn reconcile_deleted_source(
+    state: &AppState,
+    selectors: Vec<sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector>,
+) -> Vec<String> {
+    use sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore;
+
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    let data_dir = state.settings.data_dir.clone();
+    // Reconcile whenever a managed store exists, even if the policy was since disabled: entries
+    // materialized while it was enabled must still be reconciled rather than orphaned. Never
+    // create the store as a side effect of a delete.
+    if !data_dir.join("models").join("resolved").exists() {
+        return Vec::new();
+    }
+    let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let store = ResolvedCacheStore::open(&data_dir)?;
+        let mut warnings = Vec::new();
+        for selector in selectors {
+            let report = store.reconcile_removed_source(&selector, now)?;
+            for deferred in report.deferred {
+                warnings.push(format!(
+                    "A cached copy of {} is still in use and will be reclaimed after it is released.",
+                    selector.repository
+                ));
+                tracing::info!(
+                    repository = %selector.repository,
+                    cache_key = %deferred.cache_key,
+                    hold = %deferred.hold,
+                    "resolved-cache reconciliation deferred an in-use entry"
+                );
+            }
+            for stranded in report.unmatched_unreadable {
+                warnings.push(format!(
+                    "A damaged resolved-cache entry ({stranded}) could not be matched to {} and was left in place.",
+                    selector.repository
+                ));
+            }
+        }
+        Ok::<_, sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheError>(warnings)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(warnings)) => warnings,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation failed after a source delete");
+            vec![format!(
+                "Cached copies of this model could not be reconciled and may still occupy disk: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation task failed");
+            vec![
+                "Cached copies of this model could not be reconciled and may still occupy disk."
+                    .to_owned(),
+            ]
+        }
+    }
+}
+
+/// Drop the plan-store documents and cached derivatives a deleted LINKED model owned.
+///
+/// Keyed on `importPlan.checkpointId` — the same discriminator the scheduler and the worker's
+/// route selection use — so a model that is not plan-backed does nothing here. Never touches the
+/// linked library and never removes the approved root: only this checkpoint's record, plan,
+/// bindings and derivatives.
+///
+/// Failures become warnings rather than failing the delete: the manifest entry is already gone by
+/// this point, so refusing here would leave the catalog and the plan store disagreeing with no way
+/// to retry.
+async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String> {
+    let Some(checkpoint_id) = entry
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+    let data_dir = state.settings.data_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
+            .invalidate_checkpoint(&checkpoint_id)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "forgetting a linked checkpoint failed after a model delete");
+            vec![format!(
+                "This model's import plan and cached derivatives could not be removed: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "the linked-checkpoint cleanup task failed");
+            vec!["This model's import plan and cached derivatives could not be removed.".to_owned()]
+        }
+    }
 }
 
 pub(crate) async fn delete_model(
@@ -1071,6 +1643,7 @@ pub(crate) async fn delete_model(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let manifest_path = state
@@ -1087,10 +1660,15 @@ pub(crate) async fn delete_model(
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
-        huggingface_hub_cache_dir(&state.settings.data_dir),
+        sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+            .root()
+            .to_owned(),
     ];
-    let removal = match remove_owned_artifacts(
-        model_artifact_paths(cleanup_source, &state.settings.data_dir),
+    let removal = match remove_whole_model_artifacts(
+        catalogs.models(&state).await?,
+        &model_id,
+        cleanup_source,
+        &state.settings.data_dir,
         &allowed_roots,
         permanent,
     )
@@ -1134,8 +1712,122 @@ pub(crate) async fn delete_model(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
     }
-    let warnings =
+    let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // A plan-backed (linked) model's bytes are not ours, but its plan documents and derivatives
+    // are. Without this the manifest entry went away and the record, plan, bindings and every
+    // cached derivative stayed behind forever — reachable by nothing, reclaimable by nothing.
+    // E6 still holds exactly: this drops SceneWorks-owned documents, never a library file, and
+    // never the approved root itself (other checkpoints under it stay valid).
+    warnings.extend(forget_linked_checkpoint(&state, cleanup_source).await);
+    // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
+    warnings.extend(
+        reconcile_deleted_source(
+            &state,
+            owned_source_repositories(cleanup_source)
+                .into_iter()
+                .map(|repository| {
+                    sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                        repository,
+                        revision: None,
+                        tier: None,
+                    }
+                })
+                .collect(),
+        )
+        .await,
+    );
+    // ---- checkpoint teardown (epic 20398) ---------------------------------------------------
+    // `remove_whole_model_artifacts` removed the BYTES. A plan-backed entry also owns documents
+    // under `<data>/checkpoints/` — catalog record, plan, bindings — which that sweep never sees.
+    // Left behind for a MANAGED install they make the id permanently un-reimportable: the manifest
+    // entry is gone, so this route's `existing_ids` check passes on the next import, and the
+    // worker's `ManagedIngest::begin` then refuses forever with `InstallIdTaken` naming a path that
+    // no longer exists.
+    //
+    // Deliberately one block that discriminates on ownership, because the two ownerships need
+    // opposite treatment and only ONE of them is this story's.
+    let plan_checkpoint_id = cleanup_source
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned);
+    match plan_checkpoint_id.as_deref().map(|checkpoint_id| {
+        (
+            checkpoint_id,
+            sceneworks_core::checkpoint_plan_store::managed_install_id(checkpoint_id),
+        )
+    }) {
+        // MANAGED: SceneWorks owns the install tree, so the record, plan and bindings go with it.
+        Some((checkpoint_id, Some(install_id))) => {
+            let data_dir = state.settings.data_dir.clone();
+            let owned_install_id = install_id.to_owned();
+            let owned_checkpoint_id = checkpoint_id.to_owned();
+            // Through the DERIVATIVE store, not `CheckpointPlanStore::remove_managed` directly:
+            // the plan store's own removal drops the record and `remove_dir_all`s the install tree
+            // with nothing asking about derivatives first, so a leased or pinned derivative was
+            // orphaned — its source bytes and plan gone, and its `derivedFrom` checkpoint id (the
+            // only handle any later invalidation has) no longer resolving to anything. The
+            // derivative store removes derivatives FIRST and refuses the whole teardown if one is
+            // still in use, which is the same ordering the linked path above already had
+            // (sc-20651 feature-end review).
+            //
+            // But a REFUSAL cannot be honoured HERE, and only here: by this point
+            // `remove_whole_model_artifacts` has already deleted the install bytes and the manifest
+            // entry is already gone. Holding the plan record back for the derivative's sake would
+            // therefore strand the record with no bytes under it, and `ManagedIngest::begin` would
+            // refuse this install id FOREVER with `InstallIdTaken` naming a path that no longer
+            // exists — the model becomes permanently un-reimportable. So the record is cleared
+            // regardless, and the derivative that could not be reclaimed is NAMED in a warning:
+            // it is orphaned either way once the bytes are gone, and a named orphan is one the user
+            // can find and evict, while a silent one is not. Every other caller of
+            // `remove_managed_install` still gets the refuse-first behaviour, which is correct for
+            // them: their bytes are still there to hold.
+            let outcome = tokio::task::spawn_blocking(move || {
+                managed_checkpoint_teardown(&data_dir, &owned_install_id, &owned_checkpoint_id)
+            })
+            .await;
+            let report = match outcome {
+                Ok(report) => report,
+                Err(error) => ManagedTeardownReport {
+                    failure: Some(error.to_string()),
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: Some(error.to_string()),
+                },
+            };
+            // The files are already gone; a failure here cannot un-delete the model, so it is
+            // surfaced rather than raised. The warning names the checkpoint because that id is the
+            // only handle on the stranded record.
+            if let Some(failure) = report.failure {
+                tracing::warn!(
+                    checkpoint_id = %checkpoint_id,
+                    error = %failure,
+                    orphaned_derivatives = report.orphaned_derivatives.len(),
+                    cleared = report.fallback_failure.is_none(),
+                    "managed checkpoint teardown failed after a model delete"
+                );
+                if let Some(fallback_failure) = report.fallback_failure {
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} could not be removed ({fallback_failure}); re-importing this model id may be refused until it is cleared."
+                    ));
+                } else {
+                    let orphans = if report.orphaned_derivatives.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        report.orphaned_derivatives.join(", ")
+                    };
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} was removed, but its cached derivatives could not be reclaimed ({failure}); orphaned resolved-cache entries: {orphans}. Unpin or release them to free that space."
+                    ));
+                }
+            }
+        }
+        // LINKED (or any non-managed checkpoint id): the bytes are the user's own library copy,
+        // which this route never owned, so `remove_managed` must not be reached — it would be the
+        // wrong operation on the wrong tree. Invalidating a linked entry's plan and the derivatives
+        // compiled from it is sc-20635's work; this arm is where it lands.
+        Some((_, None)) => {}
+        None => {}
+    }
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1152,6 +1844,299 @@ pub(crate) async fn delete_model(
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// What the managed checkpoint teardown did after a model delete, when it did not simply succeed.
+struct ManagedTeardownReport {
+    /// The refusal that stopped the derivatives-first teardown. `None` when it succeeded outright,
+    /// which is the only case that produces no warning.
+    failure: Option<String>,
+    /// The derivative cache keys still present after that refusal — the entries the delete could
+    /// not reclaim, named so the user can find them.
+    orphaned_derivatives: Vec<String>,
+    /// The record-clearing fallback's OWN refusal. `Some` means the plan record really is stranded
+    /// and the install id may stay un-reimportable, which is a materially different warning.
+    fallback_failure: Option<String>,
+}
+
+/// Tear down a managed install after its bytes and its manifest entry are already gone.
+///
+/// Derivatives first (so a derivative in use is reclaimed cleanly when it can be), then — if that
+/// refuses — the plan record UNCONDITIONALLY, because leaving it behind is what poisons the install
+/// id forever. Blocking throughout; callers must run it off the async runtime.
+fn managed_checkpoint_teardown(
+    data_dir: &std::path::Path,
+    install_id: &str,
+    checkpoint_id: &str,
+) -> ManagedTeardownReport {
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+
+    let store = CheckpointDerivativeStore::open(data_dir);
+    let failure = match &store {
+        Ok(store) => match store.remove_managed_install(install_id) {
+            Ok(_) => {
+                return ManagedTeardownReport {
+                    failure: None,
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: None,
+                }
+            }
+            Err(error) => error.to_string(),
+        },
+        Err(error) => error.to_string(),
+    };
+    let orphaned_derivatives = store
+        .as_ref()
+        .map(|store| surviving_derivatives(store, checkpoint_id))
+        .unwrap_or_default();
+    let fallback_failure =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+            .remove_managed(install_id)
+            .err()
+            .map(|error| error.to_string());
+    ManagedTeardownReport {
+        failure: Some(failure),
+        orphaned_derivatives,
+        fallback_failure,
+    }
+}
+
+/// The derivative cache keys still recorded as produced from `checkpoint_id`.
+///
+/// Read AFTER a refused teardown, so it names exactly the entries that were not reclaimed. An
+/// enumeration failure yields an empty list rather than an error: this only enriches a warning that
+/// is already being raised, and losing the warning would be worse than losing the names.
+fn surviving_derivatives(
+    store: &sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore,
+    checkpoint_id: &str,
+) -> Vec<String> {
+    store
+        .cache()
+        .enumerate()
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|summary| {
+                    let metadata = summary.metadata?;
+                    (metadata.production.is_derived()
+                        && metadata.derived_from.as_deref() == Some(checkpoint_id))
+                    .then_some(metadata.cache_key)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The file scopes `model` OWNS inside `repo` — the union of its PRIMARY (non-co-requisite) download
+/// entries that point at `repo`. Co-requisite rows are deliberately excluded; see the comment on the
+/// filter below for why that is what makes this "owned" rather than merely "referenced".
+///
+/// `None` when ANY of those primaries declares no `files` filter: that is a claim on the WHOLE repo,
+/// which cannot be expressed as a scoped removal, so the caller keeps the blanket path removal rather
+/// than silently reclaiming less than the user asked for.
+fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
+    let mut scopes = Vec::new();
+    for download in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        // Co-requisites are EXCLUDED, and that is what makes this "owned" rather than "referenced".
+        // A co-requisite may be shared by several models and is never removed by a model delete
+        // (the `coRequisite` schema note says so outright). sc-19573 made this load-bearing: both
+        // MiniMax-H3 entries now co-require the OTHER's DiT partition from the shared repo, so
+        // counting co-requisite rows here would make an entry claim its sibling's subtree as its own
+        // — and, symmetrically in `other_entries_repo_file_scopes`, retain its own. The two sets
+        // would cover everything, `selected && !retained` would never hold, and a whole-model delete
+        // would silently reclaim nothing. `delete_model_variant`'s `retained_files` already applies
+        // exactly this filter for exactly this reason.
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+    {
+        let files = string_array_field(download, "files");
+        if files.is_empty() {
+            return None;
+        }
+        for file in files {
+            if !scopes.contains(&file) {
+                scopes.push(file);
+            }
+        }
+    }
+    (!scopes.is_empty()).then_some(scopes)
+}
+
+/// The file scopes every catalog entry OTHER than `model_id` claims inside `repo` (sc-19078).
+///
+/// Thirteen catalog groups put two or more entries in ONE Hugging Face repo, and a whole-model delete
+/// resolves that repo's cache path ([`model_artifact_paths`]) — so removing one entry took the SIBLING
+/// entry's bytes with it. For most of those groups the two entries name the same `files`, so the
+/// removal at least matched what both wanted. MiniMax-H3 is the group where it becomes destructive:
+/// `minimax_h3` owns `{tier}/transformer` and `minimax_h3_ref` owns `{tier}/transformer_ref` inside
+/// `SceneWorks/minimax-h3-mlx` — DIFFERENT weights, up to 66.3 GB per tier — so deleting the
+/// text-to-video entry wiped an installed reference model the user never asked to remove.
+///
+/// Co-requisite rows are included: a sibling's shared component living in the same repo is still bytes
+/// that sibling needs. Nothing here is conditioned on the sibling being INSTALLED — an installed
+/// sibling is exactly the case that matters, and for a sibling that is absent every one of these
+/// patterns matches no file on disk, so retaining them costs the delete nothing.
+///
+/// The two kinds are returned SEPARATELY, because the caller may only ever subtract from one of them.
+/// See [`SiblingRepoScopes`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SiblingRepoScopes {
+    /// Scopes a sibling entry claims as its OWN primary weights. These are the sc-19078 subject and
+    /// are NEVER subtracted from: the sibling is a separate installed model, and unlinking bytes it
+    /// names as its own primary download is precisely the data loss this function exists to prevent.
+    primaries: Vec<String>,
+    /// Scopes a sibling entry claims only as a CO-REQUISITE — a shared component, or (MiniMax-H3)
+    /// the deleted entry's own partition that the sibling's engine also opens. Overlap with the
+    /// deleted entry's own primaries is subtracted from THIS half only, so that "delete this model"
+    /// still frees the model's own weights instead of no-opping.
+    co_requisites: Vec<String>,
+}
+
+impl SiblingRepoScopes {
+    fn is_empty(&self) -> bool {
+        self.primaries.is_empty() && self.co_requisites.is_empty()
+    }
+
+    /// The retained set for [`remove_tier_artifacts`]: every sibling primary, untouched, plus the
+    /// co-requisite scopes that do NOT overlap `own_files`.
+    ///
+    /// Subtracting the overlap from the co-requisite half ONLY is the whole point of the split
+    /// (sc-19573 review). Subtracting it from the union instead collapses the retained set to `[]`
+    /// for every group whose sibling names the SAME primary `files` — `flux_dev`/`pulid_flux_dev`,
+    /// `z_image_turbo`/`z_image_edit`, `bernini`/`bernini_image`, `realvisxl`/`instantid_realvisxl`,
+    /// `qwen_image_edit_2511`/`_lightning`, `ideogram_4`/`ideogram_4_turbo` — and strips the shared
+    /// text-encoder/VAE out of the `anima_*` trio. `remove_tier_artifacts`'s `selected && !retained`
+    /// would then unlink the sibling's blobs with `permanent=true`: tens of GB, unrecoverable without
+    /// re-download, i.e. exactly the sc-19078 defect re-introduced.
+    fn retained_files(&self, own_files: &[String]) -> Vec<String> {
+        let mut retained = self.primaries.clone();
+        for file in &self.co_requisites {
+            if !own_files.contains(file) && !retained.contains(file) {
+                retained.push(file.clone());
+            }
+        }
+        retained
+    }
+}
+
+fn other_entries_repo_file_scopes(
+    catalog: &[Value],
+    model_id: &str,
+    repo: &str,
+) -> SiblingRepoScopes {
+    let mut scopes = SiblingRepoScopes::default();
+    for entry in catalog
+        .iter()
+        .filter(|entry| entry.get("id").and_then(Value::as_str) != Some(model_id))
+    {
+        for download in entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| download.get("repo").and_then(Value::as_str) == Some(repo))
+        {
+            let bucket = if is_co_requisite_download(download) {
+                &mut scopes.co_requisites
+            } else {
+                &mut scopes.primaries
+            };
+            for file in string_array_field(download, "files") {
+                if !bucket.contains(&file) {
+                    bucket.push(file);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+/// Remove a whole model's owned artifacts for [`delete_model`], keeping a shared-repo sibling's bytes.
+///
+/// The default path is unchanged: every path in [`model_artifact_paths`] is removed wholesale, which
+/// is right for the ~80 catalog entries that own their download repo outright. When the primary repo is
+/// ALSO claimed by another catalog entry, the repo's two storage locations (the app-managed mirror dir
+/// and the Hugging Face hub cache) are removed SCOPED instead — via the same
+/// [`remove_tier_artifacts`] machinery the per-tier delete uses, with the sibling's declared files as
+/// the retained set — so this entry's own subtrees and their exclusive blobs go and the sibling's stay.
+/// Every other artifact path (a manifest `paths.model`, an imported `source.path`) is entry-exclusive
+/// and still removed wholesale.
+///
+/// An entry that declares NO file scope inside a shared repo ([`model_repo_file_scopes`] → `None`)
+/// keeps the blanket removal: it claims the whole repo, so there is no honest narrower scope, and
+/// today's behavior is preserved rather than quietly reclaiming nothing.
+async fn remove_whole_model_artifacts(
+    catalog: &[Value],
+    model_id: &str,
+    cleanup_source: &Value,
+    data_dir: &FsPath,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
+    let all_paths = model_artifact_paths(cleanup_source, data_dir);
+    let shared = model_download(cleanup_source)
+        .and_then(|download| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|repo| {
+            let siblings = other_entries_repo_file_scopes(catalog, model_id, &repo);
+            let own = model_repo_file_scopes(cleanup_source, &repo)?;
+            (!siblings.is_empty()).then_some((repo, own, siblings))
+        });
+    let Some((repo, own_files, sibling_scopes)) = shared else {
+        return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
+    };
+    // sc-19573 — a sibling may co-require THIS entry's own subtree, and then the retained set would
+    // cover everything the delete selected: `selected && !retained` would never hold and the user's
+    // explicit "delete this model" would silently reclaim zero bytes.
+    //
+    // Both MiniMax-H3 entries are in that shape now — each co-requires the other's DiT partition,
+    // because the engine opens both on every load. Removing the overlap resolves it in the honest
+    // direction: the delete does what it says, and the sibling entry's install state drops to
+    // incomplete + `repairAvailable`, which is the truth (it can no longer load) and is re-fetchable
+    // in one click. Retaining instead would leave a user who asked to free 56 GB with a no-op and no
+    // explanation.
+    //
+    // The subtraction applies to the CO-REQUISITE half ONLY ([`SiblingRepoScopes::retained_files`]).
+    // A sibling's PRIMARY scopes are never subtracted — six catalog groups pair two entries that name
+    // the IDENTICAL primary `files` in one repo, and subtracting there would empty the retained set
+    // and let this delete unlink the sibling's own weights.
+    //
+    // Computed AFTER the `is_empty` gate above, so an entry whose only sibling claim is an overlap
+    // still takes the SCOPED path rather than falling back to the blanket whole-repo removal that
+    // sc-19078 exists to prevent.
+    let sibling_files = sibling_scopes.retained_files(&own_files);
+
+    let managed_dir = data_dir.join("models").join(safe_download_dir(&repo));
+    let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
+    // Everything that is NOT the shared repo's storage: still this entry's alone, still removed whole.
+    let exclusive = all_paths
+        .into_iter()
+        .filter(|path| {
+            path != &managed_dir && repo_cache.as_ref().is_none_or(|cache| path != cache)
+        })
+        .collect::<Vec<_>>();
+    let mut removal = remove_owned_artifacts(exclusive, allowed_roots, permanent).await?;
+    let scoped = remove_tier_artifacts(
+        repo_cache,
+        Some(managed_dir),
+        &own_files,
+        &sibling_files,
+        allowed_roots,
+        permanent,
+    )
+    .await?;
+    removal.removed_paths.extend(scoped.removed_paths);
+    removal.retained_paths.extend(scoped.retained_paths);
+    removal.trash_failed_paths.extend(scoped.trash_failed_paths);
+    Ok(removal)
 }
 
 /// Delete ONE installed quant tier of a model and reclaim its disk, leaving the other tiers
@@ -1177,10 +2162,16 @@ pub(crate) async fn delete_model_variant(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let data_dir = &state.settings.data_dir;
-    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    let allowed_roots = vec![
+        data_dir.join("models"),
+        sceneworks_core::hf_home::model_source_library(data_dir)
+            .root()
+            .to_owned(),
+    ];
     // A tier lives in one of two storage shapes. Download-matrix models (`hasVariantMatrix`) keep the
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
@@ -1267,10 +2258,27 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
+    // A single-tier delete only orphans resolved-cache entries built from that tier; entries for
+    // the model's other tiers stay valid, so the selector is scoped by tier.
+    let cache_warnings = reconcile_deleted_source(
+        &state,
+        owned_source_repositories(&model)
+            .into_iter()
+            .map(|repository| {
+                sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                    repository,
+                    revision: None,
+                    tier: Some(variant.clone()),
+                }
+            })
+            .collect(),
+    )
+    .await;
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,
         "kind": "model-variant",
+        "warnings": cache_warnings,
         // Permanent delete: no OS trash, no undo (sc-12088).
         "trashed": false,
         // A tier delete NEVER removes the registry entry: the model stays in the catalog so the
@@ -1464,7 +2472,18 @@ async fn remove_empty_dirs(dir: &FsPath) {
 /// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
 /// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
 async fn prune_empty_repo_cache(repo_cache: &FsPath) {
-    remove_empty_dirs(&repo_cache.join("snapshots")).await;
+    let Some(source_root) = repo_cache.parent() else {
+        return;
+    };
+    let Ok(source_library) =
+        sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(source_root)
+    else {
+        return;
+    };
+    let Ok(snapshots_root) = source_library.snapshots_root_from_repository_root(repo_cache) else {
+        return;
+    };
+    remove_empty_dirs(&snapshots_root).await;
     remove_empty_dirs(&repo_cache.join("blobs")).await;
     let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
         .map(|mut entries| entries.next().is_some())
@@ -1588,18 +2607,28 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
 fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
-    let weight_file = if source.is_dir() {
-        first_safetensors_path(source)
-    } else {
-        Some(source.to_path_buf())
-    };
+    let weight_file = imported_model_primary_weight_file(source);
     let Some(weight_file) = weight_file else {
         return Err(ApiError::bad_request(
             "No safetensors base-weight file was found to import; single-file base-checkpoint import expects a .safetensors transformer.",
         ));
     };
     let detection = detect_base_weight_file(&weight_file).map_err(model_family_inspection_error)?;
-    import_detection_supported(&detection).map_err(ApiError::bad_request)
+    import_detection_supported(&detection).map_err(ApiError::bad_request)?;
+    if matches!(
+        &detection,
+        BaseWeightDetection::Recognized(verdict)
+            if verdict.family.as_deref() == Some("mage-flow")
+    ) && (!source.is_dir()
+        || !sceneworks_core::base_weights::is_mage_flow_transformer_dir(source))
+    {
+        return Err(ApiError::bad_request(
+            "Model import for the 'mage-flow' family requires a complete transformer directory \
+             containing config.json and diffusion_pytorch_model.safetensors; a bare weights file \
+             is refused because the loader cannot derive its architecture.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_model_import_job(
@@ -1641,16 +2670,502 @@ pub(crate) async fn create_model_import_job(
         .map_err(IntoResponse::into_response)
 }
 
+/// The `(rootId, relativePath)` pair a linked checkpoint import names, if this request is one.
+///
+/// Both or neither: a request carrying only one half names no checkpoint, and silently treating it
+/// as a fetch import would queue a job with no source at all.
+fn linked_checkpoint_selection(
+    payload: &ModelImportRequest,
+) -> Result<Option<(String, String)>, ApiError> {
+    let root_id = payload
+        .linked_root_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let relative_path = payload
+        .linked_relative_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (root_id, relative_path) {
+        (Some(root_id), Some(relative_path)) => {
+            Ok(Some((root_id.to_owned(), relative_path.to_owned())))
+        }
+        (None, None) => Ok(None),
+        _ => Err(ApiError::bad_request(
+            "A linked checkpoint import requires both linkedRootId and linkedRelativePath",
+        )),
+    }
+}
+
+/// What a managed install records about where its bytes came from (sc-20636). Serialized onto the
+/// queued job as `importProvenance` and handed to the ingest, which puts it in the persisted plan.
+///
+/// It carries no secret: `credential_host` names the host whose stored credential the download will
+/// use, never the credential, and `url` is already stripped of userinfo and secret-bearing query
+/// parameters by `checkpoint_ingest::sanitize_provenance_url`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModelImportProvenance {
+    pub(crate) source: &'static str,
+    pub(crate) reference: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) version_id: Option<String>,
+    pub(crate) file_id: Option<String>,
+    pub(crate) credential_host: Option<String>,
+}
+
+impl ModelImportProvenance {
+    fn to_json(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert("source".to_owned(), Value::String(self.source.to_owned()));
+        for (key, value) in [
+            ("reference", &self.reference),
+            ("url", &self.url),
+            ("versionId", &self.version_id),
+            ("fileId", &self.file_id),
+            ("credentialHost", &self.credential_host),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_owned(), Value::String(value.clone()));
+            }
+        }
+        Value::Object(object)
+    }
+
+    /// The `source.provider` value the model manifest entry records for this import.
+    ///
+    /// Deliberately COARSER than [`Self::source`]: `upload` and `local-copy` both record the
+    /// historical `"local"`. That is the value every model entry written before epic 20398 carries
+    /// and every reader of this field was written against, so splitting it in two would be a silent
+    /// manifest-vocabulary change nothing asked for. The finer distinction is not lost — it is
+    /// recorded in `importProvenance.source`, a new field with no legacy readers. A REMOTE import
+    /// does widen the provider (`civitai` rather than the generic `url` its transfer shares),
+    /// because that names a genuinely new provider rather than re-spelling an existing one.
+    fn manifest_provider(&self) -> &'static str {
+        match self.source {
+            "upload" | "local-copy" => "local",
+            remote => remote,
+        }
+    }
+}
+
+/// Reconcile a discriminated source's `expectedSha256` with the flat `payload.expectedSha256`.
+///
+/// Both set and naming the SAME digest is honoured — a sha256 is hex, so case and surrounding
+/// whitespace are not a difference. Both set and naming DIFFERENT digests is refused, because
+/// resolving that by precedence would verify the transferred bytes against a digest the caller did
+/// not choose and report success. A blank flat field is not a value, so it is not a conflict.
+fn reconcile_expected_sha256(
+    from_source: Option<String>,
+    from_flat: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let blank_is_absent = |value: Option<String>| value.filter(|digest| !digest.trim().is_empty());
+    match (blank_is_absent(from_source), blank_is_absent(from_flat)) {
+        (Some(source_digest), Some(flat_digest)) => {
+            let normalize = |digest: &str| digest.trim().to_ascii_lowercase();
+            if normalize(&source_digest) != normalize(&flat_digest) {
+                return Err(ApiError::bad_request(format!(
+                    "Provide either the discriminated `source` or the legacy `expectedSha256` field, not both: they name different digests ({} and {})",
+                    source_digest.trim(),
+                    flat_digest.trim()
+                )));
+            }
+            Ok(Some(source_digest))
+        }
+        (Some(digest), None) | (None, Some(digest)) => Ok(Some(digest)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Collapse the discriminated `source` (when present) onto the flat `repo`/`sourceUrl`/`sourcePath`
+/// fields the rest of the import path already speaks, and describe what was chosen as provenance.
+///
+/// Both spellings converge HERE, before any validation, so there is one import pipeline rather than
+/// a new one beside the old: a legacy `{"repo": "..."}` body and a
+/// `{"source": {"kind": "huggingFace", "repo": "..."}}` body produce the identical job payload apart
+/// from the provenance detail the discriminated form additionally carries.
+///
+/// A request that sets both a discriminated source and a conflicting flat field is refused rather
+/// than resolved by precedence — silently honouring one and dropping the other is how an import
+/// fetches something the caller did not ask for.
+pub(crate) fn normalize_model_import_source(
+    payload: &mut ModelImportRequest,
+) -> Result<(ModelImportProvenance, Option<String>), ApiError> {
+    let Some(source) = payload.source.take() else {
+        // Legacy flat request. `uploadedSourcePath` is set only by the multipart handler, so it is
+        // what distinguishes an upload from a copy of a file the user already had.
+        let provenance = if let Some(repo) = payload.repo.as_deref() {
+            ModelImportProvenance {
+                source: "huggingface",
+                reference: Some(repo.to_owned()),
+                ..Default::default()
+            }
+        } else if let Some(url) = payload.source_url.as_deref() {
+            ModelImportProvenance {
+                source: "url",
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(url),
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    url,
+                ),
+                ..Default::default()
+            }
+        } else if payload.uploaded_source_path {
+            ModelImportProvenance {
+                source: "upload",
+                reference: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        } else {
+            ModelImportProvenance {
+                source: "local-copy",
+                reference: payload
+                    .source_path
+                    .as_deref()
+                    .and_then(|path| FsPath::new(path).file_name()?.to_str())
+                    .map(str::to_owned),
+                ..Default::default()
+            }
+        };
+        return Ok((provenance, None));
+    };
+
+    let conflict = |field: &str| {
+        Err(ApiError::bad_request(format!(
+            "Provide either the discriminated `source` or the legacy `{field}` field, not both"
+        )))
+    };
+    if !option_str_is_empty(payload.repo.as_deref()) {
+        return conflict("repo");
+    }
+    if !option_str_is_empty(payload.source_url.as_deref()) {
+        return conflict("sourceUrl");
+    }
+    // An upload fills `sourcePath` server-side from the multipart `file` part, which is not a
+    // caller-supplied conflict.
+    if !option_str_is_empty(payload.source_path.as_deref()) && !payload.uploaded_source_path {
+        return conflict("sourcePath");
+    }
+
+    let mut revision = None;
+    let provenance = match source {
+        ModelImportSourceV1::Upload { staged_path } => {
+            let staged_path = staged_path
+                .or_else(|| payload.source_path.clone())
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "An upload source requires the file to be sent in the same multipart request",
+                    )
+                })?;
+            payload.source_path = Some(staged_path);
+            payload.uploaded_source_path = true;
+            ModelImportProvenance {
+                source: "upload",
+                reference: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::LocalPath { path } => {
+            let reference = FsPath::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            payload.source_path = Some(path);
+            payload.uploaded_source_path = false;
+            ModelImportProvenance {
+                source: "local-copy",
+                reference,
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::Url {
+            url,
+            expected_sha256,
+        } => {
+            let provenance = ModelImportProvenance {
+                source: "url",
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(&url),
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    &url,
+                ),
+                ..Default::default()
+            };
+            payload.source_url = Some(url);
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
+            provenance
+        }
+        ModelImportSourceV1::HuggingFace {
+            repo,
+            revision: requested_revision,
+            files,
+        } => {
+            if !files.is_empty() {
+                payload.files = files;
+            }
+            revision = requested_revision.clone();
+            let reference = match requested_revision.as_deref() {
+                Some(revision) => format!("{repo}@{revision}"),
+                None => repo.clone(),
+            };
+            payload.repo = Some(repo);
+            ModelImportProvenance {
+                source: "huggingface",
+                reference: Some(reference),
+                version_id: requested_revision,
+                file_id: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::Civitai {
+            url,
+            model_version_id,
+            file_id,
+            expected_sha256,
+        } => {
+            let provenance = ModelImportProvenance {
+                source: "civitai",
+                reference: model_version_id
+                    .as_deref()
+                    .map(|version| format!("modelVersion/{version}")),
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(&url),
+                version_id: model_version_id,
+                file_id,
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    &url,
+                ),
+            };
+            // Civitai downloads through the ordinary source-URL path: same transfer, same
+            // host-keyed credential attachment, same size limits. Only the recorded identity
+            // differs.
+            payload.source_url = Some(url);
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
+            provenance
+        }
+    };
+    Ok((provenance, revision))
+}
+
+/// Re-resolve a managed NVFP4 variant's pin SERVER-SIDE (sc-11043, epic 11037).
+///
+/// `GET /api/v1/models/managed-variants` advertises, for each registered variant, the exact import
+/// body that installs it. That body is a convenience for the client, and a convenience is not a
+/// guarantee: without this, a client could `POST` `modelId: "nvfp4-krea-2-turbo"` with any repo,
+/// revision or file it liked — or omit `expectedSha256` entirely, which the worker's
+/// `if let Some(..)` check treats as "nothing to verify" — and SceneWorks would record unverified
+/// bytes under the curated variant's identity, its checkpoint id, and its provenance. AC3's
+/// "verified file checksum" has to be enforced by the server or it is only client-cooperative.
+///
+/// So the registration wins. The registry is keyed on the very id the request claims, so when the
+/// id names a variant, the repo, revision, file list and `expectedSha256` are taken from the
+/// registration rather than from the body. A request that explicitly names a DIFFERENT pin is
+/// refused rather than silently rewritten — that is a client bug or an attempt, and both deserve a
+/// diagnostic. There is still exactly ONE import pipeline: this only fills in the fetch, and
+/// everything after it (normalisation, licence gate, install-id validation, the ingest) is the
+/// generic path every other import walks.
+///
+/// A managed variant is a pinned FETCH of specific upstream bytes, so the ownership modes that do
+/// not fetch — a linked library reference, a local copy, an upload, a bare URL — cannot claim one.
+fn resolve_managed_variant_pin(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
+    use sceneworks_core::managed_checkpoint_variants::{
+        match_managed_nvfp4_variant_id, ManagedVariantIdMatch,
+    };
+    // Case-INSENSITIVELY, because a managed variant's id is its install-directory name and its
+    // checkpoint identity, and `safe_download_dir` preserves whatever case the request supplied
+    // while NTFS and a default APFS volume do not. An exact-match lookup therefore missed
+    // `"NVFP4-Krea-2-Turbo"` — no registered repo, revision, file or checksum was applied — while
+    // the distinct-id collision check saw a new id and the filesystem saw the curated variant's own
+    // directory. Arbitrary bytes then landed under the curated identity with nothing verified.
+    //
+    // A near miss is REFUSED, never normalized to the canonical id. Rewriting it would install
+    // something the request did not name, which is the same class of silent substitution this
+    // function exists to refuse everywhere else; the diagnostic names the canonical id so a client
+    // bug is one edit away from correct.
+    let variant = match match_managed_nvfp4_variant_id(payload.model_id.as_deref().unwrap_or("")) {
+        ManagedVariantIdMatch::Unregistered => return Ok(()),
+        ManagedVariantIdMatch::Exact(variant) => variant,
+        ManagedVariantIdMatch::NearMiss(variant) => {
+            return Err(ApiError::bad_request(format!(
+                "Model id '{}' differs only in case from the managed NVFP4 variant '{}', which \
+                 shares its install directory and checkpoint identity on this platform. Import it \
+                 under the exact id '{}', or choose a model id that is not a case variant of a \
+                 managed variant.",
+                payload.model_id.as_deref().unwrap_or("").trim(),
+                variant.variant_id,
+                variant.variant_id
+            )));
+        }
+    };
+    let claim = |detail: &str| {
+        Err(ApiError::bad_request(format!(
+            "Model id '{}' is a managed NVFP4 variant pinned to {}@{} {}; {detail}",
+            variant.variant_id, variant.repo, variant.revision, variant.repo_file
+        )))
+    };
+
+    if payload.linked_root_id.is_some() || payload.linked_relative_path.is_some() {
+        return claim(
+            "it is installed by fetching those pinned bytes, so it cannot be claimed by a linked \
+             library reference. Import your own copy under a different model id.",
+        );
+    }
+    if !option_str_is_empty(payload.source_url.as_deref())
+        || !option_str_is_empty(payload.source_path.as_deref())
+    {
+        return claim(
+            "it cannot be installed from a source URL or a local path. Import your own copy under \
+             a different model id.",
+        );
+    }
+    match payload.source.as_ref() {
+        None | Some(ModelImportSourceV1::HuggingFace { .. }) => {}
+        Some(_) => {
+            return claim(
+                "it is a Hugging Face repo import. Import your own copy under a different model \
+                 id.",
+            )
+        }
+    }
+    if let Some(repo) = payload.repo.as_deref().map(str::trim) {
+        if !repo.is_empty() && repo != variant.repo {
+            return claim(&format!("this request names repo '{repo}'"));
+        }
+    }
+    if let Some(ModelImportSourceV1::HuggingFace {
+        repo,
+        revision,
+        files,
+    }) = payload.source.as_ref()
+    {
+        if repo.trim() != variant.repo {
+            return claim(&format!("this request names repo '{}'", repo.trim()));
+        }
+        if let Some(revision) = revision.as_deref().map(str::trim) {
+            if !revision.is_empty() && revision != variant.revision {
+                return claim(&format!("this request names revision '{revision}'"));
+            }
+        }
+        if !files.is_empty() && files.iter().any(|file| file.trim() != variant.repo_file) {
+            return claim("this request names a different file in the repo");
+        }
+    }
+    if !payload.files.is_empty()
+        && payload
+            .files
+            .iter()
+            .any(|file| file.trim() != variant.repo_file)
+    {
+        return claim("this request names a different file in the repo");
+    }
+    if let Some(expected) = payload.expected_sha256.as_deref().map(str::trim) {
+        if !expected.is_empty() && !expected.eq_ignore_ascii_case(&variant.sha256) {
+            return claim(&format!(
+                "this request asserts checksum '{expected}', not the pinned '{}'",
+                variant.sha256
+            ));
+        }
+    }
+    if let Some(family) = payload.family.as_deref().map(str::trim) {
+        if !family.is_empty()
+            && sceneworks_core::lora_family::canonical_lora_family(family) != variant.family
+        {
+            return claim(&format!("this request names family '{family}'"));
+        }
+    }
+
+    // The registration is now the source of truth for every fetch fact, including the ones the
+    // request left out. `expectedSha256` in particular is filled in rather than defaulted to
+    // "unverified", which is the whole point.
+    payload.repo = None;
+    payload.source_url = None;
+    payload.source_path = None;
+    payload.files = Vec::new();
+    payload.source = Some(ModelImportSourceV1::HuggingFace {
+        repo: variant.repo.clone(),
+        revision: Some(variant.revision.clone()),
+        files: vec![variant.repo_file.clone()],
+    });
+    payload.expected_sha256 = Some(variant.sha256.clone());
+    payload.family = Some(variant.family.clone());
+    if payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        payload.name = Some(variant.display_name.clone());
+    }
+    Ok(())
+}
+
 pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    if option_str_is_empty(payload.repo.as_deref())
+    // A curated managed NVFP4 variant is identified by its `modelId`, and its pin is re-resolved
+    // from the registry before anything else reads the body — so no client-supplied repo,
+    // revision, file or (absent) checksum can record unverified bytes under that identity.
+    resolve_managed_variant_pin(&mut payload)?;
+    // Linked (in-place) ownership: an approved library root plus a confined relative path, and
+    // never an absolute path (epic 20398, sc-20635). It is an ALTERNATIVE ownership mode rather
+    // than another way to FETCH, so it is resolved before source normalisation and excludes it
+    // entirely — including sc-20636's discriminated `source`, which only ever names a transfer.
+    let linked = linked_checkpoint_selection(&payload)?;
+    if let Some((root_id, relative_path)) = linked.clone() {
+        if !option_str_is_empty(payload.repo.as_deref())
+            || !option_str_is_empty(payload.source_url.as_deref())
+            || !option_str_is_empty(payload.source_path.as_deref())
+            || payload.source.is_some()
+        {
+            return Err(ApiError::bad_request(
+                "A linked checkpoint import references a library in place; do not also provide a \
+                 repo, source URL, source path, or a discriminated source",
+            ));
+        }
+        // Fail fast on an unapproved or unavailable root, and on a path shape the plan store would
+        // refuse anyway, so a job is never queued for a source that cannot compile. The same
+        // validator `compile_linked` uses, not a second copy of its rules.
+        sceneworks_core::checkpoint_plan_store::validate_linked_relative_path(&relative_path)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let data_dir = state.settings.data_dir.clone();
+        let probed_root_id = root_id.clone();
+        tokio::task::spawn_blocking(move || {
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                .resolve_root(&probed_root_id)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Approved root lookup failed: {error}")))?
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        // The VALIDATED values are what the job carries. Without this the route validated the
+        // trimmed pair and then serialised the raw one, so `" root-abc "` passed the API and
+        // failed in the worker — and the queued `manifestEntry` (built from the trimmed pair
+        // below) and the job payload disagreed about which checkpoint was being imported.
+        payload.linked_root_id = Some(root_id);
+        payload.linked_relative_path = Some(relative_path);
+    }
+    // Source normalisation collapses sc-20636's discriminated `source` onto the flat
+    // repo/sourceUrl/sourcePath fields. A linked import has no transfer to normalise — it was
+    // refused above if it named one — so it names its own provenance and skips the fetch checks.
+    let (provenance, revision) = match &linked {
+        Some((root_id, relative_path)) => (
+            ModelImportProvenance {
+                source: "linked-library",
+                reference: Some(format!("{root_id}/{relative_path}")),
+                ..Default::default()
+            },
+            None,
+        ),
+        None => normalize_model_import_source(&mut payload)?,
+    };
+    if linked.is_none()
+        && option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_url.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())
     {
         return Err(ApiError::bad_request(
-            "Provide a Hugging Face repo, source URL, or source path",
+            "Provide a Hugging Face repo, source URL, source path, or an approved library root id \
+             with a relative path",
         ));
     }
     if let Some(source_url) = payload.source_url.as_deref() {
@@ -1659,6 +3174,18 @@ pub(crate) async fn queue_model_import_job(
     if let Some(repo) = payload.repo.as_deref() {
         validate_huggingface_repo(repo)?;
     }
+    // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
+    // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
+    // the catalog for the source — so `{"repo": "MiniMaxAI/MiniMax-H3"}` pulled the restricted
+    // weights from upstream while `POST /api/v1/models/:id/download` was answering 403 for the same
+    // bytes. The same predicate the raw jobs route uses, so there is one mechanism, not two.
+    ensure_license_acknowledged_for_source(
+        &state,
+        &[payload.repo.as_deref()],
+        payload.source_url.as_deref(),
+        payload.license_acknowledged,
+    )
+    .await?;
     let model_type = match payload.model_type.as_deref().map(str::trim) {
         Some(value) if !value.is_empty() => {
             let normalized = value.to_ascii_lowercase();
@@ -1681,6 +3208,14 @@ pub(crate) async fn queue_model_import_job(
         .name
         .clone()
         .or_else(|| payload.repo.clone())
+        .or_else(|| {
+            linked.as_ref().and_then(|(_, relative_path)| {
+                FsPath::new(relative_path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+        })
         .or_else(|| {
             payload
                 .source_url
@@ -1711,6 +3246,17 @@ pub(crate) async fn queue_model_import_job(
         )));
     }
     let target_name = safe_download_dir(&model_id);
+    // The install id the WORKER will use is the SANITIZED `target_name`, not the raw model id, and
+    // it has to be a usable directory name before a job exists: the ingest resolves it through
+    // `CheckpointPlanStore::install_dir`, which validates. Without this a caller-supplied `modelId`
+    // that sanitizes to (say) a dot-leading name is answered 201 and then dies in the worker with
+    // an `InvalidInstallId` the caller never sees. Validated at the resolved value, because that is
+    // the string the worker will actually address a path with.
+    if let Err(error) = sceneworks_core::checkpoint_plan_store::validate_install_id(&target_name) {
+        return Err(ApiError::bad_request(format!(
+            "Model id '{model_id}' cannot be installed: {error}"
+        )));
+    }
     let target_dir = state
         .settings
         .data_dir
@@ -1750,22 +3296,44 @@ pub(crate) async fn queue_model_import_job(
         )?;
     }
     let timestamp = now_rfc3339();
-    let mut manifest_entry = json!({
-        "id": model_id,
-        "name": name,
-        "type": model_type,
-        "source": {
-            "provider": model_import_source_provider(&payload),
-            "repo": payload.repo.clone(),
-            "path": source_path_rel,
-        },
-        "files": payload.files.clone(),
-        "paths": {
-            "model": target_dir.display().to_string(),
-        },
-        "createdAt": timestamp,
-        "updatedAt": timestamp,
-    });
+    // A linked entry names its library by root id and relative path and carries NO install path:
+    // nothing is copied, and the plan-driven route reads the plan's own layers. The worker stamps
+    // `importPlan.checkpointId` onto this entry once the full-content compile succeeds — a
+    // candidate that never compiles never becomes selectable (E7).
+    let mut manifest_entry = match &linked {
+        Some((root_id, relative_path)) => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                "provider": provenance.manifest_provider(),
+                "rootId": root_id,
+                "relativePath": relative_path,
+            },
+            "files": payload.files.clone(),
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+        None => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                // The provider the SOURCE normalisation resolved, so a Civitai import is recorded
+                // as "civitai" rather than as the generic "url" its transfer happens to share.
+                // Coarser than provenance for the two non-remote shapes — see `manifest_provider`.
+                "provider": provenance.manifest_provider(),
+                "repo": payload.repo.clone(),
+                "path": source_path_rel,
+            },
+            "files": payload.files.clone(),
+            "paths": {
+                "model": target_dir.display().to_string(),
+            },
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+    };
     if let Some(source_url) = payload.source_url.clone() {
         if let Some(source) = manifest_entry
             .get_mut("source")
@@ -1782,13 +3350,30 @@ pub(crate) async fn queue_model_import_job(
     if let Some(object) = manifest_entry.as_object_mut() {
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
+    let ownership_mode = payload.ownership_mode;
     let mut payload = to_json_object(&payload)?;
+    // The ingest contract the worker executes: managed ownership, plus the provenance the install's
+    // persisted plan will carry. Written unconditionally so a legacy flat request is a managed
+    // import with recorded provenance too — not a second, unprovenanced code path (AC3).
+    payload.insert(
+        "ownershipMode".to_owned(),
+        serde_json::to_value(ownership_mode)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+    payload.insert("importProvenance".to_owned(), provenance.to_json());
+    if let Some(revision) = revision {
+        payload.insert("revision".to_owned(), Value::String(revision));
+    }
     payload.insert("modelId".to_owned(), manifest_entry["id"].clone());
     payload.insert("modelName".to_owned(), manifest_entry["name"].clone());
-    payload.insert(
-        "targetDir".to_owned(),
-        Value::String(target_dir.display().to_string()),
-    );
+    // A linked import installs nothing, so it gets no install directory: handing one to the worker
+    // would name a path that must never be created for this ownership mode.
+    if linked.is_none() {
+        payload.insert(
+            "targetDir".to_owned(),
+            Value::String(target_dir.display().to_string()),
+        );
+    }
     payload.insert(
         "manifestPath".to_owned(),
         Value::String(manifest_path.display().to_string()),
@@ -1803,7 +3388,7 @@ pub(crate) async fn queue_model_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn model_import_request_from_multipart(
@@ -1811,15 +3396,20 @@ pub(crate) async fn model_import_request_from_multipart(
     mut multipart: Multipart,
 ) -> Result<(ModelImportRequest, PathBuf), ApiError> {
     let mut payload = ModelImportRequest {
+        ownership_mode: OwnershipModeV1::default(),
+        source: None,
         model_id: None,
         name: None,
         model_type: None,
         repo: None,
         source_url: None,
         source_path: None,
+        linked_root_id: None,
+        linked_relative_path: None,
         files: Vec::new(),
         family: None,
         expected_sha256: None,
+        license_acknowledged: false,
         uploaded_source_path: false,
     };
     let mut staged_path = None;
@@ -1861,6 +3451,27 @@ pub(crate) async fn model_import_request_from_multipart(
                 "family" => payload.family = Some(value.to_owned()),
                 "repo" => payload.repo = Some(value.to_owned()),
                 "sourceUrl" => payload.source_url = Some(value.to_owned()),
+                // The multipart form accepts `repo`/`sourceUrl` too, so it can reach a
+                // licence-restricted repo exactly like the JSON body and needs the same way to
+                // assert the acknowledgment (sc-17227). Anything other than "true" leaves it false
+                // — the assertion is affirmative or it is not made.
+                "licenseAcknowledged" => {
+                    payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
+                // The multipart form takes the same two epic-20398 fields as the JSON body, decoded
+                // by the same serde impls, so an unknown ownership mode or malformed discriminated
+                // source is refused here exactly as it is there rather than being ignored (E7).
+                "ownershipMode" => {
+                    payload.ownership_mode = serde_json::from_value(Value::String(value.to_owned()))
+                        .map_err(|error| {
+                            ApiError::bad_request(format!("Invalid ownershipMode: {error}"))
+                        })?
+                }
+                "source" => {
+                    payload.source = Some(serde_json::from_str(value).map_err(|error| {
+                        ApiError::bad_request(format!("Invalid import source: {error}"))
+                    })?)
+                }
                 _ => {}
             }
         }
@@ -1920,16 +3531,6 @@ pub(crate) async fn cleanup_staged_model_upload(path: &FsPath) {
     }
 }
 
-pub(crate) fn model_import_source_provider(payload: &ModelImportRequest) -> &'static str {
-    if payload.repo.is_some() {
-        "huggingface"
-    } else if payload.source_url.is_some() {
-        "url"
-    } else {
-        "local"
-    }
-}
-
 pub(crate) fn model_family_inspection_error(error: SafetensorsHeaderError) -> ApiError {
     match error {
         SafetensorsHeaderError::Io(io_error) => {
@@ -1982,7 +3583,10 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -1997,6 +3601,9 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    let selection_catalog = models.clone();
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -2006,7 +3613,12 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
                 .flatten()
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
-        apply_runtime_text_encoder_options(model, &state.settings.data_dir)?;
+        apply_runtime_text_encoder_options(
+            model,
+            &selection_catalog,
+            &state.settings.data_dir,
+            &state.settings.external_model_roots,
+        )?;
     }
     Ok(models)
 }
@@ -2017,19 +3629,87 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
 /// Models sees it without a server restart, while no repo/revision/download metadata is persisted.
 fn apply_runtime_text_encoder_options(
     model: &mut Value,
+    catalog: &[Value],
     data_dir: &FsPath,
+    external_roots: &[PathBuf],
 ) -> Result<(), ApiError> {
-    let adapter = model
-        .get("adapter")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let options = sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir);
+    let mut options =
+        sceneworks_worker::image_text_encoder_options(catalog, model, data_dir, external_roots)
+            .into_iter()
+            .map(|option| serde_json::to_value(option).expect("text encoder option serializes"))
+            .collect::<Vec<_>>();
+    if options.is_empty() {
+        let adapter = model
+            .get("adapter")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        options.extend(
+            sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir)
+                .into_iter()
+                .map(|option| {
+                    serde_json::to_value(option).expect("video text encoder option serializes")
+                }),
+        );
+    }
     set_runtime_text_encoder_options(model, options)
+}
+
+/// Resolve an authored Image Studio encoder selection through the worker-owned descriptor contract.
+/// Only the opaque id comes from the client. The path-bearing resolution is rebuilt from a fresh
+/// server catalog at every create/retry/duplicate boundary and is never trusted as request input.
+pub(crate) async fn resolve_selected_image_text_encoder(
+    state: &AppState,
+    job_payload: &JsonObject,
+    model_id: &str,
+    manifest_entry: &mut Value,
+) -> Result<(), ApiError> {
+    let selected = match job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("textEncoderModel"))
+    {
+        None => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) if id == "default" => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) => id.as_str(),
+        Some(_) => return Err(ApiError::bad_request(
+            "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models",
+        )),
+    };
+
+    let catalog = model_catalog_snapshot(state).await?;
+    let catalog_model = catalog
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+        .unwrap_or(manifest_entry);
+    let resolution = sceneworks_worker::resolve_image_text_encoder_selection(
+        catalog.as_ref(),
+        catalog_model,
+        selected,
+        &state.settings.data_dir,
+        &state.settings.external_model_roots,
+    )
+    .map_err(ApiError::bad_request)?
+    .ok_or_else(|| ApiError::internal("non-default text encoder resolved as default"))?;
+    let object = manifest_entry
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert("resolvedTextEncoder".to_owned(), resolution);
+    Ok(())
 }
 
 fn set_runtime_text_encoder_options(
     model: &mut Value,
-    options: Vec<sceneworks_worker::TextEncoderOption>,
+    options: Vec<Value>,
 ) -> Result<(), ApiError> {
     let object = model
         .as_object_mut()
@@ -2037,7 +3717,7 @@ fn set_runtime_text_encoder_options(
     if options.is_empty() {
         object.remove("textEncoderOptions");
     } else {
-        object.insert("textEncoderOptions".to_owned(), json!(options));
+        object.insert("textEncoderOptions".to_owned(), Value::Array(options));
     }
     Ok(())
 }
@@ -2049,45 +3729,31 @@ mod runtime_text_encoder_option_tests {
     use crate::tests::support::isolate_hf_cache;
 
     #[test]
-    fn catalog_field_is_generic_and_contains_no_distribution_metadata() {
-        let mut model = json!({ "id": "future_video", "adapter": "future_adapter" });
+    fn catalog_field_is_path_free_and_default_can_be_omitted() {
+        let mut model = json!({ "id": "future_image" });
         set_runtime_text_encoder_options(
             &mut model,
             vec![
-                sceneworks_worker::TextEncoderOption {
-                    id: "default",
-                    label: "Bundled encoder (default)",
-                    description: "Uses the installed encoder.",
-                    is_default: true,
-                },
-                sceneworks_worker::TextEncoderOption {
-                    id: "future_staged_encoder",
-                    label: "Staged alternate",
-                    description: "Uses a complete operator-staged alternate.",
-                    is_default: false,
-                },
+                json!({
+                    "id": "default",
+                    "label": "Model encoder (default)",
+                    "description": "Uses the bundled encoder.",
+                    "isDefault": true
+                }),
+                json!({
+                    "id": "text_encoder_0123456789abcdef0123456789abcdef",
+                    "label": "Alternate",
+                    "description": "Contract validated.",
+                    "isDefault": false
+                }),
             ],
         )
         .unwrap();
-
-        let options = model["textEncoderOptions"].as_array().unwrap();
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[1]["id"], "future_staged_encoder");
-        assert_eq!(options[1]["isDefault"], false);
-        for forbidden in ["repo", "revision", "files", "download"] {
-            assert!(
-                options.iter().all(|option| option.get(forbidden).is_none()),
-                "runtime options must not become distribution metadata: {forbidden}"
-            );
+        let serialized = serde_json::to_string(&model["textEncoderOptions"]).unwrap();
+        for forbidden in ["path", "repo", "revision", "files", "download"] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
         }
-    }
 
-    #[test]
-    fn models_without_a_runtime_surface_emit_no_selector_field() {
-        let mut model = json!({
-            "id": "fixed_encoder_model",
-            "textEncoderOptions": [{ "id": "stale" }]
-        });
         set_runtime_text_encoder_options(&mut model, Vec::new()).unwrap();
         assert!(model.get("textEncoderOptions").is_none());
     }
@@ -2103,7 +3769,7 @@ mod runtime_text_encoder_option_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn live_options_refresh_when_alternate_becomes_valid_or_corrupt() {
+    fn legacy_ltx_fallback_refreshes_when_alternate_becomes_valid_or_corrupt() {
         let _env = isolate_hf_cache();
         let data_dir = tempfile::tempdir().unwrap();
         let repo = sceneworks_core::hf_home::huggingface_repo_cache_path(
@@ -2111,7 +3777,9 @@ mod runtime_text_encoder_option_tests {
             "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
         )
         .unwrap();
-        let snapshot = repo.join("snapshots").join("test-revision");
+        let snapshot = repo
+            .join("snapshots")
+            .join("0123456789abcdef0123456789abcdef01234567");
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(
             snapshot.join("config.json"),
@@ -2126,22 +3794,27 @@ mod runtime_text_encoder_option_tests {
         write_tiny_safetensors(&snapshot.join("model.safetensors"));
 
         let mut model = json!({ "id": "ltx_2_3", "adapter": "ltx_video" });
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        let catalog = vec![model.clone()];
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 2);
 
         std::fs::write(snapshot.join("model.safetensors"), b"truncated").unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         let options = model["textEncoderOptions"].as_array().unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(options[0]["id"], "default");
 
         std::fs::remove_dir_all(&repo).unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 1);
     }
 }
 
-async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    // Before trusting the cached snapshot, check whether the resolved cache's published set moved
+    // under us — the worker publishes promotions in another process, so this is the only signal
+    // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
+    crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
         if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
@@ -2309,6 +3982,12 @@ fn receipt_files_present(
                     .filter(|snapshot| {
                         snapshot_tier_is_loadable(snapshot, &receipt.files, family_complete)
                     })
+                    // A backfill records whatever it FOUND, so a receipt can name a shard index plus
+                    // only the shards that happened to land. Every recorded index must still resolve
+                    // to a complete shard set on disk, or this receipt is laundering an interrupted
+                    // download into "installed" (sc-20526). Stat-only: the index paths are already in
+                    // the receipt, so this costs no directory walk.
+                    .filter(|snapshot| listed_shard_indexes_are_complete(snapshot, &receipt.files))
                     .collect::<Vec<_>>();
                 receipt
                     .revision
@@ -2337,6 +4016,169 @@ fn model_family_tier_predicate(model: &Value) -> Option<fn(&FsPath) -> bool> {
             .unwrap_or_default(),
         model.get("id").and_then(Value::as_str).unwrap_or_default(),
     )
+}
+
+/// Whether a receipt entry is PROVABLY torn: every cached snapshot that holds one of the shard
+/// indexes the entry recorded is missing at least one shard that index names, and no snapshot holds
+/// a complete set (sc-20526).
+///
+/// Deliberately positive-evidence only. A receipt whose repo cache is gone, whose files simply are
+/// not where this box expects them, or that records no shard index at all is left ALONE — read-side
+/// validation already refuses to count such a receipt as installed, and silently deleting a receipt
+/// on ambiguous evidence would destroy the relocation proof an external-library install depends on.
+fn receipt_entry_is_provably_torn(entry: &Value, data_dir: &FsPath) -> bool {
+    if entry.get("backfilled").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let indexes = entry
+        .get("resolvedFiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        return false;
+    }
+    let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+        return false;
+    };
+    let mut saw_torn = false;
+    for snapshot in crate::huggingface_snapshot_dirs(&root) {
+        let present = indexes
+            .iter()
+            .filter(|file| path_is_readable_file(&snapshot.join(file)))
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            continue;
+        }
+        // One complete snapshot is enough: cached revisions are alternatives, and a re-download
+        // lands beside the torn revision it replaces rather than deleting it.
+        if present.len() == indexes.len()
+            && listed_shard_indexes_are_complete(
+                &snapshot,
+                &indexes
+                    .iter()
+                    .map(|file| (*file).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        {
+            return false;
+        }
+        saw_torn = true;
+    }
+    saw_torn
+}
+
+/// Repair receipts that a pre-sc-20526 backfill minted over a partially downloaded tier.
+///
+/// The offending shape is `backfilled: true` with a shard index whose `weight_map` names files that
+/// were never downloaded — the receipt recorded the partial on-disk set as if it were complete, and
+/// nothing invalidated it, so affected users needed a manual delete. Dropping the entry here lets the
+/// next scan re-backfill honestly (the backfill writer early-outs while ANY receipt for the model
+/// survives) and heals every other receipt consumer, since they all read this one file.
+///
+/// Cost: one small JSON read per managed model directory plus a stat per recorded index and shard.
+/// It runs on the catalog sweep, never on the per-job hot path.
+fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
+    let entries = receipt_entries(managed_path);
+    if entries.is_empty()
+        || !entries
+            .iter()
+            .any(|entry| receipt_entry_is_provably_torn(entry, data_dir))
+    {
+        return;
+    }
+    let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
+    // Re-read under the lock: a concurrent backfill may have rewritten the file.
+    let kept = receipt_entries(managed_path)
+        .into_iter()
+        .filter(|entry| !receipt_entry_is_provably_torn(entry, data_dir))
+        .collect::<Vec<_>>();
+    let receipt_path = managed_path.join(".sceneworks-download-complete.json");
+    let Some(first) = kept.first().cloned() else {
+        // Every entry was a false-complete: the model is not installed, so the receipt must go
+        // rather than linger as a bare marker `model_is_installed` would still honour.
+        let _ = std::fs::remove_file(&receipt_path);
+        return;
+    };
+    let mut receipt = first;
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("receipts".to_owned(), Value::Array(kept));
+    }
+    let _ = sceneworks_core::download_receipt::write(&receipt_path, &receipt);
+}
+
+/// Heal legacy install identity before the catalog and local-cache eligibility read it.
+fn repair_missing_snapshot_revisions(managed: &FsPath, model: &Value, data_dir: &FsPath) {
+    use sceneworks_core::download_receipt;
+    let marker = managed.join(".sceneworks-download-complete.json");
+    if !marker.is_file() {
+        return;
+    }
+    let Ok(_lock) = download_receipt::lock(managed) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&marker) else {
+        return;
+    };
+    let Ok(mut receipt) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let family_complete = model_family_tier_predicate(model);
+    let repair = |entry: &mut Value| {
+        if entry
+            .get("modelId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| Some(id) != model.get("id").and_then(Value::as_str))
+        {
+            return false;
+        }
+        let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+            return false;
+        };
+        let Some(revision) = download_receipt::recover_revision(entry, &root) else {
+            return false;
+        };
+        let Ok((_, snapshot)) = sceneworks_core::hf_home::model_source_library(data_dir)
+            .discover_snapshot(repo, Some(&revision))
+        else {
+            return false;
+        };
+        let files = string_array_field(entry, "resolvedFiles");
+        if !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+            || !listed_shard_indexes_are_complete(&snapshot, &files)
+        {
+            return false;
+        }
+        entry["snapshotRevision"] = Value::String(revision);
+        true
+    };
+    // The newest receipt is mirrored at the top level. Repair both representations without
+    // rebuilding the envelope or dropping unrelated variants and fields.
+    let mut changed = repair(&mut receipt);
+    if let Some(entries) = receipt.get_mut("receipts").and_then(Value::as_array_mut) {
+        for entry in entries {
+            changed |= repair(entry);
+        }
+    }
+    if changed {
+        if let Err(error) = download_receipt::write(&marker, &receipt) {
+            tracing::warn!(%error, path = %marker.display(), "could not repair missing snapshot revisions");
+        }
+    }
 }
 
 fn backfill_current_receipt(
@@ -2373,19 +4215,52 @@ fn backfill_current_receipt(
             }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            // Record only a file set that SATISFIES what the repo declares, never merely what was
+            // found (sc-20526). A `<tier>/*` glob and a whole-repo fetch declare no per-file claim,
+            // so the sharded-safetensors indexes IN the resolved set are the workable ground truth:
+            // every shard their `weight_map` names must be on disk. Otherwise this would mint a
+            // "complete" receipt for a tier missing ~4 GB of its text encoder (lens_turbo bf16) and
+            // that receipt would then keep the model reading installed through the usable-stale path.
+            if !listed_shard_indexes_are_complete(&snapshot, &resolved) {
+                return None;
+            }
+            // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
+            // receipt makes its whole repository unserveable from the resolved cache — there is no
+            // pair to compare coverage against — so a backfilled install silently dropped out of
+            // the local tier while still being promotable, occupying cache bytes it could never be
+            // served from. The revision is not unknowable here: the snapshot directory selected
+            // just above IS `.../snapshots/<revision>`, and `resolvedFiles` were read from it. Only
+            // a genuinely immutable 40-hex name is recorded; anything else is omitted rather than
+            // written as a revision the source tier could not re-resolve. The worker's
+            // `establish_receipt_tree_stamp` already patches receipts this same way.
+            let snapshot_revision = snapshot
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| {
+                    sceneworks_core::model_artifacts::validate_immutable_revision(name).is_ok()
+                })
+                .map(|name| Value::String(name.to_owned()))
+                .unwrap_or(Value::Null);
             (!resolved.is_empty()).then(|| json!({
                 "schemaVersion": 2, "repo": repo,
                 "modelId": model.get("id").cloned().unwrap_or(Value::Null),
                 "variant": entry.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
                 "manifestFiles": files, "resolvedFiles": resolved, "backfilled": true,
+                "snapshotRevision": snapshot_revision,
             }))
         }).collect::<Vec<_>>();
     if receipts.is_empty() {
         return;
     }
+    if std::fs::create_dir_all(managed_path).is_err() {
+        return;
+    }
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
@@ -2413,14 +4288,10 @@ fn backfill_current_receipt(
         .as_object_mut()
         .unwrap()
         .insert("receipts".to_owned(), Value::Array(merged));
-    let _ = std::fs::create_dir_all(managed_path);
-    let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
-        std::fs::write(
-            managed_path.join(".sceneworks-download-complete.json"),
-            bytes,
-        )
-        .ok()
-    });
+    let _ = sceneworks_core::download_receipt::write(
+        &managed_path.join(".sceneworks-download-complete.json"),
+        &receipt,
+    );
 }
 
 #[cfg(test)]
@@ -2449,7 +4320,7 @@ mod import_gate_tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&header_bytes);
-        bytes.extend(std::iter::repeat(0_u8).take(entries.len() * 4));
+        bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
         std::fs::write(path, bytes).expect("write safetensors");
     }
 
@@ -2467,6 +4338,40 @@ mod import_gate_tests {
         ]
     }
 
+    fn fused_sdxl_f16_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+                "F16",
+            ),
+            (
+                "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+                "F16",
+            ),
+            ("first_stage_model.encoder.conv_in.weight", "F16"),
+            ("first_stage_model.decoder.conv_out.weight", "F16"),
+        ]
+    }
+
+    fn legacy_user_entry(family: &str, path: &FsPath) -> JsonObject {
+        json!({
+            "id": "legacy_user_model",
+            "family": family,
+            "paths": { "model": path.to_string_lossy() },
+        })
+        .as_object()
+        .expect("legacy entry")
+        .clone()
+    }
+
     #[test]
     fn krea2_bf16_upload_is_accepted() {
         let temp = tempfile::tempdir().unwrap();
@@ -2476,6 +4381,67 @@ mod import_gate_tests {
             import_source_supported(&file).is_ok(),
             "a dense-bf16 Krea 2 DiT upload must pass the import gate"
         );
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let krea_dir = models.join("imports/krea");
+        let krea_file = krea_dir.join("transformer.safetensors");
+        write_safetensors(&krea_file, &krea2_bf16_dit_keys());
+        let mut krea = legacy_user_entry("krea_2", &krea_dir);
+        stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
+        assert_eq!(krea["importSourceShape"], json!("transformer_file"));
+
+        let sdxl_file = models.join("imports/sdxl.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut sdxl = legacy_user_entry("sdxl", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut sdxl, &data_dir, true);
+        assert_eq!(sdxl["importSourceShape"], json!("fused_checkpoint"));
+
+        let mage_dir = models.join("imports/mage");
+        std::fs::create_dir_all(&mage_dir).unwrap();
+        std::fs::write(mage_dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            mage_dir.join("diffusion_pytorch_model.safetensors"),
+            b"weights",
+        )
+        .unwrap();
+        let mut mage = legacy_user_entry("mage-flow", &mage_dir);
+        stamp_legacy_import_source_shape(&mut mage, &data_dir, true);
+        assert_eq!(mage["importSourceShape"], json!("transformer_directory"));
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_refuses_ambiguous_or_mismatched_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let ambiguous = models.join("imports/ambiguous");
+        write_safetensors(&ambiguous.join("one.safetensors"), &krea2_bf16_dit_keys());
+        write_safetensors(&ambiguous.join("two.safetensors"), &krea2_bf16_dit_keys());
+        let mut multiple = legacy_user_entry("krea_2", &ambiguous);
+        stamp_legacy_import_source_shape(&mut multiple, &data_dir, true);
+        assert!(multiple.get("importSourceShape").is_none());
+
+        let nested = models.join("imports/nested");
+        write_safetensors(
+            &nested.join("transformer/model.safetensors"),
+            &krea2_bf16_dit_keys(),
+        );
+        let mut recursive = legacy_user_entry("krea_2", &nested);
+        stamp_legacy_import_source_shape(&mut recursive, &data_dir, true);
+        assert!(recursive.get("importSourceShape").is_none());
+
+        let sdxl_file = models.join("imports/wrong-family.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut wrong_family = legacy_user_entry("krea_2", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut wrong_family, &data_dir, true);
+        assert!(wrong_family.get("importSourceShape").is_none());
     }
 
     #[test]
@@ -2588,6 +4554,88 @@ mod download_receipt_tests {
     // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
     use crate::tests::support::isolate_hf_cache;
 
+    #[test]
+    fn discovery_repairs_legacy_snapshot_revisions_and_restores_cache_eligibility() {
+        use sceneworks_core::model_artifacts::artifact_selection::{
+            local_cache_eligibility_for_model, LocalCacheCoverage,
+        };
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let repo = "owner/receipt-repair";
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = huggingface_repo_cache_path(data, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rev);
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        // A newer catalog pin must never be substituted for the snapshot actually installed.
+        let model = json!({"id":"repair", "downloads":[{"provider":"huggingface", "repo":repo,
+            "revision":"2222222222222222222222222222222222222222", "variant":"q4", "default":true, "files":["q4/*"]}]});
+        for revision in [None, Some(Value::Null), Some(json!("")), Some(json!("  "))] {
+            let mut entry = json!({"repo":repo, "modelId":"repair", "variant":"q4", "backfilled":true,
+                "resolvedFiles":["q4/model.safetensors"], "customField":"preserved"});
+            if let Some(revision) = revision {
+                entry["snapshotRevision"] = revision;
+            }
+            let sibling = json!({"repo":repo,"modelId":"other","variant":"q8", "snapshotRevision":rev,
+                "resolvedFiles":["q8/model.safetensors"]});
+            let mut top = entry.clone();
+            top["receipts"] = json!([entry, sibling]);
+            std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::None
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            let bytes = std::fs::read(&marker).unwrap();
+            let after: Value = serde_json::from_slice(&bytes).unwrap();
+            top["snapshotRevision"] = json!(rev);
+            top["receipts"][0]["snapshotRevision"] = json!(rev);
+            assert_eq!(
+                after, top,
+                "only missing revisions change, including the mirrored top-level receipt"
+            );
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::Full
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            assert_eq!(
+                std::fs::read(&marker).unwrap(),
+                bytes,
+                "repeat discovery is idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_revision_repair_does_not_pin_a_torn_shard_set() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = "owner/torn-repair";
+        let root = huggingface_repo_cache_path(temp.path(), repo).unwrap();
+        let snapshot = root.join("snapshots/1111111111111111111111111111111111111111");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let managed = temp.path().join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":repo,"modelId":"repair", "resolvedFiles":["model.safetensors.index.json"]});
+        let before = serde_json::to_vec(&receipt).unwrap();
+        std::fs::write(&marker, &before).unwrap();
+        repair_missing_snapshot_revisions(&managed, &json!({"id":"repair"}), temp.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
+
     fn builtin_models_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -2604,6 +4652,512 @@ mod download_receipt_tests {
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
+    /// Manifest `files` entries are match patterns, not literal names — Eros's shared Gemma
+    /// encoder ships as `"gemma/*"`. Seeding must write a CONCRETE file the pattern matches:
+    /// `snapshot_contains_pattern` globs the snapshot, so any real name under `gemma/` reads
+    /// exactly like the literal `*` file this helper used to write. That literal only ever worked
+    /// because `*` is a legal filename on macOS/Linux; on Windows `fs::write` fails with
+    /// `ERROR_INVALID_NAME` (os error 123), which reddened the seeded-cache Eros tests on the dev
+    /// box while the Linux `cargo test` lane stayed green.
+    fn seeded_file_path(pattern: &str) -> String {
+        pattern
+            .split('/')
+            .map(|segment| match segment {
+                "*" => "seeded.safetensors".to_owned(),
+                segment if pattern_contains_glob(segment) => {
+                    segment.replace('*', "seeded").replace('?', "0")
+                }
+                segment => segment.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
+        let repo = download.get("repo").and_then(Value::as_str).unwrap();
+        let revision = download.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(download, "files") {
+            let path = snapshot.join(seeded_file_path(&file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"legacy Eros weights").unwrap();
+        }
+    }
+
+    fn seed_manifest_downloads(data_dir: &FsPath, model: &Value, include_co_requisites: bool) {
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| include_co_requisites || !is_co_requisite_download(download))
+        {
+            seed_manifest_download(data_dir, download);
+        }
+    }
+
+    /// A platformCleanupOnly tombstone has its `variants` projection stripped by
+    /// `apply_model_catalog_entry`, yet the snapshot pipeline still runs size enrichment on it.
+    /// The refresh must no-op for tombstones while staying a hard error for real entries —
+    /// this exact mismatch 500'd the whole catalog for machines holding legacy Eros weights.
+    /// (Platform-neutral twin of the seeded-cache Eros tests below, which reach the same tombstone
+    /// through a real on-disk install — see `seeded_file_path` for why that seeding is glob-aware.)
+    #[test]
+    fn size_refresh_tolerates_a_cleanup_tombstone_without_variants() {
+        let mut tombstone = json!({
+            "id": "ltx_2_3_eros",
+            "platformCleanupOnly": true,
+        });
+        refresh_variant_download_sizes(&mut tombstone)
+            .expect("tombstone size refresh must be a no-op");
+        assert!(
+            tombstone.get("variants").is_none(),
+            "tombstone refresh must not invent a variants projection"
+        );
+
+        let mut real_entry = json!({ "id": "ltx_2_3" });
+        assert!(
+            refresh_variant_download_sizes(&mut real_entry).is_err(),
+            "a non-tombstone entry without a variants array is still a contract violation"
+        );
+    }
+
+    /// SC-18902: Eros is a real MLX product route, but its exact-head Candle/CUDA capture was
+    /// unusable. Pin the complete catalog projection so a future edit cannot restore the 46.8 GB
+    /// Windows/Linux offer merely by changing one of the three required download rows.
+    #[test]
+    fn ltx_eros_catalog_is_macos_only_and_not_downloadable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let base = builtin_models_entry("ltx_2_3");
+        assert_ne!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "base LTX-2.3 must remain cross-platform"
+        );
+        for os in ["windows", "linux"] {
+            let mut candle_base = base.clone();
+            retain_downloads_for_os(&mut candle_base, os);
+            assert!(
+                model_download_context(&candle_base)
+                    .expect("valid base LTX catalog entry")
+                    .is_some(),
+                "{os}: base LTX-2.3 remains downloadable"
+            );
+        }
+
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(true));
+
+        let mut false_override = entry.clone();
+        let object = false_override.as_object_mut().unwrap();
+        object.insert("macOnly".to_owned(), Value::Bool(false));
+        object.insert("type".to_owned(), Value::String("image".to_owned()));
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        let mut absent_override = entry.clone();
+        let object = absent_override.as_object_mut().unwrap();
+        object.remove("macOnly");
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        object.insert("usable".to_owned(), Value::Bool(true));
+        for override_attempt in [false_override, absent_override] {
+            let mut overridden_projection = vec![override_attempt];
+            retain_models_for_os(&mut overridden_projection, "windows", temp.path()).unwrap();
+            assert!(
+                overridden_projection.is_empty(),
+                "user platform/download fields cannot restore the withdrawn Eros product"
+            );
+        }
+
+        let mut macos = entry.clone();
+        retain_downloads_for_os(&mut macos, "macos");
+        let macos_downloads = macos
+            .get("downloads")
+            .and_then(Value::as_array)
+            .expect("macOS Eros downloads");
+        assert_eq!(
+            macos_downloads
+                .iter()
+                .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![
+                "SceneWorks/ltx-2.3-mlx",
+                "TenStrip/LTX2.3-10Eros",
+                "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+            ],
+            "macOS retains the shared Gemma bundle, Eros checkpoint, and cond_safe adapter"
+        );
+        let macos_context = model_download_context(&macos)
+            .expect("valid Eros download context")
+            .expect("macOS Eros remains downloadable");
+        let macos_state = install_state_for(Some(macos_context), &macos, temp.path());
+        assert!(macos_state.downloadable);
+        let mut macos_projection = vec![base.clone(), entry.clone()];
+        retain_models_for_os(&mut macos_projection, "macos", temp.path()).unwrap();
+        assert_eq!(
+            macos_projection
+                .iter()
+                .filter_map(|model| model.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["ltx_2_3", "ltx_2_3_eros"],
+            "macOS catalog and Model Manager retain both LTX products"
+        );
+
+        for os in ["windows", "linux"] {
+            let mut candle = entry.clone();
+            retain_downloads_for_os(&mut candle, os);
+            assert_eq!(
+                candle
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["SceneWorks/ltx-2.3-mlx"],
+                "{os}: platform filtering retains only the shared Gemma bundle, never the Eros checkpoint or adapter"
+            );
+            assert!(
+                model_download_context(&candle)
+                    .expect("valid filtered catalog entry")
+                    .is_none(),
+                "{os}: Eros must have no canonical download"
+            );
+            let state = install_state_for(None, &candle, temp.path());
+            assert!(!state.downloadable, "{os}: Eros must not be downloadable");
+            assert!(
+                !state.installed,
+                "{os}: filtered remote files must not resurrect a picker row"
+            );
+            let mut projection = vec![base.clone(), entry.clone()];
+            retain_models_for_os(&mut projection, os, temp.path()).unwrap();
+            assert_eq!(
+                projection
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["ltx_2_3"],
+                "{os}: Model Manager/catalog must omit Eros and preserve base LTX-2.3"
+            );
+        }
+    }
+
+    /// A previously shipped Windows/Linux install remains visible only as a cleanup tombstone. The
+    /// tombstone cannot generate, download, repair, or update, but DELETE can reclaim both the dense
+    /// checkpoint and its Eros-exclusive cond_safe adapter; once removed, the row disappears.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_legacy_install_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "an installed legacy Eros row is retained"
+        );
+        assert_eq!(
+            projection[0]
+                .get("platformCleanupOnly")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let context = model_download_context(&projection[0])
+            .unwrap()
+            .expect("cleanup tombstone retains its original artifact context");
+        // No resolved-cache artifacts (sc-19708's availability seam): a platform tombstone is
+        // judged from its own on-disk install, not from an external library's local copies.
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            Some(context),
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("installState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert_eq!(
+            projected.get("usable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("updateAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let refusal = ensure_model_downloadable(&projected)
+            .expect_err("a cleanup tombstone must reject direct download API calls");
+        assert!(refusal.detail.contains("retained only"));
+        let refusal = ensure_model_not_cleanup_only(&projected)
+            .expect_err("a cleanup tombstone must reject direct conversion API calls");
+        assert!(refusal.detail.contains("conversion"));
+        assert_eq!(
+            projected.get("hasVariantMatrix").and_then(Value::as_bool),
+            Some(false)
+        );
+        for field in [
+            "variants",
+            "mlxConversionState",
+            "mlxInstallState",
+            "mlxTiers",
+            "mlxTierStates",
+        ] {
+            assert!(
+                projected.get(field).is_none(),
+                "cleanup projection leaked {field}"
+            );
+        }
+
+        // The snapshot pipeline runs size enrichment on every retained row AFTER the tombstone
+        // strip. It must tolerate the stripped projection — a hard error here 500s the entire
+        // catalog for any machine still holding legacy Eros weights in its HF cache.
+        let mut enriched = projected.clone();
+        let context = model_download_context(&enriched).unwrap();
+        apply_model_catalog_size_fields(&mut enriched, context.as_ref(), None)
+            .expect("size enrichment tolerates a cleanup tombstone");
+        assert!(
+            enriched.get("variants").is_none(),
+            "size enrichment must not resurrect the variants projection on a tombstone"
+        );
+
+        let primary_repo = "TenStrip/LTX2.3-10Eros";
+        let adapter_repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let cleanup_paths = model_artifact_paths(&projected, data_dir);
+        assert!(cleanup_paths.contains(&primary_cache));
+        assert!(cleanup_paths.contains(&adapter_cache));
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(cleanup_paths, &allowed_roots, true)
+            .await
+            .expect("cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!primary_cache.exists(), "primary Eros cache is reclaimed");
+        assert!(
+            !adapter_cache.exists(),
+            "exclusive cond_safe cache is reclaimed"
+        );
+
+        let mut after_delete = vec![entry.clone()];
+        retain_models_for_os(&mut after_delete, "windows", data_dir).unwrap();
+        assert!(
+            after_delete.is_empty(),
+            "the cleanup tombstone disappears after deletion"
+        );
+
+        // A partial legacy install also needs the delete affordance, but never a repair/download.
+        seed_manifest_downloads(data_dir, &entry, false);
+        let mut partial = vec![entry];
+        retain_models_for_os(&mut partial, "linux", data_dir).unwrap();
+        assert_eq!(
+            partial.len(),
+            1,
+            "a partial legacy install remains reclaimable"
+        );
+        let context = model_download_context(&partial[0]).unwrap();
+        let partial = apply_model_catalog_entry(
+            partial.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            partial.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            partial.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let partial_primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        assert!(partial_primary_cache.exists());
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&partial, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("partial cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(
+            !partial_primary_cache.exists(),
+            "partial primary Eros cache is reclaimed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_corequisite_only_partial_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        let adapter = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|download| {
+                download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true)
+            })
+            .unwrap();
+        seed_manifest_download(data_dir, adapter);
+
+        let adapter_repo = adapter.get("repo").and_then(Value::as_str).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let mut projection = vec![entry];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "a co-requisite-only partial is retained"
+        );
+        let context = model_download_context(&projection[0]).unwrap();
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&projected, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("co-requisite-only partial delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!adapter_cache.exists(), "orphan adapter cache is reclaimed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_mixed_trash_failure_retains_a_retryable_cleanup_tombstone() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let primary_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3-10Eros").unwrap();
+        let adapter_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments")
+                .unwrap();
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "linux", data_dir).unwrap();
+        let cleanup_model = projection.pop().unwrap();
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let _trash = crate::test_trash_outcomes([
+            (primary_cache.clone(), true),
+            (adapter_cache.clone(), false),
+        ]);
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&cleanup_model, data_dir),
+            &allowed_roots,
+            false,
+        )
+        .await
+        .expect("mixed OS-trash outcome is recoverable");
+        assert!(removal
+            .removed_paths
+            .iter()
+            .any(|path| path == &primary_cache.display().to_string()));
+        assert!(removal
+            .trash_failed_paths
+            .iter()
+            .any(|path| path == &adapter_cache.display().to_string()));
+        assert!(!primary_cache.exists());
+        assert!(adapter_cache.exists());
+
+        let mut retry_projection = vec![entry.clone()];
+        retain_models_for_os(&mut retry_projection, "linux", data_dir).unwrap();
+        assert_eq!(
+            retry_projection.len(),
+            1,
+            "adapter residue must keep the permanent-delete retry resolvable"
+        );
+        let context = model_download_context(&retry_projection[0]).unwrap();
+        let retry_model = apply_model_catalog_entry(
+            retry_projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retry_model.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        let retry = crate::remove_owned_artifacts(
+            model_artifact_paths(&retry_model, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("permanent retry reclaims the retained adapter");
+        assert!(!retry.removed_paths.is_empty());
+        assert!(!adapter_cache.exists());
+
+        let mut after_retry = vec![entry];
+        retain_models_for_os(&mut after_retry, "linux", data_dir).unwrap();
+        assert!(
+            after_retry.is_empty(),
+            "tombstone disappears after retry succeeds"
+        );
     }
 
     #[test]
@@ -2693,6 +5247,521 @@ mod download_receipt_tests {
         std::fs::write(tier.join("tokenizer.json"), b"{}").unwrap();
         let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
         assert!(state.installed);
+    }
+
+    /// sc-20526 fixture: a diffusers quant tier whose text encoder is SHARDED. `present_shards`
+    /// selects which of the three declared shards actually landed, so the same builder produces both
+    /// the interrupted download and the genuinely complete tier.
+    fn write_sharded_diffusers_tier(snapshot: &FsPath, tier: &str, present_shards: &[u32]) {
+        let tier_dir = snapshot.join(tier);
+        std::fs::create_dir_all(&tier_dir).unwrap();
+        std::fs::write(
+            tier_dir.join("model_index.json"),
+            serde_json::to_vec(&json!({
+                "_class_name": "LensPipeline",
+                "text_encoder": ["transformers", "Qwen3Model"],
+                "transformer": ["diffusers", "LensTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (component, weights) in [
+            ("transformer", "diffusion_pytorch_model.safetensors"),
+            ("vae", "diffusion_pytorch_model.safetensors"),
+        ] {
+            let dir = tier_dir.join(component);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+            std::fs::write(dir.join(weights), b"weights").unwrap();
+        }
+        let scheduler = tier_dir.join("scheduler");
+        std::fs::create_dir_all(&scheduler).unwrap();
+        std::fs::write(scheduler.join("scheduler_config.json"), b"{}").unwrap();
+
+        let encoder = tier_dir.join("text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(encoder.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        for shard in present_shards {
+            std::fs::write(
+                encoder.join(format!("model-0000{shard}-of-00003.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+    }
+
+    fn sharded_tier_model(repo: &str, tier: &str) -> Value {
+        json!({
+            "id": "lens_turbo",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "variant": tier, "files": [format!("{tier}/*")]
+            }]
+        })
+    }
+
+    /// sc-20526 (AC 1, AC 6): the lens_turbo bf16 shape. The tier's `<tier>/*` glob matches, its
+    /// `model_index.json` is present, and `text_encoder/` holds a real `.safetensors` — so every
+    /// pre-existing check passed — yet the index names three shards and only the LAST one landed.
+    /// `model.embed_tokens.weight` lives in shard 1, so the load died with "cannot find tensor".
+    /// Backfill must refuse to mint a receipt, and the tier must read not-installed but repairable.
+    #[test]
+    fn backfill_refuses_a_partially_downloaded_sharded_tier() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a tier missing 2 of 3 text-encoder shards must not read installed"
+        );
+        assert!(
+            state.cache_incomplete,
+            "it must surface as repairable/re-downloadable, not merely absent"
+        );
+        assert!(
+            state
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("model-00001-of-00003.safetensors")),
+            "the absent shard must be named: {:?}",
+            state.missing_required_files
+        );
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+        assert!(
+            !marker.exists(),
+            "backfill must not launder an interrupted download into a complete receipt"
+        );
+
+        // Mutation check: the two missing shards arriving flips every assertion above, proving the
+        // check discriminates on shard completeness rather than rejecting sharded tiers wholesale.
+        for shard in [1, 2] {
+            std::fs::write(
+                snapshot.join(format!(
+                    "bf16/text_encoder/model-0000{shard}-of-00003.safetensors"
+                )),
+                b"shard",
+            )
+            .unwrap();
+        }
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(state.installed, "a genuinely complete tier must pass");
+        assert!(!state.cache_incomplete);
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str()
+                    == Some("bf16/text_encoder/model-00001-of-00003.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3, AC 4, AC 6): an ALREADY-WRITTEN false-complete receipt — `backfilled: true`
+    /// with `resolvedFiles` listing the index plus only the shards that happened to land. This is
+    /// exactly what shipped to affected users. The next scan must invalidate it (no "usable stale"
+    /// install) AND repair the file, so nobody has to delete it by hand.
+    #[test]
+    fn existing_false_complete_receipt_is_invalidated_and_repaired() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
+        std::fs::create_dir_all(&managed).unwrap();
+        let torn_entry = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/model_index.json",
+                "bf16/text_encoder/config.json",
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        std::fs::write(&marker, serde_json::to_vec(&torn_entry).unwrap()).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a receipt whose recorded files all exist must still not resurrect a torn shard set"
+        );
+        assert!(
+            !marker.exists(),
+            "the false-complete receipt must be repaired away so the install self-heals"
+        );
+
+        // A receipt for a tier that IS complete survives the same sweep untouched.
+        write_sharded_diffusers_tier(&snapshot, "q4", &[1, 2, 3]);
+        let sound = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "q4",
+            "manifestFiles": ["q4/*"],
+            "resolvedFiles": [
+                "q4/model_index.json",
+                "q4/text_encoder/model-00001-of-00003.safetensors",
+                "q4/text_encoder/model-00002-of-00003.safetensors",
+                "q4/text_encoder/model-00003-of-00003.safetensors",
+                "q4/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        let seeded_files = sound["resolvedFiles"].clone();
+        std::fs::write(&marker, serde_json::to_vec(&sound).unwrap()).unwrap();
+        let q4 = sharded_tier_model(repo, "q4");
+        assert!(install_state_for(model_download_context(&q4).unwrap(), &q4, data_dir).installed);
+        // IDENTITY, not mere existence. `marker.exists()` alone proves nothing here: the tier is
+        // complete, so a receipt deleted by an over-eager repair would be re-backfilled inside the
+        // same call and the file would be back before the assertion ran. A re-backfill records the
+        // full WALKED set (model_index, transformer, vae, scheduler, …), so the seeded five entries
+        // surviving verbatim is what proves the sound receipt was never touched.
+        let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(
+            after["resolvedFiles"], seeded_files,
+            "repair must be positive-evidence only — a sound receipt is never deleted (nor \
+             re-minted from a walk, which would list the transformer/vae/scheduler files too)"
+        );
+        assert_eq!(after["manifestFiles"], json!(["q4/*"]));
+    }
+
+    /// sc-20526 (AC 2): a WHOLE-REPO download (empty `files`) declares no per-file claim, so "some
+    /// payload landed" used to be the only signal. The repo's own shard index is the ground truth.
+    #[test]
+    fn whole_repo_install_validates_its_shard_index() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/whole-repo-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "whole-repo-model",
+            "downloads": [{ "provider": "huggingface", "repo": repo }]
+        });
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(!state.installed, "half a shard set is not an install");
+        assert!(state
+            .missing_required_files
+            .iter()
+            .any(|file| file.contains("model-00001-of-00002.safetensors")));
+
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a complete whole-repo shard set must pass"
+        );
+    }
+
+    /// sc-20526 (AC 1) — the shard guard INSIDE `backfill_current_receipt`, standing on its own.
+    ///
+    /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
+    /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
+    /// `install_state_for` never enters the backfill at all — delete the guard and that test still
+    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
+    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
+    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
+    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
+    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
+    /// declared those files and they are all there — so this fixture is the guard alone.)
+    #[test]
+    fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/flat-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                "lm_head.weight": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "flat_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
+            }]
+        });
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            state.installed,
+            "fixture precondition: every declared pattern is present, so cache health reads \
+             installed and the backfill lane is genuinely entered"
+        );
+        assert!(
+            !marker.exists(),
+            "backfill must refuse to record a set whose own shard index names a file that never \
+             landed — nothing else on this lane is watching"
+        );
+
+        // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
+        // guard discriminates on shard completeness rather than never writing for this shape.
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
+        );
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str() == Some("model-00001-of-00002.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3) — the shard filter in `receipt_files_present`, with repair kept out of the way.
+    ///
+    /// `existing_false_complete_receipt_is_invalidated_and_repaired` deletes the receipt before the
+    /// read side ever runs, so it cannot witness that filter. Here a SECOND cached revision holds the
+    /// same index with a complete shard set, which is precisely the evidence
+    /// `receipt_entry_is_provably_torn` treats as "not provably torn" — the receipt SURVIVES the
+    /// sweep. It still must not count: the only revision holding every file the receipt RECORDED is
+    /// the torn one (rev-a), and the complete revision (rev-b) is missing `config.json`, so no single
+    /// snapshot satisfies both the recorded set and that set's own index.
+    #[test]
+    fn torn_receipt_surviving_repair_is_still_refused_by_the_read_side() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/two-revision-sharded";
+        let root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let index_json = serde_json::to_vec(&json!({"weight_map": {
+            "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "lm_head.weight": "model-00002-of-00002.safetensors",
+        }}))
+        .unwrap();
+
+        // rev-a: exactly what the receipt recorded — and its index names a shard that never landed.
+        let torn = root.join("snapshots/rev-a");
+        std::fs::create_dir_all(&torn).unwrap();
+        std::fs::write(torn.join("config.json"), b"{}").unwrap();
+        std::fs::write(torn.join("model.safetensors.index.json"), &index_json).unwrap();
+        std::fs::write(torn.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+
+        // rev-b: a COMPLETE shard set, but no `config.json` — so it can never satisfy this receipt.
+        // Its existence is what makes the entry not *provably* torn, so repair leaves the file alone.
+        let sound = root.join("snapshots/rev-b");
+        std::fs::create_dir_all(&sound).unwrap();
+        std::fs::write(sound.join("model.safetensors.index.json"), &index_json).unwrap();
+        for shard in [1, 2] {
+            std::fs::write(
+                sound.join(format!("model-0000{shard}-of-00002.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+
+        // `tokenizer.json` exists in no revision, so the cache-health lane reads NOT installed and
+        // the receipt is the only thing that could still call this model installed.
+        let model = json!({
+            "id": "two_revision_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "tokenizer.json"]
+            }]
+        });
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "two_revision_sharded",
+            "variant": "default",
+            "manifestFiles": ["config.json", "model.safetensors.index.json", "tokenizer.json"],
+            "resolvedFiles": [
+                "config.json",
+                "model.safetensors.index.json",
+                "model-00002-of-00002.safetensors",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "fixture precondition: a complete sibling revision makes this entry NOT provably torn, \
+             so repair must leave it byte-identical — the read side has to do the refusing"
+        );
+        assert!(
+            !state.installed,
+            "the revision holding every recorded file is the torn one, so a surviving receipt must \
+             not be honoured as a usable-stale install"
+        );
+
+        // Mutation check: the absent shard landing in rev-a makes the SAME surviving receipt
+        // legitimately count, proving the refusal keys on shard completeness, not on the receipt.
+        std::fs::write(torn.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a receipt whose recorded index IS complete in the revision holding its files counts"
+        );
+    }
+
+    /// sc-20526 (AC 4) — the hard constraint on repair: PROVABLY torn, never merely unverifiable.
+    ///
+    /// A backfilled, index-bearing receipt whose repo cache is not on this box at all (weights moved
+    /// into an external library, or a data dir restored without its HF cache) carries no evidence of
+    /// tearing. Deleting it would destroy the relocation proof an external-library install depends
+    /// on, and read-side validation already refuses to count it — so it must survive untouched.
+    /// Flipping `saw_torn`'s initial value to `true` turns "no evidence" into "delete it".
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_repo_cache_is_absent() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/relocated-to-external-library";
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "relocated", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+        assert!(
+            huggingface_repo_cache_path(data_dir, repo).is_some_and(|root| !root.exists()),
+            "fixture precondition: no repo cache at all, so nothing can be proven about the shards"
+        );
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "an absent repo cache is not evidence of tearing — the receipt must survive byte-identical"
+        );
+    }
+
+    /// sc-20526 (AC 4), the second no-evidence shape: the repo cache IS here, but not one cached
+    /// revision holds the index the receipt recorded (a revision bump, or a cache pruned of this
+    /// tier). Nothing can be read off disk, so nothing is proven and the receipt stays.
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_index_is_in_no_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/index-not-cached";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model_index.json"), b"{}").unwrap();
+        std::fs::write(snapshot.join("q4/some.safetensors"), b"weights").unwrap();
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "index_not_cached", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "a recorded index that is in NO snapshot proves nothing — the receipt must survive \
+             byte-identical"
+        );
+
+        // Mutation check: the index arriving with a shard missing IS proof, and the same call now
+        // removes the entry — so the survival above is a decision about evidence, not inaction.
+        let encoder = snapshot.join("bf16/text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(encoder.join("model-00003-of-00003.safetensors"), b"shard").unwrap();
+        repair_torn_backfilled_receipts(&managed, data_dir);
+        assert!(
+            !marker.exists(),
+            "a recorded index that IS on disk and names a missing shard is provably torn"
+        );
     }
 
     #[test]
@@ -3083,7 +6152,7 @@ mod download_receipt_tests {
                     .join(revision);
                 std::fs::create_dir_all(&snapshot).unwrap();
                 for file in string_array_field(co_requisite, "files") {
-                    let path = snapshot.join(&file);
+                    let path = snapshot.join(seeded_file_path(&file));
                     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                     std::fs::write(path, b"weights").unwrap();
                 }
@@ -3099,6 +6168,50 @@ mod download_receipt_tests {
                 "{model_id}: nothing is missing once every component is staged, got {:?}",
                 installed.missing_required_files
             );
+
+            // Existing installs predate the upstream repo rename and keep the exact immutable CLIP
+            // snapshot under the legacy cache namespace. The catalog must continue to call those
+            // installs ready instead of offering a repair that would fetch the same ~3.95 GB blob
+            // again; the worker uses the same validator-proven plain source and hard-links the
+            // canonical namespace cache-only when the filesystem supports it.
+            let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+            let clip = co_requisites
+                .iter()
+                .find(|download| {
+                    download.get("repo").and_then(Value::as_str) == Some(rename.current_repo)
+                })
+                .expect("live MMAudio manifest has the canonical CLIP component");
+            let clip_revision = clip.get("revision").and_then(Value::as_str).unwrap();
+            let clip_files = string_array_field(clip, "files");
+            std::fs::remove_dir_all(
+                huggingface_repo_cache_path(data_dir, rename.current_repo).unwrap(),
+            )
+            .unwrap();
+            let legacy_repo = huggingface_repo_cache_path(data_dir, rename.legacy_repo).unwrap();
+            let legacy_snapshot = legacy_repo.join("snapshots").join(clip_revision);
+            for file in &clip_files {
+                let path = legacy_snapshot.join(seeded_file_path(file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+
+                    let blob = legacy_repo.join("blobs").join("clip-blob");
+                    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+                    std::fs::write(&blob, b"existing cached weights").unwrap();
+                    symlink(&blob, &path).unwrap();
+                }
+                #[cfg(not(unix))]
+                std::fs::write(path, b"existing cached weights").unwrap();
+            }
+
+            let legacy_installed =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(
+                legacy_installed.installed,
+                "{model_id}: the exact legacy CLIP snapshot remains a complete offline install"
+            );
+            assert!(legacy_installed.missing_required_files.is_empty());
         }
     }
 
@@ -3183,7 +6296,7 @@ mod download_receipt_tests {
                 .join(codec_rev);
             std::fs::create_dir_all(&codec_snapshot).unwrap();
             for file in string_array_field(codec, "files") {
-                let path = codec_snapshot.join(&file);
+                let path = codec_snapshot.join(seeded_file_path(&file));
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, b"weights").unwrap();
             }
@@ -3201,19 +6314,29 @@ mod download_receipt_tests {
         }
     }
 
-    /// sc-13682: the three SDXL shared components (CLIP-L/bigG tokenizers + fp16-fix VAE) are declared as
-    /// candle-only (`platforms: [windows, linux]`) hard co-requisites on every candle-SDXL base +
-    /// InstantID. On macOS `retain_downloads_for_os` strips them, so the self-contained MLX turnkey's
-    /// install state does NOT gate on them; on the candle OSes all three are retained and gate the entry.
-    /// Binds to the LIVE builtin manifest so a lost platform tag or a dropped component fails here.
+    /// The three descriptor-required SDXL components (CLIP-L/bigG tokenizers + fp16-fix VAE) remain
+    /// Candle-only hard co-requisites on every Candle-SDXL base + InstantID. OpenPose is different: it
+    /// is one cross-platform soft install companion on exactly the five accepted base models.
+    /// Missing it must offer an update without making ordinary MLX or Candle generation uninstalled.
+    /// Binds both contracts to the LIVE builtin manifest and install-state implementation.
     #[test]
-    fn sdxl_shared_components_are_candle_only_and_gate_install_state_off_macos() {
+    fn sdxl_shared_components_separate_hard_candle_and_soft_cross_platform_state() {
         use std::collections::BTreeSet;
 
-        let want: BTreeSet<String> = ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect();
+        let _env = isolate_hf_cache();
+        let hard_want: BTreeSet<String> =
+            ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect();
+        let soft_want = BTreeSet::from(["controlnet_openpose".to_owned()]);
+        let pose_models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
 
         for model_id in [
             "sdxl",
@@ -3224,41 +6347,90 @@ mod download_receipt_tests {
             "instantid_realvisxl",
         ] {
             let entry = builtin_models_entry(model_id);
-
-            // macOS: the candle-only components are filtered out, so the MLX turnkey gates on NO coReq.
-            let mut macos = entry.clone();
-            retain_downloads_for_os(&mut macos, "macos");
-            assert!(
-                model_co_requisite_downloads(&macos).is_empty(),
-                "{model_id}: the SDXL CLIP/VAE components must not gate the macOS MLX turnkey install state",
-            );
-
-            // Windows + Linux: all three components are retained and gate the candle entry.
-            for os in ["windows", "linux"] {
-                let mut candle = entry.clone();
-                retain_downloads_for_os(&mut candle, os);
-                let ids: BTreeSet<String> = model_co_requisite_downloads(&candle)
-                    .iter()
-                    .filter_map(|download| {
-                        download
-                            .get("componentId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .collect();
+            for os in ["macos", "windows", "linux"] {
+                let mut platform_entry = entry.clone();
+                retain_downloads_for_os(&mut platform_entry, os);
+                let co_requisites = model_co_requisite_downloads(&platform_entry);
+                let ids_for = |soft: bool| -> BTreeSet<String> {
+                    co_requisites
+                        .iter()
+                        .filter(|download| {
+                            (download.get("required").and_then(Value::as_str) == Some("soft"))
+                                == soft
+                        })
+                        .filter_map(|download| {
+                            download
+                                .get("componentId")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                };
+                let expected_hard = if os == "macos" {
+                    BTreeSet::new()
+                } else {
+                    hard_want.clone()
+                };
                 assert_eq!(
-                    ids, want,
-                    "{model_id} on {os}: the candle SDXL entry must gate on all three shared components",
+                    ids_for(false),
+                    expected_hard,
+                    "{model_id} on {os}: only Candle must gate on the three hard CLIP/VAE components",
                 );
+                let expected_soft = if pose_models.contains(&model_id) {
+                    soft_want.clone()
+                } else {
+                    BTreeSet::new()
+                };
+                assert_eq!(
+                    ids_for(true),
+                    expected_soft,
+                    "{model_id} on {os}: OpenPose must be soft, cross-platform, and limited to the five accepted pose backbones",
+                );
+
+                if pose_models.contains(&model_id) {
+                    let data = tempfile::tempdir().unwrap();
+                    for download in platform_entry
+                        .get("downloads")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|download| {
+                            download.get("required").and_then(Value::as_str) != Some("soft")
+                        })
+                    {
+                        seed_manifest_download(data.path(), download);
+                    }
+                    let state = install_state_for(
+                        model_download_context(&platform_entry).unwrap(),
+                        &platform_entry,
+                        data.path(),
+                    );
+                    assert!(
+                        state.installed,
+                        "{model_id} on {os}: missing soft OpenPose must not block ordinary generation",
+                    );
+                    assert!(
+                        state.update_available,
+                        "{model_id} on {os}: missing soft OpenPose must remain installable/repairable",
+                    );
+                    assert!(
+                        !state.cache_incomplete && state.missing_required_files.is_empty(),
+                        "{model_id} on {os}: a missing soft component is not a torn hard install; missing={:?}",
+                        state.missing_required_files,
+                    );
+                }
             }
         }
     }
 
-    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
-    /// install badge must enforce the exact provider-required six-file layout. This binds product
-    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    /// The live SCAIL-2 manifest must give off-Mac users all three shared package variants and the
+    /// catalog's per-tier install badge must enforce both the provider-required six-file layout and
+    /// the exact precision marker. This binds product advertisement, Model Manager filtering, and
+    /// worker loadability without duplicating weights or enabling a mixed package. The product
+    /// description must also advertise the reviewed Candle q4/q8/bf16 routes rather than the
+    /// pre-admission fail-closed wording.
     #[test]
-    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+    fn scail2_shared_variants_are_installable_off_macos_and_advertise_admitted_candle_tiers() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let original = builtin_models_entry("scail2_14b");
@@ -3267,10 +6439,24 @@ mod download_receipt_tests {
             let mut model = original.clone();
             retain_downloads_for_os(&mut model, os);
             let downloads = model["downloads"].as_array().unwrap();
-            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
-            assert_eq!(downloads[0]["variant"], "bf16");
-            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
-            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+            assert_eq!(
+                downloads.len(),
+                3,
+                "{os} must expose all three package tiers"
+            );
+            let variants: std::collections::BTreeMap<_, _> = downloads
+                .iter()
+                .map(|download| {
+                    (
+                        download["variant"].as_str().unwrap(),
+                        download["files"].clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(variants["q4"], json!(["q4/*"]));
+            assert_eq!(variants["q8"], json!(["q8/*"]));
+            assert_eq!(variants["bf16"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "q4");
         }
 
         let mut model = original;
@@ -3278,14 +6464,39 @@ mod download_receipt_tests {
         let download = model_download(&model).unwrap();
         let repo = download["repo"].as_str().unwrap();
         let revision = download["revision"].as_str().unwrap();
-        let tier = huggingface_repo_cache_path(data.path(), repo)
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
             .unwrap()
             .join("snapshots")
-            .join(revision)
-            .join("bf16");
-        std::fs::create_dir_all(&tier).unwrap();
+            .join(revision);
+        let q4 = snapshot.join("q4");
+        let q8 = snapshot.join("q8");
+        let bf16 = snapshot.join("bf16");
 
-        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let write_tier = |dir: &FsPath, marker: Value| {
+            std::fs::create_dir_all(dir).unwrap();
+            for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+                std::fs::write(dir.join(file), b"").unwrap();
+            }
+            std::fs::write(
+                dir.join("config.json"),
+                serde_json::to_vec(&marker).unwrap(),
+            )
+            .unwrap();
+        };
+        let health = |states: &[ModelVariantState]| {
+            states
+                .iter()
+                .map(|state| {
+                    (
+                        state.variant.clone(),
+                        (state.installed, state.cache_incomplete),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+
+        std::fs::create_dir_all(&q4).unwrap();
+        std::fs::write(q4.join("dit.safetensors"), b"").unwrap();
         let partial =
             install_state_for(model_download_context(&model).unwrap(), &model, data.path());
         assert!(!partial.installed);
@@ -3294,27 +6505,80 @@ mod download_receipt_tests {
             partial
                 .missing_required_files
                 .iter()
-                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+                .any(|file| file.contains("q4") && file.contains("incomplete")),
             "got {:?}",
             partial.missing_required_files
         );
 
-        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
-            std::fs::write(tier.join(file), b"").unwrap();
-        }
-        let installed =
-            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
-        assert!(installed.installed);
-        assert!(!installed.cache_incomplete);
+        write_tier(
+            &q4,
+            json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        );
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (false, false)),
+                ("q4".to_owned(), (true, false)),
+                ("q8".to_owned(), (false, false)),
+            ]),
+            "one complete variant must not make never-downloaded siblings look installed or torn"
+        );
 
-        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
-        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
-        assert!(!torn.installed, "a provider-required file was removed");
-        assert!(torn.cache_incomplete);
+        // Every q8 filename exists, but the q4 marker was mixed into the q8 directory. The coarse
+        // glob sees files; the shared completeness predicate must still keep this tier disabled and
+        // repairable while leaving the independently complete q4 installed.
+        write_tier(
+            &q8,
+            json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        );
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (false, false)),
+                ("q4".to_owned(), (true, false)),
+                ("q8".to_owned(), (false, true)),
+            ])
+        );
+        let mixed = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(mixed.installed, "the valid q4 sibling remains installed");
+        assert!(
+            mixed.cache_incomplete,
+            "the mixed q8 tier remains repairable"
+        );
+
+        write_tier(
+            &q8,
+            json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        );
+        write_tier(&bf16, json!({}));
+        let states = model_variant_states(&model, data.path());
+        assert!(states.iter().all(|state| state.installed));
+        assert!(states.iter().all(|state| !state.cache_incomplete));
+
+        std::fs::remove_file(q4.join("t5_encoder.safetensors")).unwrap();
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (true, false)),
+                ("q4".to_owned(), (false, true)),
+                ("q8".to_owned(), (true, false)),
+            ]),
+            "tearing q4 must not alter the independently installed q8/bf16 states"
+        );
 
         let description = model["ui"]["description"].as_str().unwrap();
         assert!(description.contains("Candle on NVIDIA Windows/Linux"));
-        assert!(!description.contains("macOS native MLX only"));
+        assert!(description.contains("ordered reference character images"));
+        assert!(description.contains(
+            "admit the same installable q4, q8, and bf16 package variants when installed"
+        ));
+        assert!(
+            !description.contains("execution remains fail-closed"),
+            "the pre-admission product wording must not contradict the reviewed Candle routes"
+        );
     }
 }
 
@@ -3339,9 +6603,12 @@ fn install_state_for(
         // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
+        let mut tier_dependencies_missing = false;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
+                tier_dependencies_missing =
+                    variants.iter().any(|variant| variant.dependencies_missing);
                 let any_installed = variants.iter().any(|variant| variant.installed);
                 // A TORN tier — some of its files present but not all — is a genuine repair candidate:
                 // it will fail to load, and re-downloading that tier fixes it. A never-fetched tier is
@@ -3403,6 +6670,11 @@ fn install_state_for(
         // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
         // left by an empty download would otherwise read the whole model as installed while every tier
         // reads missing. Single-variant models keep the repo-level managed contract.
+        // sc-20526: drop any receipt a pre-fix backfill minted over a partially downloaded tier
+        // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
+        // manual delete — and so the backfill below can re-record the tier honestly.
+        repair_torn_backfilled_receipts(&managed_path, data_dir);
+        repair_missing_snapshot_revisions(&managed_path, model, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
@@ -3442,7 +6714,10 @@ fn install_state_for(
                             .and_then(Value::as_bool)
                             .unwrap_or(false)
                 });
-        let usable_stale = stale_files_present && !breaking_update;
+        // A receipt proves the primary files exist, not that their dependencies still do.
+        // Do not let it override missing dependencies. A partial nonbreaking primary update
+        // may still use its complete older receipt.
+        let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
@@ -3466,8 +6741,11 @@ fn install_state_for(
         let tier_scoped: Vec<Value> = model_co_requisite_downloads(model)
             .into_iter()
             .filter(|download| co_requisite_variant(download).is_some())
+            .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
             .collect();
-        if !tier_scoped.is_empty() {
+        // Current matrix variants already check their matching dependency sets with the primary.
+        // Retain the dependency floor when a receipt is supplying an older primary instead.
+        if (!model_has_variant_matrix(model) || usable_stale) && !tier_scoped.is_empty() {
             let tiers: std::collections::BTreeSet<String> = tier_scoped
                 .iter()
                 .filter_map(co_requisite_variant)
@@ -3477,16 +6755,7 @@ fn install_state_for(
                     .iter()
                     .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
                     .all(|download| {
-                        download
-                            .get("repo")
-                            .and_then(Value::as_str)
-                            .and_then(|repo| huggingface_repo_cache_path(data_dir, repo))
-                            .map(|path| {
-                                huggingface_cache_health(
-                                    &path,
-                                    &string_array_field(download, "files"),
-                                )
-                            })
+                        co_requisite_cache_health(data_dir, download)
                             .is_some_and(|health| health.installed)
                     })
             });
@@ -3512,9 +6781,7 @@ fn install_state_for(
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
-            let files = string_array_field(&co_requisite, "files");
-            let health = huggingface_repo_cache_path(data_dir, repo)
-                .map(|path| huggingface_cache_health(&path, &files));
+            let health = co_requisite_cache_health(data_dir, &co_requisite);
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
@@ -3566,6 +6833,105 @@ fn install_state_for(
     }
 }
 
+/// Resolve install-state health for a hard/soft co-requisite, including exact cache-only aliases
+/// for upstream repository renames. This deliberately does not mutate the cache while serving the
+/// catalog. It lets an existing immutable legacy snapshot remain usable/installed; the worker's
+/// load-time resolver then consumes the same validated plain source and hard-links the canonical
+/// cache namespace from those local bytes when possible.
+fn co_requisite_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+) -> Option<HuggingFaceCacheHealth> {
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let files = string_array_field(download, "files");
+    let exact_rename = download
+        .get("revision")
+        .and_then(Value::as_str)
+        .and_then(|revision| {
+            sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+        });
+    let current = match exact_rename {
+        Some(rename) => {
+            exact_rename_side_cache_health(data_dir, rename.current_repo, rename, &files)
+        }
+        None => huggingface_repo_cache_path(data_dir, repo)
+            .map(|path| huggingface_cache_health(&path, &files)),
+    };
+    if current.as_ref().is_some_and(|health| health.installed) {
+        return current;
+    }
+
+    let exact_legacy = exact_rename.and_then(|rename| {
+        exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+    });
+
+    match (current, exact_legacy) {
+        (_, Some(legacy)) if legacy.installed => Some(legacy),
+        (Some(current), _) if current.incomplete => Some(current),
+        (_, Some(legacy)) if legacy.incomplete => Some(legacy),
+        (current, legacy) => current.or(legacy),
+    }
+}
+
+fn co_requisite_satisfied_by_exact_legacy_rename(data_dir: &FsPath, download: &Value) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    let files = string_array_field(download, "files");
+    let Some(rename) =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+    else {
+        return false;
+    };
+    exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+        .is_some_and(|health| health.installed)
+}
+
+/// Evaluate an exact legacy alias with the same canonical-source confinement used by the worker's
+/// load-time relink. A readable symlink is not sufficient: if it escapes the legacy repository
+/// cache, treating it as installed would suppress the canonical repair download even though the
+/// worker must reject it.
+fn exact_rename_side_cache_health(
+    data_dir: &FsPath,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return Some(HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: Vec::new(),
+        });
+    }
+    // Through the typed source-library seam rather than raw joins (sc-19711's artifact inventory
+    // forbids the API constructing a model root directly; `crates/sceneworks-worker/src/model_jobs.rs`
+    // is the one classified infrastructure surface allowed to). `repo_root` came from
+    // `huggingface_repo_cache_path`, i.e. this same library, so the seam accepts it; `.root()` is the
+    // very `huggingface_hub_cache_dir(data_dir)` this used to pass, unchanged.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshot = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?
+        .join(rename.revision);
+    if sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        library.root(),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .is_some()
+    {
+        Some(HuggingFaceCacheHealth::installed())
+    } else {
+        Some(HuggingFaceCacheHealth::missing(files.to_vec()))
+    }
+}
+
 // Per-variant install state (sc-8508, epic 8506): a single downloadable tier of a quant-matrix
 // model. `install_state_for` reports the DEFAULT variant's install state (back-compat single-variant
 // contract); `model_variants` reports one of these per declared download entry so the catalog knows
@@ -3581,6 +6947,8 @@ struct ModelVariantState {
     installed_path: Option<String>,
     /// This tier's incomplete-cache signal (some but not all `files` present).
     cache_incomplete: bool,
+    /// A present primary is missing required companions; primary-only receipts cannot repair this.
+    dependencies_missing: bool,
     /// Files this tier is missing from the cache (empty when complete or absent).
     missing_required_files: Vec<String>,
     /// This tier's estimated download size (from `downloads[].estimatedSizeBytes` /
@@ -3639,6 +7007,11 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
+        // Both MiniMax-H3 entries load both DiT partitions. Each partition's glob can match
+        // an interrupted download, so require both indexed shard sets before advertising a tier.
+        "minimax-h3" if tc::minimax_h3_tier_predicate(model_id).is_some() => {
+            Some(|dir| tc::minimax_h3_tier_complete(dir) && tc::minimax_h3_ref_tier_complete(dir))
+        }
         _ => None,
     }
 }
@@ -3774,6 +7147,42 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // A tier is usable only with its own required companions. Checking these only at
+            // model level let a complete q4 encoder certify bf16 and hid its repair action.
+            // An absent primary remains absent even if shared files from another tier exist.
+            let mut dependencies_missing = false;
+            if installed || cache_incomplete {
+                for download in model_co_requisite_downloads_for_variant(
+                    model,
+                    entry.get("variant").and_then(Value::as_str),
+                )
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+                {
+                    let health = co_requisite_cache_health(data_dir, &download);
+                    if health.as_ref().is_some_and(|health| health.installed) {
+                        continue;
+                    }
+                    installed = false;
+                    cache_incomplete = true;
+                    dependencies_missing = true;
+                    let repo = download
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let missing = health
+                        .map(|health| health.missing_files)
+                        .filter(|files| !files.is_empty())
+                        .unwrap_or_else(|| string_array_field(&download, "files"));
+                    if missing.is_empty() {
+                        missing_required_files.push(repo.to_owned());
+                    } else {
+                        missing_required_files
+                            .extend(missing.iter().map(|file| format!("{repo}/{file}")));
+                    }
+                }
+            }
+
             let installed_path = if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -3791,6 +7200,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
                 cache_incomplete,
+                dependencies_missing,
                 missing_required_files,
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
@@ -3895,6 +7305,12 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
 }
 
 fn refresh_variant_download_sizes(model: &mut Value) -> Result<(), ApiError> {
+    // A platformCleanupOnly tombstone strips the whole variants projection in
+    // `apply_model_catalog_entry` — the missing array is its contract, not corruption, and there
+    // is nothing to refresh. Keep the strict array guard below for every real catalog entry.
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
     // `apply_variant_fields` runs in the blocking install-state sweep while live HF estimation runs
     // concurrently. Refresh only the already-built response fields after both complete: rebuilding
     // variants here would repeat filesystem probes serially and undo the intended overlap.
@@ -4104,26 +7520,94 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
 /// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    // Deliberately the BUILD's linked engines, not `generation::enqueue_backend` — see that
+    // function's "Scope" note. The pair is consulted asymmetrically below (a withdrawal crosses
+    // lanes, a positive advertisement never does), which a one-hot routing answer cannot express,
+    // and a macOS build links no candle engine to derive a positive candle verdict from.
     let mlx_lane = cfg!(target_os = "macos");
-    apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
+    // Resolved as a VERDICT rather than by checking whether the first pass wrote anything:
+    // `apply_model_manifest_defaults` can already have synthesized a `loraCompatibility` object, so
+    // "the key exists" says nothing about whether this projection decided anything.
+    let verdict = imported_lora_advertisement_verdict(object, mlx_lane, !mlx_lane).or_else(|| {
+        // This build's lane had NO OPINION, which is not the same as "adapters are fine". Leaving
+        // the entry untouched restores the permissive `family` fallback — the precise silent
+        // re-advertisement sc-15328 fixed, where the API accepted a LoRA submission no worker could
+        // claim and the job queued forever with no error. A generated Mage full fine-tune on any
+        // non-macOS deployment is exactly that shape: candle registers no `mage-flow` imported
+        // provider, so only MLX can say "serves the family, refuses adapters".
+        //
+        // So a WITHDRAWAL crosses lanes; a positive advertisement never does. Offering adapters
+        // this build cannot claim is the same hang pointed the other way, which is what the filter
+        // to the refusing verdict prevents.
+        imported_lora_advertisement_verdict(object, !mlx_lane, mlx_lane).filter(|serves| !serves)
+    });
+    if let Some(serves_loras) = verdict {
+        write_imported_lora_advertisement(object, serves_loras);
+    }
 }
 
+/// Test-facing lane-scoped projection: resolve ONE lane pair and write its verdict verbatim, with no
+/// cross-lane fallback. Production goes through [`apply_imported_lora_advertisement`], which adds
+/// the withdrawal fallback; keeping this seam separate is what lets a test state each lane's own
+/// truth from either platform without the fallback blurring the two.
+#[cfg(test)]
 fn apply_imported_lora_advertisement_for_lanes(
     object: &mut JsonObject,
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
-    if object.get("type").and_then(Value::as_str) != Some("image") {
-        return;
-    }
-    let Some(id) = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|id| !id.is_empty())
+    let Some(serves_loras) =
+        imported_lora_advertisement_verdict(object, mlx_lane_available, candle_lane_available)
     else {
         return;
     };
+    write_imported_lora_advertisement(object, serves_loras);
+}
+
+/// The advertisement verdict for one lane pair, with no mutation: `Some(true)` serves adapters,
+/// `Some(false)` serves the family and refuses them, `None` is "not on this seam at all" (a builtin,
+/// a non-image row, or a family no supplied lane registers).
+fn imported_lora_advertisement_verdict(
+    object: &JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> Option<bool> {
+    if object.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.is_empty())?;
+    let family = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)?;
+    let source = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })?;
+    sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
+        &id,
+        &family,
+        source,
+        mlx_lane_available,
+        candle_lane_available,
+    )
+}
+
+/// Write the verdict onto the entry. Split from the resolution above so the production binding can
+/// resolve twice — its own lane, then a cross-lane withdrawal — without projecting twice.
+fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool) {
     let Some(family) = object
         .get("family")
         .and_then(Value::as_str)
@@ -4133,25 +7617,306 @@ fn apply_imported_lora_advertisement_for_lanes(
     else {
         return;
     };
-    let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
-        &id,
-        &family,
-        mlx_lane_available,
-        candle_lane_available,
-    );
-    if serves_loras != Some(false) {
-        return;
-    }
     let compatibility = object
         .entry("loraCompatibility".to_owned())
         .or_insert_with(|| json!({}));
+    if !compatibility.is_object() {
+        *compatibility = json!({});
+    }
     let Some(compatibility) = compatibility.as_object_mut() else {
         return;
     };
-    // Preserve every other key (`types` drives the multi-phase surface); only the families
-    // promise is withdrawn.
-    compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
-    compatibility.insert("supported".to_owned(), Value::Bool(false));
+    if serves_loras {
+        let families = compatibility
+            .entry("families".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !families.is_array() {
+            *families = Value::Array(Vec::new());
+        }
+        if let Some(families) = families.as_array_mut() {
+            if !families
+                .iter()
+                .any(|value| value.as_str() == Some(family.as_str()))
+            {
+                families.push(Value::String(family));
+            }
+        }
+        compatibility.insert("supported".to_owned(), Value::Bool(true));
+    } else {
+        // Explicit empty wins over permissive family fallback in the validator.
+        compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
+        compatibility.insert("supported".to_owned(), Value::Bool(false));
+    }
+}
+
+/// Project the exact active-provider surface for a stamped imported source shape. Family siblings
+/// are never unioned: a Krea transformer file, SDXL fused checkpoint, Mage directory, and external
+/// ComfyUI tree each see only registrations for their structural loader.
+fn apply_imported_provider_surface(object: &mut JsonObject) {
+    // The BUILD's linked engines, like its `apply_imported_lora_advertisement` sibling — not
+    // `generation::enqueue_backend`. See that function's "Scope" note.
+    let mlx_lane = cfg!(target_os = "macos");
+    apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
+}
+
+fn apply_imported_provider_surface_for_lanes(
+    object: &mut JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) {
+    if object.get("type").and_then(Value::as_str) != Some("image")
+        || object.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+    {
+        return;
+    }
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(source) = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    let mlx_routes = sceneworks_core::jobs_store::imported_provider_routes("mlx", &family)
+        .filter(|route| route.source == source)
+        .collect::<Vec<_>>();
+    let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    let mac_support = if mlx_routes.is_empty() {
+        serde_json::to_value(sceneworks_core::jobs_store::model_mac_support(
+            id, "image", None,
+        ))
+    } else {
+        Ok(json!({
+            "supported": true,
+            "features": {
+                "pose": mlx_routes.iter().any(|route| {
+                    route.operation == "pose"
+                        && route.conditioning.iter().any(|kind| kind == "control")
+                }),
+                "reference": mlx_routes.iter().any(|route| {
+                    route.operation == "generate"
+                        && route
+                            .conditioning
+                            .iter()
+                            .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+                }),
+                "edit": mlx_routes.iter().any(|route| route.operation == "edit"),
+                "lycoris": mlx_routes
+                    .iter()
+                    .any(|route| route.supports_lora || route.supports_lokr),
+            }
+        }))
+    };
+    if let Ok(mac_support) = mac_support {
+        object.insert("macSupport".to_owned(), mac_support);
+    }
+
+    let routes = [
+        ("mlx", mlx_lane_available),
+        ("candle", candle_lane_available),
+    ]
+    .into_iter()
+    .filter(|(_, available)| *available)
+    .flat_map(|(backend, _)| {
+        sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
+    })
+    .filter(|route| route.source == source)
+    .collect::<Vec<_>>();
+    project_imported_operation_surface(object, &routes);
+}
+
+/// Replace family-wide defaults with the operations exposed by this exact source/backend route set.
+/// Imported rows are initially enriched by `apply_model_manifest_defaults`, so merely adding provider
+/// capabilities leaves unsupported sibling operations visible. This projection is intentionally
+/// subtractive for every route-owned field while preserving unrelated author metadata.
+fn project_imported_operation_surface(
+    object: &mut JsonObject,
+    routes: &[&sceneworks_core::jobs_store::ImportedProviderSurface],
+) {
+    let generates_reference = routes.iter().any(|route| {
+        route.operation == "generate"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+    });
+    let pose = routes.iter().any(|route| {
+        route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
+    });
+    let edit = routes.iter().any(|route| route.operation == "edit");
+    let edit_multi_reference = routes.iter().any(|route| {
+        route.operation == "edit"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| kind == "multi_reference")
+    });
+    let multi_phase = routes.iter().any(|route| route.operation == "multi_phase");
+    let generates = routes.iter().any(|route| {
+        matches!(
+            route.operation.as_str(),
+            "generate" | "pose" | "multi_phase"
+        )
+    });
+
+    let capabilities = object
+        .entry("capabilities".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !capabilities.is_array() {
+        *capabilities = Value::Array(Vec::new());
+    }
+    if let Some(capabilities) = capabilities.as_array_mut() {
+        capabilities.retain(|value| {
+            !matches!(
+                value.as_str(),
+                Some("text_to_image" | "edit_image" | "image_to_image" | "character_image")
+            )
+        });
+        if generates {
+            capabilities.push(Value::String("text_to_image".to_owned()));
+        }
+        if edit {
+            capabilities.push(Value::String("edit_image".to_owned()));
+        }
+    }
+
+    let ui = object.entry("ui".to_owned()).or_insert_with(|| json!({}));
+    if !ui.is_object() {
+        *ui = json!({});
+    }
+    if let Some(ui) = ui.as_object_mut() {
+        if generates_reference {
+            ui.insert("img2img".to_owned(), Value::Bool(true));
+        } else {
+            ui.remove("img2img");
+            ui.remove("img2imgStrength");
+        }
+        if pose {
+            ui.insert("poseLibrary".to_owned(), Value::Bool(true));
+            ui.insert("poseControlScale".to_owned(), Value::Bool(true));
+            ui.insert("controlModes".to_owned(), json!(["pose"]));
+        } else {
+            ui.remove("poseLibrary");
+            ui.remove("poseControlScale");
+            ui.remove("controlModes");
+        }
+        if !edit_multi_reference {
+            ui.remove("editReferences");
+        }
+    }
+
+    // An empty route set means this backend has no opinion about adapter compatibility. Do not
+    // manufacture an empty object: catalog consumers distinguish abstention from an explicit
+    // provider-owned compatibility surface. Once at least one exact route exists, keep the existing
+    // object-shaped projection so supported routes retain a stable schema even when they expose no
+    // acceleration adapter.
+    if routes.is_empty() {
+        object.remove("loraCompatibility");
+    } else {
+        let compatibility = object
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(compatibility) = compatibility.as_object_mut() {
+            if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
+                types.retain(|value| value.as_str() != Some("acceleration"));
+            }
+            if multi_phase {
+                let types = compatibility
+                    .entry("types".to_owned())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(types) = types.as_array_mut() {
+                    types.push(Value::String("acceleration".to_owned()));
+                }
+            }
+        }
+    }
+
+    object.remove("runtimeQuantTiers");
+
+    // A checkpoint STORED as NVFP4 has exactly one runtime tier: its own (sc-11043, epic 11037).
+    // The q4/q8/bf16 sweep below describes what a route can quantize a dense import TO, which is a
+    // question that does not arise here — these bytes are already packed E2M1 and nothing
+    // re-quantizes them. Offering the sweep for such an entry advertised `q4` for an NVFP4
+    // checkpoint, which is precisely the alias E2 forbids, and the admission gate then refused
+    // every job the offer produced: the picker showed tiers the router would not accept.
+    //
+    // Keyed on the SOURCE codec — what the weights are stored in — never on what a load would
+    // materialize them as, which is a per-run receipt this catalog projection cannot know.
+    if sceneworks_core::jobs_store::imported_entry_source_codec(object)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
+    {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(vec![Value::String("nvfp4".to_owned())]),
+        );
+        return;
+    }
+
+    let mut runtime_quant_tiers = Vec::new();
+    for tier in ["q4", "q8"] {
+        if routes.iter().any(|route| {
+            route
+                .supported_quants
+                .iter()
+                .any(|candidate| candidate == tier)
+        }) {
+            runtime_quant_tiers.push(Value::String(tier.to_owned()));
+        }
+    }
+    if routes.iter().any(|route| route.source != "comfy_ui_tree") {
+        runtime_quant_tiers.push(Value::String("bf16".to_owned()));
+    }
+    if !runtime_quant_tiers.is_empty() {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(runtime_quant_tiers),
+        );
+    }
+}
+
+/// True when this entry is a convert-at-install model that loads from a **converted artifact on the
+/// platform this build targets** — so its conversion state belongs in the catalog here (sc-20529).
+///
+/// The converter half is [`sceneworks_core::jobs_store::convert_artifact_required_here`], the SAME
+/// predicate the worker's unconverted-model preflight gates on. Re-implementing the
+/// converter-membership test here (the original shape of this function) put two copies of one
+/// platform rule on either side of the API/worker seam, where they can drift into an API that
+/// offers a convert affordance the worker refuses to honour, or the reverse.
+///
+/// Only the `requiresConversion` read stays local: it is a property of THIS catalog entry, not of
+/// the converter registry, and it is load-bearing — without it a turnkey model that merely names a
+/// converter would start reporting MLX status off-Mac.
+///
+/// Platform-aware, like the core helper: off macOS only `CANDLE_NATIVE_CONVERTERS` qualify, on macOS
+/// every native converter does (where the call site's `cfg!(target_os = "macos")` arm has already
+/// won anyway — macOS surfaces MLX status for every entry, convert-at-install or not).
+fn entry_requires_converted_artifact_here(object: &JsonObject) -> bool {
+    let Some(mlx) = object.get("mlx").and_then(Value::as_object) else {
+        return false;
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    mlx.get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(sceneworks_core::jobs_store::convert_artifact_required_here)
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
@@ -4179,9 +7944,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // Forward the catalog-declared family so an imported/user model whose id is in no routing
-        // table still routes to its family's MLX engine (route-by-family, sc-14019) instead of
-        // reporting "not available on Mac". Builtin ids are unaffected (they route by id).
+        // Preserve the catalog-declared family in the shared probe call, but do not authorize an
+        // imported loader from family identity alone. This pass supplies builtin id-keyed defaults;
+        // `apply_imported_provider_surface` runs later with the full manifest entry and replaces an
+        // imported row's provisional verdict from its exact family + `importSourceShape` routes.
         let family = object
             .get("family")
             .and_then(Value::as_str)
@@ -4192,7 +7958,42 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
     }
-    let mlx_status = if cfg!(target_os = "macos") {
+    // The off-Mac twin (sc-19570). Emitted on EVERY platform, exactly like `macSupport`: the client
+    // decides whether to act on it from `candleGatingActive`, and a block that appeared only on the
+    // platform it gates could never be asserted from a Mac test run — which is precisely how the
+    // off-Mac half of this defect stayed invisible for as long as it did. No `family` argument: the
+    // block carries the per-video-mode verdict, and video routing is id-keyed (route-by-family is
+    // an image-lane mechanism).
+    let candle_support = {
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let model_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        model_candle_support(id, model_type)
+    };
+    if let Ok(candle_support) = serde_json::to_value(candle_support) {
+        object.insert("candleSupport".to_owned(), candle_support);
+    }
+    // A LOCAL DISK probe for MLX convert-output tier dirs, so it is a platform fact and must NOT go
+    // through `generation::enqueue_backend`: keying it off `candle_required` would hide `mlxTiers`
+    // and its per-tier state from the Studio on macOS for directories that are genuinely present.
+    //
+    // Off macOS the probe is NARROWED, not skipped (sc-20529). A convert-at-install model whose
+    // converter has a real off-Mac (candle) implementation — `CANDLE_NATIVE_CONVERTERS`, today just
+    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` — needs the same convert affordance and the
+    // same converted/needs_conversion/needs_source states on Windows and Linux that macOS gets: the
+    // candle converter (sc-7459) is real, `POST /models/{id}/convert` is not platform-gated, and
+    // `inject_converted_model_path` already reads the converted dir on every platform. Without these
+    // fields the Studio had no way to show that the conversion was still outstanding, so the model
+    // read as installed off its raw single-file download and failed at load.
+    //
+    // It stays NARROW deliberately. Probing every `requiresConversion` model off-Mac would flip
+    // Anima's three variants to `missing` there: `anima_quant` is macOS-only, and off-Mac Anima
+    // loads the raw `circlestone-labs/Anima` `split_files/` tree with no converted dir at all. The
+    // const is the contract that keeps those two cases apart.
+    let mlx_status = if cfg!(target_os = "macos") || entry_requires_converted_artifact_here(object)
+    {
         mlx_catalog_status(object, data_dir)
     } else {
         None
@@ -4430,20 +8231,104 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    builtin_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    // sc-19708: the typed availability judgement for this entry's default selected closure on
+    // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
+    // an install living in an app-owned path is local-ready regardless of the library, and an
+    // installed-but-incomplete cache stays `incomplete` rather than `missing`.
+    let availability_resolution =
+        crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
+    // sc-19712 F-5: what a local copy of this entry could EVER cover, which is a different question
+    // from where it resolves from today. A model with soft co-requisites or a revision-less
+    // requirement showed the identical "local copy" affordance as a fully cacheable one, so the
+    // badge promised protection from a disconnect that the cache cannot actually deliver.
+    let cache_eligibility =
+        crate::model_sources::cache_eligibility_for_entry(data_dir, &model, None);
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    let (availability, availability_resolution) = if installed_in_app_owned_path
+        && !matches!(
+            availability_resolution.availability,
+            ModelAvailability::LocalReady
+        ) {
+        (ModelAvailability::LocalReady, None)
+    } else if availability_resolution.availability == ModelAvailability::Missing
+        && state.cache_incomplete
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else {
+        (
+            availability_resolution.availability.clone(),
+            Some(availability_resolution),
+        )
+    };
+    let platform_cleanup_only =
+        model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true);
+    let cleanup_residue_only = platform_cleanup_only
+        && !state.installed
+        && cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        availability_resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "cacheEligibility".to_owned(),
+        cache_eligibility
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize cache eligibility: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    // Ownership and routing authority are deliberately separate. A user overlay on a builtin is
+    // removable (deleting it restores builtin defaults), but it cannot reclassify that protected id
+    // as an imported checkpoint and bypass/trigger source-shaped provider validation.
     let user_managed = user_model_ids.contains(model_id);
+    let builtin_routing_authority = builtin_model_ids.contains(model_id);
     object.insert(
         "catalogScope".to_owned(),
-        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+        Value::String(
+            if builtin_routing_authority {
+                "builtin"
+            } else {
+                "user"
+            }
+            .to_owned(),
+        ),
     );
-    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
+    stamp_legacy_import_source_shape(object, data_dir, !builtin_routing_authority);
+    object.insert(
+        "downloadable".to_owned(),
+        Value::Bool(state.downloadable && !platform_cleanup_only),
+    );
     object.insert(
         "installState".to_owned(),
         Value::String(
@@ -4458,7 +8343,7 @@ fn apply_model_catalog_entry(
     object.insert(
         "cacheState".to_owned(),
         Value::String(
-            if state.cache_incomplete {
+            if state.cache_incomplete || cleanup_residue_only {
                 "incomplete"
             } else if state.installed {
                 "complete"
@@ -4480,11 +8365,11 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "repairAvailable".to_owned(),
-        Value::Bool(state.downloadable && state.cache_incomplete),
+        Value::Bool(state.downloadable && state.cache_incomplete && !platform_cleanup_only),
     );
     object.insert(
         "updateAvailable".to_owned(),
-        Value::Bool(state.update_available),
+        Value::Bool(state.update_available && !platform_cleanup_only),
     );
     object.insert(
         "installedPath".to_owned(),
@@ -4495,8 +8380,12 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "removable".to_owned(),
-        Value::Bool(user_managed || state.installed),
+        Value::Bool(user_managed || state.installed || platform_cleanup_only),
     );
+    if platform_cleanup_only {
+        object.insert("usable".to_owned(), Value::Bool(false));
+        object.insert("recommended".to_owned(), Value::Bool(false));
+    }
     // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
     // each with its own installed flag + path + size + footprint. A single-variant model
     // still emits exactly one "default" variant, so the array is a superset of the
@@ -4504,6 +8393,7 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
@@ -4513,7 +8403,378 @@ fn apply_model_catalog_entry(
     // diverges by backend and never fully collapses. Additive: a model the generated table does not
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
+    sceneworks_core::decoder_support::apply_to_model_entry(object);
+    apply_decoder_availability(object, data_dir);
+    if platform_cleanup_only {
+        // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
+        // action projection even though the preserved manifest metadata is still needed by the
+        // deletion resolver to locate old files.
+        object.insert("hasVariantMatrix".to_owned(), Value::Bool(false));
+        object.remove("variants");
+        object.remove("mlxConversionState");
+        object.remove("mlxInstallState");
+        object.remove("mlxTiers");
+        object.remove("mlxTierStates");
+    }
     Ok(model)
+}
+
+/// Give a provider-aliased model row the canonical provider's exact optional decoder donors.
+///
+/// Imported Krea entries intentionally carry `downloads: []`: their primary DiT is an in-place user
+/// file, not a downloadable model. Decoder eligibility is nevertheless provider-derived, and the
+/// selected decoder must resolve the same pinned standalone VAE as the builtin Turbo provider. Clone
+/// only soft co-requisites whose component ids occur in the provider's generated decoder facts;
+/// primary downloads and unrelated components (including text encoders) are never inherited.
+fn inherit_provider_decoder_downloads(model: &mut Value, builtin_models: &[Value]) {
+    let Some(object) = model.as_object() else {
+        return;
+    };
+    let Some(model_id) = object.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(provider_id) =
+        sceneworks_core::decoder_support::provider_id_for_backend(object, "mlx")
+    else {
+        return;
+    };
+    if provider_id == model_id {
+        return;
+    }
+    let component_ids = sceneworks_core::decoder_support::component_ids_for_backend(object, "mlx");
+    if component_ids.is_empty() {
+        return;
+    }
+    let Some(provider) = builtin_models.iter().find(|candidate| {
+        candidate.get("id").and_then(Value::as_str) == Some(provider_id.as_str())
+    }) else {
+        return;
+    };
+    let inherited = provider
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| {
+            download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download
+                    .get("componentId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|component_id| {
+                        component_ids
+                            .iter()
+                            .any(|expected| expected == component_id)
+                    })
+                && download
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|revision| {
+                        revision.len() == 40
+                            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                && download
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .is_some_and(|repo| !repo.trim().is_empty())
+                && download
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| !files.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if inherited.is_empty() {
+        return;
+    }
+
+    let object = model.as_object_mut().expect("checked object above");
+    let existing = object
+        .remove("downloads")
+        .and_then(|downloads| downloads.as_array().cloned())
+        .unwrap_or_default();
+    // Canonical rows lead so both the API availability probe and the worker's exact component
+    // resolver bind the generated decoder id to the provider's source even if a user manifest
+    // happens to contain another soft component with the generic `vae` id.
+    let mut downloads = inherited.clone();
+    downloads.extend(
+        existing
+            .into_iter()
+            .filter(|download| !inherited.iter().any(|canonical| canonical == download)),
+    );
+    object.insert("downloads".to_owned(), Value::Array(downloads));
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OptionalComponentAvailability {
+    installed: bool,
+    estimated_size_bytes: Option<u64>,
+}
+
+/// Enrich descriptor-derived decoder options with the local state of their pinned, soft
+/// co-requisite. Eligibility comes exclusively from engine facts; this function answers only whether
+/// the declared standalone component is present. A full Wan model install is neither consulted nor
+/// implied.
+fn apply_decoder_availability(object: &mut JsonObject, data_dir: &FsPath) {
+    let mut components: std::collections::BTreeMap<String, OptionalComponentAvailability> =
+        std::collections::BTreeMap::new();
+    for download in object
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(component_id) = download.get("componentId").and_then(Value::as_str) else {
+            continue;
+        };
+        let installed = pinned_component_download_installed(download, data_dir);
+        let size = download
+            .get("estimatedSizeBytes")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                download
+                    .get("footprint")
+                    .and_then(|footprint| footprint.get("diskSizeBytes"))
+                    .and_then(Value::as_u64)
+            });
+        // The provider-inheritance seam prepends its canonical exact row. First declaration wins so
+        // a later user-authored soft `vae` row cannot make the Wan option appear installed or divert
+        // the worker to a different file.
+        components
+            .entry(component_id.to_owned())
+            .or_insert(OptionalComponentAvailability {
+                installed,
+                estimated_size_bytes: size,
+            });
+    }
+
+    let Some(by_backend) = object
+        .get_mut(sceneworks_core::decoder_support::DECODERS_FIELD)
+        .and_then(Value::as_object_mut)
+        .and_then(|decoders| {
+            decoders
+                .get_mut(sceneworks_core::decoder_support::BY_BACKEND_FIELD)
+                .and_then(Value::as_object_mut)
+        })
+    else {
+        return;
+    };
+    for options in by_backend.values_mut().filter_map(Value::as_array_mut) {
+        for option in options.iter_mut().filter_map(Value::as_object_mut) {
+            let state = option
+                .get("componentId")
+                .and_then(Value::as_str)
+                .and_then(|id| components.get(id))
+                .copied()
+                .unwrap_or_default();
+            option.insert("available".to_owned(), Value::Bool(state.installed));
+            if let Some(bytes) = state.estimated_size_bytes {
+                option.insert("estimatedSizeBytes".to_owned(), Value::from(bytes));
+            }
+        }
+    }
+}
+
+fn pinned_component_download_installed(download: &Value, data_dir: &FsPath) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        return false;
+    }
+    // Through the typed source-library resolver, not a hand-built `snapshots/<rev>` root — the
+    // model-path inventory audit (sc-19703) forbids direct root construction on this file.
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+        return false;
+    };
+    files
+        .iter()
+        .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
+}
+
+#[cfg(test)]
+mod decoder_availability_tests {
+    use super::*;
+    use crate::tests::support::isolate_hf_cache;
+
+    fn model() -> Value {
+        json!({
+            "id": "qwen_image",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "SceneWorks/krea-realtime-14b-mlx",
+                "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+                "coRequisite": true,
+                "required": "soft",
+                "componentId": "vae",
+                "files": ["q4/vae.safetensors"],
+                "estimatedSizeBytes": 507591212
+            }],
+            "decoders": { "byBackend": { "mlx": [{
+                "id": "wan_2_1_vae", "componentId": "vae", "experimental": true
+            }] } }
+        })
+    }
+
+    fn donor_download() -> Value {
+        model()["downloads"][0].clone()
+    }
+
+    #[test]
+    fn option_is_available_only_at_the_declared_pinned_single_file() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let mut model = model();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"stale donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"pinned donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        let option = &model["decoders"]["byBackend"]["mlx"][0];
+        assert_eq!(option["available"], true);
+        assert_eq!(option["estimatedSizeBytes"], 507591212_u64);
+    }
+
+    #[test]
+    fn imported_krea_alias_inherits_exact_provider_donor_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let builtin = vec![json!({
+            "id": "krea_2_turbo",
+            "downloads": [donor_download()]
+        })];
+        let mut imported = json!({
+            "id": "user_kreamania_variant5",
+            "name": "Kreamania Variant 5",
+            "type": "image",
+            "family": "krea_2",
+            "downloads": []
+        });
+
+        inherit_provider_decoder_downloads(&mut imported, &builtin);
+        let donor = &imported["downloads"][0];
+        assert_eq!(donor["repo"], "SceneWorks/krea-realtime-14b-mlx");
+        assert_eq!(
+            donor["revision"],
+            "e68e9a3d98187fdf6936838ffcf6df5aa48d6626"
+        );
+        assert_eq!(donor["files"], json!(["q4/vae.safetensors"]));
+
+        sceneworks_core::decoder_support::apply_to_model_entry(imported.as_object_mut().unwrap());
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"], false,
+            "an imported alias must not advertise an unresolved donor as selectable"
+        );
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"wrong revision").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            false
+        );
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"exact donor").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            true
+        );
+    }
+}
+
+/// Backfill the explicit source-shape discriminator for user entries created before SC-18312.
+/// This is structural inspection under the app-managed model root, never a family guess: a Mage
+/// transformer directory must carry both of its required files; a single-file import is classified
+/// by the same header-only detector the importer uses. The worker repeats confinement and shape
+/// validation before opening weights.
+fn stamp_legacy_import_source_shape(
+    object: &mut JsonObject,
+    data_dir: &FsPath,
+    user_managed: bool,
+) {
+    if !user_managed || object.contains_key("importSourceShape") {
+        return;
+    }
+    let Some(raw) = object
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let Ok(path) = std::fs::canonicalize(raw) else {
+        return;
+    };
+    let Ok(model_root) = std::fs::canonicalize(data_dir.join("models")) else {
+        return;
+    };
+    if !path.starts_with(model_root) {
+        return;
+    }
+    if object.get("family").and_then(Value::as_str) == Some("mage-flow")
+        && path.is_dir()
+        && sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path)
+    {
+        object.insert(
+            "importSourceShape".to_owned(),
+            Value::String("transformer_directory".to_owned()),
+        );
+        return;
+    }
+    let Some(weight_file) = imported_model_primary_weight_file(&path) else {
+        return;
+    };
+    let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&weight_file) else {
+        return;
+    };
+    let family = object.get("family").and_then(Value::as_str);
+    let source = match (family, verdict.family.as_deref(), verdict.component) {
+        (Some("krea_2"), Some("krea_2"), ComponentRole::Transformer) => "transformer_file",
+        (Some("sdxl"), Some("sdxl"), ComponentRole::Checkpoint) => "fused_checkpoint",
+        _ => return,
+    };
+    object.insert(
+        "importSourceShape".to_owned(),
+        Value::String(source.to_owned()),
+    );
 }
 
 type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -4588,14 +8849,62 @@ mod model_size_concurrency_tests {
         // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
-        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        //
         // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
         // each gain its exact pinned download context while macOS keeps the same one.
+        //
         // sc-18481 retired AuraSR from the installable catalog because every production backend
         // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
         // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
+        //
+        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
+        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
+        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
+        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
+        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
+        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
+        // `None`. That asymmetry is the point of running this loop per OS.
+        //
+        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
+        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
+        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
+        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
+        // windows/linux gain exactly one at that point. SC-20756 later adds the distinct hosted
+        // `q4/transformer_ref/*` context for the reference partition.
+        //
+        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
+        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
+        // `default: true` row, so the off-Mac context is now
+        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
+        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
+        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
+        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
+        // platforms never fetch.
+        //
+        // SC-20756 then makes the already-hosted Ref2VA tiers installable off-Mac; the pinned
+        // provider has admitted that conditioning surface since sc-17157.
+        //
+        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
+        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
+        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
+        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
+        // download row, so every OS gains exactly one.
+        //
+        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
+        // the shared 87 / 84 / 84, six independent deltas all apply:
+        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
+        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
+        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
+        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
+        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
+        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
+        //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
+        // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
+        // 88/85/85 (epic, at the previous sync); neither is right once both land. SC-18780 then
+        // publishes the single cross-platform LTX 2.5 turnkey context, giving 90 / 87 / 87.
+        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 90_usize), ("windows", 87), ("linux", 87)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -4712,12 +9021,33 @@ async fn estimate_model_catalog_sizes(
     .collect()
 }
 
+/// Built-in + user model manifest entries merged by id, with NO platform filtering — the raw
+/// authored catalog. [`load_model_catalog_inputs`] narrows `downloads` to the running OS on top of
+/// this; [`license_acknowledgment_repo_index`] deliberately reads it unfiltered, because a licence
+/// requirement must not depend on which OS is asking. Both manifest reads are mtime/size-cached
+/// (`load_manifest_entries`), so the second consumer costs a stat and a clone.
+async fn merged_model_manifest_entries(
+    state: &AppState,
+) -> Result<(Vec<Value>, std::collections::HashSet<String>), ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    Ok((merge_entries_by_id(builtin, user), user_model_ids))
+}
+
 async fn load_model_catalog_inputs(
     state: &AppState,
 ) -> Result<
     (
         Vec<Value>,
         Vec<Option<DownloadContext>>,
+        std::collections::HashSet<String>,
         std::collections::HashSet<String>,
     ),
     ApiError,
@@ -4731,25 +9061,34 @@ async fn load_model_catalog_inputs(
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
+    let decoder_providers = builtin.clone();
+    let builtin_model_ids = builtin
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
+    retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
     // size, and the frontend all agree on the right repo (sc-3240).
     for model in &mut models {
-        retain_downloads_for_os(model, std::env::consts::OS);
+        inherit_provider_decoder_downloads(model, &decoder_providers);
+        if model.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
+            retain_downloads_for_os(model, std::env::consts::OS);
+        }
     }
     let download_contexts = models
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((models, download_contexts, user_model_ids))
+    Ok((models, download_contexts, user_model_ids, builtin_model_ids))
 }
 
 async fn estimate_current_model_catalog_sizes(
     state: &AppState,
 ) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
-    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    let (_, download_contexts, _, _) = load_model_catalog_inputs(state).await?;
     Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
 }
 
@@ -4758,10 +9097,15 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     // sweep) so tests can assert request-scoped and process-shared reuse.
     #[cfg(test)]
     crate::test_note_model_catalog_build();
-    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
+    let (models, download_contexts, user_model_ids, builtin_model_ids) =
+        load_model_catalog_inputs(state).await?;
+    let builtin_model_ids = Arc::new(builtin_model_ids);
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    // App-owned resolved-local artifacts, enumerated ONCE per snapshot build (read-only: no
+    // session, no usage refresh) so every entry's availability can detect local-ready coverage.
+    let local_artifacts = Arc::new(crate::model_sources::local_resolved_artifacts(state));
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -4769,6 +9113,8 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let builtin_model_ids_for_sweep = builtin_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -4783,6 +9129,8 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &builtin_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -4805,9 +9153,15 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
         // job validation never wait on unrelated Hugging Face network calls.
         apply_model_catalog_size_fields(model, context.as_ref(), None)?;
     }
-    let external = external.map_err(|err| {
+    let mut external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
     })?;
+    for model in &mut external {
+        if let Some(object) = model.as_object_mut() {
+            apply_imported_provider_surface(object);
+            apply_imported_lora_advertisement(object);
+        }
+    }
     models.extend(external);
     models.sort_by(|left, right| {
         let left_key = (
@@ -4872,8 +9226,63 @@ pub(crate) async fn resolve_model_manifest_entry(
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
     };
-    let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    let builtin_entry = find(&builtin);
+    let user_entry = find(&user);
+    let mut catalog_scope = if builtin_entry.is_some() {
+        Some("builtin")
+    } else if user_entry.is_some() {
+        Some("user")
+    } else {
+        None
+    };
+    let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if entry.as_object().is_none_or(JsonObject::is_empty) {
+        // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
+        // the face stack) for job admission even when the configured manifest directory is
+        // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a
+        // stripped config dir cannot silently strip typed model-source coverage.
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+            catalog_scope = Some("builtin");
+        }
+    }
+    inherit_provider_decoder_downloads(&mut entry, &builtin);
+    if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
+        // The merged worker-facing entry must carry the same routing authority as `/models`.
+        // A user manifest may override builtin presentation/defaults without turning the protected
+        // builtin identity into an imported checkpoint. Genuine user-only ids remain user-scoped.
+        object.insert("catalogScope".to_owned(), Value::String(scope.to_owned()));
+        stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
+    }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    if let Some(object) = entry.as_object_mut() {
+        // The worker receives the same descriptor-derived selection table and local pinned-file
+        // availability as the catalog UI. This keeps enqueue validation and execution on one fact set.
+        sceneworks_core::decoder_support::apply_to_model_entry(object);
+        apply_decoder_availability(object, &state.settings.data_dir);
+    }
+    Ok(entry)
+}
+
+/// The compiled-in builtin model manifest, used as the last-resort catalog authority when the
+/// on-disk manifest directory does not carry an entry. Kept complete and cross-platform: the
+/// caller derives per-platform closures from it, so filtering here would let a macOS API omit
+/// Candle-only co-requisites from a Windows/Linux worker carrier.
+pub(crate) fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
     Ok(entry)
 }
 
@@ -4957,47 +9366,73 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
 /// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
 /// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
 /// at least one entry is platform-tagged, so single-repo models are untouched.
-pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
-    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if !downloads
-        .iter()
-        .any(|entry| entry.get("platforms").is_some())
-    {
-        return;
-    }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
-}
+///
+/// sc-19708: the manifest-shape predicates below now live in
+/// `sceneworks_core::model_artifacts::artifact_selection` because the availability seam (API
+/// preflight AND the worker's pre-loader guard) selects the same closures. These re-exports keep
+/// the API's install/display call sites on the identical definitions so they cannot drift.
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os;
 
-pub(crate) fn model_download(model: &Value) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let mut fallback = None;
-    for download in downloads {
-        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
-        // choosing the canonical entry for size/install-path/download.
-        if !is_supported_model_download(download) || is_co_requisite_download(download) {
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::model_download;
+
+/// Remove whole video products that have no route on `os`. This is intentionally narrower than the
+/// legacy image-model `macOnly` label: only video entries use it as a catalog-withdrawal contract.
+fn retain_models_for_os(
+    models: &mut Vec<Value>,
+    os: &str,
+    data_dir: &FsPath,
+) -> Result<(), ApiError> {
+    if os == "macos" {
+        return Ok(());
+    }
+    let mut retained = Vec::with_capacity(models.len());
+    for mut model in std::mem::take(models) {
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let withdrawn_video = video_model_withdrawn_on_platform(model_id, &model, os);
+        if !withdrawn_video {
+            retained.push(model);
             continue;
         }
-        fallback.get_or_insert(download);
-        if download.get("default").and_then(Value::as_bool) == Some(true) {
-            return Some(download.clone());
+
+        // Previously shipped off-Mac routes may already occupy substantial disk. Keep a catalog
+        // tombstone only when the old artifact is installed or partial so Model Manager and DELETE
+        // can reclaim it; a fresh machine sees no row at all. Preserve its original downloads on
+        // the tombstone solely to resolve install state and owned cleanup paths.
+        let context = model_download_context(&model)?;
+        let state = install_state_for(context, &model, data_dir);
+        let cleanup_residue = cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
+        if state.installed || state.cache_incomplete || cleanup_residue {
+            let object = model
+                .as_object_mut()
+                .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+            object.insert("platformCleanupOnly".to_owned(), Value::Bool(true));
+            retained.push(model);
         }
     }
-    fallback.cloned()
+    *models = retained;
+    Ok(())
+}
+
+/// Product withdrawals are authoritative by stable model id, not by a user-overridable manifest
+/// presentation flag. `macOnly` remains the generic platform annotation, while this policy keeps a
+/// same-id user manifest from restoring a product whose off-Mac runtime was explicitly removed.
+pub(crate) fn video_model_withdrawn_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> bool {
+    platform != "macos"
+        && (matches!(model_id, "ltx_2_3_eros")
+            || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
+                && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
 }
 
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
-pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
-    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download;
 
 /// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
@@ -5011,74 +9446,10 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
-pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
-    download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-/// The co-requisite downloads that apply to `variant` (sc-14980).
-///
-/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
-/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
-/// across tiers still see them all.
-pub(crate) fn model_co_requisite_downloads_for_variant(
-    model: &Value,
-    variant: Option<&str>,
-) -> Vec<Value> {
-    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
-    model_co_requisite_downloads(model)
-        .into_iter()
-        .filter(
-            |download| match (co_requisite_variant(download), wanted.as_deref()) {
-                (None, _) => true,
-                (Some(_), None) => true,
-                (Some(row), Some(wanted)) => row == wanted,
-            },
-        )
-        .collect()
-}
-
-pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
-    model
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|download| {
-                    is_co_requisite_download(download) && is_supported_model_download(download)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
-/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
-/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
-/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
-pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let wanted = variant.trim().to_ascii_lowercase();
-    downloads
-        .iter()
-        .find(|download| {
-            is_supported_model_download(download)
-                && !is_co_requisite_download(download)
-                && download
-                    .get("variant")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                    == Some(wanted.as_str())
-        })
-        .cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_download_for_variant,
+};
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
 /// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
@@ -5111,13 +9482,7 @@ fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<Stri
     None
 }
 
-pub(crate) fn is_supported_model_download(download: &Value) -> bool {
-    download.get("provider").and_then(Value::as_str) == Some("huggingface")
-        && download
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| !repo.is_empty())
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download;
 
 pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
     let Some(download) = model_download(model) else {
@@ -5171,10 +9536,30 @@ pub(crate) fn huggingface_cache_health(
             }
             continue;
         }
+        // A whole-repo (empty `files`) fetch of a non-diffusers repo declares no per-file claim, so
+        // "some payload landed" was the only signal. That accepts an interrupted sharded download as
+        // installed. The repo's own `*.safetensors.index.json` files are the declared set for their
+        // shards, so validate them here (sc-20526).
+        //
+        // Cost, stated honestly: ONE snapshot walk per candidate snapshot, whose result answers both
+        // the payload question and the index hunt. This lane previously short-circuited on a
+        // `config.json` stat and walked nothing, so a `config.json`-bearing snapshot now pays a walk
+        // it did not pay before. That walk is not removable by making it lazy: FINDING the indexes is
+        // the check, and the check must run before this returns `installed`. What each index then
+        // costs is one small JSON read plus a stat per distinct shard — no hashing, no header parse,
+        // no tensor read. The whole lane runs on the install/catalog sweep, never per job.
+        let files_on_disk = snapshot_files(&snapshot);
         if path_is_readable_file(&snapshot.join("config.json"))
-            || snapshot_has_payload_file(&snapshot)
+            || snapshot_has_payload_file_in(&files_on_disk)
         {
-            return HuggingFaceCacheHealth::installed();
+            let torn = torn_shard_indexes_in(&snapshot, &files_on_disk);
+            if torn.is_empty() {
+                return HuggingFaceCacheHealth::installed();
+            }
+            if best_missing.is_empty() || torn.len() < best_missing.len() {
+                best_missing = torn;
+            }
+            continue;
         }
         if best_missing.is_empty() {
             best_missing.push("model_index.json".to_owned());
@@ -5390,10 +9775,21 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             if !path_is_valid_json_object(&snapshot.join(format!("{component}/config.json"))) {
                 missing.push(format!("{component}/config.json"));
             }
-            if !diffusers_component_has_weight_file(snapshot, component) {
+            // ONE listing of the component directory, asked two questions below (sc-20526).
+            let component_entries = diffusers_component_entries(snapshot, component);
+            if !diffusers_component_has_weight_file_in(&component_entries) {
                 missing.push(format!("{component}/<weights>"));
             } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
                 missing.push(format!("{component}/<weights> (malformed safetensors)"));
+            } else {
+                // A sharded component holds "a weight file" as soon as ONE shard landed. The
+                // component's own index declares the rest, so an interrupted download is only
+                // visible by comparing `weight_map` against disk (sc-20526).
+                for shard in
+                    component_missing_shards_in(&snapshot.join(component), &component_entries)
+                {
+                    missing.push(format!("{component}/{shard}"));
+                }
             }
         } else if is_mage && component == "tokenizer" {
             // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
@@ -5461,25 +9857,79 @@ fn diffusers_component_has_valid_config_file(snapshot: &FsPath, component: &str)
         .unwrap_or(false)
 }
 
-fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
-    let component_dir = snapshot.join(component);
-    let Ok(entries) = std::fs::read_dir(component_dir) else {
-        return false;
+/// Every non-hidden readable entry directly inside a diffusers component directory.
+///
+/// The weight-file probe and the shard-index probe ask different questions of the SAME listing, so
+/// the health loop reads the directory once and hands the result to both (sc-20526). Threading the
+/// list is what makes the "one `read_dir` per component" cost claim true rather than aspirational.
+fn diffusers_component_entries(snapshot: &FsPath, component: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(snapshot.join(component)) else {
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| !is_hidden_file(path) && path_is_readable_file(path))
+        .collect()
+}
+
+fn diffusers_component_has_weight_file_in(entries: &[PathBuf]) -> bool {
+    entries.iter().any(|path| {
         let name = path
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        !is_hidden_file(&path)
-            && path_is_readable_file(&path)
-            && (name.ends_with(".safetensors")
-                || name.ends_with(".bin")
-                || name.ends_with(".msgpack")
-                || name.ends_with(".gguf"))
+        name.ends_with(".safetensors")
+            || name.ends_with(".bin")
+            || name.ends_with(".msgpack")
+            || name.ends_with(".gguf")
     })
+}
+
+/// Shards that a component directory's `*.safetensors.index.json` files name but that are not on
+/// disk, reported relative to the component (sc-20526).
+///
+/// A sharded component satisfies [`diffusers_component_has_weight_file_in`] as soon as ONE shard
+/// landed, so an interrupted download left `model.safetensors.index.json` + the last shard and read
+/// "installed" — then died at the first forward pass with `cannot find tensor
+/// model.embed_tokens.weight` (lens_turbo bf16). The index IS the declared file set for a sharded
+/// component, so comparing it against disk is the workable ground truth even when the manifest
+/// declares only a `<tier>/*` glob or a whole-repo fetch.
+///
+/// Cost: no directory read at all — `entries` is the listing
+/// [`diffusers_component_entries`] already spent for the weight-file probe — plus one small JSON
+/// read per index and a stat per distinct shard. No hashing, no header parse, no tensor read.
+fn component_missing_shards_in(dir: &FsPath, entries: &[PathBuf]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for path in entries
+        .iter()
+        .filter(|path| sceneworks_core::safetensors::is_safetensors_index_path(path))
+    {
+        missing.extend(sceneworks_core::safetensors::missing_indexed_shards(
+            dir, path,
+        ));
+    }
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Whether every `*.safetensors.index.json` NAMED IN `files` (snapshot-relative paths, as a receipt's
+/// `resolvedFiles` or a backfill's resolved set records them) has all of its shards on disk.
+///
+/// This is the receipt-lane half of the shard check and costs nothing beyond a stat per shard: the
+/// file list is already in hand, so no directory walk is needed to find the indexes (sc-20526).
+fn listed_shard_indexes_are_complete(snapshot: &FsPath, files: &[String]) -> bool {
+    files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .all(|file| {
+            let path = snapshot.join(file);
+            path.parent().is_some_and(|dir| {
+                sceneworks_core::safetensors::indexed_shards_are_present(dir, &path)
+            })
+        })
 }
 
 fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str) -> bool {
@@ -5515,8 +9965,12 @@ fn safetensors_header_is_valid(path: &FsPath) -> bool {
         && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
 }
 
-fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
-    snapshot_files(snapshot).into_iter().any(|path| {
+/// Whether an already-walked snapshot file list holds anything that is not documentation/artwork.
+///
+/// Takes the list rather than the directory so the whole-repo health probe walks once and reuses the
+/// result for both the payload question and the shard-index validation (sc-20526).
+fn snapshot_has_payload_file_in(files: &[String]) -> bool {
+    files.iter().any(|path| {
         let lower = path.to_ascii_lowercase();
         !lower.ends_with(".md")
             && !lower.ends_with(".png")
@@ -5524,6 +9978,29 @@ fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
             && !lower.ends_with(".jpeg")
             && !lower.ends_with(".gitattributes")
     })
+}
+
+/// Snapshot-relative shard paths that a `*.safetensors.index.json` in `files` names but that are not
+/// on disk. Takes the already-walked file list so no extra directory traversal is spent (sc-20526).
+fn torn_shard_indexes_in(snapshot: &FsPath, files: &[String]) -> Vec<String> {
+    let mut missing = files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .flat_map(|file| {
+            let path = snapshot.join(file);
+            let dir = path.parent().map(FsPath::to_path_buf).unwrap_or_default();
+            let prefix = match file.rsplit_once('/') {
+                Some((parent, _)) => format!("{parent}/"),
+                None => String::new(),
+            };
+            sceneworks_core::safetensors::missing_indexed_shards(&dir, &path)
+                .into_iter()
+                .map(move |shard| format!("{prefix}{shard}"))
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 /// Every readable file under `snapshot`, snapshot-relative, `/`-separated.
@@ -5829,7 +10306,11 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
     if let Some(path) = model_manifest_installed_path(model, data_dir) {
         paths.push(path);
     }
-    if let Some(repo) = model_download(model).and_then(|download| {
+    let cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        paths.extend(cleanup_with_model_artifact_paths(model, data_dir));
+    }
+    for repo in cleanup_downloads.into_iter().filter_map(|download| {
         download
             .get("repo")
             .and_then(Value::as_str)
@@ -5854,6 +10335,24 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         } else {
             data_dir.join(path)
         });
+    }
+    unique_paths(paths)
+}
+
+fn cleanup_with_model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for repo in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true))
+        .filter_map(|download| download.get("repo").and_then(Value::as_str))
+    {
+        paths.push(data_dir.join("models").join(safe_download_dir(repo)));
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            paths.push(cache_path);
+        }
     }
     unique_paths(paths)
 }
@@ -5968,6 +10467,45 @@ mod gated_credential_tests {
             Some("https://huggingface.co/stabilityai/stable-diffusion-3.5-large"),
         );
     }
+
+    // sc-17227: an acknowledgment-only entry — MiniMax-H3, whose HF repo is PUBLIC. The catalog
+    // must carry `requiresLicenseAcknowledgment` + `licenseNotice` through to the web client
+    // untouched, and must NOT manufacture a `credentialHost` for it: the Models screen keys the
+    // "Add token in Settings" / "Request access on Hugging Face" affordances off that host, and
+    // there is no token to add and no access to request. Note the asymmetry with the gated case
+    // above — `gated` is normalized to an explicit `false`, but the host is left absent, which is
+    // exactly what `derive_credential_host` would have supplied had the two been coupled.
+    #[test]
+    fn license_acknowledgment_entry_keeps_its_fields_and_gains_no_credential_host() {
+        let mut model = map(json!({
+            "id": "minimax_h3",
+            "requiresLicenseAcknowledgment": true,
+            "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+            "licenseNotice": "Applicable Territory excludes the United States of America.",
+            "downloads": [{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }]
+        }));
+        apply_gating_fields(&mut model);
+        assert_eq!(
+            model
+                .get("requiresLicenseAcknowledgment")
+                .and_then(Value::as_bool),
+            Some(true),
+            "the acknowledgment flag must survive to the web client",
+        );
+        assert_eq!(
+            model.get("licenseNotice").and_then(Value::as_str),
+            Some("Applicable Territory excludes the United States of America."),
+        );
+        assert_eq!(
+            model.get("licenseUrl").and_then(Value::as_str),
+            Some("https://huggingface.co/MiniMaxAI/MiniMax-H3"),
+        );
+        assert_eq!(model.get("gated").and_then(Value::as_bool), Some(false));
+        assert!(
+            !model.contains_key("credentialHost"),
+            "a public-repo acknowledgment model must not be given a credential host: {model:?}",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6019,6 +10557,78 @@ mod variant_install_tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn tier_dependencies_cannot_be_borrowed_from_a_sibling_or_a_receipt() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let components = "SceneWorks/encoders";
+        let mut model = quant_matrix_model(repo);
+        for tier in ["q4", "q8", "bf16"] {
+            model["downloads"].as_array_mut().unwrap().push(json!({
+                "provider": "huggingface", "repo": components, "coRequisite": true,
+                "variant": tier, "files": [format!("{tier}/encoder.bin")]
+            }));
+        }
+        seed_cache(data.path(), repo, &["bf16/model.safetensors"]);
+        seed_cache(
+            data.path(),
+            components,
+            &["q4/encoder.bin", "bf16/encoder.bin"],
+        );
+        let state =
+            || install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state().installed); // Also backfills the primary receipt.
+        let receipt = data.path().join("models").join(safe_download_dir(repo));
+        assert!(!receipt_file_sets(&receipt, repo, Some("matrix_model")).is_empty());
+
+        std::fs::remove_file(
+            huggingface_repo_cache_path(data.path(), components)
+                .unwrap()
+                .join("snapshots/abc123/bf16/encoder.bin"),
+        )
+        .unwrap();
+        let broken = state();
+        assert!(
+            !broken.installed,
+            "q4's encoder and the bf16 primary receipt cannot certify bf16"
+        );
+        assert!(broken.cache_incomplete);
+        assert!(broken
+            .missing_required_files
+            .contains(&format!("{components}/bf16/encoder.bin")));
+        let variants = model_variant_states(&model, data.path());
+        for tier in ["q4", "q8"] {
+            let variant = variants.iter().find(|v| v.variant == tier).unwrap();
+            assert!(
+                !variant.installed && !variant.cache_incomplete,
+                "absent primary {tier}"
+            );
+        }
+
+        seed_cache(data.path(), components, &["bf16/encoder.bin"]);
+        assert!(state().installed);
+        assert!(!state().cache_incomplete);
+    }
+
+    #[test]
+    fn optional_tier_dependencies_do_not_block_an_installed_primary() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let mut model = quant_matrix_model(repo);
+        model["downloads"].as_array_mut().unwrap().push(json!({
+            "provider": "huggingface", "repo": "SceneWorks/optional", "coRequisite": true,
+            "variant": "q4", "required": "soft", "files": ["optional.bin"]
+        }));
+        seed_cache(data.path(), repo, &["q4/model.safetensors"]);
+        let variants = model_variant_states(&model, data.path());
+        let q4 = variants.iter().find(|v| v.variant == "q4").unwrap();
+        assert!(q4.installed && !q4.cache_incomplete);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state.installed && !state.cache_incomplete);
     }
 
     #[test]
@@ -6208,6 +10818,145 @@ mod variant_install_tests {
             !status.update_available,
             "no convertSourceFile → never reports an update"
         );
+    }
+
+    /// sc-20529: which convert-at-install entries get MLX status surfaced. The converter half is
+    /// delegated to `sceneworks_core::jobs_store::convert_artifact_required_here` — the same
+    /// predicate the worker's preflight gates on — so this pins the DELEGATION (identical verdicts
+    /// on both sides of the API/worker seam) as well as the entry-shape half that stays local.
+    #[test]
+    fn converted_artifact_predicate_tracks_the_core_platform_rule() {
+        use sceneworks_core::jobs_store::convert_artifact_required_here;
+        let entry = |value: Value| value.as_object().unwrap().clone();
+
+        // flux2_klein_9b_true_v2: the candle converter exists (sc-7459), so the converted artifact
+        // is required on EVERY platform — this is the entry the whole story is about.
+        assert!(entry_requires_converted_artifact_here(&entry(json!({
+            "id": "flux2_klein_9b_true_v2",
+            "mlx": { "requiresConversion": true, "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // Anima / LTX / the prequant converters are macOS-only, so off-Mac they require NO converted
+        // artifact: surfacing them there would report `missing` for models that legitimately load
+        // their raw source tree. On macOS every native converter does produce the artifact. Asserted
+        // against the core helper rather than a second hard-coded membership test — that duplication
+        // is exactly what this delegation removed.
+        for converter in [
+            "anima_quant",
+            "ltx_video",
+            "flux2_dev_quant",
+            "sd3_5_large_quant",
+        ] {
+            assert_eq!(
+                entry_requires_converted_artifact_here(&entry(json!({
+                    "id": "x",
+                    "mlx": { "requiresConversion": true, "converter": converter }
+                }))),
+                convert_artifact_required_here(converter),
+                "{converter}: the catalog predicate must agree with the core platform rule"
+            );
+        }
+        // …and off macOS that verdict is concretely `false` (the Anima trap, stated outright).
+        #[cfg(not(target_os = "macos"))]
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "anima_base",
+            "mlx": { "requiresConversion": true, "converter": "anima_quant" }
+        }))));
+
+        // The entry-shape half, which stays local: a turnkey that merely names a converter is not
+        // convert-at-install, even on macOS where the converter itself qualifies.
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "x",
+            "mlx": { "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // No mlx block at all.
+        assert!(!entry_requires_converted_artifact_here(&entry(
+            json!({ "id": "x" })
+        )));
+    }
+
+    /// The off-Mac surfacing end-to-end (sc-20529): on EVERY platform, an unconverted
+    /// `flux2_klein_9b_true_v2` reports `needs_source`/`needs_conversion` and a converted one
+    /// reports `converted` + its path, so the Studio can offer the convert affordance and never
+    /// present the model as ready off its raw single-file download.
+    #[test]
+    fn convert_at_install_klein_reports_mlx_state_on_every_platform() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "flux2_klein_9b_true_v2",
+            "name": "FLUX.2 [klein] 9B True V2",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_klein_diffusers",
+                "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
+                "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_source"),
+            "an unconverted klein must report its conversion state on every platform"
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("missing")
+        );
+
+        seed_converted(data_dir, "flux2_klein_9b_true_v2");
+        let mut model = model.clone();
+        model.remove("mlxConversionState");
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert!(model
+            .get("mlxConvertedPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("flux2_klein_9b_true_v2")));
+    }
+
+    /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
+    /// `anima_quant` is macOS-only, so off-Mac Anima loads the raw `circlestone-labs/Anima`
+    /// `split_files/` tree with no converted dir. Emitting `mlxInstallState: "missing"` there
+    /// would present three installed, working models as not installed.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_mac_anima_reports_no_mlx_conversion_state() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "anima_base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert!(
+            model.get("mlxInstallState").is_none(),
+            "off-Mac Anima has no converted artifact by design — reporting an MLX install state \
+             would flip three working models to missing"
+        );
+        assert!(model.get("mlxConversionState").is_none());
     }
 
     #[test]
@@ -7627,6 +12376,404 @@ mod variant_delete_tests {
             .exists());
     }
 
+    /// The `SceneWorks/minimax-h3-mlx` shape (sc-17150 / sc-17158): ONE repo holding two DiT
+    /// partitions per tier, each owned by a DIFFERENT catalog entry. Seeds `tier`'s `transformer/`
+    /// (owned by `minimax_h3`) and `transformer_ref/` (owned by `minimax_h3_ref`).
+    ///
+    /// The two partitions ship a BYTE-IDENTICAL `config.json` (they carry the same architecture and
+    /// the same 638 tensor names; only the weights differ), so the hub cache stores it as ONE blob
+    /// that both snapshot entries symlink to. That shared blob is the trap: unlinking it with the base
+    /// partition would leave the reference partition's `config.json` dangling.
+    fn seed_minimax_tier(repo: &FsPath, tier: &str, base_etag: &str, ref_etag: &str, size: usize) {
+        let shared_config = blob(repo, &format!("{tier}-config"), b"{}");
+        link(
+            repo,
+            &format!("{tier}/transformer/config.json"),
+            &shared_config,
+        );
+        link(
+            repo,
+            &format!("{tier}/transformer_ref/config.json"),
+            &shared_config,
+        );
+        for partition in ["transformer", "transformer_ref"] {
+            let etag = if partition == "transformer" {
+                base_etag
+            } else {
+                ref_etag
+            };
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model.safetensors.index.json"),
+                &format!("{etag}-index"),
+                1,
+            );
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model-00001-of-00001.safetensors"),
+                etag,
+                size,
+            );
+        }
+    }
+
+    /// sc-19078 — a MiniMax-H3 per-tier delete reclaims that tier's own partition and NOTHING else.
+    ///
+    /// Mirrors `mage_flow_per_tier_delete_reclaims_only_that_tiers_dit`, which is the shipping
+    /// physical-per-tier precedent. H3 adds a dimension Mage does not have: the sibling that must
+    /// survive is not only another TIER of the same entry but another CATALOG ENTRY's partition inside
+    /// the same tier of the same repo — and the two partitions share a blob.
+    ///
+    /// Four things must hold at once, each a distinct way this could fail:
+    ///   - the deleted tier's own partition bytes are actually reclaimed (not 0);
+    ///   - the OTHER tier of the same entry survives (the tier predicates are disjoint);
+    ///   - the SIBLING ENTRY's partition in the SAME tier survives (the partition predicates are
+    ///     disjoint) — the case sc-17139's follow-ups flagged as reachable here for the first time;
+    ///   - the blob the two partitions SHARE survives, so the sibling's `config.json` still resolves.
+    #[tokio::test]
+    async fn minimax_h3_per_tier_delete_reclaims_only_that_entrys_partition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--SceneWorks--minimax-h3-mlx");
+        // Real hosted per-partition sizes scaled down by 1e6 (18,780,109,783 B q4 / 35,302,064,357 B
+        // q8). The RATIO and the disjointness are what the assertions are about.
+        const Q4_DIT: usize = 18780;
+        const Q8_DIT: usize = 35302;
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", Q4_DIT);
+        seed_minimax_tier(&repo, "q8", "q8dit", "q8refdit", Q8_DIT);
+
+        // Delete `minimax_h3`'s q4 tier. `retained` carries the surviving tiers of THAT entry, exactly
+        // as `delete_model_variant` builds it from the entry's own `downloads`.
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/transformer/*".to_owned()],
+            &[
+                "q8/transformer/*".to_owned(),
+                "bf16/transformer/*".to_owned(),
+            ],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // 1. Real bytes: the q4 base partition's shard + its index, and nothing else. The shared
+        //    `config.json` blob is NOT counted — it never left disk.
+        assert_eq!(
+            removal.reclaimed_bytes,
+            (Q4_DIT + 1) as u64,
+            "a MiniMax-H3 tier delete must reclaim that entry's own partition bytes"
+        );
+        assert!(!repo.join("blobs/q4dit").exists());
+        assert!(!repo
+            .join("snapshots/rev/q4/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 2. The same entry's OTHER tier is untouched.
+        assert!(repo.join("blobs/q8dit").exists());
+        assert!(repo
+            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 3. The SIBLING ENTRY's partition inside the deleted tier is untouched — `minimax_h3_ref`
+        //    stays installed at q4 even though its bytes live in the tier just deleted.
+        assert!(repo.join("blobs/q4refdit").exists());
+        assert!(repo
+            .join(
+                "snapshots/rev/q4/transformer_ref/diffusion_pytorch_model-00001-of-00001.safetensors"
+            )
+            .exists());
+
+        // 4. The blob the two partitions SHARE survives and the sibling's link still resolves through
+        //    it — a dangling `config.json` would make the reference entry unloadable while still
+        //    reading installed.
+        assert!(repo.join("blobs/q4-config").exists());
+        let sibling_config = repo.join("snapshots/rev/q4/transformer_ref/config.json");
+        assert!(
+            std::fs::read(&sibling_config).is_ok(),
+            "sibling config resolves"
+        );
+    }
+
+    /// sc-19078 — the WHOLE-model delete is scoped when the download repo is shared.
+    ///
+    /// This is the destructive half. `model_artifact_paths` resolves the repo's cache dir, so before
+    /// this the blanket `remove_dir_all` on `models--SceneWorks--minimax-h3-mlx` took every
+    /// `transformer_ref/` tier with it — up to 132.6 GB of an installed model the user never asked to
+    /// delete. `remove_whole_model_artifacts` removes the entry's own `files` scopes instead, with the
+    /// sibling entry's scopes retained.
+    #[tokio::test]
+    async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/minimax-h3-mlx";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
+        seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
+
+        let downloads = |partition: &str| {
+            json!(["q4", "q8", "bf16"]
+                .iter()
+                .map(|tier| json!({
+                    "provider": "huggingface",
+                    "repo": repo_name,
+                    "variant": tier,
+                    "files": [format!("{tier}/{partition}/*")],
+                }))
+                .collect::<Vec<_>>())
+        };
+        let base = json!({ "id": "minimax_h3", "downloads": downloads("transformer") });
+        let reference =
+            json!({ "id": "minimax_h3_ref", "downloads": downloads("transformer_ref") });
+        let catalog = vec![base.clone(), reference];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        let removal = remove_whole_model_artifacts(
+            &catalog,
+            "minimax_h3",
+            &base,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Every tier of the deleted entry's own partition is gone…
+        assert!(!removal.removed_paths.is_empty());
+        for etag in ["q4dit", "bf16dit"] {
+            assert!(!repo.join("blobs").join(etag).exists(), "{etag} removed");
+        }
+        assert!(!repo.join("snapshots/rev/q4/transformer").exists());
+        assert!(!repo.join("snapshots/rev/bf16/transformer").exists());
+
+        // …and every tier of the SIBLING entry's partition survives, blobs and links alike.
+        for etag in ["q4refdit", "bf16refdit", "q4-config", "bf16-config"] {
+            assert!(repo.join("blobs").join(etag).exists(), "{etag} retained");
+        }
+        for tier in ["q4", "bf16"] {
+            let sibling = repo.join(format!("snapshots/rev/{tier}/transformer_ref"));
+            assert!(sibling.join("config.json").exists(), "{tier} ref config");
+            assert!(std::fs::read(sibling.join("config.json")).is_ok());
+            assert!(sibling
+                .join("diffusion_pytorch_model-00001-of-00001.safetensors")
+                .exists());
+        }
+        // The repo cache dir itself must NOT be pruned — the sibling still lives in it.
+        assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
+    }
+
+    /// The exclusive-repo case is UNCHANGED: with no sibling claiming the repo, a whole-model delete
+    /// still removes the repo cache wholesale, including files no `files` scope names.
+    ///
+    /// This is the non-vacuity partner of the test above — without it, scoping could silently become
+    /// the universal path and quietly stop reclaiming the ~80 entries that own their repo outright.
+    #[tokio::test]
+    async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "Org/solo-model";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
+        // A file NO declared scope names — only a blanket removal reaches it.
+        seed(&repo, "README.md", "readme", 10);
+
+        let model = json!({
+            "id": "solo_model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo_name,
+                "variant": "q4",
+                "files": ["q4/transformer/*"],
+            }],
+        });
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "solo_model",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !repo.exists(),
+            "an exclusively-owned repo cache is removed whole"
+        );
+    }
+
+    /// A shared-repo entry that declares NO `files` scope keeps the blanket removal (`SceneWorks/bernini`
+    /// is the shipping example — both entries claim the whole repo with `files: []`). There is no
+    /// honest narrower scope for a whole-repo claim, so the documented behavior is preserved rather
+    /// than quietly reclaiming nothing.
+    #[tokio::test]
+    async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/whole-repo-pair";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "model.safetensors", "dit", 100);
+
+        let entry = |id: &str| {
+            json!({
+                "id": id,
+                "downloads": [{ "provider": "huggingface", "repo": repo_name, "files": [] }],
+            })
+        };
+        let first = entry("pair_a");
+        let catalog = vec![first.clone(), entry("pair_b")];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(&catalog, "pair_a", &first, data_dir, &allowed_roots, true)
+            .await
+            .unwrap();
+
+        assert!(!repo.exists());
+    }
+
+    #[test]
+    fn repo_file_scopes_union_tiers_and_reject_a_whole_repo_claim() {
+        let model = json!({
+            "id": "minimax_h3",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q8", "files": ["q8/transformer/*"] },
+                { "repo": "MiniMaxAI/MiniMax-H3", "coRequisite": true, "files": ["vae/*"] },
+            ],
+        });
+        // Only the named repo's rows, unioned across tiers — the co-requisite repo is a different repo
+        // and contributes nothing to this repo's scope.
+        assert_eq!(
+            model_repo_file_scopes(&model, "SceneWorks/minimax-h3-mlx"),
+            Some(vec![
+                "q4/transformer/*".to_owned(),
+                "q8/transformer/*".to_owned()
+            ])
+        );
+        // A repo this entry does not claim at all has no scope.
+        assert_eq!(model_repo_file_scopes(&model, "Org/unrelated"), None);
+        // One unscoped row poisons the whole repo's scope: it is a claim on everything.
+        let unscoped = json!({
+            "id": "bernini",
+            "downloads": [{ "repo": "SceneWorks/bernini", "files": [] }],
+        });
+        assert_eq!(
+            model_repo_file_scopes(&unscoped, "SceneWorks/bernini"),
+            None
+        );
+        // …and it poisons it even when a SCOPED sibling row is present in the same repo. This is the
+        // case the empty-scopes fallback alone cannot express: without the early return the entry
+        // would scope its delete to `q4/*` and strand everything else the unscoped row claims.
+        let mixed = json!({
+            "id": "mixed_claim",
+            "downloads": [
+                { "repo": "Org/mixed", "variant": "q4", "files": ["q4/*"] },
+                { "repo": "Org/mixed", "files": [] },
+            ],
+        });
+        assert_eq!(model_repo_file_scopes(&mixed, "Org/mixed"), None);
+
+        // Sibling scopes exclude the entry itself and INCLUDE a sibling's co-requisite in that repo.
+        let sibling = json!({
+            "id": "minimax_h3_ref",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer_ref/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "coRequisite": true, "files": ["shared/*"] },
+            ],
+        });
+        let catalog = vec![model.clone(), sibling];
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "SceneWorks/minimax-h3-mlx"),
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer_ref/*".to_owned()],
+                co_requisites: vec!["shared/*".to_owned()],
+            },
+            "the two kinds must stay SEPARATE — only the co-requisite half may be subtracted from"
+        );
+        // Viewed from the sibling, the base entry's scopes are the ones retained.
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3_ref", "SceneWorks/minimax-h3-mlx"),
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()],
+                co_requisites: Vec::new(),
+            }
+        );
+        // A repo only this entry claims has no sibling scopes at all — the discriminator that keeps
+        // the blanket path in force for the entries that own their repo outright.
+        assert!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "MiniMaxAI/MiniMax-H3")
+                .is_empty()
+        );
+    }
+
+    /// The retained set may subtract the deleted entry's own scopes from the sibling's CO-REQUISITE
+    /// half only (sc-19573 review). Subtracting from the union destroys the sibling's weights.
+    #[test]
+    fn retained_files_never_subtracts_a_siblings_primary_scopes() {
+        // The flux_dev ↔ pulid_flux_dev shape, and five more groups like it: the sibling names the
+        // IDENTICAL primary `files`, because both entries really do load the same checkpoint. Every
+        // one of those scopes must survive. Subtracting from the union yields `[]`, and then
+        // `remove_tier_artifacts`'s `selected && !retained` unlinks the sibling's blobs with
+        // `permanent=true` — tens of GB, unrecoverable without re-download.
+        let own = vec!["q4/*".to_owned(), "q8/*".to_owned(), "bf16/*".to_owned()];
+        let shared = SiblingRepoScopes {
+            primaries: own.clone(),
+            co_requisites: Vec::new(),
+        };
+        assert_eq!(
+            shared.retained_files(&own),
+            own,
+            "an identically-scoped sibling primary must be retained IN FULL, not emptied"
+        );
+
+        // The anima trio: the sibling's primary is its own DiT, and the TE/VAE it shares with the
+        // deleted entry ride the deleted entry's own primary rows too. Both must be retained.
+        let anima_own = vec![
+            "split_files/diffusion_models/anima-base-v1.0.safetensors".to_owned(),
+            "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+            "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+        ];
+        let anima_sibling = SiblingRepoScopes {
+            primaries: vec![
+                "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors".to_owned(),
+                "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+                "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+            ],
+            co_requisites: Vec::new(),
+        };
+        assert!(
+            anima_sibling
+                .retained_files(&anima_own)
+                .contains(&"split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned()),
+            "the shared text encoder anima_aesthetic/anima_turbo still need must be retained"
+        );
+
+        // MiniMax-H3, unchanged by the split: the sibling's PRIMARY is `transformer_ref`, and its
+        // co-requisite claim on the deleted entry's own `transformer` is what gets subtracted, so
+        // "delete minimax_h3" still frees the DiT the user asked to free.
+        let mm_own = vec!["q4/transformer/*".to_owned()];
+        let mm_sibling = SiblingRepoScopes {
+            primaries: vec!["q4/transformer_ref/*".to_owned()],
+            co_requisites: vec![
+                "q4/transformer/*".to_owned(),
+                "q4/text_encoder/*".to_owned(),
+            ],
+        };
+        assert_eq!(
+            mm_sibling.retained_files(&mm_own),
+            vec![
+                "q4/transformer_ref/*".to_owned(),
+                "q4/text_encoder/*".to_owned()
+            ],
+            "the overlapping co-requisite is dropped; the sibling's primary and the shared TE stay"
+        );
+    }
+
     // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus
     // SYMLINKS to a shared TE/VAE source that lives outside the tier dirs (sc-12025).
     fn seed_convert_tier(converted: &FsPath, tier: &str, dit_bytes: usize, shared_te: &FsPath) {
@@ -7702,11 +12849,45 @@ mod variant_delete_tests {
 mod imported_lora_advertisement_tests {
     use super::*;
 
+    fn route(
+        operation: &str,
+        conditioning: &[&str],
+    ) -> sceneworks_core::jobs_store::ImportedProviderSurface {
+        sceneworks_core::jobs_store::ImportedProviderSurface {
+            family: "fixture".to_owned(),
+            source: "fixture".to_owned(),
+            operation: operation.to_owned(),
+            provider_id: "fixture_provider".to_owned(),
+            conditioning: conditioning
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supports_lora: true,
+            supports_lokr: false,
+            supported_quants: vec!["q4".to_owned(), "q8".to_owned()],
+            supports_kv_cache: false,
+            supports_sequential_offload: false,
+            registry_cached: true,
+        }
+    }
+
     fn entry(id: &str, family: &str) -> JsonObject {
-        json!({ "id": id, "type": "image", "family": family })
-            .as_object()
-            .expect("entry object")
-            .clone()
+        let source = match family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            _ => "comfy_ui_tree",
+        };
+        json!({
+            "id": id,
+            "type": "image",
+            "family": family,
+            "catalogScope": "user",
+            "importSourceShape": source,
+        })
+        .as_object()
+        .expect("entry object")
+        .clone()
     }
 
     fn withdrawn(object: &JsonObject) -> bool {
@@ -7718,34 +12899,79 @@ mod imported_lora_advertisement_tests {
             && object["loraCompatibility"]["supported"] == json!(false)
     }
 
-    /// Both native imported Krea 2 single-file loaders take adapters. Neither platform projection
-    /// may withdraw the synthesized family promise now that each scheduler gate can claim it.
+    /// Both native imported Krea 2 single-file loaders take adapters (sc-18480), so neither platform
+    /// projection may withdraw the synthesized family promise — each scheduler gate can claim the
+    /// adapter shape, so the projection AFFIRMS it instead.
     #[test]
-    fn imported_krea_2_advertisement_survives_on_both_native_lanes() {
-        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
-            let mut object = entry("user_kreamania_variant5", "krea_2");
-            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
-            assert!(
-                object.get("loraCompatibility").is_none(),
-                "{lane} serves imported Krea 2 LoRAs; withdrawing would hide a working surface: \
-                 {object:?}"
-            );
-        }
+    fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
+        let mut on_candle = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert_eq!(
+            on_candle["loraCompatibility"]["families"],
+            json!(["krea_2"])
+        );
+        assert_eq!(on_candle["loraCompatibility"]["supported"], json!(true));
+
+        let mut on_mlx = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert_eq!(on_mlx["loraCompatibility"]["families"], json!(["krea_2"]));
+        assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
     }
 
-    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
-    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
-    /// promise while preserving the now-routable model itself.
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on MLX, whose provider seam
+    /// rejects adapters — so that projection withdraws the LoRA promise while preserving the
+    /// routable model itself. Candle declares no `mage-flow` imported provider at all, so it has no
+    /// opinion to project and must leave the entry untouched: withdrawing there would advertise a
+    /// lane that exists and merely lacks adapters, which is a different and false claim.
     #[test]
-    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
-        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
-            let mut object = entry("finetune_9f3c", "mage-flow");
-            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
-            assert!(
-                withdrawn(&object),
-                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
-            );
-        }
+    fn mage_flow_withdraws_adapters_only_on_the_lane_that_serves_it() {
+        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert!(
+            withdrawn(&on_mlx),
+            "MLX renders generated Mage t2i but cannot load adapters: {on_mlx:?}"
+        );
+
+        let untouched = entry("finetune_9f3c", "mage-flow");
+        let mut on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert_eq!(
+            on_candle, untouched,
+            "candle declares no mage-flow imported provider, so there is no promise to withdraw"
+        );
+    }
+
+    /// The LANE-SCOPED verdict above is per-lane truth; the PRODUCTION binding must still publish a
+    /// withdrawal on a candle-only deployment. sc-15328's hang was exactly this shape — no explicit
+    /// empty family list, so `families_from_value_chain` fell back to `family`, the API accepted a
+    /// LoRA submission, and no worker could claim it. That regressed on every non-macOS build the
+    /// moment the advertisement became facts-derived, because candle registers no `mage-flow`
+    /// imported provider and therefore answers "no opinion" rather than "refuses adapters".
+    #[test]
+    fn a_candle_only_build_still_withdraws_mage_adapters_from_the_other_lane() {
+        let mut object = entry("finetune_9f3c", "mage-flow");
+        // The production binding's own lane (candle) has no opinion here.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, false, true),
+            None
+        );
+        // MLX is the lane that serves the family and refuses adapters, and that refusal is what
+        // must reach the entry regardless of which engine this build links.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, true, false),
+            Some(false)
+        );
+        write_imported_lora_advertisement(&mut object, false);
+        assert!(withdrawn(&object), "{object:?}");
+        assert_eq!(object["loraCompatibility"]["families"], json!([]));
+
+        // A positive advertisement must NOT cross lanes: offering adapters this build cannot claim
+        // is the same hang pointed the other way.
+        let krea = entry("user_kreamania_variant5", "krea_2");
+        assert_eq!(
+            imported_lora_advertisement_verdict(&krea, true, false),
+            Some(true)
+        );
     }
 
     /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
@@ -7756,12 +12982,11 @@ mod imported_lora_advertisement_tests {
         for (mlx, candle) in [(true, false), (false, true)] {
             let mut sdxl = entry("community_xl", "sdxl");
             apply_imported_lora_advertisement_for_lanes(&mut sdxl, mlx, candle);
-            assert!(
-                sdxl.get("loraCompatibility").is_none(),
-                "both fused SDXL loaders accept UNet adapters"
-            );
+            assert_eq!(sdxl["loraCompatibility"]["families"], json!(["sdxl"]));
+            assert_eq!(sdxl["loraCompatibility"]["supported"], json!(true));
 
             let mut builtin = entry("krea_2_turbo", "krea_2");
+            builtin.insert("catalogScope".to_owned(), json!("builtin"));
             apply_imported_lora_advertisement_for_lanes(&mut builtin, mlx, candle);
             assert!(
                 builtin.get("loraCompatibility").is_none(),
@@ -7774,8 +12999,10 @@ mod imported_lora_advertisement_tests {
     /// adapter verdict and keeps sibling compatibility metadata intact.
     #[test]
     fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
+        // The canonical family token, so the affirming branch finds it already present and the
+        // entry is byte-preserved rather than gaining a second, duplicate family entry.
         let compatibility =
-            json!({ "families": ["krea-2"], "supported": true, "types": ["character", "style"] });
+            json!({ "families": ["krea_2"], "supported": true, "types": ["character", "style"] });
         let mut supported = entry("user_kreamania_variant5", "krea_2");
         supported.insert("loraCompatibility".to_owned(), compatibility.clone());
         apply_imported_lora_advertisement_for_lanes(&mut supported, false, true);
@@ -7789,11 +13016,442 @@ mod imported_lora_advertisement_tests {
             "loraCompatibility".to_owned(),
             json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
         );
-        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, false, true);
+        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, true, false);
         assert!(withdrawn(&withdrawn_entry));
         assert_eq!(
             withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    #[test]
+    fn provider_surface_matches_exact_source_shape() {
+        let mut krea = entry("user_krea", "krea_2");
+        apply_imported_provider_surface_for_lanes(&mut krea, true, false);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert_eq!(krea["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        let mut wrong_shape = entry("wrong_shape", "krea_2");
+        wrong_shape.insert("importSourceShape".to_owned(), json!("fused_checkpoint"));
+        apply_model_manifest_defaults(&mut wrong_shape, "image", Some("krea_2"));
+        apply_imported_provider_surface_for_lanes(&mut wrong_shape, true, true);
+        assert!(wrong_shape["capabilities"]
+            .as_array()
+            .is_some_and(|values| values
+                .iter()
+                .all(|value| { !matches!(value.as_str(), Some("text_to_image" | "edit_image")) })));
+        assert!(wrong_shape["ui"].get("img2img").is_none());
+        assert!(wrong_shape["ui"].get("editReferences").is_none());
+        assert!(wrong_shape.get("runtimeQuantTiers").is_none());
+        assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    /// sc-11043 (epic 11037): a checkpoint STORED as NVFP4 offers exactly its own tier.
+    ///
+    /// The q4/q8/bf16 sweep describes what a route can quantize a dense import TO; these bytes are
+    /// already packed E2M1 and nothing re-quantizes them. Offering the sweep advertised `q4` for an
+    /// NVFP4 checkpoint — the alias E2 forbids — and every job the offer produced was then refused
+    /// by the admission gate, so the picker showed tiers the router would not accept.
+    #[test]
+    fn an_nvfp4_import_offers_its_own_tier_and_never_q4() {
+        let mut native = entry("user_krea_nvfp4", "krea_2");
+        native.insert("importQuantFormat".to_owned(), json!("nvfp4"));
+        apply_imported_provider_surface_for_lanes(&mut native, false, true);
+        assert_eq!(native["runtimeQuantTiers"], json!(["nvfp4"]));
+
+        // A dense sibling through the same route is untouched: the projection keys on the entry's
+        // own source codec, not on the family or the route's advertised quants.
+        let mut dense = entry("user_krea_bf16", "krea_2");
+        dense.insert("importQuantFormat".to_owned(), json!("bf16"));
+        apply_imported_provider_surface_for_lanes(&mut dense, false, true);
+        assert_eq!(dense["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        // A classification with no proved engine codec is not an NVFP4 claim.
+        let mut packed = entry("user_krea_packed", "krea_2");
+        packed.insert("importQuantFormat".to_owned(), json!("comfy_quant_packed"));
+        apply_imported_provider_surface_for_lanes(&mut packed, false, true);
+        assert_eq!(packed["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+    }
+
+    #[test]
+    fn exact_route_projection_withdraws_family_siblings_before_adding_supported_operations() {
+        let mut candle_sdxl = entry("community_xl", "sdxl");
+        apply_model_manifest_defaults(&mut candle_sdxl, "image", Some("sdxl"));
+        let generate = route("generate", &[]);
+        project_imported_operation_surface(&mut candle_sdxl, &[&generate]);
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "text_to_image"));
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value != "edit_image"));
+        assert!(candle_sdxl["ui"].get("img2img").is_none());
+
+        let mut krea = entry("user_krea", "krea_2");
+        apply_model_manifest_defaults(&mut krea, "image", Some("krea_2"));
+        let edit = route("edit", &["reference", "multi_reference"]);
+        let pose = route("pose", &["control"]);
+        let multi_phase = route("multi_phase", &[]);
+        let generate = route("generate", &["reference"]);
+        project_imported_operation_surface(&mut krea, &[&generate, &edit, &pose, &multi_phase]);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["ui"].get("editReferences").is_some());
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert!(krea["loraCompatibility"]["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "acceleration"));
+    }
+
+    #[test]
+    fn external_comfyui_surface_uses_exact_candle_registration() {
+        let mut zimage = entry("external_z", "z-image");
+        zimage.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut zimage, false, true);
+        assert_eq!(zimage["ui"]["img2img"], json!(true));
+
+        let mut qwen = entry("external_qwen", "qwen-image");
+        qwen.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut qwen, false, true);
+        assert_eq!(qwen["capabilities"], json!(["text_to_image"]));
+        assert_eq!(qwen["ui"], json!({}));
+        assert!(qwen.get("runtimeQuantTiers").is_none());
+        assert_eq!(qwen["loraCompatibility"], json!({}));
+
+        let mut mage_on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_mlx, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_mlx, true, false);
+        assert!(mage_on_mlx["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.contains(&json!("text_to_image"))));
+        assert_eq!(
+            mage_on_mlx["runtimeQuantTiers"],
+            json!(["q4", "q8", "bf16"])
+        );
+
+        let mut mage_on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_candle, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_candle, false, true);
+        assert!(mage_on_candle["capabilities"]
+            .as_array()
+            .is_some_and(|values| !values.contains(&json!("text_to_image"))));
+        assert!(
+            mage_on_candle.get("loraCompatibility").is_none(),
+            "an empty route set must abstain instead of manufacturing compatibility metadata"
+        );
+        assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
+    }
+}
+
+/// sc-20636 (epic 20398): the import API's ownership mode + discriminated source, and the
+/// normalisation that keeps every legacy flat request working and managed.
+#[cfg(test)]
+mod model_import_source_tests {
+    use super::*;
+
+    fn legacy() -> ModelImportRequest {
+        ModelImportRequest {
+            ownership_mode: OwnershipModeV1::default(),
+            source: None,
+            model_id: None,
+            name: None,
+            model_type: None,
+            repo: None,
+            source_url: None,
+            source_path: None,
+            // Linked (in-place) ownership is a different mode entirely (sc-20635); a legacy flat
+            // request never names one.
+            linked_root_id: None,
+            linked_relative_path: None,
+            files: Vec::new(),
+            family: None,
+            expected_sha256: None,
+            license_acknowledged: false,
+            uploaded_source_path: false,
+        }
+    }
+
+    fn parse(body: &str) -> ModelImportRequest {
+        serde_json::from_str(body).expect("body deserializes")
+    }
+
+    /// AC3: a body written before `ownershipMode` and `source` existed still deserializes, and it
+    /// normalises to MANAGED ownership with its source recorded — not to an unowned import.
+    #[test]
+    fn legacy_flat_bodies_still_deserialize_and_normalise_to_managed_ownership() {
+        for (body, expected_source, expected_reference) in [
+            (
+                r#"{"repo":"org/model","type":"image"}"#,
+                "huggingface",
+                Some("org/model"),
+            ),
+            (
+                r#"{"sourceUrl":"https://host.example/model.safetensors"}"#,
+                "url",
+                None,
+            ),
+            (
+                r#"{"sourcePath":"/data/models/imports/mine/model.safetensors"}"#,
+                "local-copy",
+                Some("model.safetensors"),
+            ),
+        ] {
+            let mut payload = parse(body);
+            assert_eq!(
+                payload.ownership_mode,
+                OwnershipModeV1::Managed,
+                "an absent ownershipMode is managed: {body}"
+            );
+            assert!(payload.source.is_none());
+            let (provenance, revision) =
+                normalize_model_import_source(&mut payload).expect("legacy body normalises");
+            assert_eq!(provenance.source, expected_source, "{body}");
+            assert_eq!(
+                provenance.reference.as_deref(),
+                expected_reference,
+                "{body}"
+            );
+            assert_eq!(revision, None);
+        }
+
+        // The flat fields survive normalisation untouched, so the rest of the import path — and the
+        // worker — see exactly what they saw before this field pair existed.
+        let mut payload = parse(r#"{"repo":"org/model","files":["model.safetensors"]}"#);
+        normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(payload.repo.as_deref(), Some("org/model"));
+        assert_eq!(payload.files, vec!["model.safetensors".to_owned()]);
+    }
+
+    #[test]
+    fn an_uploaded_legacy_body_is_recorded_as_an_upload_not_a_local_copy() {
+        let mut payload = legacy();
+        payload.source_path =
+            Some("/data/cache/model-uploads/upload-1/mine.safetensors".to_owned());
+        payload.files = vec!["mine.safetensors".to_owned()];
+        payload.uploaded_source_path = true;
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(provenance.source, "upload");
+        assert_eq!(provenance.reference.as_deref(), Some("mine.safetensors"));
+    }
+
+    /// Each discriminated variant collapses onto the flat field the existing transfer code reads,
+    /// so there is one pipeline rather than a second one beside it.
+    #[test]
+    fn every_discriminated_source_normalises_onto_the_existing_transfer_fields() {
+        let mut payload = parse(
+            r#"{"source":{"kind":"huggingFace","repo":"org/model","revision":"abc123","files":["model.safetensors"]}}"#,
+        );
+        let (provenance, revision) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(payload.repo.as_deref(), Some("org/model"));
+        assert_eq!(payload.files, vec!["model.safetensors".to_owned()]);
+        assert_eq!(revision.as_deref(), Some("abc123"));
+        assert_eq!(provenance.source, "huggingface");
+        assert_eq!(provenance.reference.as_deref(), Some("org/model@abc123"));
+        assert_eq!(provenance.version_id.as_deref(), Some("abc123"));
+        assert_eq!(provenance.file_id.as_deref(), Some("model.safetensors"));
+
+        let mut payload = parse(
+            r#"{"source":{"kind":"localPath","path":"/data/models/imports/x/model.safetensors"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_path.as_deref(),
+            Some("/data/models/imports/x/model.safetensors")
+        );
+        assert!(!payload.uploaded_source_path);
+        assert_eq!(provenance.source, "local-copy");
+
+        let mut payload = parse(
+            r#"{"source":{"kind":"url","url":"https://host.example/m.safetensors","expectedSha256":"ab"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_url.as_deref(),
+            Some("https://host.example/m.safetensors")
+        );
+        assert_eq!(payload.expected_sha256.as_deref(), Some("ab"));
+        assert_eq!(provenance.source, "url");
+        assert_eq!(provenance.credential_host.as_deref(), Some("host.example"));
+
+        let mut payload = legacy();
+        payload.source = Some(ModelImportSourceV1::Upload {
+            staged_path: Some("/data/cache/model-uploads/u/m.safetensors".to_owned()),
+        });
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_path.as_deref(),
+            Some("/data/cache/model-uploads/u/m.safetensors")
+        );
+        assert!(payload.uploaded_source_path);
+        assert_eq!(provenance.source, "upload");
+    }
+
+    /// AC1: Civitai's version/file identity, URL, and the host whose credential authorized the
+    /// download are recorded; no secret is.
+    #[test]
+    fn a_civitai_source_records_its_identity_and_never_a_secret() {
+        let mut payload = parse(
+            r#"{"source":{"kind":"civitai","url":"https://user:t0ken@civitai.com/api/download/models/9931?type=Model&token=s3cret","modelVersionId":"9931","fileId":"40277","expectedSha256":"abc"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+
+        // The transfer reuses the ordinary source-URL download, credential attachment included.
+        assert_eq!(
+            payload.source_url.as_deref(),
+            Some("https://user:t0ken@civitai.com/api/download/models/9931?type=Model&token=s3cret")
+        );
+        assert_eq!(payload.expected_sha256.as_deref(), Some("abc"));
+
+        assert_eq!(provenance.source, "civitai");
+        assert_eq!(provenance.version_id.as_deref(), Some("9931"));
+        assert_eq!(provenance.file_id.as_deref(), Some("40277"));
+        assert_eq!(provenance.reference.as_deref(), Some("modelVersion/9931"));
+        assert_eq!(provenance.credential_host.as_deref(), Some("civitai.com"));
+        assert_eq!(
+            provenance.url.as_deref(),
+            Some("https://civitai.com/api/download/models/9931?type=Model"),
+            "userinfo and the token parameter must be stripped before provenance is persisted"
+        );
+        let serialized = provenance.to_json().to_string();
+        assert!(
+            !serialized.contains("t0ken") && !serialized.contains("s3cret"),
+            "provenance must carry no credential: {serialized}"
+        );
+    }
+
+    /// A request that sets both spellings is refused rather than silently resolved by precedence:
+    /// honouring one and dropping the other would fetch something the caller did not ask for.
+    #[test]
+    fn a_request_that_sets_both_spellings_is_refused() {
+        for body in [
+            r#"{"repo":"org/a","source":{"kind":"huggingFace","repo":"org/b"}}"#,
+            r#"{"sourceUrl":"https://a.example/m","source":{"kind":"url","url":"https://b.example/m"}}"#,
+            r#"{"sourcePath":"/a/m","source":{"kind":"localPath","path":"/b/m"}}"#,
+        ] {
+            let mut payload = parse(body);
+            let error = normalize_model_import_source(&mut payload)
+                .expect_err("a conflicting body must refuse");
+            assert!(
+                format!("{error:?}").contains("not both"),
+                "{body} refused as {error:?}"
+            );
+        }
+    }
+
+    /// `expectedSha256` has the same two spellings as `repo`/`sourceUrl`/`sourcePath`, and it was
+    /// the only one resolved by PRECEDENCE (`expected_sha256.or(payload.expected_sha256)`). A caller
+    /// who sent two different digests got the transfer verified against whichever one won and a
+    /// success report — the exact silent resolution this function's contract refuses. Both set and
+    /// naming the same digest is fine: sha256 is hex, so case and surrounding whitespace are not a
+    /// difference.
+    #[test]
+    fn conflicting_expected_sha256_digests_are_refused_and_matching_ones_are_accepted() {
+        let alpha = "a".repeat(64);
+        let beta = "b".repeat(64);
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            let error = normalize_model_import_source(&mut payload)
+                .expect_err("two different digests must refuse");
+            let rendered = format!("{error:?}");
+            assert!(
+                rendered.contains("expectedSha256") && rendered.contains("not both"),
+                "{label} refusal must name the field: {rendered}"
+            );
+            assert!(
+                rendered.contains(&alpha) && rendered.contains(&beta),
+                "{label} refusal must show both digests: {rendered}"
+            );
+        }
+
+        // The SAME digest in both places, differing only in case and surrounding whitespace, is one
+        // digest spelled twice — accepted, and the value is preserved for the transfer to verify.
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            normalize_model_import_source(&mut payload).unwrap_or_else(|error| {
+                panic!("{label} must accept one digest spelled twice: {error:?}")
+            });
+            assert_eq!(
+                payload.expected_sha256.as_deref(),
+                Some(alpha.as_str()),
+                "{label} must keep the digest for the transfer to verify"
+            );
+        }
+
+        // Only one side set is not a conflict, in either direction.
+        let mut payload = parse(&format!(
+            r#"{{"expectedSha256":"{alpha}","source":{{"kind":"url","url":"https://h.example/m"}}}}"#
+        ));
+        normalize_model_import_source(&mut payload).expect("a flat-only digest is not a conflict");
+        assert_eq!(payload.expected_sha256.as_deref(), Some(alpha.as_str()));
+    }
+
+    /// E7: an ownership mode this route does not serve fails closed at deserialization rather than
+    /// defaulting to managed.
+    #[test]
+    fn an_unserved_ownership_mode_is_refused_instead_of_defaulted() {
+        for body in [
+            r#"{"repo":"org/model","ownershipMode":"linked"}"#,
+            r#"{"repo":"org/model","ownershipMode":"external"}"#,
+            r#"{"repo":"org/model","ownershipMode":""}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelImportRequest>(body).is_err(),
+                "{body} must be refused"
+            );
+        }
+        // And an unknown discriminated source kind, or an unknown field inside a known one.
+        for body in [
+            r#"{"source":{"kind":"ftp","url":"ftp://host/m"}}"#,
+            r#"{"source":{"kind":"url","url":"https://h/m","token":"s3cret"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelImportRequest>(body).is_err(),
+                "{body} must be refused"
+            );
+        }
     }
 }

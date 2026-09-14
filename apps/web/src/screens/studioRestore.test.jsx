@@ -12,6 +12,7 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 import { VideoStudio } from "./VideoStudio.jsx";
 
@@ -610,6 +611,39 @@ describe("reference-tuning declared defaults apply on a fresh late-catalog mount
     expect(snap.ipAdapterScale).toBe(0.33);
     expect(snap.controlnetScale).toBe(0.22);
     expect(snap.trueCfgScale).toBe(1.5);
+  });
+
+  it("replays sanitized shared numeric controls without poisoning the form state", async () => {
+    seedSnapshot("image", {
+      ipAdapterScale: 0.61,
+      controlnetScale: 0.81,
+      trueCfgScale: 4.1,
+    });
+    const recipe = recipeFromWorkflowShare(
+      {
+        mode: "text_to_image",
+        prompt: "shared recipe",
+        advanced: {
+          ipAdapterScale: "bad",
+          controlnetConditioningScale: Infinity,
+          trueCfgScale: "NaN",
+          schedulerShift: "2.5",
+        },
+      },
+      { model: { state: "resolved", catalogId: "z_image_turbo" }, loras: [], styles: [] },
+    );
+
+    await renderSequence(ImageStudio, [
+      imageContext({ studioLaunch: { id: "shared-numeric-replay", view: "Image", recipe } }),
+    ]);
+
+    const snap = readSnapshot("image");
+    // Invalid values were gone before the effect touched the number-backed controls.
+    expect(snap.ipAdapterScale).toBe(0.61);
+    expect(snap.controlnetScale).toBe(0.81);
+    expect(snap.trueCfgScale).toBe(4.1);
+    // Finite values survive in their numeric form, not as serialized strings.
+    expect(snap.schedulerShift).toBe(2.5);
   });
 
   // Issue-2 companion: a saved preset that carries its OWN reference tuning (a character-mode preset

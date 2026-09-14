@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/epic-20738-terminal-profile-v1.json",
+  "title": "Epic 20738 serialized CUDA terminal profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "epic", "story", "profile", "artifacts", "cells"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "epic": { "const": 20738 },
+    "story": { "const": 20945 },
+    "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/artifact" }
+    },
+    "cells": {
+      "type": "array",
+      "minItems": 19,
+      "maxItems": 19,
+      "items": { "$ref": "#/$defs/cell" }
+    }
+  },
+  "$defs": {
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority", "role", "repository", "revision", "subdirectory", "allowPatterns"],
+      "properties": {
+        "authority": { "$ref": "#/$defs/authority" },
+        "role": { "enum": ["primary", "text_encoder", "control", "tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"] },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "subdirectory": { "type": "string", "minLength": 1 },
+        "allowPatterns": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "quantizationMarker": { "$ref": "#/$defs/quantizationMarker" }
+      }
+    },
+    "quantizationMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bits", "groupSize", "components"],
+      "properties": {
+        "bits": { "const": 4 },
+        "groupSize": { "const": 64 },
+        "components": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "text_encoder" },
+            { "const": "text_encoder_2" },
+            { "const": "unet" }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "modelId", "engineId", "requestedTier", "artifactIds", "request"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "kind": { "enum": ["image", "scail2", "ltx", "sdxlOpenPose"] },
+        "modelId": { "type": "string", "minLength": 1 },
+        "engineId": { "type": "string", "minLength": 1 },
+        "requestedTier": { "enum": ["q4", "q8"] },
+        "capability": { "const": "multiReference" },
+        "artifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "request": { "$ref": "#/$defs/request" }
+      }
+    },
+    "authority": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "model", "variant"],
+          "properties": {
+            "kind": { "const": "manifest" }, "model": { "type": "string", "minLength": 1 },
+            "variant": { "enum": ["q4", "q8"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "model", "componentId"],
+          "properties": {
+            "kind": { "const": "manifest" }, "model": { "type": "string", "minLength": 1 },
+            "componentId": { "enum": ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "model", "component"],
+          "properties": {
+            "kind": { "const": "manifest" }, "model": { "const": "ltx_2_3" },
+            "component": { "const": "gemma" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "file"],
+          "properties": {
+            "kind": { "const": "explicitPublicArtifact" },
+            "file": { "const": "diffusion_pytorch_model.safetensors" }
+          }
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "steps", "seed"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "steps": { "type": "integer", "minimum": 1 },
+        "seed": { "type": "integer", "minimum": 0 },
+        "frames": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 },
+        "guidance": { "type": "number" },
+        "trueCfg": { "type": "number" },
+        "sampler": { "type": "string", "minLength": 1 },
+        "referencePairs": { "type": "integer", "minimum": 1, "maximum": 6 }
+      }
+    }
+  }
+}

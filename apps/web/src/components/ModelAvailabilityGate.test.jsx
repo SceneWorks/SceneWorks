@@ -37,6 +37,22 @@ describe("ModelAvailabilityGate", () => {
     expect(container.querySelector(".model-availability-gate")).toBeNull();
   });
 
+  it("shows initialization progress without advertising download offers", async () => {
+    await renderGate({
+      ready: false,
+      initializing: true,
+      title: "Image Studio needs a model",
+      offers: [{ id: "fallback-only", name: "Unverified fallback" }],
+      children: <div className="studio-body">Studio</div>,
+    });
+
+    expect(container.textContent).toContain("Initializing models");
+    expect(container.textContent).toContain("Checking which models are installed");
+    expect(container.textContent).not.toContain("Unverified fallback");
+    expect(container.querySelector('[role="progressbar"]')).toBeTruthy();
+    expect(container.querySelector(".studio-body")).toBeNull();
+  });
+
   it("offers recommended models for download when gated and queues on click", async () => {
     const onDownload = vi.fn();
     await renderGate({

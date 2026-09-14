@@ -3,6 +3,13 @@ import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
+import {
+  borrowedLicenseAcknowledgmentBlocked,
+  licenseAckRefusalMessage,
+  licenseAcknowledgmentBlocked,
+  licenseAcknowledgmentSource,
+  requiresLicenseAcknowledgment,
+} from "../licenseAcknowledgment.js";
 import { upsertJobNewest } from "../sorters.js";
 
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
@@ -234,9 +241,14 @@ export function useModelsAndLoras({
       // multipart field names (e.g. `type`, not `modelType`) or the value is silently dropped
       // and the import defaults to `image` (sc-14020).
       Object.entries(metadata).forEach(([key, value]) => {
-        if (value != null && value !== "") {
-          body.append(key, value);
+        if (value == null || value === "") {
+          return;
         }
+        // The multipart parser reads `source` as a JSON DOCUMENT (models.rs
+        // `model_import_request_from_multipart` runs `serde_json::from_str` on it), so an object
+        // appended verbatim would arrive as the literal "[object Object]" and be refused as an
+        // invalid import source. Every other field is a scalar and is unchanged (epic 20398).
+        body.append(key, typeof value === "object" && !(value instanceof Blob) ? JSON.stringify(value) : value);
       });
       body.append("file", file);
     } else {
@@ -309,6 +321,20 @@ export function useModelsAndLoras({
 
   const createModelDownloadJob = useCallback(
     async (model, options = {}) => {
+      // Licence-acknowledgment CHOKE POINT (sc-17227). Every download-starting surface funnels
+      // through here — the Models screen, the Simple UI's model manager, the first-run Setup
+      // Wizard, the studio availability gates, the workflow drop, the Update button — so this is
+      // the one place the gate binds all of them. Enforcing it per-surface is how MiniMax-H3
+      // shipped downloadable from three screens that render no licence UI at all.
+      //
+      // Refusing here rather than letting the request through is not belt-and-braces: for a
+      // `requiresLicenseAcknowledgment` model the repo is PUBLIC, so nothing upstream refuses an
+      // unacknowledged fetch and the weights would simply land. The API refuses the same request
+      // independently (`apps/rust-api/src/models.rs`) for clients this code never runs in.
+      if (licenseAcknowledgmentBlocked(model)) {
+        setError(licenseAckRefusalMessage(model));
+        return null;
+      }
       try {
         // sc-8509: install a specific quant tier when the caller passes one (the Models-page tier
         // picker for a quant-matrix model). Absent `variant` installs the model's default tier —
@@ -316,6 +342,11 @@ export function useModelsAndLoras({
         const body = { requestedGpu: "auto" };
         if (options.variant) {
           body.variant = options.variant;
+        }
+        // Carry the acknowledgment to the API, which refuses the download without it. Sent only
+        // when the model actually requires one, so no other download's body changes shape.
+        if (requiresLicenseAcknowledgment(model)) {
+          body.licenseAcknowledged = true;
         }
         const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
           method: "POST",
@@ -355,10 +386,27 @@ export function useModelsAndLoras({
   // Mirrors createModelDownloadJob.
   const createLoraDownloadJob = useCallback(
     async (lora) => {
+      // The LoRA half of the licence CHOKE POINT (sc-17227). `POST /api/v1/loras/:id/download`
+      // gates on the repo the catalog row resolves to, so a LoRA whose `source.repo` is a
+      // restricted repo is refused exactly as the model download is — and without this the refusal
+      // is a bare 403 no shipped surface can clear: nothing sends the assertion, and no LoRA row
+      // renders a licence checkbox. The server stamps the gating model onto the row; the gate here
+      // reads that stamp and the ack the Models screen already persists, so accepting the licence
+      // once on the model's card is what makes its LoRAs downloadable.
+      const licenseSource = licenseAcknowledgmentSource(lora);
+      if (borrowedLicenseAcknowledgmentBlocked(lora)) {
+        setLoraError(licenseAckRefusalMessage(licenseSource));
+        return null;
+      }
       try {
+        const body = { requestedGpu: "auto" };
+        // Sent only for a row the server flagged, so no other LoRA download changes shape.
+        if (licenseSource) {
+          body.licenseAcknowledged = true;
+        }
         const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
           method: "POST",
-          body: JSON.stringify({ requestedGpu: "auto" }),
+          body: JSON.stringify(body),
         });
         setJobs((items) => upsertJobNewest(items, job));
         setLoraError("");

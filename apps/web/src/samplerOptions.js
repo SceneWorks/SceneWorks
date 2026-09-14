@@ -148,6 +148,32 @@ export function stepsDefaultFromModel(model) {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+// `limits.steps` — the EXACT set of denoise step counts a model can render, or `null` for no menu
+// (sc-19502). Distilled models bake their sigma waypoints into training, so LTX-2.3 renders at 8
+// steps and nothing else; the API and worker refuse anything off this menu.
+//
+// Deliberately mirrors `allowed_steps` in crates/sceneworks-core/src/video_request.rs, INCLUDING
+// its "unsatisfiable means no menu" fallback: a menu whose entries are all unusable would otherwise
+// pin the control to nothing and make the model unusable from the UI. A UI stricter than the gate
+// blocks legal requests; a UI looser than it offers a knob the backend will refuse.
+//
+// ⚠️ Reads the BASE `limits` directly — NOT `effectiveLimits(model, backend)`, unlike every sampler
+// helper above. That is load-bearing, not an oversight. `effectiveLimits` REPLACES the whole block
+// with `mlx.limits` / `candle.limits` when one exists, so a model carrying a per-backend sampler
+// override would read as having no step menu here while the Rust gate — which reads top-level
+// `limits.steps` lane-agnostically — still refuses off-menu counts. That is precisely the UI/gate
+// desync sc-19502 fixed. The step count is a property of the distilled weights, not of the backend
+// (both LTX lanes bake the identical schedule), so there is deliberately no per-lane form of this
+// key; `both_ltx_lanes_agree_on_one_legal_step_count` asserts none appears.
+export function stepsMenuFromModel(model) {
+  const raw = model?.limits?.steps;
+  if (!Array.isArray(raw)) return null;
+  const menu = raw
+    .map((value) => (typeof value === "number" ? value : Number.NaN))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return menu.length ? menu : null;
+}
+
 export function guidanceDefaultFromModel(model) {
   const value = Number(model?.defaults?.guidanceScale);
   return Number.isFinite(value) ? value : null;

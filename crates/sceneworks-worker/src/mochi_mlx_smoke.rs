@@ -135,7 +135,7 @@ fn mochi_mlx_gpu_smoke() {
          (mochi_frame_count snaps to this); got {frames}"
     );
     assert!(
-        w % 16 == 0 && h % 16 == 0,
+        w.is_multiple_of(16) && h.is_multiple_of(16),
         "Mochi requires width/height divisible by 16; got {w}x{h}"
     );
 

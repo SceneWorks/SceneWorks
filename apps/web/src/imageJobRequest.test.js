@@ -76,6 +76,8 @@ function img2imgPidState(overrides = {}) {
     showPidToggle: true,
     usePid: true,
     pidTarget: "2k",
+    showDecoderPicker: false,
+    decoder: "native",
     hideReferenceStrength: false,
     ipAdapterScale: 0.8,
     identityStructure: false,
@@ -177,6 +179,19 @@ describe("buildImageJobRequest", () => {
     const request = buildImageJobRequest(img2imgPidState());
     expect(request.advanced.usePid).toBe(true);
     expect(request.advanced.pidTarget).toBe("2k");
+  });
+
+  it("forwards the descriptor-derived alternate decoder selection", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        showPidToggle: true,
+        usePid: false,
+        showDecoderPicker: true,
+        decoder: "wan_2_1_vae",
+      }),
+    );
+    expect(request.advanced.decoder).toBe("wan_2_1_vae");
+    expect(request.advanced.usePid).toBeUndefined();
   });
 
   it("produces an identical img2img + PiD payload for a batch-style call as for single Generate", () => {

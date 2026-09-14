@@ -78,20 +78,36 @@ COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # so the API can seed an empty config dir, which means they must exist in the
 # build context (not just the runtime bind mount) or the compile can't read them.
 COPY config ./config
-# Same constraint, second source (sc-16080): `sceneworks-core::memory_calibration`
-# embeds the generated calibration evidence via `include_str!`, and that embed is NOT
-# test-gated, so a release build of the API cannot compile without it.
+# Same constraint, second source (sc-16080): `sceneworks-core` embeds generated calibration
+# evidence and video-curve inputs via `include_str!`, and those embeds are NOT test-gated, so a
+# release build of the API cannot compile without them.
 #
-# Deliberately the single embedded FILE rather than `docs/generated`: that directory
-# also holds `memory-matrix.json`, which is regenerated and re-hashed by any change to
-# the selector's source, so copying the directory would invalidate this layer and
-# rebuild the whole Rust graph on edits the image does not depend on.
+# Deliberately the two singleton embeds plus the LTX evidence family rather than
+# `docs/generated`: that directory also holds
+# `memory-matrix.json`, which is regenerated and re-hashed by any change to the selector's source,
+# so copying the directory would invalidate this layer and rebuild the whole Rust graph on edits
+# the image does not depend on.
 #
 # Every `include_str!`/`include_bytes!` that reaches outside its crate needs a line
 # here, or the Docker build breaks while `cargo build` on a checkout stays green — the
 # two see different trees. Embeds inside `mod tests` are exempt: this stage builds
 # `--release` without tests.
+#
+# `docs/calibration/<campaign>/` is copied as a DIRECTORY, one line per campaign — unlike
+# `docs/generated/`, whose per-file lines exist to keep the churning `memory-matrix.json` out of the
+# layer. A campaign directory is append-only immutable evidence, so nothing in it invalidates this
+# layer that the image does not already depend on. It used to be one COPY per corpus, and the
+# sc-22738 campaign's 112 anchors pushed this stage past Docker's overlay layer limit (~125): the
+# `parity-docker` lane died with `max depth exceeded` on layer 126/143 rather than any build error.
+# Adding a campaign is one new line here; adding an anchor to an existing campaign is none.
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
+COPY docs/generated/video-memory-curves.json ./docs/generated/
+COPY docs/generated/ltx-mlx-*.json ./docs/generated/
+COPY docs/calibration/sc-18791/ ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
+COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
+COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -215,8 +231,16 @@ COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # The builtin catalog, embedded via include_str! by sceneworks-core (see above).
 COPY config ./config
-# Keep the Candle builder on the same compile-time calibration input as the plain builder.
+# Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above, which
+# also records why `docs/calibration/<campaign>/` is a directory COPY and `docs/generated/` is not).
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
+COPY docs/generated/video-memory-curves.json ./docs/generated/
+COPY docs/generated/ltx-mlx-*.json ./docs/generated/
+COPY docs/calibration/sc-18791/ ./docs/calibration/sc-18791/
+COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
+COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
+COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
+COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
 # nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in

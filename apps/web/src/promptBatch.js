@@ -124,17 +124,6 @@ function linePlan(prompt, variableMap) {
   return { tokens, named, linked, axes };
 }
 
-// Cartesian product of the axis sizes as index tuples. `[]` axes → `[[]]` (one empty
-// combination), so a line with no axes still yields exactly one render. The last axis
-// varies fastest, matching the documented ordering.
-function axisCombos(axes) {
-  return axes.reduce(
-    (combos, axis) =>
-      combos.flatMap((combo) => Array.from({ length: axis.size }, (_, i) => [...combo, i])),
-    [[]],
-  );
-}
-
 // Resolve one line for a combination (an index per axis). Named tokens with no axis
 // (unfilled) stay literal; the returned `values` map carries the chosen named values.
 function resolveLine(plan, combo) {
@@ -217,19 +206,32 @@ export function resolvePrompt(template, valueMap) {
   });
 }
 
-// Expand a batch to its concrete prompts. Each prompt line fans out over its own axes
-// (named cross-product × inline occurrences × linked groups zipped). Each entry carries
-// the resolved `prompt` plus the `values` map of the named bindings that produced it.
-export function expandBatch(prompts, variables) {
+// Yield a batch's concrete prompts one at a time. The last axis varies fastest, matching
+// the documented ordering, but this never builds the full Cartesian product in memory.
+export function* iterateBatch(prompts, variables) {
   const variableMap = buildVariableMap(variables);
-  const out = [];
   for (const prompt of promptList(prompts)) {
     const plan = linePlan(prompt, variableMap);
-    for (const combo of axisCombos(plan.axes)) {
-      out.push(resolveLine(plan, combo));
+    const combo = Array(plan.axes.length).fill(0);
+    // An axis-free line still has one empty combination.
+    for (;;) {
+      yield resolveLine(plan, combo);
+      let axis = plan.axes.length - 1;
+      while (axis >= 0) {
+        combo[axis] += 1;
+        if (combo[axis] < plan.axes[axis].size) break;
+        combo[axis] = 0;
+        axis -= 1;
+      }
+      if (axis < 0) break;
     }
   }
-  return out;
+}
+
+// Expand a batch to its concrete prompts. This compatibility helper intentionally
+// materializes the iterable; high-cardinality callers should consume iterateBatch().
+export function expandBatch(prompts, variables) {
+  return [...iterateBatch(prompts, variables)];
 }
 
 // The first resolved prompt (line 1, first choice of every axis) — for a live preview

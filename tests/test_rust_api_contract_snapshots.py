@@ -23,6 +23,7 @@ from rust_api_harness import (
     PNG_1X1,
     enable_api_listening_log,
     safetensors_bytes,
+    spawn_env,
     spawn_process,
     wait_for_health,
 )
@@ -31,6 +32,17 @@ from rust_api_harness import (
 pytestmark = pytest.mark.parity
 
 ROOT = Path(__file__).resolve().parents[1]
+# 🔴 REGENERATE ON LINUX WITH DEFAULT FEATURES, NOT ON A MAC. These snapshots record the contract
+# of the build `parity-rust` runs: Linux with NO `backend-candle`, i.e. the "neither" build. Parts
+# of the model manifest are cfg-split, so a Mac serves a DIFFERENT and equally correct response —
+# `encoder_route_for_model` has a real arm under
+# `any(target_os = "macos", all(not(macos), feature = "backend-candle"))` and a `None`-returning
+# stub otherwise, so `textEncoderOptions` is present on macOS and absent on the lane. Running
+# `UPDATE_SNAPSHOTS=1` here therefore bakes macOS-only keys into a Linux contract and turns this
+# suite red on CI while it passes locally — which is exactly how it was broken once.
+#
+# Expect `pytest -m parity` on a Mac to report that field as `only in candidate`. That divergence is
+# the cfg split showing through, not snapshot drift, and it is not a reason to regenerate.
 SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "rust_api_contract_snapshots" / "snapshots.json"
 UPDATE_SNAPSHOTS = os.getenv(
     "UPDATE_SNAPSHOTS",
@@ -188,7 +200,20 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
-        env = os.environ.copy()
+        # sc-19708: the catalog now reports the configured model-library root
+        # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
+        # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
+        # OS Hugging Face home under $HOME — so without a pin the golden would record WHOSE
+        # machine recorded it (a macOS dev box bakes in /Users/<name>/..., which then fails on
+        # every Linux runner, and re-recording there just flips which machine is broken).
+        # HF_HUB_CACHE has top precedence, so pinning it under `root` makes the value identical on
+        # every machine and lets the existing per-runtime redaction render it <runtime-root>/...,
+        # exactly like every other path in the contract. It also keeps the contract run off the
+        # developer's real Hugging Face cache. The assertion still discriminates: the field must
+        # be present, a string, and this exact configured root. The pin lives in the shared
+        # `spawn_env` helper; the e2e harness lacked it and paid a 22.6s install-state sweep
+        # against the host cache on a developer box.
+        env = spawn_env(root)
         env.update(
             {
                 "SCENEWORKS_API_HOST": "127.0.0.1",
@@ -1440,6 +1465,19 @@ def test_person_tracking_and_replace_person_contracts(contract_runtimes):
     ]
     assert_response_contract("person track job response", baseline_runtime, candidate_runtime, track_jobs[0], track_jobs[1], expected_status=201, snapshot=True)
 
+    # `model` is named explicitly (sc-19570). This fixture used to omit it and inherit the
+    # DEFAULT video model, which today is `ltx_2_3` — a model whose `replace_person` mode runs
+    # only on the macOS MLX engine. The enqueue CONTRACT is platform-independent (201 with a job
+    # snapshot on every host, which is what `expected_status` below pins), but the job's own
+    # lifecycle is not: off-Mac such a pair is failed terminal at once with a
+    # `platform_unreachable:` reason instead of queueing for a worker that can never exist. That
+    # made `status` / `stage` / `error` / `completedAt` in the SNAPSHOT depend on which runner
+    # recorded it, and this suite runs on `ubuntu-latest`.
+    #
+    # `wan_2_2` serves `replace_person` on BOTH lanes — candle Wan-VACE off-Mac, MLX on a Mac — so
+    # the snapshot is stable everywhere and the fixture is testing the person-replace contract
+    # rather than the default model's reachability. Naming it also makes the fixture immune to a
+    # future change of the catalog default.
     replace_jobs = [
         runtime.request(
             "POST",
@@ -1447,6 +1485,7 @@ def test_person_tracking_and_replace_person_contracts(contract_runtimes):
             json_payload={
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
+                "model": "wan_2_2",
                 "mode": "replace_person",
                 "prompt": "hero walks through rain",
                 "sourceClipAssetId": "asset-video",

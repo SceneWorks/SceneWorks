@@ -270,6 +270,7 @@ export const ADVANCED_PREFILL = {
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
   usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
+  decoder: { label: "Alternate decoder", prefill: PREFILL_CONTROL },
   pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },
   ipAdapterScale: { label: "Reference strength", prefill: PREFILL_CONTROL },
   controlnetConditioningScale: { label: "Identity structure", prefill: PREFILL_CONTROL },
@@ -283,7 +284,11 @@ export const ADVANCED_PREFILL = {
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
-  // The five that travel and land nowhere. Each names why, because "not restored" without a
+  // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
+  // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
+  // that unavailable choice visible and the API then fails closed until it is restored or changed.
+  textEncoderModel: { label: "Text encoder", prefill: PREFILL_CONTROL },
+  // The settings that travel and land nowhere. Each names why, because "not restored" without a
   // reason reads like a bug.
   poses: {
     label: "Poses",
@@ -310,7 +315,7 @@ export const ADVANCED_PREFILL = {
     detail: "A Document Studio interleave setting. Image Studio has no control for it.",
   },
   // The VIDEO arm (sc-15956). Every one of these travels in a shared MP4 and lands nowhere HERE,
-  // for one reason that covers all eleven: this registry drives Image Studio, and a video recipe
+  // for one shared reason: this registry drives Image Studio, and a video recipe
   // replays in Video Studio. That is a different panel and a different story, so the honest thing
   // for this one to say is that the setting arrived and this studio has no control for it —
   // exactly what the four rows above say about the Detail, Character and Document lanes.
@@ -333,10 +338,35 @@ export const ADVANCED_PREFILL = {
     prefill: PREFILL_NONE,
     detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
   },
-  textEncoderModel: {
-    label: "Text encoder",
+  transformerVariant: {
+    label: "Transformer variant",
     prefill: PREFILL_NONE,
-    detail: "A Video Studio setting: which text encoder read the prompt.",
+    detail: "A Video Studio setting: which LTX 2.5 transformer recipe made the clip.",
+  },
+  vaeDecoder: {
+    label: "VAE decoder",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which LTX 2.5 reconstruction path made the clip.",
+  },
+  autoDuration: {
+    label: "Automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: whether LTX 2.5 predicted the clip duration.",
+  },
+  autoDurationMinSeconds: {
+    label: "Minimum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the lower bound for LTX 2.5 duration prediction.",
+  },
+  autoDurationMaxSeconds: {
+    label: "Maximum automatic duration",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the upper bound for LTX 2.5 duration prediction.",
+  },
+  temporalUpsampleRounds: {
+    label: "Temporal refinement",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: how many LTX 2.5 temporal-refinement rounds ran.",
   },
   lightning: {
     label: "Lightning steps",
@@ -379,6 +409,32 @@ export const ADVANCED_PREFILL = {
 
 function prefillDisposition(key) {
   return ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE;
+}
+
+// Shared workflows cross a trust boundary before they reach the number-backed controls in a
+// studio. Keep the list beside the prefill registry: these are the control values that may safely
+// be coerced to a finite number, while every other scalar retains its own meaning and shape.
+const NUMERIC_ADVANCED_PREFILL_KEYS = new Set([
+  "schedulerShift",
+  "steps",
+  "guidanceScale",
+  "ipAdapterScale",
+  "controlnetConditioningScale",
+  "trueCfgScale",
+  "strength",
+  "textStyleGain",
+  "controlScale",
+]);
+
+function sharedRecipeNumber(value) {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 // ---- The adapter --------------------------------------------------------------------------
@@ -424,7 +480,15 @@ export function recipeFromWorkflowShare(
   const rawSettings = {};
   for (const [key, value] of Object.entries(share.advanced ?? {})) {
     if (value !== null && value !== undefined && prefillDisposition(key) !== PREFILL_NONE) {
-      rawSettings[key] = value;
+      if (NUMERIC_ADVANCED_PREFILL_KEYS.has(key)) {
+        const number = sharedRecipeNumber(value);
+        if (number === null) {
+          continue;
+        }
+        rawSettings[key] = number;
+      } else {
+        rawSettings[key] = value;
+      }
     }
   }
   if (!styleIdResolved(report)) {

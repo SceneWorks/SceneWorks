@@ -5,15 +5,15 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
-    MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
+    MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
-    has_nonempty_nested_array, has_nonempty_or_malformed_array,
-    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonnull_or_malformed_nested_carrier, krea_edit_has_unsupported_carrier,
-    SENSENOVA_MODEL_IDS,
+    conditioned_reference_count, has_malformed_optional_nested_number,
+    has_malformed_optional_string, has_nonempty_array, has_nonempty_nested_array,
+    has_nonempty_or_malformed_array, has_nonempty_or_malformed_nested_array,
+    has_nonempty_or_malformed_string, has_nonempty_string, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -47,29 +47,19 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     image_request_mlx_eligible(model, &job.payload)
 }
 
-/// Per-model image MLX-eligibility dispatch, factored out of [`image_job_is_mlx_eligible`] so the
-/// UI gating oracle ([`model_mac_support`], sc-3486) can probe the same per-family predicates with
-/// synthetic payloads — one dispatch table, no divergence between routing and what the UI hides.
+/// Per-model image MLX-eligibility dispatch. Builtins use the id-keyed arms below; imported rows
+/// carry their full manifest entry and select an exact family + source-shaped provider route. The
+/// API projects the same provider facts into imported catalog affordances, while
+/// [`model_mac_support`] remains the builtin-default probe.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if !MLX_ROUTED_MODELS.contains(&model) {
-        // Route-by-family fallback for a non-builtin (imported/user) image model whose novel id is in
-        // no routing table (sc-14109, epic 14015). S0d (sc-14019) made only the display badge
-        // (`image_model_mac_support`) family-aware, so an imported checkpoint showed as usable yet its
-        // job was never claimed at THIS predicate — it stranded on "Waiting for an available GPU
-        // worker." A builtin always keeps its id-keyed verdict: `!is_builtin_image_model` mirrors the
-        // display badge's guard so the router and the badge agree, and it keeps a (hypothetical
-        // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
-        // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
-        // ever reached by imported ids; the guard is defensive parity, not live behavior.
-        // `MLX_IMPORTED_CAPS`: the MLX native single-file loader takes an adapter slice
-        // (inference #211) — LoRAs (sc-14111) + Kontext edit (sc-14119) — and assembles the Krea
-        // pose control branch around the file-loaded DiT (strict-pose sets on the krea_2 family).
-        return imported_image_request_family_eligible(
-            model,
-            payload,
-            MLX_ROUTED_FAMILIES,
-            MLX_IMPORTED_CAPS,
-        );
+        // Exact imported-provider fallback for a novel id outside the builtin table (sc-14109,
+        // refined by sc-18312). The stamped manifest family is necessary but insufficient: the
+        // structural `importSourceShape` and requested operation must match one generated MLX
+        // registry row, including its conditioning, adapter, and quant capabilities. Missing or
+        // sibling source identity therefore fails closed. `is_builtin_image_model` inside the
+        // provider gate keeps any future non-MLX builtin from inheriting an imported route.
+        return imported_image_request_provider_eligible(model, payload, "mlx");
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
@@ -174,23 +164,83 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
 /// `image_detail` is a separate job type with its own routing (see `image_detail_native_eligible`).
-pub(crate) fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
+pub(crate) fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    sdxl_mlx_lane(payload).is_some()
+}
+
+/// The core-side SDXL route classification. Both shapes are owned by the MLX worker, but preserving
+/// the lane here keeps scheduling tests aligned with the worker's precedence instead of treating
+/// ControlNet as an accidental consequence of the old catch-all SDXL predicate. Ownership includes
+/// fail-closed routes whose exact provider composition is rejected before generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MlxSdxlLane {
+    Control,
+    Generic,
+}
+
+pub(crate) fn sdxl_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
+    Some(if sdxl_control_mlx_candidate(payload) {
+        MlxSdxlLane::Control
+    } else {
+        MlxSdxlLane::Generic
+    })
+}
+
+/// Candidate predicate for the dedicated SDXL OpenPose ControlNet lane. As on Candle, any material
+/// `advanced.poses` carrier or explicit material control intent is claimed before edit/IP/generic
+/// routing; exact shape, count, supported mode, and conflict validation belongs to the shared worker
+/// handler and fails closed there.
+pub(crate) fn sdxl_control_mlx_candidate(payload: &Map<String, Value>) -> bool {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return false;
+    };
+    let poses_are_material = match advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) if poses.is_empty() => false,
+        Some(_) => true,
+    };
+    let named_control_is_material = match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    };
+    poses_are_material
+        || named_control_is_material
+        || advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+        || advanced
+            .get("controlWeights")
+            .is_some_and(|value| !value.is_null())
 }
 
 /// RealVisXL Lightning MLX-routing (sc-6075). The standalone distilled checkpoint runs through the
 /// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
 /// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
-/// txt2img-only"). So only a plain text-to-image job is MLX-eligible here; any `edit_image`, source,
-/// reference, or mask conditioning is refused and remains queued (or is hidden by the manifest's
-/// txt2img-only `capabilities`). LoRAs + quant are fine on the SDXL path, so they don't gate.
+/// txt2img-only"). Plain text-to-image remains generating; a material pose carrier is also claimed by
+/// the named control lane, where the worker executes the supported ControlNet + Lightning composition.
+/// Any non-pose `edit_image`, source, reference, or mask shape is
+/// refused and remains queued. LoRAs + quant are fine on the SDXL path, so they don't gate.
 pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
+    realvisxl_lightning_mlx_lane(payload).is_some()
+}
+
+pub(crate) fn realvisxl_lightning_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
+    // Material pose carriers are worker-owned before the legacy txt2img-only exclusions.
+    if sdxl_control_mlx_candidate(payload) {
+        return Some(MlxSdxlLane::Control);
     }
-    !(has_nonempty_string(payload, "sourceAssetId")
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return None;
+    }
+    if has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "maskAssetId"))
+        || has_nonempty_string(payload, "maskAssetId")
+    {
+        None
+    } else {
+        Some(MlxSdxlLane::Generic)
+    }
 }
 
 /// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
@@ -621,12 +671,19 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// share this gate. Edit, control, multiple-reference, adapter, pose, phase, and malformed unsupported
 /// carriers are rejected instead of being silently ignored. This keeps `model_mac_support`'s
 /// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
+///
+/// The singular reference is OPTIONAL on this one gate — the engine serves plain text-to-image AND
+/// singular-reference latent-init img2img — so only a malformed non-string carrier may fail closed
+/// ([`has_malformed_optional_string`]). The distinction that matters is `null`: the API normalizes
+/// every unset optional asset carrier to an explicit `null` before the job is stored, and an earlier
+/// `.map(..).unwrap_or(true)` form handled only the MISSING key, so every real text-to-image
+/// submission read as "not a valid reference" and no MLX worker would claim it (sc-19712 F-1,
+/// observed live). sc-20525 finished the job: the replacement still rejected a BLANK string, which
+/// contradicted both its own doc and the worker's convention that a blank asset id is absent, and
+/// left the Mac lane disagreeing with the Candle twin on the same payload.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-        && payload
-            .get("referenceAssetId")
-            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
-            .unwrap_or(true)
+        && !has_malformed_optional_string(payload, "referenceAssetId")
         && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
         && !["referenceAssetIds", "controls", "controlnets"]
             .iter()
@@ -701,11 +758,23 @@ pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
 /// gate was a routing caution, never an engine limit.
 pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    video_request_is_mlx_eligible(&job.job_type, &job.payload)
+}
+
+/// The `(job_type, payload)` form of [`video_job_is_mlx_eligible`] — the same predicate, reachable
+/// before a [`JobSnapshot`] exists (sc-19504). `create_video_job` holds exactly this pair at
+/// enqueue time and must be able to ask the REAL gate whether any lane will claim the job it is
+/// about to write; a second, re-typed copy of these rules is the false-green shape that let
+/// GH #2074 and sc-15328 ship. See [`super::gaps::video_request_is_claimable_by_any_lane`].
+pub(crate) fn video_request_is_mlx_eligible(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
     // The base `video_generate` job type plus the advanced job types: the clip-conditioning
     // `video_extend` / `video_bridge` (sc-3522, LTX IC-LoRA) and `person_replace` (sc-3521 →
     // Wan-VACE). The per-model/per-mode gate below keeps each mode to its capable engines.
     if !matches!(
-        job.job_type,
+        job_type,
         JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge
@@ -713,9 +782,23 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     ) {
         return false;
     }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    // **A DELIBERATE, TESTED NEGATIVE (sc-20651).** SceneWorks ships NO MLX video lane that reads a
+    // checkpoint plan: `resolve_video_route` on macOS has no plan-backed arm, and every MLX Wan/LTX
+    // engine loads the builtin snapshot for its model id. So a plan-backed entry
+    // (`importPlan.checkpointId`, epic 20398) that reached an MLX lane would render BUILTIN weights
+    // under the user's imported checkpoint id — a silent substitution, not a capability.
+    //
+    // The `VIDEO_MLX_ROUTED_MODELS` guard below already excludes every imported id, so this is not
+    // the common path; it is the guard for a plan-backed entry forwarded under a BUILTIN model id,
+    // which that list would happily admit. Its candle twin is
+    // [`super::candle::plan_backed_wan_video_candle_eligible`], the only lane that exists — never
+    // add an MLX arm here without a worker route that actually loads the plan's bytes.
+    if super::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload).is_some() {
+        return false;
+    }
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
         return false;
     }
@@ -725,12 +808,11 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // `mode` — a missing/stale `mode` on those types must not fall through to the
     // `image_to_video` default and route incorrectly. The base `video_generate` type reads
     // the payload `mode` (default `image_to_video`, mirroring `video_request_from_job`).
-    let mode = match job.job_type {
+    let mode = match job_type {
         JobType::VideoExtend => "extend_clip",
         JobType::VideoBridge => "video_bridge",
         JobType::PersonReplace => "replace_person",
-        _ => job
-            .payload
+        _ => payload
             .get("mode")
             .and_then(Value::as_str)
             .unwrap_or("image_to_video"),
@@ -739,13 +821,11 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         return false;
     }
     if model == "wan_2_2" {
-        let has_source = job
-            .payload
+        let has_source = payload
             .get("sourceAssetId")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
-        let has_last = job
-            .payload
+        let has_last = payload
             .get("lastFrameAssetId")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
@@ -759,10 +839,9 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
             return false;
         }
     }
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
-        && !job
-            .payload
+        && !payload
             .get("loras")
             .and_then(Value::as_array)
             .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
@@ -802,7 +881,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     }
     // VACE-Fun is a shipped, dedicated dual-expert replacement engine. It must not fall into the
     // generic Wan text/image generation arm: the worker dispatches only `replace_person` to
-    // `wan2_2_vace_fun_14b`, and explicitly refuses the model off-Mac.
+    // `wan2_2_vace_fun_14b`.
     if model == "wan_2_2_vace_fun_14b" {
         return mode == "replace_person";
     }
@@ -856,9 +935,61 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "krea_realtime_14b" {
         return matches!(mode, "text_to_video" | "image_to_video" | "video_to_video");
     }
+    // Wan2.2 VACE-Fun A14B (epic 3456 / sc-3458), added by sc-17159 together with its missing
+    // `VIDEO_MODEL_CAPS` row. It needs its OWN arm in BOTH directions: the generic arm below would
+    // grant it `text_to_video | image_to_video`, which this dual-expert CONTROL checkpoint does not
+    // do (its manifest deliberately advertises `replace_person` alone —
+    // `builtin_manifest_registers_the_wan_vace_fun_model` pins that), while the generic
+    // `replace_person` list names only ltx/wan_2_2 and so refused the one mode it does do.
+    if model == "wan_2_2_vace_fun_14b" {
+        return mode == "replace_person";
+    }
+    // MiniMax-H3 (epic 17137 / sc-17159). TWO ids, TWO different mode sets, and each needs its own
+    // arm for the opposite reason:
+    //
+    // * `minimax_h3` is the `transformer` checkpoint — t2va + fl2va. The generic arm below grants
+    //   `text_to_video | image_to_video` but lists only LTX + Wan TI2V-5B for `first_last_frame`,
+    //   so fl2va — a mode the manifest advertises in `capabilities` AND `ui.recommendedFor` —
+    //   would fall to `_ => false` and surface disabled in the Video Studio on the ONLY platform
+    //   this family installs on.
+    // * `minimax_h3_ref` is the `transformer_ref` checkpoint and serves Ref2VA ALONE. The generic
+    //   arm would have done the reverse damage: granted it `text_to_video | image_to_video`, which
+    //   its checkpoint does not do, while refusing `reference_to_video`, which is the only thing it
+    //   does. `image_to_video` on the reference partition is not a harmless extra — the two
+    //   partitions are separate 18.78 GB DiTs and routing a t2v request at the reference one loads
+    //   the wrong checkpoint.
+    //
+    // The mode sets are exactly each entry's declared `capabilities`, and
+    // `every_declared_video_capability_is_claimable_by_some_lane` (routing/catalog.rs) reads the
+    // shipped manifest bytes to hold that, so a capability added to either entry without an arm
+    // here is RED at the source rather than at the next user report.
+    if model == "minimax_h3" {
+        return matches!(
+            mode,
+            "text_to_video" | "image_to_video" | "first_last_frame"
+        );
+    }
+    if model == "minimax_h3_ref" {
+        // Ref2VA, ACTIVATED (sc-18650). `reference_to_video` is the ONLY mode this partition
+        // serves — the `transformer_ref` checkpoint. The route was withheld while
+        // `video_mode_conditioning_requirements` demanded `multiReference` alone (the old
+        // sc-17157 condition): the pinned engines deliberately declare the ORDERED omni-reference
+        // surface instead — `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]`, because
+        // gen-core has no heterogeneous-reference variant for this family and the request's own
+        // order carries the semantics (`mlx-gen-minimax-h3/src/model.rs`, measured at the pinned
+        // revision). sc-18650 aligned the requirement to that shipped contract
+        // (`multiReference | reference`), so the declaration here no longer makes
+        // `dump-engine-capabilities` refuse the runtime artifact.
+        //
+        // The refusals below remain load-bearing: the generic arm would grant this partition
+        // `text_to_video | image_to_video`, which its checkpoint does not do — the two partitions
+        // are separate 18.78 GB DiTs, and routing a t2v request at the reference one loads the
+        // wrong checkpoint.
+        return mode == "reference_to_video";
+    }
     match mode {
         "text_to_video" | "image_to_video" => true,
-        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
         // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
         // and Wan (`wan_2_2`) — the worker prefers native Wan-VACE ControlClip for genuine motion
         // continuity (sc-3812, tier C: real source frames pinned at the kept positions + a
@@ -866,11 +997,18 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
         // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
         // path, so extend/bridge on them are refused and remain queued.
-        "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        "extend_clip" | "video_bridge" => {
+            matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2")
+        }
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
         // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
         // the models that advertise the capability), so admit those.
-        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
+        //
+        // `wan_2_2_vace_fun_14b` also advertises `replace_person` and was unreachable before
+        // sc-17159, but it is served by its OWN arm above rather than added here: it must NOT
+        // inherit this arm's neighbours (`text_to_video | image_to_video`), which the generic arm
+        // would otherwise hand it. (`scail2_14b` has its own arm for the same reason.)
+        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
         _ => false,
     }
 }
@@ -1218,11 +1356,12 @@ mod tests {
     /// sc-14109 (epic 14015): an imported/user Krea 2 single-file checkpoint carries a novel id in NO
     /// routing table, but the full catalog entry the API stamps into the job (`modelManifestEntry`)
     /// declares `family: "krea_2"` — the MLX-routed family whose builtins already run in-process. A
-    /// plain t2i job MUST be claim-eligible via the route-by-family fallback, or the mlx worker never
-    /// claims it (`worker_supports_job`) and, with no torch/candle Krea lane on Mac, it strands on
+    /// plain t2i job MUST be claim-eligible via the exact imported-provider fallback, or
+    /// `worker_supports_job` never lets the MLX worker claim it. With no torch/candle Krea lane on
+    /// Mac, it strands on
     /// "Waiting for an available GPU worker." forever — exactly the bug this story fixes. S0d
-    /// (sc-14019) had made only the display badge family-aware, leaving this claim-time predicate
-    /// blindly `false` for the same id.
+    /// The manifest's stamped `transformer_file` source proves which Krea provider is authoritative;
+    /// family identity without that structural source remains ineligible.
     #[test]
     fn imported_krea_family_t2i_is_mlx_eligible() {
         let imported_id = "user_kreamania_variant5"; // a novel id, never a builtin
@@ -1234,6 +1373,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "paths": { "model": "/app/models/imports/kreamania_variant4" }
             },
         });
@@ -1248,6 +1388,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "modelPath": "/app/models/imports/kreamania_variant4.safetensors"
             },
         });
@@ -1257,15 +1398,14 @@ mod tests {
         ));
     }
 
-    /// The route-by-family fallback fires ONLY for an MLX-routed family with a readable manifest
-    /// entry. A non-routed family (the detector's `z-image`, an unsupported import), a missing
-    /// manifest entry, and a manifest entry with no `family` key all stay not-eligible — unchanged
-    /// from the pre-sc-14109 blanket `false`, so nothing new becomes claimable by accident.
+    /// The imported-provider fallback fires only for an exact registered family + source-shaped
+    /// manifest entry. An unregistered family, a missing entry, or an entry without family/source
+    /// identity remains ineligible, so nothing becomes claimable by inference from its id.
     #[test]
     fn imported_model_without_routed_family_is_not_mlx_eligible() {
         let imported_id = "user_zimage_import";
 
-        // z-image is a real detector family but NOT in MLX_ROUTED_FAMILIES → no family fallback.
+        // z-image is a real detector family but has no exact MLX provider registration.
         let z_image = json!({
             "model": imported_id,
             "mode": "text_to_image",
@@ -1309,6 +1449,7 @@ mod tests {
         let entry = json!({
             "id": imported_id,
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         });
 

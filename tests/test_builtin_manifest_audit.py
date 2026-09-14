@@ -97,6 +97,12 @@ EXPECTED_SHIPPED_CONTROL_WEIGHTS = frozenset(
             "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
         ),
         (
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors",
+            "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        ),
+        (
             "kolors_control",
             "Kwai-Kolors/Kolors-ControlNet-Pose",
             "diffusion_pytorch_model.safetensors",
@@ -187,6 +193,98 @@ def test_cached_manifest_and_schema_loaders_return_isolated_copies():
     assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
+def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
+    """sc-18781: one selected tier installs both published transformer identities."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+    co_requisites = [row for row in model["downloads"] if row.get("coRequisite")]
+    tiers = {
+        row["variant"]: row
+        for row in model["downloads"]
+        if not row.get("coRequisite")
+    }
+    expected_bytes = {
+        "q4": 82_001_054_462,
+        "q8": 83_672_150_720,
+        "bf16": 145_561_765_732,
+    }
+
+    assert set(tiers) == set(expected_bytes)
+    for tier, measured_bytes in expected_bytes.items():
+        row = tiers[tier]
+        assert row["files"] == [f"distilled/{tier}/*", f"dev/{tier}/*"]
+        # q8 is a first-class candle tier, so every tier row ships on every platform.
+        assert row["platforms"] == ["macos", "windows", "linux"]
+        assert row["estimatedSizeBytes"] == measured_bytes
+        assert row["footprint"]["diskSizeBytes"] == measured_bytes
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+
+    expected_co_requisites = {
+        ("enhancer/*",): 23_951_748_129,
+        ("distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",): 8_899_889_568,
+    }
+    assert len(co_requisites) == len(expected_co_requisites)
+    for row in co_requisites:
+        expected_platforms = ["macos"] if row["files"] == ["enhancer/*"] else ["macos", "windows", "linux"]
+        assert row["platforms"] == expected_platforms
+        assert row["estimatedSizeBytes"] == expected_co_requisites[tuple(row["files"])]
+
+    assert model["defaults"]["steps"] == 8
+    assert model["limits"]["steps"] == [8, 30]
+    assert model["limits"]["requiresDimensionsMultipleOf"] == 64
+    assert "maxPixels" not in model["limits"]
+
+
+def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
+    """sc-18800: static declarations mirror the two provider contracts without false exemptions."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+
+    assert model["mlx"]["memoryStrategyCapabilities"] == {
+        "bounded_decode": {
+            "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_attention": {
+            "parameters": {"attentionChunkSize": 16_777_216},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_transformer_residency": {
+            "parameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit",
+            },
+            "overlays": ["none"],
+        },
+    }
+    assert model["candle"] == {
+        "memoryStrategyCapabilities": {
+            "bounded_decode": {
+                "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+            "bounded_attention": {
+                "parameters": {"attentionChunkSize": 16_777_216},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+            "bounded_transformer_residency": {
+                "parameters": {
+                    "transformerWindowSize": 1,
+                    "transformerWindowComponent": "Dit",
+                },
+                "overlays": ["none"],
+                "tiers": ["q4", "q8", "bf16"],
+            },
+        }
+    }
+    for backend in ("mlx", "candle"):
+        assert "memoryStrategyStructuralExemptions" not in model[backend]
+    assert "supportsSequentialOffload" not in model["candle"]
+
+
 COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
 COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
 # Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
@@ -240,8 +338,28 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
 
 
 def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
-    assert model["candle"] == {
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract.
+
+    sc-20246: `memoryStrategyContract` is now ENGINE-PROJECTED per variant
+    (scripts/generate-manifest-memory-declarations.mjs), so it is necessarily NOT shared — each
+    variant names its own provider and its own catalog modes. The shared-ladder pin below therefore
+    covers the hand-authored, measured keys, and the projected contract is asserted separately in
+    shape terms: it must be wholly engine-sourced and must never claim a rung this same block
+    declares structurally exempt.
+    """
+    contract = model["candle"].get("memoryStrategyContract")
+    assert contract is not None, model_id
+    exempt = set(model["candle"].get("memoryStrategyStructuralExemptions", {}))
+    for implementation in contract["implementations"]:
+        assert implementation["source"].startswith("config/engine-capabilities/"), model_id
+        assert implementation["rung"] not in exempt, (model_id, implementation["rung"])
+    assert contract["provider"] == model_id, model_id
+
+    assert {
+        key: value
+        for key, value in model["candle"].items()
+        if key != "memoryStrategyContract"
+    } == {
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,
@@ -294,6 +412,51 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         _assert_mage_tier_layout(model, model_id, repo, revision)
+
+
+def test_minimax_h3_sibling_dit_partition_ships_wherever_its_tier_does():
+    """sc-22738: `transformer_ref/` is part of the MINIMUM LOADABLE SET, not a Ref2VA extra.
+
+    Both engines open `transformer/config.json` AND `transformer_ref/config.json` on every load
+    regardless of task, so a platform that gets the tier's base DiT and not its sibling gets an
+    install that cannot render at all. The `transformer_ref` co-requisites were scoped
+    ``["macos"]`` while the packed q4/q8 primaries shipped to all three platforms, which made the
+    off-Mac q4/q8 install a hard load failure by construction: CUDA campaign run 34356681566
+    fetched both tier roots on the Windows box and every ``minimax_h3``/``minimax_h3_ref`` q4/q8
+    cell still planned ``weights_missing`` naming ``transformer_ref/config.json``.
+
+    The rule asserted here is the parity, not a literal platform list: whatever platforms a tier's
+    primary rehost row ships to, that tier's sibling partition ships to the same ones. bf16 is
+    therefore free to stay macOS-only on ``minimax_h3`` — its primary is — because the off-Mac
+    dense leg loads from the ``MiniMaxAI/MiniMax-H3`` snapshot root instead.
+    """
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    rehost = "SceneWorks/minimax-h3-mlx"
+    for model_id, primary_partition, sibling_partition in [
+        ("minimax_h3", "transformer", "transformer_ref"),
+        ("minimax_h3_ref", "transformer_ref", "transformer"),
+    ]:
+        rows = [d for d in models[model_id]["downloads"] if d["repo"] == rehost]
+        for tier in TIERS:
+            primary = [
+                d for d in rows
+                if d.get("variant") == tier
+                and d.get("files") == [f"{tier}/{primary_partition}/*"]
+            ]
+            sibling = [
+                d for d in rows
+                if d.get("variant") == tier
+                and d.get("files") == [f"{tier}/{sibling_partition}/*"]
+            ]
+            assert len(primary) == 1, (model_id, tier, primary_partition)
+            assert len(sibling) == 1, (model_id, tier, sibling_partition)
+            assert sibling[0]["platforms"] == primary[0]["platforms"], (
+                f"{model_id}:{tier}: {sibling_partition} ships to "
+                f"{sibling[0]['platforms']} but {primary_partition} ships to "
+                f"{primary[0]['platforms']}; both engines probe "
+                f"{sibling_partition}/config.json on EVERY load, so the narrower row makes that "
+                "platform's install unloadable"
+            )
 
 
 def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
@@ -435,6 +598,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
+        "image_jobs/sdxl_control.rs",
         "image_jobs/zimage.rs",
         "image_jobs/zimage_control.rs",
     }
@@ -544,48 +708,50 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
     )
 
 
-def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
-    """sc-14476 lane inventory and regression guard.
+AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
+    "image_jobs/base.rs": "model.default_repo()",
+    "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
+    "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
+    "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
+    "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
+    "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
+    "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
+    "image_jobs/pulid.rs": "PULID_FLUX_REPO",
+    "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
+    "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
+    "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
+    "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
+    "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
+    "sensenova_jobs.rs": "default_repo_for(&request.model)",
+    "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
+}
 
-    The marker names the effective resolution source in each lane. Explicit
-    constants below are justified because their repo is staged as a co-requisite
-    of a different model (InstantID/PuLID), while video resolves Wan tiers from
-    the request's own downloads. Any new reader must be consciously added here.
-    """
-    audited_lanes = {
-        "image_jobs/base.rs": "model.default_repo()",
-        "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
-        "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
-        "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
-        "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
-        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/pulid.rs": "PULID_FLUX_REPO",
-        "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
-        "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
-        "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
-        "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
-        "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "sensenova_jobs.rs": "default_repo_for(&request.model)",
-        "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
+
+def _worker_sources() -> dict[str, str]:
+    return {
+        path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
+        for path in WORKER_SOURCE_PATH.rglob("*.rs")
     }
-    actual_lanes: set[str] = set()
-    for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
-        if re.search(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source):
-            actual_lanes.add(path.relative_to(WORKER_SOURCE_PATH).as_posix())
 
+
+def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
+    sources: dict[str, str], audited_lanes: dict[str, str]
+) -> None:
+    actual_lanes = {
+        relative_path
+        for relative_path, source in sources.items()
+        if re.search(
+            r"\.model_manifest_entry\s*\.get\(\"repo\"\)",
+            source.split("\n#[cfg(test)]", maxsplit=1)[0],
+        )
+    }
     assert actual_lanes == set(audited_lanes), (
         "top-level model_manifest_entry.repo lane inventory changed; audit every added/removed lane: "
         f"added={sorted(actual_lanes - set(audited_lanes))}, "
         f"removed={sorted(set(audited_lanes) - actual_lanes)}"
     )
     for relative_path, fallback_marker in audited_lanes.items():
-        source = (
-            (WORKER_SOURCE_PATH / relative_path)
-            .read_text(encoding="utf-8")
-            .split("\n#[cfg(test)]", maxsplit=1)[0]
-        )
+        source = sources[relative_path].split("\n#[cfg(test)]", maxsplit=1)[0]
         reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
         assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
         for read in reads:
@@ -600,9 +766,74 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_ipadapter.rs",
         "image_jobs/zimage_control.rs",
     ):
-        source = (WORKER_SOURCE_PATH / relative_path).read_text(encoding="utf-8")
+        source = sources[relative_path]
         assert "default_repo_for(model)" in source, (
             f"{relative_path}: per-family fallback no longer delegates to MODEL_TABLE"
+        )
+
+
+def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
+    """sc-14476 lane inventory and regression guard.
+
+    The marker names the effective installed resolution source in each lane. Explicit constants are
+    permitted only when a built-in download stages that exact repo; video's generic lane instead
+    selects from the request's own downloads. Any new reader must be consciously added here.
+    """
+    _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
+        _worker_sources(), AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES
+    )
+
+
+def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
+    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    assert '.model_manifest_entry.get("repo")' not in production, (
+        "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
+        "bf16/shared components come from two separately pinned installed snapshots"
+    )
+    for declaration, use in (
+        (
+            'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?",
+        ),
+        (
+            'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)",
+        ),
+    ):
+        assert declaration in production, f"missing exact MiniMax-H3 repo authority: {declaration}"
+        assert use in production, f"MiniMax-H3 resolver no longer consumes {use}"
+
+
+def test_minimax_h3_candle_repo_audit_rejects_override_and_root_mutations():
+    source = _worker_sources()["video_jobs/minimax_h3.rs"]
+    _assert_minimax_h3_candle_uses_exact_installed_roots(source)
+
+    for label, mutated in (
+        (
+            "upstream root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+                'const CANDLE_MINIMAX_H3_REPO: &str = "mutable/upstream";',
+            ),
+        ),
+        (
+            "tier rehost root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "mutable/rehost";',
+            ),
+        ),
+        (
+            "manifest override",
+            source.replace(
+                "let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;",
+                'let root = request.model_manifest_entry.get("repo").unwrap();',
+            ),
+        ),
+    ):
+        _must_fail_assertion(
+            lambda mutated=mutated: _assert_minimax_h3_candle_uses_exact_installed_roots(mutated),
+            f"the MiniMax-H3 Candle audit must reject a {label} mutation",
         )
 
 
@@ -701,6 +932,183 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def _measured_contract_rows():
+    """Every hand-authored (non engine-projected) memoryStrategyContract row in the catalog."""
+    manifest = _load_builtin_models_manifest()
+    for model in manifest["models"]:
+        for backend in ("mlx", "candle"):
+            contract = (model.get(backend) or {}).get("memoryStrategyContract")
+            if not contract:
+                continue
+            for index, row in enumerate(contract["implementations"]):
+                if str(row.get("source", "")).startswith("config/engine-capabilities/"):
+                    continue
+                yield model["id"], backend, index, row
+
+
+def test_only_overlay_bearing_rows_may_omit_their_calibration_identity():
+    """sc-22730: an absent `fingerprint` is an ENGINE WITHHOLDING, never an authoring oversight.
+
+    `candle-gen-sd3`'s `production_calibration_identity` returns `None` whenever
+    `!receipt.adapters.is_empty()` (inference
+    `crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs:876-886`), so the six SD3.5 lora
+    rows CANNOT name an identity: the engine never publishes one for that load shape. The schema
+    therefore admits an overlay-bearing measured row with no `fingerprint`, and that permission is
+    wider than the truth.
+
+    STRUCTURAL HALF ONLY (sc-22738). This test used to pin the exact six-row set
+    `{sd3_5_*:candle[1|3]}`, which is a frozen-corpus gate: it reds on any new overlay-bearing row,
+    including a correct one, and it says nothing about WHY a row may omit its identity. The derived
+    rule — which model/crate pairs actually withhold, read from the engine source when
+    `INFERENCE_REPO` points at a checkout that carries it — already lives in
+    `scripts/manifest-memory-declarations.test.mjs`
+    ("no overlay-bearing manifest row promises an identity its candle engine withholds under
+    adapters"). What survives here is the SHAPE claim that file does not make: an omission implies
+    the row is overlay-bearing, over every measured contract row in the catalog.
+
+    The clean-base half is enforced structurally, and asserted below against the real schema.
+    """
+    omitted = [
+        (model_id, backend, index, row)
+        for model_id, backend, index, row in _measured_contract_rows()
+        if "fingerprint" not in row
+    ]
+    # Not a count: the claim is only that the population is non-empty, so the loop below is not
+    # vacuous. A catalog in which every measured row named its identity would make this test
+    # meaningless rather than wrong, and that is what this says.
+    assert omitted, (
+        "no measured contract row omits its calibration identity, so the omission rule below "
+        "guards nothing — has the engine started publishing under adapters?"
+    )
+    # An omission is earned ONLY by being overlay-bearing: a clean base row that drops its
+    # fingerprint is an authoring oversight, and this is what catches it.
+    for model_id, backend, index, row in omitted:
+        assert [
+            overlay for overlay in row["overlays"] if overlay != "none"
+        ] or row.get("providerOverlay", "none") != "none", (
+            f"{model_id}:{backend}[{index}] omits fingerprint but declares no overlay; only an "
+            "engine that withholds the identity under adapters may leave it out"
+        )
+
+
+def test_schema_requires_a_calibration_identity_on_clean_base_rows_only():
+    """sc-22730: the schema's own two-sided behaviour, exercised on the real manifest.
+
+    Mutating the catalog rather than a hand-built document keeps the assertion where the rows live:
+    a schema that stopped distinguishing the two shapes would pass a synthetic fixture built to the
+    same (wrong) rule.
+    """
+    validator = jsonschema.Draft202012Validator(_load_schema(SCHEMA_PATH))
+
+    def errors_after(mutate):
+        manifest = _load_builtin_models_manifest()
+        model = next(m for m in manifest["models"] if m["id"] == "sd3_5_large")
+        rows = model["candle"]["memoryStrategyContract"]["implementations"]
+        mutate(rows)
+        return list(validator.iter_errors(manifest))
+
+    # Bind the two fixture rows by shape, so a reordered contract cannot leave this testing the
+    # wrong pair while still passing.
+    fixture = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "sd3_5_large")
+    fixture_rows = fixture["candle"]["memoryStrategyContract"]["implementations"]
+    assert fixture_rows[0]["overlays"] == ["none"] and "fingerprint" in fixture_rows[0]
+    assert fixture_rows[1]["overlays"] == ["lora"] and "fingerprint" not in fixture_rows[1]
+
+    # Row 0 is the clean base (overlays ["none"]): dropping its identity must be REJECTED.
+    assert errors_after(lambda rows: rows[0].pop("fingerprint")), (
+        "the schema no longer requires a fingerprint on a clean base row"
+    )
+    # Row 1 is the lora row: it is already fingerprint-free and must validate. Putting one back is
+    # legal to the schema (which cannot see the engine) — the test above is what forbids it.
+    assert not errors_after(lambda rows: None), "the committed lora rows must validate as authored"
+    # The other measured requirements survive the relaxation on the overlay-bearing row.
+    for field in ("engagedRungs", "parameters", "parameterRanges"):
+        assert errors_after(lambda rows, field=field: rows[1].pop(field)), (
+            f"an overlay-bearing measured row may still omit {field}"
+        )
+
+
+def test_memory_request_provider_mode_schema_admits_public_character_image():
+    """SC-20798: provider-owned Character routes keep their public typed coordinate."""
+    schema = _load_schema(SCHEMA_PATH)
+    provider_modes = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            properties = value.get("properties", {})
+            if "providerMode" in properties:
+                provider_modes.append(properties["providerMode"])
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(schema)
+    assert len(provider_modes) == 1
+    assert provider_modes[0]["enum"] == [
+        "text_to_image",
+        "image_to_image",
+        "edit_image",
+        "character_image",
+    ]
+
+
+def test_memory_declaration_withhold_is_authorable_on_both_backends():
+    """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
+
+    `memoryDeclarationWithhold` is how a backend block records that it declares LESS than
+    `config/engine-capabilities/capabilities.<backend>.json` dumps, on purpose, because a measurement
+    says the wider claim is wrong. No committed entry needs one today — the dumps happen to agree with
+    every recorded verdict — so without this test the property's FIRST real use would red
+    `test_builtin_models_manifest_satisfies_authoring_schema` at the moment somebody needed it, which
+    is precisely when a red is least useful. Validated against the real manifest plus a synthetic
+    withhold rather than against a hand-built document, so the property is exercised where it lives.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def validate_with(withhold, backend):
+        manifest = _load_builtin_models_manifest()
+        model = next(
+            candidate
+            for candidate in manifest["models"]
+            if candidate.get(backend) is not None
+        )
+        model[backend]["memoryDeclarationWithhold"] = withhold
+        return sorted(
+            validator.iter_errors(manifest), key=lambda error: list(error.absolute_path)
+        )
+
+    for backend in ("mlx", "candle"):
+        for rungs in (["bounded_decode", "bounded_attention"], "all"):
+            errors = validate_with(
+                {
+                    "rungs": rungs,
+                    "story": "SC-15525",
+                    "reason": "rung 2 is withheld on quality: the production latent drifts 84/255.",
+                },
+                backend,
+            )
+            assert not errors, (backend, rungs, [error.message for error in errors])
+
+    # Uncited or malformed withholds must be REJECTED, matching what `withheldRungs` throws on.
+    for bad in (
+        {"rungs": ["bounded_decode"], "reason": "no story"},
+        {"rungs": ["bounded_decode"], "story": "SC-15525"},
+        {"rungs": [], "story": "SC-15525", "reason": "empty"},
+        {"rungs": ["not_a_rung"], "story": "SC-15525", "reason": "unknown rung"},
+        {"rungs": "everything", "story": "SC-15525", "reason": "not the all literal"},
+        {
+            "rungs": "all",
+            "story": "SC-15525",
+            "reason": "extra key",
+            "unexpected": True,
+        },
+    ):
+        assert validate_with(bad, "mlx"), bad
+
+
 def test_sensenova_models_do_not_advertise_lora_compatibility():
     """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
     manifest = _load_builtin_models_manifest()
@@ -740,6 +1148,78 @@ def test_schema_accepts_mlx_sequential_offload_capability():
     ]
 
 
+def test_cleanup_with_model_is_boolean_and_requires_a_corequisite():
+    """SC-18902: only an explicitly exclusive co-requisite may follow a cleanup tombstone."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    download = {
+        "provider": "huggingface",
+        "repo": "namespace/exclusive-adapter",
+        "coRequisite": True,
+        "cleanupWithModel": True,
+    }
+    valid = _model_entry_with_download(download)
+    assert not list(validator.iter_errors({"schemaVersion": 1, "models": [valid]}))
+
+    without_corequisite = _model_entry_with_download(
+        {key: value for key, value in download.items() if key != "coRequisite"}
+    )
+    errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [without_corequisite]})
+    )
+    assert any(
+        error.validator == "required"
+        and "coRequisite" in error.message
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+    wrong_type = _model_entry_with_download({**download, "cleanupWithModel": "yes"})
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [wrong_type]}))
+    assert any(
+        error.validator == "type"
+        and list(error.absolute_path)[-1:] == ["cleanupWithModel"]
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+
+def _cleanup_with_model_ownership_errors(manifest: dict) -> list[str]:
+    owners_by_repo: dict[str, set[str]] = {}
+    cleanup_rows: list[tuple[str, str]] = []
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            repo = download.get("repo")
+            if repo:
+                owners_by_repo.setdefault(repo, set()).add(model["id"])
+            if download.get("cleanupWithModel") is True:
+                cleanup_rows.append((model["id"], repo))
+    return [
+        f"{model_id}:{repo} is referenced by {sorted(owners_by_repo.get(repo, set()))}"
+        for model_id, repo in cleanup_rows
+        if owners_by_repo.get(repo, set()) != {model_id}
+    ]
+
+
+def test_cleanup_with_model_repositories_are_exclusive_to_one_parent():
+    """Deleting a cleanup tombstone may recursively remove only a repo no sibling model uses."""
+    manifest = _load_builtin_models_manifest()
+    assert not _cleanup_with_model_ownership_errors(manifest)
+
+    mutated = copy.deepcopy(manifest)
+    eros = next(model for model in mutated["models"] if model["id"] == "ltx_2_3_eros")
+    exclusive = next(
+        download for download in eros["downloads"] if download.get("cleanupWithModel") is True
+    )
+    sibling = next(model for model in mutated["models"] if model["id"] == "ltx_2_3")
+    sibling["downloads"].append(
+        {
+            "provider": exclusive["provider"],
+            "repo": exclusive["repo"],
+            "files": exclusive.get("files", []),
+        }
+    )
+    errors = _cleanup_with_model_ownership_errors(mutated)
+    assert errors and "ltx_2_3" in errors[0] and "ltx_2_3_eros" in errors[0], errors
+
 def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     """Static capabilities and exact provider contracts share one overlay vocabulary.
 
@@ -763,10 +1243,12 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
 def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
-    The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing rows; the universal assertions are what prevent a new row from silently
-    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
-    calibrated measurement.
+    Stated as derivations rather than catalog head-counts (sc-20799 round 2): a pinned row count
+    only ever records how many rows existed on the day it was written, and every legitimate
+    add/remove edits the integer instead of testing anything. What actually has to hold is that the
+    populations partition cleanly and that every member of each satisfies its geometry invariant —
+    which is what prevents a new row from silently escaping the normalization contract or an
+    unmeasured tier gate from presenting itself as a calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -780,17 +1262,32 @@ def test_measured_memory_rows_declare_their_workload_geometry():
         if "vramGbByTier" in candle:
             candle_rows.append((model["id"], candle))
 
-    assert len(mlx_rows) == 16
-    assert len(candle_rows) == 36
+    # Both populations must exist at all — an `all(...)` over an empty list is vacuously true, and
+    # a filter that silently stopped selecting anything is exactly the failure these guards exist
+    # to catch. Existence, not cardinality.
+    assert mlx_rows, "no download declares a measured peak; the mlx filter selected nothing"
+    assert candle_rows, "no model declares vramGbByTier; the candle filter selected nothing"
+
+    # Per-row invariant: every measured MLX peak is priced at the calibrated 1024² workload.
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
     unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
-    assert len(measured_rows) == 24
-    assert len(unmeasured_rows) == 12
+    # measured ∪ unmeasured == candle_rows, and the two are disjoint. `measured` is asserted to be a
+    # bool above, so a row cannot sit outside both; this pins that neither branch drops or
+    # double-counts a row, which is the property the two head-counts were standing in for.
+    assert measured_rows and unmeasured_rows
+    measured_ids = {row[0] for row in measured_rows}
+    unmeasured_ids = {row[0] for row in unmeasured_rows}
+    assert measured_ids.isdisjoint(unmeasured_ids), measured_ids & unmeasured_ids
+    assert measured_ids | unmeasured_ids == {row[0] for row in candle_rows}
 
-    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    measured_image_rows = [
+        row
+        for row in measured_rows
+        if row[0] not in {"scail2_14b", "minimax_h3", "minimax_h3_ref"}
+    ]
     assert all(
         row[1].get("vramMeasuredPixels") == 1024 * 1024
         for row in measured_image_rows
@@ -798,6 +1295,11 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     scail = [row for row in measured_rows if row[0] == "scail2_14b"]
     assert len(scail) == 1
     assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+    minimax_h3 = [
+        row for row in measured_rows if row[0] in {"minimax_h3", "minimax_h3_ref"}
+    ]
+    assert {row[0] for row in minimax_h3} == {"minimax_h3", "minimax_h3_ref"}
+    assert all(row[1].get("vramMeasuredPixels") == 1344 * 768 for row in minimax_h3)
 
     # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
     # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
@@ -816,20 +1318,29 @@ def test_measured_memory_rows_declare_their_workload_geometry():
 
 
 def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
-    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    """sc-20744: terminal receipts promote exact q4/q8 alongside the established bf16 row."""
     manifest = _load_builtin_models_manifest()
     scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
     candle = scail["candle"]
     assert candle == {
-        "minMemoryGb": 105,
-        "vramGbByTier": {"bf16": 102.115},
+        "minMemoryGb": 64,
+        "vramGbByTier": {"q4": 61.260, "q8": 64.928, "bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
         "measured": True,
     }
     assert candle["minMemoryGb"] == math.ceil(
-        candle["vramGbByTier"]["bf16"] + 2
+        candle["vramGbByTier"]["q4"] + 2
     )
-    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+    assert "64 GB for q4, 67 GB for q8, and 105 GB for bf16" in scail["ui"]["description"]
+
+    variants = {download["variant"]: download for download in scail["downloads"]}
+    assert set(variants) == {"q4", "q8", "bf16"}
+    for tier in ("q4", "q8"):
+        assert variants[tier]["files"] == [f"{tier}/*"]
+        assert variants[tier]["platforms"] == ["macos", "windows", "linux"]
+        assert variants[tier]["revision"] == "ce88cfdb1008f395e9c820e525e6db7b6695f7b3"
+    assert variants["bf16"]["platforms"] == ["macos", "windows", "linux"]
+    assert variants["q4"]["default"] is True
 
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
@@ -1151,9 +1662,6 @@ _COREQUISITE_REVISION_MIGRATION_PENDING: frozenset[tuple[str, str]] = frozenset(
     {
         # ("ltx_2_3", "SceneWorks/ltx-2.3-mlx") pinned in sc-13683 (the gemma coRequisite now carries
         # the full 40-hex LTX_BUNDLE_REVISION); removed here + in the Rust twin to keep both green.
-        ("ltx_2_3_eros", "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments"),
-        ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
-        ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
     }
 )
 
@@ -1530,7 +2038,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
         for model in _load_builtin_models_manifest()["models"]
         if model["id"] == "flux2_klein_9b_true_v2"
     )
-    assert model["macOnly"] is True
+    # sc-20529: `macOnly` is REMOVED, not flipped. For an image entry the flag is a no-op label
+    # (only video entries and the vision captioner read it), and the FLUX.2-klein converter has a
+    # real candle twin (sc-7459), so claiming macOS-only contradicted the shipped off-Mac convert
+    # lane. Availability is driven by the routing tables, not this flag.
+    assert "macOnly" not in model
     assert model["adapter"] == "mlx_flux2"
     # Only the bf16 single-file is pulled (not the whole 73 GB repo).
     assert model["downloads"][0]["files"] == ["Flux2-Klein-9B-True-v2-bf16.safetensors"]
@@ -1545,7 +2057,29 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     # installs), reading them from its per-tier bf16/ subdir.
     assert mlx["convertBaseRepo"] == "SceneWorks/flux2-klein-9b-mlx"
     assert mlx["convertBaseSubdir"] == "bf16"
-    assert mlx["quantize"] == 8
+    # SC-18460: the converted transformer is a fixed dense BF16 artifact — there is no packed tier
+    # to default to. `resolve_quant` maps `<= 0` to dense/no-quant, and OMITTING the key would
+    # default to q8, so 0 is the only correct declaration here. The former `== 8` described a tier
+    # this entry never ships.
+    assert mlx["quantize"] == 0
+
+
+def test_flux2_dev_carries_no_inert_mac_only_flag():
+    """sc-20530: `flux2_dev` is candle-routed off-Mac (epic 6564) AND MLX on Apple Silicon, so the
+    `macOnly: true` it used to carry was inert *and* misleading — the flag is read only by the video
+    catalog-withdrawal contract (`video_model_withdrawn_on_platform`, gated on `type == "video"`)
+    and by the id-pinned vision captioner in the web eligibility helpers, neither of which sees an
+    image entry with this id. Removed, not flipped to false, and pinned absent like the klein pair
+    so it cannot creep back (sc-20529 removed `macOnly` from `flux2_klein_9b_true_v2` too — see
+    `test_flux2_true_v2_manifest_install_time_conversion` above).
+    """
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "flux2_dev"
+    )
+    assert model["type"] == "image"
+    assert "macOnly" not in model
 
 
 def test_flux2_klein_manifest_entries_present():
@@ -1559,7 +2093,12 @@ def test_flux2_klein_manifest_entries_present():
         model = models[model_id]
         assert model["adapter"] == "mlx_flux2", model_id
         assert model["family"] == "flux2-klein", model_id
-        assert model["macOnly"] is True, model_id
+        # sc-20530: `macOnly` is REMOVED from both entries, not flipped to false. The flag is read
+        # only by the video catalog-withdrawal contract (`video_model_withdrawn_on_platform`, which
+        # requires `type == "video"`) and by the id-pinned vision captioner in the web eligibility
+        # helpers, so on an image entry it never gated anything — it only read like a platform
+        # contract these candle-routed entries do not have. Pinned absent so it cannot creep back.
+        assert "macOnly" not in model, model_id
         # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
         # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
         # FLUX Non-Commercial LICENSE.md travels with the weights.
@@ -1622,13 +2161,14 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "measured",
         )
     } == {
-        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box.
+        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box;
+        # sc-21714 then re-certified the shipped q4/1024 binding at the current inference pin.
         # The stamp is only allowed to move as the RESULT of that measurement, never on its own.
         "calibrationAbi": 3,
         "loadShape": "deferred_materialization",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
         "sceneWorksRevision": "sc-15449-contract-v1",
-        "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+        "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
         "measured": True,
     }
     assert turbo_fit["strategyParameters"] == {
@@ -1659,6 +2199,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "sc-15205",
         "sc-15206",
         "sc-17097",
+        "sc-21714",
     ]
     assert {
         (record["tier"], record["width"], record["height"])
@@ -1724,8 +2265,204 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
 
+def _committed_phase_curves(manifest: dict) -> dict:
+    """Every ``(tier, rung, phase)`` phase curve committed to the builtin manifest.
+
+    Keyed by a readable coordinate so a failure names the curve rather than an index.
+    """
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    curves = {}
+    for tier, rungs in krea["candle"]["turboFit"]["phaseCurvesByTier"].items():
+        for rung, phases in rungs.items():
+            for phase, curve in phases.items():
+                curves[f"{tier}.{rung}.{phase}"] = curve
+    return curves
+
+
+def test_image_lane_phase_curves_carry_no_temporal_coefficient():
+    """sc-18812: the whole shipped image lane is still two-coefficient, all 36 curves of it.
+
+    This is the precondition that keeps
+    ``test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points`` honest. That test
+    reads ``perMpxGb`` and compares it against a measured two-point delta, which is a COMPLETE
+    account of the curve only while no temporal term exists. Add ``perMpxFrameGb`` to any of these
+    curves and the slope comparison would keep passing while describing a different function.
+
+    The existing literal-dict assertion above covers bf16's 12 curves; this covers all 36, which is
+    what "no image curve moved" actually requires.
+    """
+    curves = _committed_phase_curves(_load_builtin_models_manifest())
+    assert len(curves) == 36, (
+        f"3 tiers x 4 rungs x 3 phases expected, found {len(curves)} - a changed population "
+        "means this guard is covering something other than what it claims"
+    )
+    for label, curve in curves.items():
+        assert set(curve) == {"fixedGb", "perMpxGb"}, (
+            f"{label} declares {sorted(curve)}; the image lane must stay two-coefficient so its "
+            "fitted slope remains the whole geometry response"
+        )
+
+
+def test_schema_admits_the_temporal_coefficient_additively():
+    """sc-18812: the temporal term is OPTIONAL, bounded, and does not disturb existing manifests.
+
+    Three claims, each with its own direction:
+
+    1. The unmodified shipped manifest still validates. That is the migration claim.
+    2. A curve that ADDS ``perMpxFrameGb`` validates - so the change is genuinely additive and a
+       video curve can ship without a schema bump.
+    3. A negative or wrong-typed ``perMpxFrameGb`` is REJECTED, and so is a curve that drops
+       ``perMpxGb`` in favour of it - the term extends the area form, it does not replace it.
+       (Replacing it is what ``latent_tokens``/``output_voxels`` would have required, which is
+       precisely why sc-18812 adopted ``cross`` instead.)
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+    assert not list(validator.iter_errors(manifest)), "the shipped manifest must still validate"
+
+    def curve_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["phaseCurvesByTier"]["q8"][
+            "threeStage"
+        ]["decode"]
+
+    def mutated(mutate):
+        candidate = copy.deepcopy(manifest)
+        mutate(candidate)
+        return list(validator.iter_errors(candidate))
+
+    assert not mutated(
+        lambda candidate: curve_of(candidate).update({"perMpxFrameGb": 0.2998482076533136})
+    ), "adding the temporal coefficient must not require a schema bump"
+    assert not mutated(
+        lambda candidate: candidate["models"][krea_index]["candle"]["turboFit"].update(
+            {"maxMeasuredVoxels": 1024 * 1024 * 100}
+        )
+    ), "declaring the temporal envelope bound must validate"
+
+    for label, mutate in (
+        ("negative temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": -0.1})),
+        ("non-numeric temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": "0.3"})),
+        (
+            "temporal coefficient REPLACING the area term",
+            lambda c: curve_of(c).clear() or curve_of(c).update(
+                {"fixedGb": 2.5, "perMpxFrameGb": 0.3}
+            ),
+        ),
+        ("misspelled temporal coefficient", lambda c: curve_of(c).update({"perMpxFrame": 0.3})),
+        (
+            "zero temporal envelope bound",
+            lambda c: c["models"][krea_index]["candle"]["turboFit"].update(
+                {"maxMeasuredVoxels": 0}
+            ),
+        ),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+    # sc-18812 review pass: an evidence record must be ABLE to state the frame count it was
+    # captured at. Without this property the matrix generator would key every record as `WxH` and
+    # characterize a video capture as a one-frame design point nobody measured.
+    def record_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["evidenceRecords"][0]
+
+    assert not mutated(
+        lambda candidate: record_of(candidate).update({"frames": 241})
+    ), "an evidence record must be able to declare its frame count"
+    for label, mutate in (
+        ("zero frames", lambda c: record_of(c).update({"frames": 0})),
+        ("fractional frames", lambda c: record_of(c).update({"frames": 24.5})),
+        ("string frames", lambda c: record_of(c).update({"frames": "241"})),
+        ("misspelled frames", lambda c: record_of(c).update({"frameCount": 241})),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+
+def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:
+    """Tiers whose committed phase curves carry ``perMpxFrameGb`` on any rung or phase."""
+    declaring = set()
+    for tier, rungs in turbo_fit.get("phaseCurvesByTier", {}).items():
+        for phases in rungs.values():
+            if any("perMpxFrameGb" in curve for curve in phases.values()):
+                declaring.add(tier)
+    return declaring
+
+
+def _evidence_records_missing_frames(turbo_fit: dict) -> list:
+    """Evidence records that support a TEMPORAL curve without saying how many frames they measured.
+
+    This is the fabricated-rank hazard, named: ``generate-memory-matrix.mjs#measuredGeometryKey``
+    reads an absent ``frames`` as 1, which is correct for the image lane and a silent invention on
+    a tier whose curve has a temporal coefficient to determine.
+    """
+    declaring = _tiers_declaring_a_temporal_curve(turbo_fit)
+    return [
+        f"{record['tier']} {record['width']}x{record['height']} "
+        f"({record['sourceStory']} activity {record['sourceActivity']})"
+        for record in turbo_fit.get("evidenceRecords", [])
+        if record["tier"] in declaring and "frames" not in record
+    ]
+
+
+def test_temporal_curve_tiers_declare_frames_on_their_evidence_records():
+    """sc-18812: a tier carrying ``perMpxFrameGb`` may not have frame-silent evidence.
+
+    Inert on the shipped manifest — no committed curve declares the temporal term — so the guard is
+    exercised in BOTH directions against mutated manifests rather than asserted vacuously. Without
+    it, adding a temporal coefficient in one place and a video capture in another would silently
+    characterize that capture as a one-frame design point: a fabricated contribution to the design
+    matrix rank, which over-claims harder than the axis collapse sc-18812 set out to fix.
+    """
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    turbo_fit = krea["candle"]["turboFit"]
+
+    # The live guard. Trivially satisfied while the image lane stays two-coefficient (which
+    # ``test_image_lane_phase_curves_carry_no_temporal_coefficient`` is what enforces), and the
+    # first thing to fire on the day a temporal curve ships without its evidence catching up.
+    assert _evidence_records_missing_frames(turbo_fit) == []
+
+    # Direction 1: declare the term, change nothing else. Every record of that tier is now a
+    # frame-silent supporter of a temporal curve, and the audit must name them.
+    declared = copy.deepcopy(turbo_fit)
+    declared["phaseCurvesByTier"]["q8"]["threeStage"]["decode"]["perMpxFrameGb"] = 0.2998
+    assert _tiers_declaring_a_temporal_curve(declared) == {"q8"}
+    offenders = _evidence_records_missing_frames(declared)
+    assert offenders, "a temporal curve with frame-silent evidence must be rejected"
+    assert all(entry.startswith("q8 ") for entry in offenders), offenders
+    assert len(offenders) == sum(
+        1 for record in turbo_fit["evidenceRecords"] if record["tier"] == "q8"
+    ), "every q8 record supports the q8 curve, so every one of them must be named"
+
+    # Direction 2: the same manifest with the frame counts stated is accepted. So the rejection
+    # above is attributable to the missing property and not to the declaration.
+    repaired = copy.deepcopy(declared)
+    for record in repaired["evidenceRecords"]:
+        if record["tier"] == "q8":
+            record["frames"] = 1
+    assert _evidence_records_missing_frames(repaired) == []
+
+    # ...and it is per TIER, not global: q4's records stay frame-silent and stay legal, because no
+    # q4 curve has a temporal coefficient to determine.
+    assert all(
+        "frames" not in record
+        for record in repaired["evidenceRecords"]
+        if record["tier"] == "q4"
+    )
+
+
 def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
-    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them."""
+    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them.
+
+    sc-18812 precondition: this reads ``perMpxGb`` as the whole geometry response, which holds
+    only while no curve carries a temporal term. ``test_image_lane_phase_curves_carry_no_temporal
+    _coefficient`` is what enforces that, and it must stay green for this comparison to mean
+    anything.
+    """
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     curves = krea["candle"]["turboFit"]["phaseCurvesByTier"]
@@ -2192,6 +2929,119 @@ def test_lora_source_guard_is_live_against_the_real_catalog():
     )
 
 
+def test_lora_schema_accepts_a_declared_model_id_list():
+    """sc-19563: the entry is additionalProperties:false, so a per-model-id key is an
+    explicit schema addition rather than a free-form one. Pin that it is accepted at
+    all — reverting the property would turn every shipped `modelIds` into an
+    authoring error."""
+    entry = _sample_lora_entry()
+    entry["modelIds"] = ["minimax_h3_ref"]
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert not errors, "a declared modelIds list must be schema-valid:\n" + _format_errors(errors)
+
+
+def test_lora_schema_rejects_a_malformed_model_id_list():
+    """`modelIds` is typed, not free-form: a bare string, an empty list, a non-string
+    element and an empty id are each rejected. Without the typing an author could
+    write `"modelIds": "minimax_h3_ref"` and the gate would read nothing — the key
+    present, the constraint absent, which is worse than declaring none at all."""
+    for value, keyword in (
+        ("minimax_h3_ref", "type"),
+        ([], "minItems"),
+        ([123], "type"),
+        ([""], "minLength"),
+    ):
+        entry = _sample_lora_entry()
+        entry["modelIds"] = value
+        errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+        assert any(
+            error.validator == keyword
+            and list(error.absolute_path)[:3] == ["loras", 0, "modelIds"]
+            for error in errors
+        ), f"modelIds={value!r} must be rejected by `{keyword}`; got {_format_errors(errors)}"
+
+
+def test_lora_schema_accepts_a_declared_sampling_recipe():
+    """sc-18726: `sampling` is an explicit schema addition on an
+    additionalProperties:false entry, so pin that a well-formed block is accepted at
+    all — reverting the property would turn every shipped turbo entry into an
+    authoring error."""
+    entry = _sample_lora_entry()
+    entry["role"] = "accelerator"
+    entry["sampling"] = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+    assert not errors, "a declared sampling recipe must be schema-valid:\n" + _format_errors(errors)
+
+
+def test_lora_schema_rejects_a_malformed_sampling_recipe():
+    """The negative arm, and the one that carries the weight (sc-18726).
+
+    `parse_turbo_recipes` DROPS a block it cannot read rather than failing — a
+    silently recipe-less accelerator renders 50 steps at the base shift, which is the
+    2 h 25 m render this whole feature exists to avoid, with no error anywhere. So
+    every way of writing the block wrong has to be an authoring-time red: a partial
+    block (each of the three keys is load-bearing and none has a safe default), an
+    out-of-band step count, a zero shift, a string where a number belongs, a typo'd
+    key, and a non-object.
+    """
+    good = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    cases = [
+        ({key: value for key, value in good.items() if key != missing}, "required")
+        for missing in good
+    ]
+    cases += [
+        ({**good, "steps": 0}, "minimum"),
+        ({**good, "steps": 4.5}, "type"),
+        ({**good, "schedulerShift": 0}, "exclusiveMinimum"),
+        ({**good, "audioSchedulerShift": "3.0"}, "type"),
+        # The sc-12288 field class, one level in: a typo'd key is silently ignored by a
+        # permissive object, and `required` alone would not catch a MISSPELLED extra.
+        ({**good, "schedulerShifts": 6.0}, "additionalProperties"),
+        (4, "type"),
+    ]
+    for value, keyword in cases:
+        entry = _sample_lora_entry()
+        entry["role"] = "accelerator"
+        entry["sampling"] = value
+        errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
+        assert any(
+            error.validator == keyword
+            and list(error.absolute_path)[:3] == ["loras", 0, "sampling"]
+            for error in errors
+        ), f"sampling={value!r} must be rejected by `{keyword}`; got {_format_errors(errors)}"
+
+
+def test_every_minimax_h3_lora_declares_its_partition_in_the_real_catalog():
+    """sc-19563, against the SHIPPED manifest rather than a sample entry.
+
+    Both H3 partitions are one architecture and declare one family, so family
+    membership cannot express which of `minimax_h3` / `minimax_h3_ref` an adapter is
+    distilled for; cross-selecting used to fold cleanly at the wrong quality.
+
+    The final inequality is the load-bearing half: a catalog that gave all four the
+    same `modelIds` would pass a presence check and enforce nothing."""
+    manifest = _load_jsonc(LORA_MANIFEST_PATH)
+    declared = {
+        entry["id"]: entry.get("modelIds")
+        for entry in manifest["loras"]
+        if entry.get("family") == "minimax-h3"
+    }
+    assert declared, "no minimax-h3 LoRAs found; this guard would be vacuous"
+    for lora_id, model_ids in declared.items():
+        assert model_ids, f"{lora_id} declares no modelIds (sc-19563)"
+    assert declared["minimax_h3_ref2v_turbo_4step"] == ["minimax_h3_ref"]
+    fl2v = [
+        ids for lora_id, ids in declared.items() if lora_id != "minimax_h3_ref2v_turbo_4step"
+    ]
+    assert all(
+        ids == ["minimax_h3"] for ids in fl2v
+    ), f"the fl2v adapters must name minimax_h3; got {fl2v}"
+    assert declared["minimax_h3_ref2v_turbo_4step"] != fl2v[0], (
+        "the ref2v and fl2v adapters must name DIFFERENT partitions, or the declaration "
+        "enforces nothing"
+    )
+
+
 # --- Control-overlay catalog (builtin.control_overlays.jsonc) ---------------
 
 
@@ -2539,3 +3389,397 @@ def test_acestep_declares_its_distilled_guidance_axes_explicitly():
     audio_block = models["acestep_v15_turbo"]["audio"]
     assert audio_block["supportsGuidance"] is False
     assert audio_block["supportsNegativePrompt"] is False
+
+
+# --------------------------------------------------------------------------------------
+# sc-17227 — MiniMax-H3 downstream-user licensing. The MiniMax H3 Community License grants a
+# NON-TRANSFERABLE licence (§II) and defines "Licensee" as whoever uses the Works (§I.9), so a
+# SceneWorks user is a Licensee in their own right; §V.2 obliges us to notify each user that the
+# §V / Exhibit A restrictions apply BEFORE providing access. `MiniMaxAI/MiniMax-H3` is a PUBLIC
+# repo, so the pre-existing acknowledgment gate — which keyed off `gated`, i.e. off "needs a
+# Hugging Face credential" — could not express that: declaring `gated` would demand a token that
+# does not exist, and not declaring it left no gate at all.
+# --------------------------------------------------------------------------------------
+
+def _huggingface_repo_key(repo):
+    """Canonicalize one repo string the way the API's `huggingface_repo_key` does: lower-cased,
+    trailing slash and `.git` stripped. `None` for anything that is not a non-empty string."""
+    if not isinstance(repo, str):
+        return None
+    repo = repo.strip().rstrip("/").strip()
+    if repo.lower().endswith(".git"):
+        repo = repo[: -len(".git")].rstrip("/").strip()
+    return repo.lower() or None
+
+
+def _declared_download_repos(model):
+    """Every Hugging Face repo `model`'s `downloads` rows name in their `repo` field, canonicalized.
+
+    Mirrors the MANIFEST-row read `license_acknowledgment_repo_index` performs — which is
+    `download.get("repo")` and nothing else (apps/rust-api/src/models.rs). It is deliberately NOT
+    `LICENSE_GATED_REPO_PAYLOAD_KEYS`: that constant is a JOB-PAYLOAD key list, applied by
+    `ensure_job_payload_license_acknowledged` to the object a client POSTs, and a manifest download
+    row has no `baseRepo`/`sourceRepo` for the index to read. Applying the payload list here
+    described an operation the Rust index never performs.
+    """
+    repos = set()
+    for download in model.get("downloads", []):
+        key = _huggingface_repo_key(download.get("repo"))
+        if key:
+            repos.add(key)
+    return repos
+
+
+def _license_acknowledgment_repo_index(models):
+    """`owner/name` -> the id of the entry that declares it, for every repo a
+    `requiresLicenseAcknowledgment` entry names. Mirrors `license_acknowledgment_repo_index` in
+    apps/rust-api/src/models.rs, which is the predicate the running gate uses."""
+    index = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is not True:
+            continue
+        for repo in _declared_download_repos(model):
+            index.setdefault(repo, model["id"])
+    return index
+
+
+def _license_acknowledgment_models():
+    """Every catalog entry that must carry the acknowledgment contract, DERIVED from the flag
+    rather than listed.
+
+    This replaced a hard-coded `MINIMAX_H3_IDS = ("minimax_h3", "minimax_h3_ref")`. A tuple of ids
+    inside an audit whose job is to catch entries nobody remembered to list is self-defeating: a
+    new entry simply is not in the tuple, every loop below skips it, and CI stays green. No entry
+    ids are maintained here — add a flagged entry to the manifest and it is audited on the next run.
+
+    What this set may be asserted on is the FAMILY-AGNOSTIC half of the contract, and only that.
+    The MiniMax-specific copy assertions live under `_minimax_h3_license_models()` below: a review
+    (sc-17227) caught them being made against every flagged entry, which would have turned three
+    audits red for the first non-MiniMax entry to carry the flag, for reasons having nothing to do
+    with it. Deriving the SET from the flag and then asserting one family's prose over it trades
+    maintained ids for maintained copy; it does not remove the coupling.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    flagged = {
+        model["id"]: model
+        for model in models
+        if model.get("requiresLicenseAcknowledgment") is True
+    }
+    # Without this the loops below iterate an empty dict and pass vacuously — the failure mode a
+    # derived set has and a literal tuple does not.
+    assert flagged, "no catalog entry declares requiresLicenseAcknowledgment"
+    return flagged
+
+
+# The one token that scopes the MiniMax-specific copy audits. It is a FAMILY, not a list of entry
+# ids: a new MiniMax-H3 partition inherits the copy contract automatically, and an entry of any
+# other family is out of scope by construction rather than by being forgotten.
+MINIMAX_H3_FAMILY = "minimax-h3"
+
+
+def _minimax_h3_license_models():
+    """The flagged entries of the MiniMax-H3 family — the scope for assertions about MiniMax's own
+    licence text, attribution string and licence URL."""
+    minimax = {
+        model_id: entry
+        for model_id, entry in _license_acknowledgment_models().items()
+        if entry.get("family") == MINIMAX_H3_FAMILY
+    }
+    assert minimax, f"no flagged entry is in the {MINIMAX_H3_FAMILY} family"
+    return minimax
+
+
+def _builtin_lora_source_repos():
+    """`lora id` -> the canonicalized Hugging Face repo its download resolves to.
+
+    Mirrors what `create_lora_download_job` reads (apps/rust-api/src/loras.rs): `source.repo`, or a
+    top-level `repo` when the entry is written flat.
+    """
+    repos = {}
+    for lora in _load_jsonc(LORA_MANIFEST_PATH)["loras"]:
+        source = lora.get("source") or {}
+        key = _huggingface_repo_key(source.get("repo") or lora.get("repo"))
+        if key:
+            repos[lora["id"]] = key
+    return repos
+
+
+def test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself():
+    """An entry that names a restricted repo in its `downloads` but does not itself declare
+    `requiresLicenseAcknowledgment` is a second door onto the same weights.
+
+    `POST /api/v1/models/:id/download` gated on the entry the PATH id names, so such an entry
+    downloaded those weights ungated while `POST /api/v1/jobs` naming the same repo answered 403.
+    The route now also consults the repo index (sc-17227), so this is no longer the only thing
+    standing between that shape and the weights — but the manifest is where the shape is authored,
+    and a shared restricted repo across two entries is one authoring decision away: the manifest
+    already uses co-requisite rows naming a shared repo for several families.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    index = _license_acknowledgment_repo_index(models)
+    assert index, "no repo is licence-gated; this guard would pass vacuously"
+
+    offenders = {}
+    for model in models:
+        if model.get("requiresLicenseAcknowledgment") is True:
+            continue
+        shared = sorted(_declared_download_repos(model) & index.keys())
+        if shared:
+            offenders[model["id"]] = [(repo, index[repo]) for repo in shared]
+
+    assert not offenders, (
+        "these entries name a licence-gated repo without declaring "
+        f"requiresLicenseAcknowledgment themselves: {offenders}"
+    )
+
+
+def _lora_license_remedy_offenders(lora_repos, models):
+    """LoRA ids whose download is licence-gated but whose gate has no way to be CLEARED.
+
+    A catalog LoRA naming a licence-gated repo is refused by `create_lora_download_job` until the
+    caller asserts the acknowledgment. The only surface that can make that assertion is the MODEL
+    card of the entry the repo index maps the repo to — a LoRA row carries no licence copy and no
+    checkbox — so the remedy exists only if that entry can actually render the acceptance, i.e. it
+    is in this catalog and carries the licence text and link the card shows. Where it cannot, the
+    LoRA is un-downloadable through every shipped surface, which is the regression this guard
+    exists to catch.
+    """
+    index = _license_acknowledgment_repo_index(models)
+    by_id = {model["id"]: model for model in models}
+    offenders = {}
+    for lora_id, repo in sorted(lora_repos.items()):
+        model_id = index.get(repo)
+        if model_id is None:
+            continue
+        entry = by_id.get(model_id)
+        missing = [
+            field
+            for field in ("licenseUrl", "licenseNotice")
+            if not isinstance((entry or {}).get(field), str) or not (entry or {})[field].strip()
+        ]
+        if entry is None or missing:
+            offenders[lora_id] = (repo, model_id, missing or ["<entry absent>"])
+    return offenders
+
+
+def test_every_builtin_lora_naming_a_license_gated_repo_has_a_reachable_remedy():
+    """The LoRA half of the gate, which nothing scanned before (sc-17227 review MAJOR 1).
+
+    `POST /api/v1/loras/:id/download` is repo-keyed like every other door, so a catalog LoRA whose
+    `source.repo` is a repo a `requiresLicenseAcknowledgment` model declares is refused 403 without
+    the assertion. `builtin.loras.jsonc` was outside every audit here — the model-side guard above
+    iterates `_load_builtin_models_manifest()["models"]` only — so nothing checked that such a LoRA
+    is still downloadable by a user who accepts the licence.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    index = _license_acknowledgment_repo_index(models)
+    assert index, "no repo is licence-gated; this guard would pass vacuously"
+
+    offenders = _lora_license_remedy_offenders(_builtin_lora_source_repos(), models)
+    assert not offenders, (
+        "these built-in LoRAs fetch a licence-gated repo with no model card able to take the "
+        f"acknowledgment that clears the refusal: {offenders}"
+    )
+
+    # POSITIVE CONTROL, in the same test: the shipped LoRA catalog names no gated repo today, so
+    # the assertion above passes vacuously on its own. Drive the same predicate over a SYNTHETIC
+    # catalog to prove it intersects `source.repo` against the index at all, and that it reports the
+    # unclearable case rather than only the clearable one.
+    gated_repo, gating_model_id = sorted(index.items())[0]
+    synthetic = {"synthetic_gated_lora": gated_repo, "synthetic_plain_lora": "owner/not-gated"}
+    assert not _lora_license_remedy_offenders(synthetic, models), (
+        "a LoRA naming a gated repo whose model carries the licence copy has a remedy and must "
+        "not be reported"
+    )
+
+    stripped = [
+        {key: value for key, value in model.items() if key != "licenseNotice"}
+        if model["id"] == gating_model_id
+        else model
+        for model in models
+    ]
+    assert _lora_license_remedy_offenders(synthetic, stripped) == {
+        "synthetic_gated_lora": (gated_repo, gating_model_id, ["licenseNotice"])
+    }, "the guard must catch a gated LoRA whose gating model cannot render the acceptance"
+
+
+def test_every_license_acknowledgment_entry_declares_the_credential_free_shape():
+    """The FAMILY-AGNOSTIC half of the acknowledgment contract, asserted over every flagged entry.
+
+    `requiresLicenseAcknowledgment` exists to express "the licence binds the user" WITHOUT
+    "a Hugging Face credential is needed" — the two used to be one flag. So an entry that raises
+    this gate must not also claim the credential shape: `gated` would make the Models screen render
+    "Add token in Settings" and "Request access on Hugging Face" for a credential and an access page
+    that need not exist, and `credentialHost` is the field that drives that UI.
+
+    It must also carry the copy the gate SHOWS. A gate whose card has no licence text is a checkbox
+    over nothing, and it is what the LoRA-side remedy resolves to as well
+    (`_lora_license_remedy_offenders`). What that text has to SAY is family-specific and is
+    asserted per family below; that it exists is not.
+    """
+    for model_id, entry in _license_acknowledgment_models().items():
+        assert entry["requiresLicenseAcknowledgment"] is True, model_id
+        assert entry.get("gated") is not True, f"{model_id}: the gated shape demands a credential"
+        assert "credentialHost" not in entry, model_id
+        for field in ("licenseUrl", "licenseNotice"):
+            value = entry.get(field)
+            assert isinstance(value, str) and value.strip(), f"{model_id}: empty {field}"
+
+
+def test_minimax_h3_requires_license_acknowledgment_without_a_credential():
+    """MiniMax-H3's own licence URL. Scoped to the family (sc-17227 review MAJOR 3): asserted over
+    every flagged entry, this would fail the first non-MiniMax entry to raise the gate, for a reason
+    having nothing to do with it. The credential-free half of what this used to assert is now
+    `test_every_license_acknowledgment_entry_declares_the_credential_free_shape`.
+    """
+    for model_id, entry in _minimax_h3_license_models().items():
+        assert entry["licenseUrl"] == "https://huggingface.co/MiniMaxAI/MiniMax-H3", model_id
+
+
+def test_minimax_h3_license_notice_names_the_restrictions_it_notifies_of():
+    """§V.2 requires notifying the user that the use restrictions apply — a bare "accept the
+    license" checkbox does not. The notice must name the FOUR terms that decide whether the user
+    may use the model at all, so assert on the SUBSTANCE, not on the field being non-empty.
+
+    Scoped to the MiniMax-H3 family: every string below is MiniMax's own copy, and asserting it
+    over the derived flag set made the flag mean "carries MiniMax's licence text" rather than
+    "requires an acknowledgment" (sc-17227 review MAJOR 3)."""
+    for model_id, entry in _minimax_h3_license_models().items():
+        notice = entry["licenseNotice"]
+        # §II / §I.9 — the licence binds the user, not only SceneWorks.
+        assert "NON-TRANSFERABLE" in notice, model_id
+        # §I.5 / §V.4 — the agreement's DEFAULT Applicable Territory, every excluded region named.
+        # A partial list would mislead. Named as the agreement's own default scope, and nothing
+        # here says how the written authorization below relates to it: which provision that
+        # confirmation is given under is not something this repository has established
+        # (sc-17227 records it as unresolved), so neither the copy nor this audit asserts it.
+        for territory in (
+            "European Union",
+            "United Kingdom",
+            "Republic of Korea",
+            "United States of America",
+        ):
+            assert territory in notice, f"{model_id}: {territory} missing from licenseNotice"
+        # The written authorization MiniMax gave SceneWorks, recorded verbatim on sc-17227. Pinned
+        # as a FACT the notice must state — the copy it replaced pointed the reader at MiniMax to
+        # ask about obtaining a licence, which stopped being the useful thing to say once the reply
+        # arrived.
+        assert "authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works" in notice, model_id
+        assert "welcome to contact MiniMax about obtaining a licence" not in notice, model_id
+        # Deliberately NOT pinned: any phrasing about which clause that authorization lands under,
+        # in either direction (sc-17227 review MAJOR 4). A negative pin on the superseded
+        # "the licence does not authorize use of the model" made restoring that reading a test
+        # failure, which is a test asserting a clause attribution this repository has not
+        # established. sc-17227's own analysis records the §II question as open; whether the reply
+        # is a §II territorial extension is Michael's to determine, not this audit's to lock in.
+        # The contact address survives the rewrite: it is the agreement's own, and a reader's
+        # question about their OWN use still goes there.
+        assert "api@minimax.io" in notice, model_id
+        # §V.1 + Exhibit A item 12 — the disclosure obligation SceneWorks does NOT discharge for
+        # the user (nothing in the app marks output as machine-generated), so it must be stated.
+        assert "machine-generated" in notice, model_id
+        # §IV.1 — the ceiling above which a separate authorization is required. The licence's own
+        # measure is REVENUE ("generate more than 20 million US dollars ... in yearly revenue"),
+        # not earnings; "earn" would read as profit and understate who is covered.
+        assert "20 million US dollars in yearly revenue" in notice, model_id
+        # §V.3 — the restriction SceneWorks' own feature set is most likely to reach: the product
+        # ships a LoRA trainer, dataset captioning and a training studio. Named because the notice
+        # claims to list the terms that decide whether the user may use the model at all, and a
+        # reader who did not see it would reasonably conclude training on H3 output is
+        # unrestricted. This assertion is what stops the set silently shrinking back to three.
+        #
+        # Bound to the ITEM HEADING, not to a bare "§V.3" (sc-17227 review LOW): the notice's
+        # closing sentence "…is what §V.3 forbids" satisfied the loose form, so deleting the whole
+        # fourth item still passed. The heading appears once, in the item itself.
+        assert "(4) NO IMPROVING OTHER AI MODELS (§V.3)" in notice, model_id
+        assert "improve any other artificial intelligence model" in notice, model_id
+        assert "Four of its terms" in notice, model_id
+
+
+def test_minimax_h3_shipped_notice_names_the_same_restrictions():
+    """The §III.4 NOTICE that ships in the app (About → Licenses) is the copy a user has when
+    they have only the built application and no repository checkout, so it must name the same set
+    the manifest gate names — including §V.3. Pinned here for the same reason: so the bullet list
+    cannot quietly lose a term."""
+    notice = (ROOT / "apps" / "desktop" / "licenses" / "minimax-h3" / "NOTICE.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "Four of its terms bind every user directly" in notice
+    for fragment in (
+        "Applicable Territory (Sections I and V.4)",
+        "Acceptable Use Policy (Section V.1 and Exhibit A)",
+        "Additional Commercial Terms (Section IV.1)",
+        "No improving other AI models (Section V.3)",
+        "improve any other\n    artificial intelligence model",
+        "20 million US dollars in\n    yearly revenue",
+    ):
+        assert fragment in notice, fragment
+    # sc-17227 review: the notice must not assert, as fact, that the modified-files notice §III.2
+    # requires is currently served on the re-hosted repository — nothing in this repository checks
+    # that, and the re-host is owned by sc-17150. Verified by pinning the hedge, so restoring the
+    # bare claim fails here.
+    assert "is not verified by anything in this repository" in notice
+    assert "re-hosted repository is where that notice is served" not in notice
+
+
+def test_minimax_h3_declares_the_section_iv_2_ui_attribution():
+    """§IV.2: "You shall prominently display 'MiniMax H3' on the user interface". The exact string
+    with a SPACE — the hyphenated `MiniMax-H3` product name does not contain it.
+
+    Scoped to the MiniMax-H3 family: §IV.2 is MiniMax's clause, and this attribution string is not
+    something a flagged entry of another family could satisfy (sc-17227 review MAJOR 3)."""
+    for model_id, entry in _minimax_h3_license_models().items():
+        attribution = entry["ui"]["attribution"]
+        assert "MiniMax H3" in attribution, model_id
+        assert attribution == "Powered by MiniMax H3", model_id
+
+
+def test_schema_accepts_license_acknowledgment_without_gated():
+    """The authoring contract must permit the decoupled shape. Guard the SCHEMA, not just the
+    shipped entries: without these keys the catalog stops validating (additionalProperties: false),
+    which is the parity-lane failure sc-17227 had to clear."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["requiresLicenseAcknowledgment"] = True
+    entry["licenseNotice"] = "Restrictions apply."
+    entry.setdefault("ui", {})["attribution"] = "Powered by MiniMax H3"
+
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [entry]}))
+
+    assert not errors, [
+        (error.validator, list(error.absolute_path), error.message) for error in errors
+    ]
+
+
+def test_license_acknowledgment_schema_guard_has_teeth():
+    """Mutation check: the three keys are only accepted because the schema declares them. Remove
+    each one INDIVIDUALLY and the shape must be rejected — proving the test above is not passing
+    on some catch-all."""
+    base = _load_schema(SCHEMA_PATH)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["requiresLicenseAcknowledgment"] = True
+    entry["licenseNotice"] = "Restrictions apply."
+    entry.setdefault("ui", {})["attribution"] = "Powered by MiniMax H3"
+    document = {"schemaVersion": 1, "models": [entry]}
+
+    for holder, key in (
+        (("properties", "models", "items", "properties"), "requiresLicenseAcknowledgment"),
+        (("properties", "models", "items", "properties"), "licenseNotice"),
+        (("properties", "models", "items", "properties", "ui", "properties"), "attribution"),
+    ):
+        schema = copy.deepcopy(base)
+        node = schema
+        for step in holder:
+            node = node[step]
+        assert key in node, f"{key} is not declared where this guard looks"
+        del node[key]
+        errors = list(jsonschema.Draft202012Validator(schema).iter_errors(document))
+        assert any(
+            error.validator == "additionalProperties" and key in error.message
+            for error in errors
+        ), f"removing {key} from the schema did not reject the entry"

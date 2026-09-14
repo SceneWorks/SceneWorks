@@ -1,0 +1,118 @@
+LTX-2.5 + Gemma-4-12B — license provenance and sourcing notice (sc-18785)
+==========================================================================
+
+This directory documents the license terms that apply to the rehosted
+SceneWorks/ltx-2.5-mlx bundle: the LTX-2.5 video weights (Lightricks) plus
+the Gemma-4-12B text encoder (Google). SceneWorks does not modify these
+weights; the terms below govern the weights, not SceneWorks' own AGPL-3.0
+source code.
+
+LTX-2.x Community License Agreement
+------------------------------------
+Every Lightricks/LTX-2.5 checkpoint embeds this license verbatim in its
+safetensors `__metadata__.license` field, headed "LTX-2.x Community License
+Agreement — License date: August 11, 2026". Because Lightricks/LTX-2.5 is a
+gated Hugging Face repo and no HF token is configured on this machine, the
+text in LTX-2-Community-License.txt was instead sourced from two independent
+PUBLIC locations that agree with each other and with the model card:
+
+  1. The public model card at https://huggingface.co/Lightricks/LTX-2.5
+     (readable without authentication despite the weights being gated)
+     tags `license: ltx-2-community-license-agreement` and links to
+     https://github.com/Lightricks/LTX-2/blob/main/LICENSE.md.
+  2. The public github.com/Lightricks/LTX-2 repository, tag v1.2.0
+     (commit d151147788a9284cca791edc6ce898007e727fe6, verified via
+     `GET /repos/Lightricks/LTX-2/git/refs/tags/v1.2.0` — the tag resolves
+     to that exact commit), file LICENSE.md. Fetched
+     2026-08-18 from
+     https://raw.githubusercontent.com/Lightricks/LTX-2/v1.2.0/LICENSE.md.
+     Its heading is "License date: August 11, 2026", matching the model
+     card and the story's measured metadata.
+
+LTX-2-Community-License.txt reproduces that text with only Markdown
+formatting characters (`**`, `>`, `[text](url)`) stripped for plain-text
+display in the About screen's `<pre>` block; no wording was changed.
+
+Diff against LTX-2.3's bundled license (required by sc-18785)
+---------------------------------------------------------------
+LTX-2.3's bundled text (../ltx-2.3/LTX-2-Community-License.txt) is headed
+"License date: January 5, 2026" — a different, earlier version. Comparing
+the two verbatim texts: they are NOT the same agreement reworded for a new
+date. The August 11, 2026 (LTX-2.5) text differs from the January 5, 2026
+(LTX-2.3) text in substance, not just date:
+
+  - New Section 3.5 "Transfer of Derivatives" — an entirely new clause
+    requiring downstream transferees of a Derivative (including LoRA
+    adapters) to independently obtain a paid license if they are a
+    Commercial Entity, regardless of who created the Derivative. LTX-2.3's
+    Section 3 has no equivalent.
+  - Section 6 "Updates and Runtime Restrictions" is retitled "Updates and
+    Runtime Restrictions; AI Regulations" and gains ~2 paragraphs of new
+    obligations: compliance with the EU AI Act (Regulation (EU) 2024/1689)
+    and the California AI Transparency Act, a duty to preserve
+    watermarking/content-provenance/latent-disclosure features, an
+    indemnification clause for AI-regulation violations, and a new
+    paragraph on the EU AI Act Article 53(2) free/open-source derogation.
+    LTX-2.3's Section 6 is four sentences with none of this.
+  - Section 14 "Disputes and Arbitration" gains an explicit jury-trial /
+    class-action waiver heading and a new consumer-protection carve-out
+    (EU/UK/California mandatory consumer law is preserved), splitting what
+    was LTX-2.3's single Section 14/15 into three numbered
+    sections (14, 15, 16) in the 2.5 text.
+  - Both versions already share the same $10,000,000 annual-revenue
+    Commercial Entity threshold (Section 2.1) and the same 20-item
+    Attachment A use restrictions (items 19-20, on circumventing technical
+    limitations and on competing products, are present in BOTH — this was
+    not new to 2.5).
+
+Conclusion: the two licenses are meaningfully different documents, not a
+reused/re-dated copy. Both are shipped as separate, complete texts (this
+directory for 2.5, ../ltx-2.3/ for 2.3) rather than deduplicating one into
+the other.
+
+Gemma 4 text encoder — NOT the same license family as LTX-2.3's Gemma 3
+--------------------------------------------------------------------------
+LTX-2.3 bundles a Gemma-3-12B-IT text encoder under Google's restrictive
+Gemma Terms of Use (see ../ltx-2.3/Gemma-Terms.txt). The story description
+for this ticket assumed LTX-2.5's Gemma-4-12B encoder carries the same
+restrictive terms. Verified directly against Google's own pages (fetched
+2026-08-18, two independent URLs, cross-checked against raw HTML — not just
+a page summary) that assumption is WRONG for Gemma 4:
+
+  - https://ai.google.dev/gemma/terms (the page governing Gemma 1/1.1/2/3/3n)
+    itself states: "For Gemma 4 terms, see the Gemma 4 license" and links to
+    https://ai.google.dev/gemma/apache_2.
+  - https://ai.google.dev/gemma/apache_2 is titled "Apache License 2.0" and
+    contains the complete, unmodified Apache License 2.0 text — Google
+    licenses Gemma 4 model weights under Apache-2.0, not the Gemma Terms of
+    Use that govern Gemma 1-3.
+  - The separate Gemma Prohibited Use Policy
+    (https://ai.google.dev/gemma/prohibited_use_policy, last modified
+    February 21, 2024, generic across all Gemma releases) still applies to
+    Gemma 4 as an acceptable-use layer on top of Apache-2.0 — Google's own
+    nav places it under the same "Gemma" section regardless of which
+    license (ToU or Apache) a given release uses.
+
+Practical effect: LTX-2.5's Gemma-4-12B component is documented here with
+Apache-2.0.txt (the permissive grant) plus Gemma-Prohibited-Use-Policy.txt
+(the still-applicable use policy) — two documents, not the single
+restrictive Gemma-Terms.txt notice used for 2.3's Gemma 3. This is a
+narrower, more permissive obligation than 2.3 carries, but it is still a
+distinct, tracked notice: Apache-2.0 requires retaining attribution and the
+NOTICE contents on redistribution, and the Prohibited Use Policy is a real,
+enforceable restriction layered on top of that permissive grant.
+
+Degated-mirror plan does not misrepresent the terms
+------------------------------------------------------
+SceneWorks/ltx-2.5-mlx (like SceneWorks/ltx-2.3-mlx before it) strips
+Hugging Face's `extra_gated_*` repo metadata when it rehosts the weights.
+That metadata only drives HF's own click-through acceptance UI (the "Agree
+and access repository" gate); it is not part of the license terms
+themselves, which live in `__metadata__.license` and the model card's
+`license` tag and are reproduced verbatim in this directory. Removing the
+click-through does not remove, weaken, or amend any clause of the LTX-2.x
+Community License Agreement, the Apache-2.0 grant, or the Gemma Prohibited
+Use Policy — all three continue to bind users of the rehosted weights
+exactly as they bind users of the upstream gated repos, and this repo's
+About → Licenses screen is precisely how SceneWorks surfaces that binding
+obligation in place of HF's UI gate.

@@ -20,6 +20,6 @@ export function describeDevice(workers, macCapabilities) {
     return { engine, gpu: "No worker connected" };
   }
   const totalMb = Number(primary.utilization?.memoryTotalMb);
-  const memory = Number.isFinite(totalMb) && totalMb > 0 ? ` · ${(totalMb / 1024).toFixed(0)} GB` : "";
+  const memory = Number.isFinite(totalMb) && totalMb > 0 ? ` · ${(totalMb / 1024).toFixed(0)} GiB` : "";
   return { engine, gpu: `${primary.gpuName ?? `GPU ${primary.gpuId}`}${memory}` };
 }

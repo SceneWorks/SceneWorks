@@ -34,3 +34,55 @@ receipted adapter and the catalog advertises an update. It must never silently s
    validation, and web eligibility tests before shipping.
 5. Verify a retained old snapshot loads as one atomic receipted set. Never combine old and current
    manifest files to make a seemingly complete model.
+
+## External model libraries and typed availability (sc-19708)
+
+Receipts are also the install evidence for the external-library availability seam. When the
+configured Hugging Face library lives on an external volume, a receipted (or previously validated)
+install whose volume is disconnected reads as **installed — external library unavailable**: the
+catalog shows the typed state, submission preflight rejects with `503
+external_model_library_unavailable`, and the worker refuses the load before any loader runs.
+Receipts and the library-binding ledger are never rewritten by a disconnect, so reconnecting the
+same physical volume restores the install with no re-download.
+
+Upgrade note for operators: jobs that were **queued before** an upgrade to a build with this seam
+carry no model manifest entries in their payloads, so a model-backed job claimed after the upgrade
+fails with a typed validation error rather than running unguarded. Re-submitting the request
+creates a fully stamped job; no installed state is affected.
+
+## The resolved-model hot cache: storage contract (sc-19703)
+
+The receipt describes the **source tier** — the authoritative Hugging Face library. The
+resolved-model hot cache adds a second, app-owned **local tier** under
+`<data_dir>/models/resolved/`, and the two are related by a strict contract:
+
+- **The source tier stays authoritative.** A bundle is only ever produced by copying bytes that a
+  real job already loaded successfully from the source library. Promotion contains no fetch path;
+  a source that no longer resolves declines rather than downloading. Nothing in the cache ever
+  writes to, renames, or deletes anything inside the configured library — verified byte-exactly in
+  `docs/resolved-cache-validation-sc19712.md` (library fingerprint identical across a full
+  promotion cycle).
+- **A bundle is self-contained and hub-shaped.** Its layout is
+  `bundle/models--<repo>/snapshots/<revision>/<subpath>/<file>`, so a bundle root is itself a valid
+  `ArtifactSourceLibrary`. That is what lets a load resolve against it with the source drive absent.
+- **The receipt is the install record; the bundle is not.** Removing a local copy never changes
+  install state — the model stays installed and returns to loading from the library. Conversely,
+  uninstalling a model reconciles away its bundles.
+- **Identity is pinned, not inferred.** An entry is keyed by a content cache key over
+  `(identity, closure members, provenance)`; a bundle whose recorded revision or tier does not match
+  the request is never substituted. A requirement carrying no revision makes its whole repository
+  unserveable from the local tier rather than guessing a snapshot.
+- **The cache is a cache, not storage of record.** It has a byte budget and an inactivity TTL, and
+  entries are evicted under either. Pinned entries, entries under an active lease, and entries whose
+  source cannot currently be re-verified as a second copy are all retained.
+
+Two consequences operators should know:
+
+1. **Uninstall reaches the library.** `DELETE /api/v1/models/:model_id` is authorised to remove
+   files from the configured library root as well as the app data dir (to the OS trash by default,
+   permanently with `?permanent=true`). If the library is a drive shared with other tools, an
+   uninstall removes those weights from it too.
+2. **Not every artifact class is cacheable.** Soft (optional) co-requisite components, revision-less
+   downloads, LoRAs and control overlays are never promoted; those load from the source library
+   regardless of what the local tier holds. The full class-by-class matrix is in
+   `docs/resolved-cache-validation-sc19712.md`.

@@ -116,3 +116,4 @@ pre-push        text diff
 # Physical calibration transcripts are hashed byte-for-byte by their evidence bundle.
 docs/calibration/sc-16170/*.log binary
 docs/calibration/sc-15833/**/*.log binary
+docs/calibration/sc-18810/*.log binary

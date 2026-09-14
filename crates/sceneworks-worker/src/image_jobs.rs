@@ -208,6 +208,22 @@ const MAX_JOB_LORAS: usize = 5;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use crate::engines::{mlx_model, ResolvedModel};
+
+/// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
+/// provider's built-in decoder byte-for-byte; every other value must be a bounded string id.
+fn requested_decoder_id(
+    advanced: &sceneworks_core::contracts::JsonObject,
+) -> WorkerResult<Option<&str>> {
+    match advanced.get("decoder") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() || value == "native" => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.decoder must be a decoder id string (or 'native')".to_owned(),
+        )),
+    }
+}
+
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
 ///
@@ -425,6 +441,35 @@ pub(crate) async fn run_image_generate_job(
     }
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
+    if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        {
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            };
+            let provider_id = sceneworks_core::decoder_support::provider_id_for_backend(
+                &request.model_manifest_entry,
+                backend,
+            )
+            .or_else(|| mlx_model(&request.model).map(|model| model.engine_id().to_owned()))
+            .unwrap_or_else(|| request.model.clone());
+            validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )))]
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "decoder '{decoder_id}' is unavailable because this worker has no compatible image backend"
+            )));
+        }
+    }
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -449,7 +494,7 @@ pub(crate) async fn run_image_generate_job(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = resolve_image_route(&request, settings);
+    let route = prepare_image_route(&request, settings)?;
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -459,8 +504,12 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
@@ -471,12 +520,16 @@ pub(crate) async fn run_image_generate_job(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = resolve_candle_image_route(&request, settings);
+    let route = prepare_candle_image_route(&request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     #[cfg(all(
@@ -512,11 +565,15 @@ pub(crate) async fn run_image_generate_job(
         let route_applies_loras = {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             {
-                route.is_some_and(|route| route.applies_request_loras(&request))
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras(&request))
             }
             #[cfg(target_os = "macos")]
             {
-                route.is_some_and(ImageRoute::applies_request_loras)
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras())
             }
         };
         // sc-18477: a request-owned adapter stack is part of the generation contract, not an
@@ -527,8 +584,12 @@ pub(crate) async fn run_image_generate_job(
         // provider load, which makes this guard fail closed for direct worker callers as well as API
         // submissions.
         if !request.loras.is_empty() && !route_applies_loras {
+            // Label with the route KIND, not the prepared route itself: the prepared value carries
+            // pinned load payloads and is deliberately not `Debug`, and the kind is what names the
+            // lane in the refusal anyway.
             let route_label = route
-                .map(|selected| format!("{selected:?}"))
+                .as_ref()
+                .map(|selected| format!("{:?}", selected.kind()))
                 .unwrap_or_else(|| "unavailable".to_owned());
             return Err(WorkerError::InvalidPayload(format!(
                 "{} cannot apply the selected LoRA/LoKr stack through the resolved {} image route; \
@@ -558,13 +619,27 @@ pub(crate) async fn run_image_generate_job(
     )
     .await?;
 
+    // Everything from here to the terminal post is covered by a region heartbeat.
+    //
+    // The routes below each run a pre-load admission pass — provider footprint queries, the tier
+    // ladder's residency probes, decode-quality binding — before they open a generation stream, and
+    // only the stream has a heartbeat of its own (its `select!` interval arm, sc-4276). The pass
+    // between the two posted nothing: on a 33 GB Krea bundle it measured 95 s, and the 90 s stale
+    // sweep marked the job `interrupted` under a healthy worker, which then died on its next
+    // progress POST with `409 ... is already interrupted`.
+    //
+    // Scoped at the dispatch seam rather than inside one route on purpose. Every arm below has the
+    // same pass and would otherwise each have to remember its own pump; overlapping the stream's
+    // interval arm costs nothing, because a heartbeat is an idempotent `last_seen_at` stamp.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     let mut asset_writes: Vec<Value> = Vec::with_capacity(plan.image_count as usize);
 
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
     let handled = if let Some(route) = route {
-        match route {
+        match route.kind() {
             ImageRoute::ZImageControl => {
                 // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
                 generate_zimage_control_stream(
@@ -735,15 +810,40 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::CheckpointPlan => {
+                // Plan-driven checkpoint (epic 20398, sc-20634): a persisted ImportPlanV1 resolved
+                // and re-verified before load; provider selected by family/source/operation through
+                // the registry. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::CheckpointPlan(sources) = route else {
+                    unreachable!("checkpoint plan route missing its prepared sources")
+                };
+                generate_checkpoint_plan_stream(
+                    api,
+                    settings,
+                    job,
+                    *sources,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::KreaImportedControl => {
                 // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
                 // control-branch overlay rides the file-loaded imported DiT (the imported twin of
                 // the `KreaControl` arm above), one pose-locked image per pose.
+                let PreparedImageRoute::KreaImportedControl(sources) = route else {
+                    unreachable!("Krea imported-control route missing its prepared sources")
+                };
                 generate_krea_imported_control_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -754,11 +854,17 @@ pub(crate) async fn run_image_generate_job(
                 // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
                 // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via
                 // the S0b MLX native single-file entrypoint. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::KreaImported(sources) = route else {
+                    unreachable!("Krea imported route missing its prepared sources")
+                };
                 generate_krea_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -769,10 +875,14 @@ pub(crate) async fn run_image_generate_job(
                 // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
                 // with the installed Mage-Flow base's shared text encoder + VAE and render through
                 // `load_finetuned`. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::MageFinetuned(transformer) = route else {
+                    unreachable!("Mage fine-tuned route missing its prepared transformer")
+                };
                 generate_mage_finetuned_stream(
                     api,
                     settings,
                     job,
+                    *transformer,
                     &plan,
                     &project_path,
                     backend,
@@ -781,11 +891,17 @@ pub(crate) async fn run_image_generate_job(
                 .await?;
             }
             ImageRoute::SdxlImported => {
+                let PreparedImageRoute::SdxlImported(sources) = route else {
+                    unreachable!("SDXL imported route missing its prepared sources")
+                };
                 generate_sdxl_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -796,6 +912,18 @@ pub(crate) async fn run_image_generate_job(
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
                 generate_instantid_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
+            ImageRoute::SdxlControl => {
+                generate_sdxl_control_stream(
                     api,
                     settings,
                     job,
@@ -862,6 +990,13 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::FluxIpAdapterPoseReject => {
+                return Err(WorkerError::InvalidPayload(
+                    "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                     this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                     than silently dropping either requested conditioning".to_owned(),
+                ));
+            }
             ImageRoute::PoseControlBaseMissing => {
                 // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
                 // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
@@ -876,14 +1011,13 @@ pub(crate) async fn run_image_generate_job(
                 )));
             }
             ImageRoute::PoseReject => {
-                // No-silent-T2I (sc-5968): a strict-pose job on an MLX model with NO pose-control lane
-                // (e.g. a plain `sdxl` pose job with no reference — SDXL identity-pose ships via InstantID /
-                // IP-Adapter) that `mlx_available` would otherwise render as plain txt2img, dropping the
-                // poses. Refuse loudly — the MLX twin of the candle `PoseReject` reject.
+                // No-silent-T2I (sc-5968): control intent on an MLX model with NO pose-control lane
+                // that `mlx_available` would otherwise render as plain txt2img, dropping the intent.
+                // Refuse loudly — the MLX twin of the candle `PoseReject` reject.
                 return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) is not supported for model '{}' on the MLX backend — \
-                     refusing rather than silently generating an unconditioned image (wired MLX pose \
-                     families: {}; SDXL identity-pose runs via InstantID)",
+                    "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the MLX backend — \
+                     refusing rather than silently generating an unconditioned image (wired MLX control \
+                     families: {})",
                     request.model,
                     WIRED_MLX_POSE_FAMILIES.join(", ")
                 )));
@@ -914,11 +1048,23 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = match route {
         Some(route) => {
-            match route {
+            match route.kind() {
                 // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
                 // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
                 CandleImageRoute::InstantId => {
                     generate_instantid_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::SdxlControl => {
+                    generate_sdxl_control_stream(
                         api,
                         settings,
                         job,
@@ -993,11 +1139,17 @@ pub(crate) async fn run_image_generate_job(
                 // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
                 // in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
                 CandleImageRoute::ZimageComfyui => {
+                    let PreparedCandleImageRoute::ZimageComfyui(sources) = route else {
+                        unreachable!("Z-Image ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_zimage_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1005,11 +1157,17 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::QwenImageComfyui => {
+                    let PreparedCandleImageRoute::QwenImageComfyui(sources) = route else {
+                        unreachable!("Qwen ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_qwen_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1021,11 +1179,17 @@ pub(crate) async fn run_image_generate_job(
                 // weights in place via `runtime_cuda::providers::flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
                 // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
                 CandleImageRoute::Flux2Comfyui => {
+                    let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
+                        unreachable!("FLUX.2 ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_flux2_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1129,6 +1293,11 @@ pub(crate) async fn run_image_generate_job(
                         &mut asset_writes,
                     )
                     .await?;
+                }
+                CandleImageRoute::KolorsCompositeReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
+                    ));
                 }
                 // Z-Image strict-pose Fun-ControlNet (sc-5489).
                 CandleImageRoute::ZimageControl => {
@@ -1243,11 +1412,17 @@ pub(crate) async fn run_image_generate_job(
                 // entrypoint. The resolver has already proved this is a non-builtin, single-file,
                 // unconditioned request; keep it distinct from the builtin registry path.
                 CandleImageRoute::KreaImported => {
+                    let PreparedCandleImageRoute::KreaImported(sources) = route else {
+                        unreachable!("Krea imported route missing its prepared sources")
+                    };
                     generate_krea_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1266,11 +1441,31 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::CheckpointPlan => {
+                    let PreparedCandleImageRoute::CheckpointPlan(sources) = route else {
+                        unreachable!("checkpoint plan route missing its prepared sources")
+                    };
+                    generate_checkpoint_plan_stream(
+                        api,
+                        settings,
+                        job,
+                        *sources,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 CandleImageRoute::MageFinetuned => {
+                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
+                        unreachable!("Mage fine-tuned route missing its prepared transformer")
+                    };
                     generate_mage_finetuned_stream(
                         api,
                         settings,
                         job,
+                        *transformer,
                         &plan,
                         &project_path,
                         backend,
@@ -1279,30 +1474,42 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::SdxlImported => {
+                    let PreparedCandleImageRoute::SdxlImported(sources) = route else {
+                        unreachable!("SDXL imported route missing its prepared sources")
+                    };
                     generate_sdxl_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
                     )
                     .await?;
                 }
-                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
-                // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
-                // dropped) and not rerouted. The candle worker CLAIMS these (jobs_store
-                // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
-                // ships via InstantID; the wired candle pose families are `WIRED_CANDLE_POSE_FAMILIES`.
+                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane must be
+                // REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped) and
+                // not rerouted. The candle worker CLAIMS these (jobs_store `image_job_candle_pose_reject`)
+                // precisely to fail them loudly here.
                 CandleImageRoute::PoseReject => {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
-                         refusing rather than silently generating an unconditioned image (wired candle pose \
-                         families: {}; SDXL identity-pose runs via InstantID)",
+                        "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the candle backend — \
+                         refusing rather than silently generating an unconditioned image (wired candle control \
+                         families: {})",
                         request.model,
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")
                     )));
+                }
+                CandleImageRoute::FluxIpAdapterPoseReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                         this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                         than silently dropping either requested conditioning".to_owned(),
+                    ));
                 }
                 // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
                 // control base snapshot is NOT installed (the family's `…_control_available` weight-gate
@@ -1362,6 +1569,20 @@ pub(crate) async fn run_image_generate_job(
         }
     }
 
+    // The candle twin of the gate above (sc-20529). An `edit_image` job on an UNCONVERTED
+    // convert-at-install model is claimed by no candle route at all — every `…_available` edit gate
+    // collapses the resolver's typed `Err` to `false`, and each terminal ladder arm excludes
+    // `mode == "edit_image"` — so it arrived here and completed with procedural stub output instead
+    // of the actionable "convert it first" refusal the t2i lanes already raise. Fail loudly with the
+    // SAME preflight message (sc-5099 no-silent-fallback). `None` for every other job, so ordinary
+    // stub models still stub.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !handled {
+        if let Some(gap) = candle_weights_gap(&request) {
+            return Err(WorkerError::InvalidPayload(gap));
+        }
+    }
+
     if !handled {
         if request.hires_fix.enabled {
             return Err(WorkerError::InvalidPayload(
@@ -1401,6 +1622,20 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
     }
+
+    // Explicitly, and BEFORE the terminal post. A pump tick that lands after the job completes is
+    // a no-op on the job row (the heartbeat's job update is scoped to the owning worker), but it
+    // would still write `busy` + this job id back onto the WORKER row — racing the loop's own Idle
+    // heartbeat and briefly advertising a worker that is free as occupied.
+    //
+    // NARROWS that race rather than closing it: `Drop` aborts the pump task, which cannot recall a
+    // POST already on the wire. One in-flight request can still land after the terminal write. The
+    // loop's next Idle heartbeat (one progress interval, ≤15s) corrects the worker row, and the job
+    // row was never at risk, so the residue is a worker that reads busy for at most that interval.
+    // Closing it outright would need the pump to await its in-flight request, which would put a
+    // network round-trip in front of every job's terminal post to fix a self-correcting cosmetic
+    // window.
+    drop(preload_heartbeat);
 
     update_job(
         api,
@@ -1654,6 +1889,34 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
     Ok(file)
 }
 
+/// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
+/// confined as directories, then their selected child is independently pinned and confined so a
+/// child symlink cannot inherit trust from its parent.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_prepared_adapter_file(
+    lora: &Value,
+    settings: &Settings,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    let raw = lora_path(lora)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
+    let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
+    let candidate = if confined.is_dir() {
+        let directory = confined;
+        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                directory.display()
+            ))
+        })?
+    } else {
+        raw
+    };
+    crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
+}
+
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
 #[cfg(any(
     target_os = "macos",
@@ -1667,7 +1930,10 @@ fn lora_weight(lora: &Value) -> f64 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .unwrap_or(0.8)
+        // Last resort only — the API always stamps a weight onto the spec. Matches the API/web
+        // default (`DEFAULT_LORA_WEIGHT`) so a weightless payload can't apply at a scale no
+        // surface would have shown.
+        .unwrap_or(1.0)
 }
 
 #[cfg(any(
@@ -2253,10 +2519,34 @@ pub(crate) fn write_image_asset(
     height: u32,
     pixels: Vec<u8>,
     adapter: &str,
-    raw_settings: JsonObject,
+    mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
+    // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
+    // asset funnels through this one function — so the source codec a checkpoint stores, the host's
+    // native-execution capability, and what the load actually materialized reach the receipt from
+    // every lane rather than only the two that happen to build them themselves.
+    //
+    // A lane that already assembled its own set keeps it: `krea_imported` resolves the DiT path and
+    // can therefore tie the facts to a source BINDING, which is strictly more than this site can
+    // state. Never overwrite a richer fact set with a poorer one.
+    //
+    // Nothing is inserted at all when the model carries no verified source classification. That
+    // absence is the honest answer for a builtin turnkey tier and a diffusers-tree import, and it
+    // is the one a consumer must handle anyway — filling it from `advanced.quantTier` would put the
+    // requested TIER into a field that means the stored CODEC.
+    if !raw_settings.contains_key(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY) {
+        crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+            &mut raw_settings,
+            crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+                &request.model_manifest_entry,
+                None,
+                crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
+            )
+            .as_ref(),
+        );
+    }
     let rgb_image = image::RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 
@@ -2969,6 +3259,13 @@ include!("image_jobs/pid.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/strict_control.rs");
+// Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
+// provider on both MLX and Candle; platform bundles select the implementation behind the registry.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+include!("image_jobs/sdxl_control.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
 include!("image_jobs/zimage.rs");
@@ -3019,6 +3316,16 @@ include!("image_jobs/krea_control.rs");
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
+// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
+// through the checkpoint plan store, its provider selected by family + source shape + operation
+// through the registry's imported-model authority, and rendered through the shared cached-generator
+// seam. Backend-neutral: the same file serves MLX and Candle.
+include!("image_jobs/checkpoint_plan.rs");
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3128,9 +3435,9 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
-    admit_candle_load_spec_floor, has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes,
-    CandleBaseEvidence,
+    admit_candle_base, admit_candle_base_floor_with_resident_overlay, admit_candle_load_spec_floor,
+    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
+    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
@@ -3193,14 +3500,14 @@ use zimage_edit_candle::zimage_edit_candle_available;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_comfyui_candle::{generate_candle_zimage_comfyui_stream, zimage_comfyui_available};
+use zimage_comfyui_candle::generate_candle_zimage_comfyui_stream;
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
 // lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_available};
+use qwen_comfyui_candle::generate_candle_qwen_comfyui_stream;
 // FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
 // quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
 // of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
@@ -3208,7 +3515,7 @@ use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_avai
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_comfyui_candle::{flux2_comfyui_available, generate_candle_flux2_comfyui_stream};
+use flux2_comfyui_candle::generate_candle_flux2_comfyui_stream;
 // Z-Image identity-init request gate for Image Studio "With Character" (sc-8409, epic 4406). Both
 // backends now generate through their registered `z_image_turbo` provider; this candle-only helper
 // preserves the off-Mac availability/base-resolution predicate while the generic stream owns Reference

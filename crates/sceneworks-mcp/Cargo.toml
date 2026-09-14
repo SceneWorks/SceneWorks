@@ -5,7 +5,8 @@
 # handlers are a THIN CLIENT over the existing `/api/v1/*` HTTP surface (mirroring
 # crates/sceneworks-worker/src/api_client.rs) — no new direct path into the
 # engine/DB. Base URL comes from `SCENEWORKS_API_URL`; auth rides the
-# `X-SceneWorks-Token` header.
+# `X-SceneWorks-Token` header. The one `sceneworks-core` import (sc-19574) is a pure
+# predicate and keeps that promise; see the dependency's own comment below.
 [package]
 name = "sceneworks-mcp"
 version.workspace = true
@@ -33,6 +34,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `transport-streamable-http-server` adds the tower service the API mounts at
 # `/mcp`; default features keep `server` + `macros` (tool router derive).
 rmcp = { version = "=2.2.0", features = ["transport-streamable-http-server"] }
+# sc-19574: ONE pure predicate — `video_request::classify_reference_set`, which decides whether a
+# `reference_to_video` reference set can condition the visual stream. This is the documented
+# exception to the thin-client rule above and it does not weaken it: the function takes three
+# `usize`s and returns an enum, opens no store, touches no engine, and `sceneworks-core` is already
+# linked into the one binary this crate is mounted into (apps/rust-api depends on both). The
+# alternative was a fourth hand-maintained copy of the rule, which is exactly how the API, the
+# Studio, this tool and the worker came to hold three different opinions about the same request.
+sceneworks-core = { path = "../sceneworks-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # `time` for the blocking generate_image submit→poll wait (sc-10234); the async
@@ -49,7 +58,6 @@ image = { workspace = true }
 # (initialize → tools/list → tools/call over streamable HTTP), not hand-rolled
 # JSON-RPC — client features are additive on the same pinned version.
 rmcp = { version = "=2.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }
-sceneworks-core = { path = "../sceneworks-core" }
 tempfile = "3.13"
 tokio = { version = "1.40", features = ["macros", "net", "rt-multi-thread"] }
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "0e4adc6f05884e6891e29dfecd32ee695efe8b18",
+    "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -208,6 +208,76 @@
       ]
     },
     {
+      "modelId": "ltx_2_5",
+      "mode": "extend_clip",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "image_to_video",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "replace_person",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "ltx_2_5",
+      "mode": "video_bridge",
+      "engineIds": [
+        "ltx_2_5"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3_ref",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
       "modelId": "scail2_14b",
       "mode": "animate_character",
       "engineIds": [
@@ -302,6 +372,7 @@
     "krea_2_control": "krea_2_control",
     "krea_2_raw_lora": "krea_2_raw",
     "lens_turbo_lora": "lens",
+    "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
     "sd3_5_large_lora": "sd3_5_large",
@@ -377,12 +448,14 @@
       "lens_turbo",
       "lens",
       "ltx_2_3",
+      "ltx_2_5",
       "mage_flow",
       "mage_flow_base",
       "mage_flow_turbo",
       "mage_flow_edit",
       "mage_flow_edit_base",
       "mage_flow_edit_turbo",
+      "minimax_h3",
       "mochi_1",
       "pulid_flux",
       "qwen_image",
@@ -1581,6 +1654,7 @@
         "modality": "video",
         "conditioning": [
           "reference",
+          "multiReference",
           "keyframe",
           "videoClip",
           "controlClip"
@@ -1590,6 +1664,38 @@
         "supported_quants": [],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "ltx_2_5",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "reference",
+          "multiReference",
+          "keyframe",
+          "videoClip",
+          "controlClip"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1709,6 +1815,29 @@
         "conditioning": [
           "reference",
           "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "minimax_h3",
+        "family": "minimax_h3",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "keyframe",
+          "reference",
+          "referenceVideo",
+          "referenceAudio"
         ],
         "supports_lora": true,
         "supports_lokr": true,
@@ -1977,7 +2106,6 @@
         "conditioning": [
           "reference",
           "mask",
-          "multiReference",
           "controlClip"
         ],
         "supports_lora": true,
@@ -2627,6 +2755,7 @@
       "krea_2_raw",
       "lens",
       "ltx_2_3",
+      "ltx_2_5",
       "mage_flow_base",
       "sd3_5_large",
       "sd3_5_medium",
@@ -2699,6 +2828,16 @@
       },
       {
         "id": "ltx_2_3",
+        "family": "ltx",
+        "backend": "mlx",
+        "modality": "video",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false
+      },
+      {
+        "id": "ltx_2_5",
         "family": "ltx",
         "backend": "mlx",
         "modality": "video",
@@ -2799,7 +2938,9 @@
     ],
     "text_llm_ids": [
       "mlx-llama",
-      "mlx-joycaption"
+      "mlx-joycaption",
+      "mlx-starvector-1b",
+      "mlx-starvector-8b"
     ],
     "snapshot_preparer_backends": [
       "mlx"

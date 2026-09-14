@@ -145,6 +145,31 @@ pub(crate) async fn upload_training_dataset_item(
     Err(ApiError::bad_request("Upload file field is required"))
 }
 
+pub(crate) async fn upload_ltx_prepared_bundle(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<TrainingDataset>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let dataset = project_call(state, move |store| {
+            store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
+        })
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok((StatusCode::CREATED, Json(dataset?)));
+    }
+    Err(ApiError::bad_request("Upload file field is required"))
+}
+
 pub(crate) async fn get_training_dataset(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
@@ -531,7 +556,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     let captioner = payload.captioner;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "training_caption",
         "captioner": captioner,
@@ -547,6 +572,12 @@ pub(crate) async fn create_training_dataset_caption_job(
         Value::Object(map) => map,
         _ => return Err(ApiError::internal("caption job payload must be an object")),
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::TrainingCaption,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::TrainingCaption,
@@ -563,7 +594,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 const MAX_PARQUET_IMPORT_CONCURRENCY: usize = 64;
@@ -668,7 +699,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         .nth(3)
         .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
         .to_path_buf();
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_parquet_import",
         "projectId": project_id.clone(),
@@ -693,6 +724,12 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetParquetImport,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetParquetImport,
@@ -709,7 +746,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,7 +895,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     let embedder = payload.embedder;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_analysis",
         "embedder": embedder,
@@ -876,6 +913,12 @@ pub(crate) async fn create_training_dataset_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetAnalysis,
@@ -892,7 +935,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_dataset_analysis_job_request(
@@ -954,7 +997,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
         ));
     }
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_face_analysis",
         "projectId": project_id.clone(),
@@ -970,6 +1013,12 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetFaceAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetFaceAnalysis,
@@ -986,7 +1035,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
@@ -1131,7 +1180,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     }
     let factor = payload.factor;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_upscale",
         "factor": factor,
@@ -1149,6 +1198,12 @@ pub(crate) async fn create_training_dataset_upscale_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetUpscale,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetUpscale,
@@ -1165,7 +1220,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Re-point dataset items at the upscaled child assets the worker just wrote (sc-6539) — the
@@ -1222,7 +1277,7 @@ fn apply_dataset_image_fix(
         .filter(|item| {
             target
                 .as_ref()
-                .map_or(true, |set| set.contains(item.id.as_str()))
+                .is_none_or(|set| set.contains(item.id.as_str()))
         })
         .map(|item| (item.id.clone(), item.path.clone()))
         .collect();
@@ -1414,6 +1469,12 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    // Enforce the Rust-owned target capability before touching a dataset, allocating
+    // output ids, or normalizing an image in place. The target catalog is returned
+    // directly to clients, so every advertised numeric bound is a submit-time
+    // contract rather than an advisory UI hint.
+    sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
+        .map_err(training_plan_error_to_api_error)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -1674,7 +1735,7 @@ pub(crate) async fn create_training_job(
         file_name,
         created_at: now_rfc3339(),
     })
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    .map_err(training_plan_error_to_api_error)?;
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1744,6 +1805,10 @@ pub(crate) async fn create_training_job(
                 "paths".to_owned(),
                 json!({ "model": output_dir.display().to_string() }),
             );
+            entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String("transformer_directory".to_owned()),
+            );
             // The catalog has one global user manifest; record the effective scope honestly rather
             // than echoing a "project" the model store cannot honour.
             entry.insert("scope".to_owned(), Value::String("global".to_owned()));
@@ -1809,16 +1874,30 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    // Route-owned DATA for the model-source seam: a real training run loads this base model, so
+    // it must carry the same typed identity as generation. The seam resolves and preflights it.
+    job_payload.insert(
+        "baseModel".to_owned(),
+        Value::String(target.base_model.clone()),
+    );
+
+    let training_job_type = if is_control {
+        JobType::ControlTraining
+    } else {
+        JobType::LoraTrain
+    };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &training_job_type,
+        &mut job_payload,
+    )
+    .await?;
 
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
             CreateJob {
-                job_type: if is_control {
-                    JobType::ControlTraining
-                } else {
-                    JobType::LoraTrain
-                },
+                job_type: training_job_type,
                 project_id: Some(project_id),
                 project_name: Some(project_name),
                 payload: job_payload,
@@ -1833,7 +1912,29 @@ pub(crate) async fn create_training_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn training_plan_error_to_api_error(
+    error: sceneworks_core::training::TrainingPlanError,
+) -> ApiError {
+    match error {
+        sceneworks_core::training::TrainingPlanError::TargetLimit(limit) => {
+            let detail = limit.to_string();
+            let context = serde_json::to_value(&limit).unwrap_or_else(|_| {
+                json!({
+                    "kind": "training_target_limit"
+                })
+            });
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                detail,
+                "training_target_limit",
+                context,
+            )
+        }
+        other => ApiError::bad_request(other.to_string()),
+    }
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its
@@ -2022,16 +2123,46 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
     sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
 }
 
-fn training_tier_name(target: &TrainingTarget) -> &'static str {
-    if target.kernel == "ltx_mlx_lora" {
-        "q4"
+/// LTX-2.5 is also packed-Q4 training, but its undistilled training identity is nested under
+/// `dev/q4/` and self-contains its Gemma-4 text encoder. Pin the same complete component set
+/// the generation worker requires so a partial nested install cannot pass the training gate.
+fn ltx25_q4_training_tier_present(snapshot: &FsPath) -> bool {
+    let q4 = snapshot.join("dev").join("q4");
+    [
+        "split_model.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "text_encoder.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "diffusion_vae_encoder.safetensors",
+        "vae_diffusion_decoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upsampler.safetensors",
+        "temporal_upsampler.safetensors",
+        "duration_head.safetensors",
+    ]
+    .iter()
+    .all(|file| q4.join(file).is_file())
+}
+
+/// The tier subdirectory training reads, as path segments so the caller joins them with the
+/// platform separator (a `"dev/q4"` literal would embed a forward slash on Windows).
+fn training_tier_segments(target: &TrainingTarget) -> &'static [&'static str] {
+    if target.base_model == "ltx_2_5" {
+        &["dev", "q4"]
+    } else if target.kernel == "ltx_mlx_lora" {
+        &["q4"]
     } else {
-        "bf16"
+        &["bf16"]
     }
 }
 
 fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
-    if target.kernel == "ltx_mlx_lora" {
+    if target.base_model == "ltx_2_5" {
+        ltx25_q4_training_tier_present(snapshot)
+    } else if target.kernel == "ltx_mlx_lora" {
         ltx_q4_training_tier_present(snapshot)
     } else {
         bf16_component_tree_present(&snapshot.join("bf16"))
@@ -2047,8 +2178,12 @@ fn tiered_turnkey_train_dir(
     snapshot: std::path::PathBuf,
     target: &TrainingTarget,
 ) -> std::path::PathBuf {
-    if snapshot_is_tiered_turnkey(&snapshot) {
-        return snapshot.join(training_tier_name(target));
+    // LTX-2.5 nests two transformer identities before the quant tier, so it does not match the
+    // root-level `bf16/q8/q4` turnkey shape tested below.
+    if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
+        return training_tier_segments(target)
+            .iter()
+            .fold(snapshot, |dir, segment| dir.join(segment));
     }
     snapshot
 }
@@ -2444,7 +2579,7 @@ pub(crate) fn training_base_model_status(
             // the run-gate would green-light training on a repo that has no dense weights to train. A
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                if snapshot_is_tiered_turnkey(&snapshot) {
+                if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
                     return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
                     } else {
@@ -2493,7 +2628,7 @@ pub(crate) fn training_base_unavailable_message(
     match status {
         TrainingBaseStatus::Ready => None,
         TrainingBaseStatus::TrainingTierMissing => {
-            let tier = if base_model == "ltx_2_3" {
+            let tier = if matches!(base_model, "ltx_2_3" | "ltx_2_5") {
                 "packed q4"
             } else {
                 "full-precision (bf16)"

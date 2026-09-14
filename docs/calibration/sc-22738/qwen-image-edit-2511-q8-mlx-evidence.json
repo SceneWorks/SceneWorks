@@ -1,0 +1,201 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/qwen-image-edit-2511-mlx",
+        "resolvedRevision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "capturedAt": "2026-09-06T15:44:46Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:qwen-edit-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 17905090324
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 38916806824
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 42130740752
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 52265983512
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "builtInAdapters",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "candidate",
+      "fixture": "qwen-edit-mlx-q8-seed16353-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-4d9232ad8c60be2342eb",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-edit-2511-mlx@0dfbf3a018bcee42d77de14494c35f97a7531def:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-a4a23d4393184b858fc9",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.27851732706946747,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 17905090324,
+          "allocatorBytes": 21497549104,
+          "reclaimableBytes": 3592458780
+        },
+        "decode": {
+          "activeBytes": 42130740752,
+          "allocatorBytes": 42130740752,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 38916806824,
+          "allocatorBytes": 49052049584,
+          "reclaimableBytes": 10135242760
+        },
+        "overall": {
+          "activeBytes": 42130740752,
+          "allocatorBytes": 52265983512,
+          "reclaimableBytes": 10135242760
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 22615687168,
+        "decode": 44291850240,
+        "denoise": 51539607552,
+        "overall": 54895050752
+      },
+      "quality": {
+        "contract": "same seed, reference, prompt, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.18823529411764706,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00196078431372549,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:5d11d27c1a6c1ce13a85007ff9aef5cfe442d07c7eb99c40d6a3b218fe398308",
+          "revision": "5e28e5ee7542c6f9308e95963574a45ae41c6e9e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 54895050752,
+          "name": "exact_fit",
+          "predictedBytes": 54895050752,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the pinned MLX Qwen-Image-Edit-2511 provider path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "edit_image",
+        "modelId": "qwen_image_edit_2511",
+        "overlay": "none",
+        "provider": "qwen_image_edit",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

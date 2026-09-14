@@ -638,7 +638,7 @@ fn segment_box_on_thread(
                 }
             }
         }
-        if best.as_ref().map_or(true, |(b, _, _)| inside > *b) {
+        if best.as_ref().is_none_or(|(b, _, _)| inside > *b) {
             best = Some((inside, grid, m));
         }
     }

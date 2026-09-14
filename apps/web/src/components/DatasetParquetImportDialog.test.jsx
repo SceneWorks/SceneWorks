@@ -69,4 +69,30 @@ describe("DatasetParquetImportDialog", () => {
       captionExcludes: ["logo", "illustration"],
     });
   });
+
+  it("surfaces a rejected submit without leaving an unhandled promise rejection", async () => {
+    const onRun = vi.fn(() => Promise.reject(undefined));
+    const unhandled = [];
+    const onUnhandled = (event) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    root = createRoot(container);
+    act(() => root.render(<DatasetParquetImportDialog onClose={vi.fn()} onRun={onRun} />));
+
+    try {
+      change(fieldByLabel("Parquet file or folder"), "D:\\broken.parquet");
+      await act(async () => {
+        document.body.querySelector('button[type="submit"]').click();
+        await Promise.resolve();
+      });
+
+      expect(onRun).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).toContain("Could not start the Parquet import.");
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
 });

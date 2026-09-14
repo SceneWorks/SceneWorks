@@ -1,0 +1,269 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/z-image-turbo-mlx",
+        "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "capturedAt": "2026-09-07T05:12:01Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:z-image-edit-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 20522836168
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "peakAfterReset",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 20531281352
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 25705481800
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 29151933208
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 47468818258
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 29151933208
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 20522836168
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 583038664
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupActive",
+            "unit": "bytes",
+            "value": 20522836168
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPeak",
+            "unit": "bytes",
+            "value": 29151933208
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupActive",
+            "unit": "bytes",
+            "value": 20522836168
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "residentSetMaterializedBeforeWindow",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-z-image-edit-bf16-768-seed16402-step4",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-3581ee9d281f4b49a4b2",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-c13690b56f9bddc42271",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.3491617306699396,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 20531281352,
+          "allocatorBytes": 20531316552,
+          "reclaimableBytes": 35200
+        },
+        "decode": {
+          "activeBytes": 29151933208,
+          "allocatorBytes": 29151933208,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 25705481800,
+          "allocatorBytes": 44022366850,
+          "reclaimableBytes": 18316885050
+        },
+        "overall": {
+          "activeBytes": 29151933208,
+          "allocatorBytes": 47468818258,
+          "reclaimableBytes": 18316885050
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 21609054208,
+        "decode": 30668750848,
+        "denoise": 46238007296,
+        "overall": 49861885952
+      },
+      "quality": {
+        "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.2196078431372549,
+        "meanError": 0,
+        "meanErrorThreshold": 0.01568627450980392,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "2cbda9dab6cb1c8f2ac0a1a9eccb8e85e83d3648d1c90f40ad3d66102f7e239e",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:68a71be19fd9fcfaa15b4cf4d117ed0a22d9d0046734845f805a130d8ceb569a",
+          "revision": "bc1ae1004ba9bc08ba95b9d149279cff570eda46"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 49861885952,
+          "name": "exact_fit",
+          "predictedBytes": 49861885952,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "post-cancel active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "post-error active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Z-Image-Turbo reference-conditioned edit path (the z_image_edit route) executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "edit_image",
+        "modelId": "z_image_edit",
+        "overlay": "none",
+        "provider": "z_image_turbo",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

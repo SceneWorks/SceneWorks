@@ -6,7 +6,6 @@
 
 use crate::downloads::{fetch_public_source_url_bytes_with_options, PublicSourceUrlFetchOptions};
 use crate::{WorkerError, WorkerResult};
-use fs2::FileExt as _;
 use futures_util::future::join_all;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat, ImageReader};
@@ -14,6 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sceneworks_core::catalog_store::{
     Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
+use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::time::utc_now;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -330,7 +330,8 @@ enum DiscardFaultPoint {
 #[derive(Debug)]
 struct CatalogFetchLease {
     _processing: Option<CatalogProcessingLease>,
-    _file: File,
+    /// A [`FileLock`], not a bare handle: released with an explicit `LOCK_UN` (sc-22738).
+    _file: FileLock,
 }
 
 struct ArtifactBudget {
@@ -634,10 +635,10 @@ impl CatalogFetchLease {
             .truncate(false)
             .open(&path)?;
         let contended = fs2::lock_contended_error().raw_os_error();
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self {
+        match FileLock::try_exclusive(file) {
+            Ok(lock) => Ok(Self {
                 _processing: processing,
-                _file: file,
+                _file: lock,
             }),
             Err(error) if error.raw_os_error() == contended => {
                 Err(CatalogImageFetchError::Busy(format!(
@@ -4189,6 +4190,31 @@ mod tests {
         let _first = CatalogFetchLease::acquire(&first_catalog).expect("first lease");
         let error = CatalogFetchLease::acquire(&second_catalog).expect_err("must contend");
         assert!(matches!(error, CatalogImageFetchError::Busy(_)));
+    }
+
+    /// sc-22738: a released fetch lease must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every
+    /// such reference is gone — and image fetch forks throughout a pass, which would leave the next
+    /// fetch refused as `Busy`.
+    #[test]
+    fn a_released_fetch_lease_is_free_even_while_an_inherited_descriptor_survives() {
+        let (_root, registry, id) = catalog_fixture();
+        let catalog = registry.open_attached(&id).expect("catalog opens");
+
+        let lease = CatalogFetchLease::acquire(&catalog).expect("lease acquires");
+        let inherited = lease
+            ._file
+            .inherited_descriptor()
+            .expect("descriptor duplicates");
+        drop(lease);
+
+        let reacquired = CatalogFetchLease::acquire(&catalog);
+        assert!(
+            reacquired.is_ok(),
+            "a fetch lease released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
     }
 
     #[tokio::test]
