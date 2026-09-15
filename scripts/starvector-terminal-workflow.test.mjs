@@ -168,7 +168,7 @@ async function forceFixtureCleanup(fixture, record) {
     await runProductServiceCli(fixture, "stop", 0).catch(() => {});
     for (const pid of [record.worker_pid, record.api_pid]) { try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ } }
   }
-  await rm(fixture.sandbox, { recursive: true, force: true });
+  await rm(fixture.sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 test("terminal workflow is dispatch-only, serial, and seals raw evidence", () => {
