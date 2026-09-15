@@ -1779,6 +1779,10 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate:
         reference_count: 0,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: Some(crate::mlx_fit_gate::clip_window_upper_bound(
+            &request.prompt,
+            &request.negative_prompt,
+        )),
     }
 }
 

@@ -232,7 +232,13 @@ async fn ensure_pulid_weights(
     // Face detector + ArcFace embedder: reuse the InstantID converted bundle (same files), placed
     // into the SAME dir so PULID_FACE_WEIGHTS_DIR sees all three face inputs together.
     ensure_instantid_file(&context, INSTANTID_MLX_REPO, &bundle, INSTANTID_SCRFD_FILE).await?;
-    ensure_instantid_file(&context, INSTANTID_MLX_REPO, &bundle, INSTANTID_ARCFACE_FILE).await?;
+    ensure_instantid_file(
+        &context,
+        INSTANTID_MLX_REPO,
+        &bundle,
+        INSTANTID_ARCFACE_FILE,
+    )
+    .await?;
 
     Ok(PulidWeights {
         adapter,
@@ -259,8 +265,14 @@ fn pulid_raw_settings(
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("guidanceScale".to_owned(), json!(guidance));
     raw.insert("idWeight".to_owned(), json!(id_weight));
-    raw.insert("timestepToStartCfg".to_owned(), json!(timestep_to_start_cfg));
-    raw.insert("maxSequenceLength".to_owned(), json!(PULID_MAX_SEQUENCE_LENGTH));
+    raw.insert(
+        "timestepToStartCfg".to_owned(),
+        json!(timestep_to_start_cfg),
+    );
+    raw.insert(
+        "maxSequenceLength".to_owned(),
+        json!(PULID_MAX_SEQUENCE_LENGTH),
+    );
     raw.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
@@ -295,6 +307,7 @@ fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxReque
         reference_count: 1,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: None,
     }
 }
 
@@ -580,7 +593,13 @@ async fn generate_pulid_flux_stream(
                                 Some(likeness_source_ref.as_str()),
                             )
                         });
-                        Ok(Some((seed, image.width, image.height, image.pixels, face_likeness)))
+                        Ok(Some((
+                            seed,
+                            image.width,
+                            image.height,
+                            image.pixels,
+                            face_likeness,
+                        )))
                     }
                     _ => Err(WorkerError::Engine(
                         "PuLID-FLUX returned non-image output".to_owned(),

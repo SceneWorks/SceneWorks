@@ -3589,6 +3589,7 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
+            stage_residency: None,
             decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
