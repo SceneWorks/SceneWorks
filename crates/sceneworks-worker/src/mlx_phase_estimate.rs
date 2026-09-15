@@ -60,6 +60,58 @@ pub(crate) fn layerwise_decode_workspace(
     Some((global * area_scale + tile_slope * f64::from(edge).powi(2)).ceil() as u64)
 }
 
+/// Current SANA six-stage DC-AE: dense linear-attention head followed by a spatially tiled tail.
+/// The focused cold q4 regression and phase boundaries are retained in
+/// docs/calibration/sc-23648/sana-sprint-phases.json. Unlike the old whole-decoder sweep, these
+/// observations execute the shipping head/tail implementation. Subtract only known loaded tensor
+/// bytes from conditioning/denoise; retain the entire decode observation as workspace because the
+/// decoder constructor also owns an unused encoder inventory. The caller adds its actual weights.
+///
+/// A single point cannot identify head, tail and accumulation coefficients. Multiplying the whole
+/// decode workspace by max(image area ratio, tile area ratio, 1) upper-envelopes every nonnegative
+/// combination of those terms, preserving full-image head and output costs even at small tiles.
+pub(crate) fn sana_workspace(
+    facts: &DecoderWorkspaceFacts,
+    geometry: MemoryGeometry,
+    edge: Option<u32>,
+    classifier_free_guidance: bool,
+) -> Option<Workspace> {
+    if facts.tiling != DecoderTilingRealization::WholeTail
+        || facts.activation_dtype_width != 4
+        || facts.channels != [1024, 1024, 512, 512, 256, 128]
+        || facts.input_channels != [32, 1024, 1024, 512, 512, 256]
+        || facts.spatial_divisors != [32, 16, 8, 4, 2, 1]
+        || geometry.frames != 1
+        || geometry.batch != 1
+        || geometry.reference_count != 0
+        || !(256..=1024).contains(&geometry.width)
+        || !(256..=1024).contains(&geometry.height)
+        || !geometry.width.is_multiple_of(32)
+        || !geometry.height.is_multiple_of(32)
+    {
+        return None;
+    }
+    let edge = edge.filter(|edge| (192..=512).contains(edge))?;
+    let area_scale =
+        (f64::from(geometry.width) * f64::from(geometry.height) / 1_048_576.0).max(1.0);
+    let tile_scale = (f64::from(edge) / 192.0).powi(2).max(1.0);
+    let forwards = if classifier_free_guidance { 2.0 } else { 1.0 };
+    // The base path adds five CFG merge tensors. The ten curated solvers retain at most two
+    // history tensors; reserve 32 latent tensors for their full per-step expression graphs,
+    // midpoint/noise branches and those histories (gen-core sampling/solvers.rs).
+    let carried = if classifier_free_guidance {
+        37 * 32 * u64::from(geometry.width / 32) * u64::from(geometry.height / 32) * 4
+    } else {
+        0
+    };
+    Some(Workspace {
+        conditioning: ((3_864_237_044_u64 - 2_318_787_072) as f64 * forwards).ceil() as u64,
+        denoise: ((4_118_238_400_u64 - 1_992_341_184) as f64 * area_scale * forwards).ceil() as u64
+            + carried,
+        decode: (3_140_425_096_f64 * area_scale.max(tile_scale)).ceil() as u64,
+    })
+}
+
 /// Phase weight lifetimes, including the nonstreamable trunk. A window is materialized only
 /// during denoise; after its final evaluation all window blocks have been dropped. Two-stage
 /// providers still retain the trunk and decoder through decode. Unknown streaming facts earn no
@@ -130,6 +182,60 @@ pub(crate) fn peak(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sana_retains_dense_head_cost_and_accounts_for_cfg() {
+        let facts = DecoderWorkspaceFacts {
+            tiling: DecoderTilingRealization::WholeTail,
+            activation_dtype_width: 4,
+            channels: vec![1024, 1024, 512, 512, 256, 128],
+            input_channels: vec![32, 1024, 1024, 512, 512, 256],
+            spatial_divisors: vec![32, 16, 8, 4, 2, 1],
+        };
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            frames: 1,
+            batch: 1,
+            reference_count: 0,
+        };
+        let sprint = sana_workspace(&facts, geometry, Some(192), false).unwrap();
+        let smaller = sana_workspace(
+            &facts,
+            MemoryGeometry {
+                width: 512,
+                height: 512,
+                ..geometry
+            },
+            Some(192),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            smaller.decode, sprint.decode,
+            "unknown fixed/head split earns no downscale credit"
+        );
+        let larger_tile = sana_workspace(&facts, geometry, Some(384), false).unwrap();
+        assert_eq!(larger_tile.decode, 4 * sprint.decode);
+        let base = sana_workspace(&facts, geometry, Some(192), true).unwrap();
+        assert_eq!(base.conditioning, 2 * sprint.conditioning);
+        assert!(base.denoise > 2 * sprint.denoise);
+        assert_eq!(base.decode, sprint.decode);
+        assert!(sana_workspace(&facts, geometry, None, false).is_none());
+        assert!(sana_workspace(
+            &facts,
+            MemoryGeometry {
+                width: 2048,
+                ..geometry
+            },
+            Some(192),
+            false
+        )
+        .is_none());
+        let mut unknown = facts.clone();
+        unknown.channels[0] = 2048;
+        assert!(sana_workspace(&unknown, geometry, Some(192), false).is_none());
+    }
+
     #[test]
     fn phase_lifetimes_and_streaming_scope_price_only_simultaneous_weights() {
         use gen_core::{

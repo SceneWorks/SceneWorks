@@ -576,7 +576,7 @@ crates/media/mlx-gen/mlx-gen-sam3/src/video.rs	b2a3223a8e3dab530ea9940d7445dce21
 crates/media/mlx-gen/mlx-gen-sam3/src/vision.rs	b97f06ac4e8a20793a664e61d69c75af4275035f	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-sam3
 crates/media/mlx-gen/mlx-gen-sana/src/config.rs	915772f33c8c5231db9cacd61315d6cd0e6836dc	a28439eb0298f408a26647e5803a372f77c570888d688f001b92ba16cfc92f46	architecture:crates/media/mlx-gen/mlx-gen-sana
 crates/media/mlx-gen/mlx-gen-sana/src/dc_ae.rs	2ab35dfe4c30f899e3c8c1cd219234ed2850e38e	df37c0e6c3bf9ffef694a4f06b5eab01dcc413504cbbccda8c8d42503be27dec	architecture:crates/media/mlx-gen/mlx-gen-sana
-crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs	ec02691b508f1b0ceb0ebbb0a01a682e578790fa	34685acc925d60791c8d6707c4027321ed9dc62c68dc213590994c517d1533f9	architecture:crates/media/mlx-gen/mlx-gen-sana
+crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs	1c3472f674a9191a5a506b65a71ba27a894e526c	34685acc925d60791c8d6707c4027321ed9dc62c68dc213590994c517d1533f9	architecture:crates/media/mlx-gen/mlx-gen-sana
 crates/media/mlx-gen/mlx-gen-sana/src/pipeline.rs	7e26a15226fed25dfabc9931b9c9e1b15b939fae	7294eafc9437a5221982512bb13f41304314efd7b09946be9ef98bfe2d42d1b4	architecture:crates/media/mlx-gen/mlx-gen-sana
 crates/media/mlx-gen/mlx-gen-sana/src/scm.rs	25428a388c5bf715dd7f3942aa3def977a8986a1	57520dadd77574972f3a310bb0a3e4fb7ab5abdbb7ae346cc5bd3ef4b415da73	architecture:crates/media/mlx-gen/mlx-gen-sana
 crates/media/mlx-gen/mlx-gen-sana/src/transformer.rs	680d711cf4ed875a2daba6cd0d3d507e7bab0e68	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-sana

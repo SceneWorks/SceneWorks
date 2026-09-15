@@ -15891,6 +15891,32 @@
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
             },
+            // sc-23648: packed tiers implement the same streaming UNet; the provider validates the artifact.
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
+              // sc-21609: same narrowing as the bf16 row — inpaint spells edit, detail is a
+              // control-overlay load, character is the identity row below.
+              "modes": ["text_to_image", "edit_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
             // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
             // Engine-derived rung x tier coverage for sdxl.
             // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
@@ -17927,7 +17953,7 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
