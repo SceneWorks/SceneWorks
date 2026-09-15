@@ -37,7 +37,7 @@ test("required CI fetches the exact terminal inference revision", async () => {
   assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${inferenceRevision}`));
 });
 
-test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", async () => {
+test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : false }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-terminal-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks")); const evidence = path.join(root, "evidence"), output = path.join(root, "output"); await mkdir(evidence); const { validator, corpus } = await golden(evidence, sceneWorksRoot);
   await assert.rejects(() => sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output: path.join(root, "real-output"), campaignRunId: "campaign", permanentPin }), /tuple-controller/);
   const receipt = await sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output, campaignRunId: "campaign", permanentPin, syntheticFixture: true });
@@ -58,7 +58,7 @@ test("exact pinned validator accepts sealed golden receipt and rejects every gat
   await removePinnedInference(inferenceRoot); inferenceRoot = inferenceRepository;
 });
 
-test("sealer reconstructs exact colon-bearing canonical paths from portable tuple artifacts", async () => {
+test("sealer reconstructs exact colon-bearing canonical paths from portable tuple artifacts", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : false }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-canonical-")), tupleRoot = path.join(root, "tuple"), suiteRoot = path.join(root, "suite"), canonical = path.join(root, "canonical");
   const bytes = Buffer.from("bound artifact"), digest = sha(bytes), logical = "runs/candle-cuda:8b/cases/0/preview", portable = logical.replace("candle-cuda:8b", "candle-cuda__colon__8b");
   const source = path.join(tupleRoot, ...portable.split("/")); await mkdir(path.dirname(source), { recursive: true }); await writeFile(source, bytes);

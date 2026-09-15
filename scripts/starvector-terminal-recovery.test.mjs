@@ -8,19 +8,26 @@ import test from "node:test";
 import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateExecutionPredecessor, validateNativeExecutionArchives, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+// Hosted Windows recovery receives this exact workflow-owned interpreter.  The
+// local archive fixture also needs an interpreter because recovery validates
+// ZIP contents with Python; use the installed command only when the workflow
+// value is absent from a native Windows test process.
+if (process.platform === "win32" && !process.env.STARVECTOR_TERMINAL_METRICS_PYTHON) {
+  process.env.STARVECTOR_TERMINAL_METRICS_PYTHON = "python";
+}
 async function writeZip(root, id, files) {
   const source = path.join(root, `zip-${id}`);
   for (const [relative, content] of Object.entries(files)) {
     const file = path.join(source, relative); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content);
   }
   const archive = path.join(root, `${id}.zip`);
-  execFileSync("python3", ["-c", "import os,sys,zipfile\nroot,out=sys.argv[1:]\nwith zipfile.ZipFile(out,'w') as z:\n for base,_,names in os.walk(root):\n  for name in names:\n   p=os.path.join(base,name); z.write(p,os.path.relpath(p,root))", source, archive]);
+  execFileSync(process.env.STARVECTOR_TERMINAL_METRICS_PYTHON ?? "python3", ["-c", "import os,sys,zipfile\nroot,out=sys.argv[1:]\nwith zipfile.ZipFile(out,'w') as z:\n for base,_,names in os.walk(root):\n  for name in names:\n   p=os.path.join(base,name); z.write(p,os.path.relpath(p,root))", source, archive]);
   return readFile(archive);
 }
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-recovery-test-")); t.after(() => rm(root, { recursive: true, force: true }));
   const archive = path.join(root, "77.zip");
-  execFileSync("python3", ["-c", "import sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],'w') as z:\n z.writestr('hostile-inputs/0.svg','noise-0<svg/>'); z.writestr('service.stderr.log',''); z.writestr('transcript.json','historical transcript bytes')", archive]);
+  execFileSync(process.env.STARVECTOR_TERMINAL_METRICS_PYTHON ?? "python3", ["-c", "import sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],'w') as z:\n z.writestr('hostile-inputs/0.svg','noise-0<svg/>'); z.writestr('service.stderr.log',''); z.writestr('transcript.json','historical transcript bytes')", archive]);
   const bytes = await readFile(archive), content = '{"campaign_run_id":"retired","permanent_pin":"' + "a".repeat(40) + '"}\n';
   const marker = { path: "campaign.json", size: Buffer.byteLength(content), sha256: sha(content), content };
   const config = { schema_version: 1, campaign_id: "retired", inference_revision: "a".repeat(40), sceneworks_revision: "b".repeat(40), workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/server-candle-linux.yml", run_id: "100", run_attempt: 1, head_sha: "b".repeat(40), conclusion: "cancelled" }, failure: { code: "worker_cpu_fallback", phase: "execution", tuple: "mlx:1b" }, markers: { campaign: marker, tuple: { ...marker, path: "tuple.json" } }, source_artifacts: [{ role: "raw", repository: "SceneWorks/SceneWorks", workflow_run_id: "100", workflow_run_attempt: 1, head_sha: "b".repeat(40), api_workflow_run: { id: "100", head_sha: "b".repeat(40) }, id: "77", name: "raw-retired", size: bytes.length, digest: `sha256:${sha(bytes)}` }], authority: { reason: "Corrected worker identity; historical bytes cannot serve current execution" } };

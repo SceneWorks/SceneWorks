@@ -562,7 +562,7 @@ test("terminal metrics provisioning fixes CPython 3.12 and wheel-only installati
   }
 });
 
-test("macOS Python selection ignores unwritable action caches and verifies the exact venv base and micro", async () => {
+test("macOS Python selection ignores unwritable action caches and verifies the exact venv base and micro", { skip: process.platform === "win32" ? "the fixture is an executable POSIX shell script for a macOS-only selector" : false }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-macos-python-"));
   const writeFakePython = async (name, identity, exitCode = 0) => {
     const executable = path.join(root, name);
