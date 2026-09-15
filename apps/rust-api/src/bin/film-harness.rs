@@ -729,6 +729,7 @@ async fn run_is_over(run_over: &mut tokio::sync::watch::Receiver<bool>) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopSignal {
     Interrupt,
+    #[cfg(unix)]
     Terminate,
 }
 
@@ -737,6 +738,7 @@ impl StopSignal {
     fn exit_code(self) -> i32 {
         match self {
             Self::Interrupt => 130,
+            #[cfg(unix)]
             Self::Terminate => 143,
         }
     }
