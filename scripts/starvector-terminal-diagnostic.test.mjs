@@ -1,19 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import {
   DIAGNOSTIC_BUDGET,
   DIAGNOSTIC_CASES,
+  DIAGNOSTIC_LEGACY_CORPUS,
   captureDiagnosticCudaOccupancy,
   diagnosticShouldStop,
   parseDiagnosticCudaGpu,
   parseDiagnosticCudaProcesses,
   prepareDiagnosticOutput,
   readCurrentInferencePin,
+  runDiagnostic,
+  selectDiagnosticRecordView,
   selectDiagnosticRecords,
   validateDiagnosticInvocation,
   validateDiagnosticManifest,
@@ -23,6 +28,7 @@ import {
 } from "./starvector-terminal-diagnostic.mjs";
 
 const sha = (character) => character.repeat(64);
+const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const revision = (character) => character.repeat(40);
 const corpusPin = revision("a");
 const sceneWorksRevision = revision("b");
@@ -30,17 +36,35 @@ const permanentPin = revision("c");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function indexFixture() {
-  return {
+  const index = {
     schema_version: 2,
     inference_revision: corpusPin,
     rows: Array.from({ length: 120 }, (_, case_index) => ({
       case_index,
+      dataset: `starvector/source-${Math.floor(case_index / 30)}`,
+      revision: revision(String(Math.floor(case_index / 30) + 1)),
+      row_index: case_index % 30,
+      filename: `source-${case_index}.svg`,
+      svg_sha256: sha(((case_index + 1) % 10).toString()),
       input_png_path: `rows/${case_index}.png`,
       png_sha256: sha((case_index % 10).toString()),
+      reference_png_sha256: sha(((case_index + 2) % 10).toString()),
       sampling: { seed: 7, temperature: 0.2 },
       detail_budgets: { "1b": { ...DIAGNOSTIC_BUDGET } },
     })),
   };
+  index.row_identity_sha256 = terminalSourceRowsSha256(index.rows);
+  return index;
+}
+
+function legacyIndexFixture() {
+  const index = indexFixture();
+  index.schema_version = 1;
+  for (const row of index.rows) {
+    delete row.detail_budgets;
+    row.detail_budget = { maxNewTokens: 4000, maxSvgBytes: 262144, maxWallTimeMs: 120000 };
+  }
+  return index;
 }
 
 function bindingFixture(index = indexFixture()) {
@@ -114,10 +138,75 @@ test("selected records are the fixed former failures with the exact Detailed bud
     (next) => { next.inference_revision = revision("f"); },
   ]) {
     const next = structuredClone(index); mutate(next);
-    assert.throws(() => selectDiagnosticRecords(next, binding, corpusPin), /Detailed budget|asset identity|row index identity/);
+    assert.throws(() => selectDiagnosticRecords(next, binding, corpusPin), /Detailed budget|source budget|asset identity|row (?:index )?identit/);
   }
   const wrongTuple = structuredClone(binding); wrongTuple.tuple = "mlx:1b";
   assert.throws(() => selectDiagnosticRecords(index, wrongTuple, corpusPin), /binding drifted/);
+});
+
+test("authenticated legacy Windows rows produce only a diagnostic current-budget view", async () => {
+  const index = legacyIndexFixture(), indexBytes = Buffer.from(`${JSON.stringify(index, null, 2)}\n`), binding = await sealedBinding(index);
+  const legacyCorpus = { ...DIAGNOSTIC_LEGACY_CORPUS, inference_revision: corpusPin, row_identity_sha256: index.row_identity_sha256, index_sha256: digest(indexBytes) };
+  const view = selectDiagnosticRecordView(index, indexBytes, binding, corpusPin, { legacyCorpus });
+  assert.equal(view.provenance.source_schema_version, 1);
+  assert.equal(view.provenance.source_index_sha256, digest(indexBytes));
+  assert.equal(view.provenance.source_row_identity_sha256, index.row_identity_sha256);
+  assert.equal(view.provenance.view, "authenticated_legacy_rows_with_current_diagnostic_budget");
+  assert.deepEqual(view.records.map((record) => record.case_index), DIAGNOSTIC_CASES);
+  assert.ok(view.records.every((record) => record.detailBudget.maxNewTokens === 7933));
+  for (const mutate of [
+    (next) => { next.index_sha256 = sha("0"); },
+    (next) => { next.row_identity_sha256 = sha("1"); },
+    (next) => { next.readiness.artifact_sha256 = sha("2"); },
+  ]) {
+    const next = structuredClone(legacyCorpus); mutate(next);
+    assert.throws(() => selectDiagnosticRecordView(index, indexBytes, binding, corpusPin, { legacyCorpus: next }), /authenticated Windows readiness input/);
+  }
+  const staleBudget = structuredClone(index); staleBudget.rows[0].detail_budget.maxNewTokens = 3999;
+  const staleBytes = Buffer.from(`${JSON.stringify(staleBudget, null, 2)}\n`);
+  const staleReceipt = { ...legacyCorpus, index_sha256: digest(staleBytes) };
+  assert.throws(() => selectDiagnosticRecordView(staleBudget, staleBytes, binding, corpusPin, { legacyCorpus: staleReceipt }), /source budget drifted/);
+});
+
+test("driver exercises authenticated legacy corpus through exact requests, both terminal outcomes, stop, and cleanup", async () => {
+  const runnerTemp = await mkdtemp(path.join(os.tmpdir(), "starvector-diagnostic-route-"));
+  const repo = path.join(runnerTemp, "repo"), output = path.join(runnerTemp, "output"), weightsRoot = path.join(runnerTemp, "weights"), corpus = path.join(runnerTemp, "corpus");
+  const options = { root: repo, output, weightsRoot, corpusAssetsRoot: corpus, permanentPin, corpusSourcePin: corpusPin, expectedSceneWorksRevision: sceneWorksRevision, leaseRoot: path.join(runnerTemp, "leases"), leaseHelper: path.join(repo, "lease"), platform: "win32", runnerTemp, noJobDownloads: "1", gpuId: "0" };
+  const index = legacyIndexFixture(), indexBytes = Buffer.from(`${JSON.stringify(index, null, 2)}\n`), binding = await sealedBinding(index);
+  const legacyCorpus = { ...DIAGNOSTIC_LEGACY_CORPUS, inference_revision: corpusPin, row_identity_sha256: index.row_identity_sha256, index_sha256: digest(indexBytes) };
+  const acceptedFiles = { transcript: path.join(runnerTemp, "provider.json"), svg: path.join(runnerTemp, "canonical.svg"), png: path.join(runnerTemp, "preview.png") };
+  let stopped = false, released = false, submitted = 0;
+  try {
+    await mkdir(path.join(repo, "config", "manifests"), { recursive: true }); await mkdir(weightsRoot, { recursive: true }); await mkdir(corpus, { recursive: true });
+    await writeFile(path.join(repo, "config", "manifests", "builtin.models.jsonc"), JSON.stringify(manifestFixture()));
+    await writeFile(path.join(weightsRoot, "starvector-terminal-weights-v1.json"), JSON.stringify(weightsFixture()));
+    await writeFile(path.join(corpus, "starvector-terminal-row-index-v1.json"), indexBytes);
+    await writeFile(acceptedFiles.transcript, "{}\n"); await writeFile(acceptedFiles.svg, "<svg/>\n"); await writeFile(acceptedFiles.png, Buffer.from([137, 80, 78, 71]));
+    await prepareDiagnosticOutput(options);
+    const service = serviceFixture(); service.worker.worker_id = "worker-1";
+    const occupancy = { schema_version: 1, samples: [], foreign_processes_observed: false, activity_attribution: "foreign_only_before_service", active_foreign_compute: false, enough_free_memory_for_static_weight_floor: true, functional_execution_allowed: true, timing_usable_for_performance: true };
+    const result = await runDiagnostic(options, {
+      legacyCorpus,
+      acquire: async () => async () => { released = true; },
+      start: async () => service,
+      ready: async (_url, tuple, workerId) => { assert.equal(tuple, "candle-cuda:1b"); assert.equal(workerId, "worker-1"); return service.worker; },
+      importAssets: async ({ tuple }) => { assert.equal(tuple, "candle-cuda:1b"); return binding; },
+      submit: async (_url, record) => {
+        assert.equal(record.case_index, DIAGNOSTIC_CASES[submitted]); assert.equal(record.projectId, binding.project_id); assert.equal(record.sourceAssetId, binding.assets[record.case_index].asset_id); assert.equal(record.input_png_sha256, index.rows[record.case_index].png_sha256); assert.deepEqual(record.detailBudget, DIAGNOSTIC_BUDGET);
+        const accepted = submitted !== 1; submitted += 1;
+        const job = outcomeFixture(record, accepted);
+        Object.assign(job.result.terminalEvidence, { providerTranscriptPath: acceptedFiles.transcript, providerTranscriptSha256: digest(await readFile(acceptedFiles.transcript)) });
+        if (accepted) Object.assign(job.result.terminalEvidence, { canonicalSvgPath: acceptedFiles.svg, canonicalSvgSha256: digest(await readFile(acceptedFiles.svg)), previewPngPath: acceptedFiles.png, previewPngSha256: digest(await readFile(acceptedFiles.png)) });
+        return job;
+      },
+      preserve: async (_output, suite, caseId, job) => { assert.equal(suite, "image_quality"); assert.equal(caseId, "diagnostic-quality-v1-9"); assert.equal(job.result.terminalEvidence.accepted, false); return { artifacts: [] }; },
+      occupancy: async () => occupancy,
+      stop: async () => { stopped = true; },
+    });
+    assert.equal(result.status, "completed"); assert.equal(submitted, 4); assert.equal(result.results.filter((item) => item.accepted).length, 3); assert.equal(result.results.filter((item) => !item.accepted).length, 1);
+    assert.equal(result.corpus.source_schema_version, 1); assert.equal(result.corpus.source_index_sha256, digest(indexBytes)); assert.deepEqual(result.corpus.request_detail_budget, DIAGNOSTIC_BUDGET);
+    assert.equal(stopped, true); assert.equal(released, true); assert.equal(result.product_service_cleanup, "stopped_and_state_removed"); assert.equal(result.lease, "released");
+  } finally { await rm(runnerTemp, { recursive: true, force: true }); }
 });
 
 test("service and terminal results bind exact source, model, provider, backend, and limits", () => {

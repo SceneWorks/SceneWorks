@@ -9,6 +9,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { acquireStableLease } from "./starvector-terminal-producer.mjs";
 import { importTupleAssets } from "./starvector-terminal-assets.mjs";
 import { assertTerminalProductWorkerReady, startProductService, stopProductService } from "./starvector-terminal-product-service.mjs";
@@ -18,6 +19,13 @@ export const DIAGNOSTIC_TUPLE = "candle-cuda:1b";
 export const DIAGNOSTIC_CASES = Object.freeze([6, 9, 11, 12, 13, 15]);
 export const DIAGNOSTIC_BUDGET = Object.freeze({ maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 });
 export const DIAGNOSTIC_STOP = Object.freeze({ accepted: 3, rejected: 4 });
+export const DIAGNOSTIC_LEGACY_CORPUS = Object.freeze({
+  schema_version: 1,
+  inference_revision: "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+  row_identity_sha256: "f9529c2e5a86bef6644054c909c4f621991f6384d9b33a029ad46ff2e6cd3b88",
+  index_sha256: "dbfd6b6ef972f3104f7a20c2033af6157b720e49adf46c506e0b34ef612d3a59",
+  readiness: Object.freeze({ workflow_run_id: "34914687576", workflow_run_attempt: 1, artifact_id: 10375713957, artifact_sha256: "2af3f6e6154c218d854022a95ae641f687b3f3b7cc4d5bbd9c30488f1f373796" }),
+});
 const MODEL = Object.freeze({
   id: "starvector_1b",
   provider: "candle-starvector-1b",
@@ -126,18 +134,48 @@ export async function captureDiagnosticCudaOccupancy({ ownedPids = [], execFileI
   return { schema_version: 1, samples, foreign_processes_observed: foreign.length > 0, activity_attribution: activityAttributable ? "foreign_only_before_service" : "ambiguous_with_owned_service", active_foreign_compute: activeForeignCompute, enough_free_memory_for_static_weight_floor: enoughFreeMemory, functional_execution_allowed: !activeForeignCompute && enoughFreeMemory, timing_usable_for_performance: foreign.length === 0 && !activeForeignCompute };
 }
 
-export function selectDiagnosticRecords(index, binding, corpusSourcePin) {
-  if (index?.schema_version !== 2 || index.inference_revision !== corpusSourcePin || !Array.isArray(index.rows) || index.rows.length !== 120) die("immutable corpus row index identity/count drifted");
+export function selectDiagnosticRecordView(index, indexBytes, binding, corpusSourcePin, { legacyCorpus = DIAGNOSTIC_LEGACY_CORPUS } = {}) {
+  if (!Buffer.isBuffer(indexBytes) || indexBytes.length === 0 || index?.inference_revision !== corpusSourcePin || !Array.isArray(index.rows) || index.rows.length !== 120) die("immutable corpus row index identity/count drifted");
+  const indexSha256 = sha(indexBytes), rowIdentity = terminalSourceRowsSha256(index.rows);
+  if (!SHA256.test(index.row_identity_sha256 ?? "") || rowIdentity !== index.row_identity_sha256) die("immutable corpus row identities drifted");
+  const legacy = index.schema_version === 1;
+  if (legacy) {
+    if (legacyCorpus?.schema_version !== 1 || legacyCorpus.inference_revision !== corpusSourcePin || legacyCorpus.row_identity_sha256 !== index.row_identity_sha256 || legacyCorpus.index_sha256 !== indexSha256 || legacyCorpus.readiness?.workflow_run_id !== "34914687576" || legacyCorpus.readiness.workflow_run_attempt !== 1 || legacyCorpus.readiness.artifact_id !== 10375713957 || legacyCorpus.readiness.artifact_sha256 !== "2af3f6e6154c218d854022a95ae641f687b3f3b7cc4d5bbd9c30488f1f373796") die("legacy corpus index is not the authenticated Windows readiness input");
+  } else if (index.schema_version !== 2) {
+    die("immutable corpus row index schema drifted");
+  }
+  for (const [position, row] of index.rows.entries()) {
+    if (row?.case_index !== position || row.row_index !== position % 30 || typeof row.dataset !== "string" || !row.dataset || !REVISION.test(row.revision ?? "") || typeof row.filename !== "string" || !row.filename || !SHA256.test(row.svg_sha256 ?? "") || !SHA256.test(row.png_sha256 ?? "") || !SHA256.test(row.reference_png_sha256 ?? "") || typeof row.input_png_path !== "string" || !row.input_png_path) die(`diagnostic corpus row ${position} immutable identity drifted`);
+    const budget = legacy ? row.detail_budget : row.detail_budgets?.["1b"];
+    const expected = legacy ? { maxNewTokens: 4000, maxSvgBytes: 262144, maxWallTimeMs: 120000 } : DIAGNOSTIC_BUDGET;
+    if (stable(budget) !== stable(expected)) die(`diagnostic corpus row ${position} source budget drifted`);
+  }
   if (!binding?.project_id || binding.tuple !== DIAGNOSTIC_TUPLE || !Array.isArray(binding.assets) || binding.assets.length !== 120 || binding.aggregate_sha256 !== sha(JSON.stringify(binding.assets))) die("tuple-local imported asset binding drifted");
   const assets = new Map(binding.assets.map((entry) => [entry.case_index, entry]));
   if (assets.size !== 120) die("tuple-local imported assets are not unique");
-  return DIAGNOSTIC_CASES.map((caseIndex) => {
-    const row = index.rows[caseIndex], asset = assets.get(caseIndex), budget = row?.detail_budgets?.["1b"];
+  const records = DIAGNOSTIC_CASES.map((caseIndex) => {
+    const row = index.rows[caseIndex], asset = assets.get(caseIndex), budget = legacy ? DIAGNOSTIC_BUDGET : row?.detail_budgets?.["1b"];
     if (row?.case_index !== caseIndex || !SHA256.test(row.png_sha256 ?? "") || !row.input_png_path || !asset?.asset_id || asset.input_png_sha256 !== row.png_sha256) die(`diagnostic case ${caseIndex} asset identity drifted`);
-    if (JSON.stringify(budget) !== JSON.stringify(DIAGNOSTIC_BUDGET)) die(`diagnostic case ${caseIndex} does not use the shipping Detailed budget`);
+    if (stable(budget) !== stable(DIAGNOSTIC_BUDGET)) die(`diagnostic case ${caseIndex} does not use the shipping Detailed budget`);
     if (!row.sampling || typeof row.sampling !== "object" || Array.isArray(row.sampling)) die(`diagnostic case ${caseIndex} sampling identity is missing`);
     return { case_id: `diagnostic-quality-v1-${caseIndex}`, case_index: caseIndex, projectId: binding.project_id, sourceAssetId: asset.asset_id, model: MODEL.id, input_png_sha256: row.png_sha256, sampling: row.sampling, detailBudget: { ...budget } };
   });
+  return {
+    records,
+    provenance: {
+      source_schema_version: index.schema_version,
+      source_index_sha256: indexSha256,
+      source_row_identity_sha256: rowIdentity,
+      view: legacy ? "authenticated_legacy_rows_with_current_diagnostic_budget" : "current_schema_rows",
+      request_detail_budget: { ...DIAGNOSTIC_BUDGET },
+      readiness: legacy ? { ...legacyCorpus.readiness } : null,
+    },
+  };
+}
+
+export function selectDiagnosticRecords(index, binding, corpusSourcePin, options = {}) {
+  const indexBytes = options.indexBytes ?? Buffer.from(`${JSON.stringify(index, null, 2)}\n`);
+  return selectDiagnosticRecordView(index, indexBytes, binding, corpusSourcePin, options).records;
 }
 
 export function validateDiagnosticOutcome(record, job) {
@@ -213,7 +251,7 @@ export async function runDiagnostic(options, dependencies = {}) {
   const modelInventory = validateDiagnosticWeightsManifest(JSON.parse(await readFile(path.join(inputs.weightsRoot, "starvector-terminal-weights-v1.json"), "utf8")));
   const apiUrl = "http://127.0.0.1:17831";
   const runId = `diagnostic-${process.env.GITHUB_RUN_ID ?? "local"}-${process.env.GITHUB_RUN_ATTEMPT ?? "0"}`;
-  const acquire = dependencies.acquire ?? acquireStableLease, start = dependencies.start ?? startProductService, stop = dependencies.stop ?? stopProductService, importAssets = dependencies.importAssets ?? importTupleAssets, submit = dependencies.submit ?? submitAndPoll, preserve = dependencies.preserve ?? preserveTerminalDiagnostics, occupancy = dependencies.occupancy ?? captureDiagnosticCudaOccupancy;
+  const acquire = dependencies.acquire ?? acquireStableLease, start = dependencies.start ?? startProductService, stop = dependencies.stop ?? stopProductService, ready = dependencies.ready ?? assertTerminalProductWorkerReady, importAssets = dependencies.importAssets ?? importTupleAssets, submit = dependencies.submit ?? submitAndPoll, preserve = dependencies.preserve ?? preserveTerminalDiagnostics, occupancy = dependencies.occupancy ?? captureDiagnosticCudaOccupancy;
   await verifyDiagnosticBootstrap(inputs);
   const resultPath = path.join(inputs.output, "diagnostic-results.json"), transcript = path.join(inputs.output, "diagnostic-route.ndjson");
   const result = { schema_version: 1, kind: "starvector_cuda_product_route_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, tuple: DIAGNOSTIC_TUPLE, sceneworks_revision: inputs.expectedSceneWorksRevision, inference_revision: inputs.permanentPin, corpus_source_revision: inputs.corpusSourcePin, model: { ...MODEL, inventory: modelInventory }, detail_budget: DIAGNOSTIC_BUDGET, selected_case_indexes: [...DIAGNOSTIC_CASES], stop_rule: DIAGNOSTIC_STOP, workflow: { run_id: String(process.env.GITHUB_RUN_ID ?? "local"), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) }, status: "starting", results: [] };
@@ -229,12 +267,15 @@ export async function runDiagnostic(options, dependencies = {}) {
     if (!result.cuda_occupancy_before_start.functional_execution_allowed) die("CUDA occupancy does not permit uncontended functional execution");
     const service = await start({ root: inputs.root, output: inputs.output, permanentPin: inputs.permanentPin, url: apiUrl, weightsRoot: inputs.weightsRoot, tuple: DIAGNOSTIC_TUPLE }); serviceStarted = true;
     validateDiagnosticService(service, { sceneWorksRevision: inputs.expectedSceneWorksRevision, permanentPin: inputs.permanentPin, modelInventory });
-    const live = await assertTerminalProductWorkerReady(apiUrl, DIAGNOSTIC_TUPLE, service.worker.worker_id);
+    const live = await ready(apiUrl, DIAGNOSTIC_TUPLE, service.worker.worker_id);
     if (JSON.stringify(live) !== JSON.stringify(service.worker)) die("live product worker changed after startup");
     const bindingPath = path.join(inputs.output, "imported-assets.json");
     const binding = await importAssets({ assetsRoot: inputs.corpusAssetsRoot, apiUrl, tuple: DIAGNOSTIC_TUPLE, output: bindingPath });
-    const index = JSON.parse(await readFile(path.join(inputs.corpusAssetsRoot, "starvector-terminal-row-index-v1.json"), "utf8"));
-    const records = selectDiagnosticRecords(index, binding, inputs.corpusSourcePin);
+    const indexBytes = await readFile(path.join(inputs.corpusAssetsRoot, "starvector-terminal-row-index-v1.json"));
+    const index = JSON.parse(indexBytes);
+    const view = selectDiagnosticRecordView(index, indexBytes, binding, inputs.corpusSourcePin, { legacyCorpus: dependencies.legacyCorpus ?? DIAGNOSTIC_LEGACY_CORPUS });
+    const records = view.records;
+    result.corpus = view.provenance;
     result.status = "running"; result.product_service = service; await writeRecord(resultPath, result);
     for (const record of records) {
       const job = await submit(apiUrl, record, transcript);
