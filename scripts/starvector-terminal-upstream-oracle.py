@@ -629,6 +629,17 @@ def classify_generation(raw, observation, budget, max_bytes):
     return raw, 'complete'
 
 
+def diagnostic_generation_outcome(raw, finish_reason):
+    """Disambiguate the oracle's normal `complete` bucket for diagnostic evidence."""
+    structural_complete_root = complete_svg_prefix(raw) is not None
+    if finish_reason == 'complete':
+        outcome = 'bounded_complete_root' if structural_complete_root else 'early_eos_incomplete'
+    else:
+        outcome = finish_reason
+    return {'structural_complete_root': structural_complete_root,
+            'diagnostic_outcome': outcome}
+
+
 def generate(model, row, device):
     import torch
     from PIL import Image
@@ -887,9 +898,12 @@ def diagnostic_worker(args, facts):
         try:
             record({'event': 'model_loaded', **coverage})
             record({'event': 'case_started', 'started_at': time.time(), **row})
+            generation_started = time.monotonic()
             raw, generation = generate(model, row, device)
+            generation_elapsed_seconds = time.monotonic() - generation_started
             raw_path = tier_root / 'raw.svg'
             raw_path.write_bytes(raw.encode('utf-8'))
+            diagnostic = diagnostic_generation_outcome(raw, generation['finish_reason'])
             result = {'schema_version': 1, 'kind': 'starvector_upstream_case_9_diagnostic',
                       'acceptance_use': 'diagnostic_only', 'usable_for_terminal_acceptance': False,
                       'tier': '1b', 'case_index': DIAGNOSTIC_CASE_INDEX,
@@ -897,8 +911,10 @@ def diagnostic_worker(args, facts):
                       'input_png_sha256': row['input_png_sha256'],
                       'sampling': row['sampling'], 'detail_budget': row['detail_budget'],
                       'finish_reason': generation['finish_reason'],
+                      **diagnostic,
                       'generated_tokens': generation['generated_tokens'],
                       'generated_bytes': generation['generated_bytes'],
+                      'generation_elapsed_seconds': generation_elapsed_seconds,
                       'raw_svg': raw_path.relative_to(output).as_posix(),
                       'raw_svg_sha256': digest(raw_path),
                       'implementation_revision': facts['lock']['implementation_revision'],

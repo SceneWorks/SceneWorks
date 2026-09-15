@@ -248,6 +248,17 @@ class OracleTests(unittest.TestCase):
         incomplete, reason = oracle.classify_generation('<svg>', {'generated_tokens': 1}, 3, 10)
         self.assertEqual((incomplete, reason), ('<svg>', 'complete'))
 
+    def test_diagnostic_outcome_distinguishes_bounded_root_from_early_eos(self):
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg><path/></svg>', 'complete'),
+            {'structural_complete_root': True, 'diagnostic_outcome': 'bounded_complete_root'})
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg><path/>', 'complete'),
+            {'structural_complete_root': False, 'diagnostic_outcome': 'early_eos_incomplete'})
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg>', 'token_limit'),
+            {'structural_complete_root': False, 'diagnostic_outcome': 'token_limit'})
+
     def test_complete_svg_prefix_is_quote_comment_and_nesting_aware(self):
         for value, expected in [
             (' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>', ' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>'),
