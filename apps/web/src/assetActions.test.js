@@ -64,6 +64,11 @@ describe("suggestedFilename (sc-8727)", () => {
     expect(suggestedFilename(asset)).toBe("shot.jpg");
   });
 
+  it("suggests .svg for a canonical vector source", async () => {
+    const { suggestedFilename } = await importBrowser();
+    expect(suggestedFilename({ displayName: "mark", file: { path: "assets/vector", mimeType: "image/svg+xml" } })).toBe("mark.svg");
+  });
+
   it("falls back to the id, then a generic name, and leaves off an unknown extension", async () => {
     const { suggestedFilename } = await importBrowser();
     expect(suggestedFilename({ id: "asset_9", file: {} })).toBe("asset_9");

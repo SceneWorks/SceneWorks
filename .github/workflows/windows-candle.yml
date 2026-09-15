@@ -300,8 +300,8 @@ on:
 #      (check.yml's hosted `candle` job does compile the candle cfg with `--all-targets`
 #      clippy, but cannot run it -- see scripts/check-candle-build.mjs.) Narrowing here
 #      would drop uncovered configurations to buy back seconds.
-# If this lane needs to get cheaper, the levers are the FETCH step (a job-local CARGO_HOME
-# under RUNNER_TEMP is re-downloaded every run -- see "Isolate Cargo dependency checkout")
+# If this lane needs to get cheaper, the levers are the FETCH step (keep its isolated
+# per-listener Cargo cache across jobs -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
 concurrency:
   group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
@@ -727,16 +727,17 @@ jobs:
         run: |
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
-      # Multiple runner services share %USERPROFILE%\.cargo. A sibling job can replace
-      # that global git checkout while rustc is still reading vendored inference sources,
-      # which surfaces as an unrelated missing-path/os-error-267 failure. Keep dependency
-      # state job-local; the verified toolchain remains on PATH from the step above.
+      # Preserve listener isolation without repeating the entire Git/registry transfer
+      # into RUNNER_TEMP every job. Never fall back to shared %USERPROFILE%\.cargo.
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
       - name: Isolate Cargo dependency checkout
         shell: powershell
         run: |
-          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
-          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
       # exactly one dispatch shape -- `provision_snapshot` true AND `run_five_rung_reference` false
       # -- and excludes only that. Everything else is untouched: PR and push runs (`github.event_name`
@@ -1397,12 +1398,15 @@ jobs:
         run: |
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
       - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
         shell: powershell
         run: |
-          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home-nvfp4-smoke'
-          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
-          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the pinned inference release for the imported NVFP4 smoke
         env:
           CARGO_NET_OFFLINE: "false"

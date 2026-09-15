@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AssetMedia, AssetThumbnail, MissingMedia, assetUrl, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, MissingMedia, assetCanRenderAsImage, assetUrl, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
 
 const imageAsset = {
   id: "img",
@@ -26,6 +26,12 @@ const audioAsset = {
   origin: "audio_studio",
   file: { path: "assets/line.wav", mimeType: "audio/wav", duration: 3, sampleRate: 24000, channels: 1 },
   projectId: "p1",
+};
+
+const vectorAsset = {
+  id: "vector", type: "vector", projectId: "p1", displayName: "mark.svg",
+  file: { path: "assets/vector.svg", mimeType: "image/svg+xml" },
+  preview: { path: "assets/preview.png", mimeType: "image/png" },
 };
 
 function fireContextMenu(el) {
@@ -93,6 +99,14 @@ describe("bounded thumbnail URLs (sc-14797)", () => {
     expect(new URL(thumbnailUrl(imageAsset)).searchParams.get("thumbnail")).toBe("384");
     expect(new URL(thumbnailUrl(videoAsset)).searchParams.get("thumbnail")).toBe("384");
     expect(new URL(posterUrl(videoAsset)).searchParams.has("thumbnail")).toBe(false);
+  });
+});
+
+describe("vector PNG-only rendering (sc-22257)", () => {
+  it("uses only the worker PNG preview and cannot enter generic image conditioning", () => {
+    expect(assetCanRenderAsImage(vectorAsset)).toBe(false);
+    expect(thumbnailUrl(vectorAsset)).toContain("assets/preview.png");
+    expect(thumbnailUrl(vectorAsset)).not.toContain("vector.svg");
   });
 });
 
