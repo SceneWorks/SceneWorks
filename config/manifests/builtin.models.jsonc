@@ -26521,7 +26521,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "4553c8589ad1ded2a575670d34374d1636be43db3a2acb73ff6998f396c6950e",
+              "sha256": "43a78ed75854ff046f751c8e52f87a43bfa53314ab89eaeee7f69ee6f7504923",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26562,6 +26562,11 @@
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
                   "sha256": "5ca3bfd2d67c0374057832d9d2364af9124a6750f30871df6f16e9650e5c8d32"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
+                  "byteSize": 16843,
+                  "sha256": "ff04cbf7f3c2ece7ccc5b1eb76074737dc1be9f838521edf2525d38a40eab8cf"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -26635,8 +26640,8 @@
                 },
                 {
                   "path": "release/starvector-terminal-recovery-v1.json",
-                  "byteSize": 9203,
-                  "sha256": "4881d2a20e2e1cdd88cf2608aad269e132bc625dbd14d4de242edbc2a62ba962"
+                  "byteSize": 11534,
+                  "sha256": "0863de19ecb1731a7a37124e51a9d00e7c57206f8c385224e7fbcaf7588e345b"
                 },
                 {
                   "path": "release/starvector-terminal-upstream-lock-v1.json",
@@ -26685,8 +26690,8 @@
                 },
                 {
                   "path": "scripts/starvector-production-closure.mjs",
-                  "byteSize": 9081,
-                  "sha256": "de45a48879264b85b77b82bb9324a6fe0f84e890c8a17228564240ee9886953d"
+                  "byteSize": 9196,
+                  "sha256": "dea326e873af48437fa8b44c10dc0a28074790c666f3ab3bb5892734d63cf65a"
                 },
                 {
                   "path": "scripts/starvector-terminal-assets.mjs",
@@ -26700,8 +26705,8 @@
                 },
                 {
                   "path": "scripts/starvector-terminal-case-bundle.mjs",
-                  "byteSize": 8887,
-                  "sha256": "ffa4facea5050a25af6387e225adc83afbb014d12c2201ebe3aeceaa5072db74"
+                  "byteSize": 9458,
+                  "sha256": "8c8b7199f0e33ebead43d34dec5d8284c16a0b414cccda9ee684746917ddc9ea"
                 },
                 {
                   "path": "scripts/starvector-terminal-cli.mjs",
@@ -26734,19 +26739,24 @@
                   "sha256": "855ab1a11121a5a86f5cf327edfc3c7f8de19b7809cc1bf7027622b243b3248b"
                 },
                 {
+                  "path": "scripts/starvector-terminal-readiness.mjs",
+                  "byteSize": 15988,
+                  "sha256": "d6800841123c0bf6b887ef32d111171e48d8a8fd30ed4989fdbed382cdc2541c"
+                },
+                {
                   "path": "scripts/starvector-terminal-recovery.mjs",
-                  "byteSize": 27522,
-                  "sha256": "1d3c5aeef0c05597437cfb1ae3c92d3eb29bbeb4ee0710696b9ea38b4b230ff6"
+                  "byteSize": 32821,
+                  "sha256": "c4ddc7d9a548b83b74a56c02c02e496e8466126ca02b2233194f54bd379333b7"
                 },
                 {
                   "path": "scripts/starvector-terminal-route.mjs",
-                  "byteSize": 39805,
-                  "sha256": "b8ffd7018875fac0819e3d8ecc0f0e6f59331cde45e253a9e643a88cfda9b503"
+                  "byteSize": 43445,
+                  "sha256": "d122420f86ae185110260e598f015619045e019e026e15b68ebcbd2f9359ee44"
                 },
                 {
                   "path": "scripts/starvector-terminal-upstream-oracle.py",
-                  "byteSize": 51047,
-                  "sha256": "695a992b1d26368c407d9c7d3dd78743383e1c5fc0775041c92d708e1156b284"
+                  "byteSize": 51404,
+                  "sha256": "850d759bb88700af5665507212954ec7232ce4b5fec5f248056a2aebb5a1039f"
                 },
                 {
                   "path": "scripts/starvector-terminal-upstream.mjs",

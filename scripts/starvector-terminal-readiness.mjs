@@ -119,12 +119,16 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
   const indexPath = path.join(assetsRoot, "starvector-terminal-row-index-v1.json"), indexInfo = await lstat(indexPath), indexBytes = await readFile(indexPath);
   if (!indexInfo.isFile() || indexInfo.isSymbolicLink()) die("terminal row index must be a regular non-symlink file");
   const index = JSON.parse(indexBytes);
-  if (index.inference_revision !== permanentPin || index.row_identity_sha256 !== corpus.upstream_image_quality_cases.row_identity_sha256 || !Array.isArray(index.rows) || index.rows.length !== 120) die("terminal row index pin, identity, or cardinality is invalid");
+  if (index.schema_version !== 2 || index.inference_revision !== permanentPin || index.row_identity_sha256 !== corpus.upstream_image_quality_cases.row_identity_sha256 || !Array.isArray(index.rows) || index.rows.length !== 120) die("terminal row index pin, identity, cardinality, or schema is invalid");
 
   const assetEntries = [], rows = [];
   for (const [position, row] of index.rows.entries()) {
     const source = corpus.upstream_image_quality_cases.sources[Math.floor(position / 30)];
     if (row.case_index !== position || row.dataset !== source?.dataset || row.revision !== source.revision || row.row_index !== position % 30 || typeof row.filename !== "string" || !row.filename || !SHA256.test(row.svg_sha256 ?? "") || !SHA256.test(row.png_sha256 ?? "") || !SHA256.test(row.reference_png_sha256 ?? "")) die(`terminal row ${position} immutable identity is invalid`);
+    for (const [tier, expected] of [["1b", 7933], ["8b", 15422]]) {
+      const budget = row.detail_budgets?.[tier];
+      if (budget?.maxNewTokens !== expected || budget.maxSvgBytes !== 262144 || budget.maxWallTimeMs !== 120000) die(`terminal row ${position} lacks the ${tier} shipping Detail budget`);
+    }
     assetEntries.push(await regularFile(assetsRoot, row.svg_path, row.svg_sha256, `row ${position} source SVG`));
     assetEntries.push(await regularFile(assetsRoot, row.input_png_path, row.png_sha256, `row ${position} input PNG`));
     assetEntries.push(await regularFile(assetsRoot, row.reference_png, row.reference_png_sha256, `row ${position} reference PNG`));
@@ -142,7 +146,7 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
   if (!Array.isArray(index.prompt_composition) || index.prompt_composition.length !== 60) die("terminal index must carry exactly 60 prompt-composition records");
   const promptHashes = [];
   index.prompt_composition.forEach((entry, caseIndex) => {
-    if (entry?.case_index !== caseIndex || entry.case_id !== `prompt-v1-${caseIndex}` || typeof entry.prompt !== "string" || !entry.prompt || sha(entry.prompt) !== entry.prompt_sha256 || typeof entry.raster_model !== "string" || !entry.raster_model || typeof entry.vector_model !== "string" || !entry.vector_model || typeof entry.expected_raster_revision !== "string" || !entry.expected_raster_revision || typeof entry.expected_vector_revision !== "string" || !entry.expected_vector_revision) die(`prompt-composition record ${caseIndex} is incomplete or drifted`);
+    if (entry?.case_index !== caseIndex || entry.case_id !== `prompt-v1-${caseIndex}` || typeof entry.prompt !== "string" || !entry.prompt || sha(entry.prompt) !== entry.prompt_sha256 || typeof entry.raster_model !== "string" || !entry.raster_model || entry.vector_model !== "starvector_8b" || typeof entry.expected_raster_revision !== "string" || !entry.expected_raster_revision || typeof entry.expected_vector_revision !== "string" || !entry.expected_vector_revision || entry.detail_budget?.maxNewTokens !== 15422 || entry.detail_budget.maxSvgBytes !== 262144 || entry.detail_budget.maxWallTimeMs !== 120000) die(`prompt-composition record ${caseIndex} is incomplete or drifted`);
     validateHashFields(entry, `prompt_composition[${caseIndex}]`); promptHashes.push(entry.prompt_sha256);
   });
   const promptIdentity = sha(promptHashes.join("\n"));

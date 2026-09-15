@@ -260,10 +260,13 @@ def source_identity(root, lock):
     return observed
 
 
-def select_rows(assets_root):
+def select_rows(assets_root, tier):
+    expected_budget = {'1b': 7933, '8b': 15422}.get(tier)
+    if expected_budget is None:
+        fail('unsupported StarVector tier')
     index = json.loads(local_file(assets_root, 'starvector-terminal-row-index-v1.json').read_text())
     rows = index.get('rows', [])
-    if len(rows) != 120 or [r.get('case_index') for r in rows] != list(range(120)):
+    if index.get('schema_version') != 2 or len(rows) != 120 or [r.get('case_index') for r in rows] != list(range(120)):
         fail('expected ordered 120-case immutable input index')
     selected, seen = [], set()
     for case_index, source_index in enumerate(SOURCE_INDICES):
@@ -275,16 +278,19 @@ def select_rows(assets_root):
         sampling = row['sampling']
         if sampling.get('temperature') != 0:
             fail('upstream parity requires greedy native sampling (temperature=0)')
-        budget = row['detail_budget']['maxNewTokens']
+        detail_budget = row.get('detail_budgets', {}).get(tier)
+        if not isinstance(detail_budget, dict):
+            fail('row lacks model-specific shipping Detail budget')
+        budget = detail_budget['maxNewTokens']
         if sampling.get('topP') != 1.0 or sampling.get('topK') != 1 or sampling.get('repetitionPenalty') != 1.0:
             fail('parity requires the declared greedy sampling contract')
-        if not 1 <= row['detail_budget'].get('maxWallTimeMs', 0) <= 3600000 or not 1 <= row['detail_budget'].get('maxSvgBytes', 0) <= 1048576:
-            fail('invalid native wall-time or SVG byte budget')
-        if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= 16384:
-            fail('invalid new-token budget')
+        if detail_budget.get('maxWallTimeMs') != 120000 or detail_budget.get('maxSvgBytes') != 262144:
+            fail('row differs from the shipping wall-time or SVG byte budget')
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget != expected_budget:
+            fail('row differs from the model shipping new-token budget')
         selected.append({'case_index': case_index, 'source_case_index': source_index, 'seed': case_index,
                          'input_png': str(png), 'input_png_sha256': row['png_sha256'],
-                         'sampling': sampling, 'detail_budget': row['detail_budget']})
+                         'sampling': sampling, 'detail_budget': detail_budget})
     return selected
 
 
@@ -385,7 +391,7 @@ def validate(args, packages=True):
         configs[key] = str(verified_file(args.components_root, component['config_path'], component['config_sha256']))
     sanitizer = absolute_regular_file(args.sanitizer, 'production sanitizer binary')
     args.sanitizer = str(sanitizer)
-    rows = select_rows(args.assets_root)
+    rows = select_rows(args.assets_root, args.tier)
     runtime = import_upstream_runtime(args.upstream_root, lock) if packages else None
     return {'lock': lock, 'source_sha256': source_hash, 'model_root': str(model_root), 'model_inventory_sha256': model_hash,
             'config_path': str(config_path), 'processor_path': str(processor_path), 'components': components,
