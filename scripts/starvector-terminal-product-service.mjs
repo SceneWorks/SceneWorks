@@ -105,6 +105,7 @@ export async function assertTerminalProductWorkerReady(url, tuple, expectedWorke
 }
 export async function waitForTerminalProductWorker(url, tuple, expectedWorkerId, assertRunning, {
   fetchImpl = fetch,
+  platform = process.platform,
   timeoutMs = 180_000,
   registrationRequestTimeoutMs = 5_000,
   retryIntervalMs = 1_000,
@@ -136,7 +137,7 @@ export async function waitForTerminalProductWorker(url, tuple, expectedWorkerId,
   assertRunning();
   // Inventory is the expensive verified-filesystem operation. Issue it once under
   // the registration deadline; a client abort does not cancel server-side scanning.
-  return assertTerminalProductWorkerReady(url, tuple, expectedWorkerId, { fetchImpl, timeoutMs: remaining });
+  return assertTerminalProductWorkerReady(url, tuple, expectedWorkerId, { fetchImpl, platform, timeoutMs: remaining });
 }
 export async function runProductServiceGpuPreflight(binary, serviceEnv, {
   execFileImpl = execFile,

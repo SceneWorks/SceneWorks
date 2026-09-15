@@ -305,6 +305,7 @@ test("terminal product worker readiness waits for registration before one model 
   const fixture = workerReadinessFixture("mlx:1b", "darwin");
   let workerRequests = 0, modelRequests = 0, clock = 0;
   const selected = await waitForTerminalProductWorker("http://127.0.0.1:17821", "mlx:1b", fixture.workerId, () => {}, {
+    platform: "darwin",
     timeoutMs: 1_000,
     retryIntervalMs: 1,
     now: () => clock,
