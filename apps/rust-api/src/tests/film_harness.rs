@@ -1714,6 +1714,51 @@ impl Harness {
         path
     }
 
+    /// Make the shipped MiniMax-H3 turbo adapters INSTALLED on this harness (sc-23406).
+    ///
+    /// The route refuses an uninstalled LoRA at enqueue, so a test that dispatches one has to make
+    /// it installed the way the API decides that question: a catalog entry whose `source.path`
+    /// points at a directory holding a readable `.safetensors`. The manifest written here is the
+    /// SHIPPED `builtin.loras.jsonc` with only that one key rewritten, so the ids, families,
+    /// `modelIds` allowlists and `sampling` recipes under test are the real ones.
+    ///
+    /// The header carries one inert tensor key on purpose: it must parse (the route reads it) and
+    /// must match no family detector (a detected family would be judged against the model's, which
+    /// is a different rule from the one this test is about).
+    pub(crate) fn install_turbo_loras(&self) {
+        let weights_dir = self.temp_dir.path().join("lora-weights");
+        std::fs::create_dir_all(&weights_dir).expect("weights dir creates");
+        let header = serde_json::json!({
+            "inert.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+        });
+        let header_bytes = serde_json::to_vec(&header).expect("header json");
+        let mut bytes = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 4]);
+        let file = weights_dir.join("adapter.safetensors");
+        std::fs::write(&file, bytes).expect("adapter writes");
+
+        let shipped = include_str!("../../../../config/manifests/builtin.loras.jsonc");
+        let mut manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(shipped))
+                .expect("the shipped lora manifest parses");
+        for lora in manifest["loras"].as_array_mut().expect("loras") {
+            let id = lora["id"].as_str().unwrap_or_default().to_owned();
+            if id.starts_with("minimax_h3") {
+                lora["source"] = serde_json::json!({
+                    "path": weights_dir.display().to_string()
+                });
+            }
+        }
+        let manifests_dir = self.temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&manifests_dir).expect("manifest dir creates");
+        std::fs::write(
+            manifests_dir.join("builtin.loras.jsonc"),
+            serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
+        )
+        .expect("lora manifest writes");
+    }
+
     pub(crate) fn run_record(&self) -> Value {
         let text = std::fs::read_to_string(self.temp_dir.path().join("run-out/run.json"))
             .expect("run.json written");
@@ -2419,6 +2464,181 @@ async fn a_lowered_reference_short_edge_rides_the_reference_shots_payload_and_re
         "{}",
         attempt("SH020")
     );
+}
+
+/// 🔴 sc-23406. The plan declares its accelerators ONCE on the family; each shot's
+/// `POST /api/v1/video/jobs` body carries only the ones its RESOLVED partition was distilled for,
+/// plus the plan's `advanced.steps` — and the attempt record on disk agrees with the payload.
+///
+/// Through the real route with the fake worker, because the route is where this could silently go
+/// wrong in three different ways: the LoRA compatibility gate could refuse the pairing, the
+/// declared-partition gate could refuse the ref2v adapter on the base checkpoint (it should — and
+/// the harness must therefore never send it there), and the payload normalisation could drop the
+/// entry shape. A core-only test proves none of those.
+#[tokio::test]
+async fn the_plans_turbo_loras_ride_each_shots_payload_for_its_own_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.install_turbo_loras();
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] =
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+        plan["model"]["advanced"] = json!({ "steps": 6 });
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-turbo");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        let payload = &job["payload"];
+        let sent: Vec<&str> = payload["loras"]
+            .as_array()
+            .map(|loras| {
+                loras
+                    .iter()
+                    .filter_map(|lora| lora["id"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(payload["model"], "minimax_h3_ref");
+                assert_eq!(
+                    sent,
+                    vec!["minimax_h3_ref2v_turbo_4step"],
+                    "the reference partition takes the ref2v adapter and ONLY that one: {}",
+                    payload["loras"]
+                );
+                assert_eq!(attempt.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+            }
+            "SH020" => {
+                assert_eq!(payload["model"], "minimax_h3");
+                assert_eq!(
+                    sent,
+                    vec!["minimax_h3_turbo_4step_v01"],
+                    "the base partition takes the fl2v adapter — sending the ref2v one here is \
+                     what the route's declared-partition gate refuses: {}",
+                    payload["loras"]
+                );
+                assert_eq!(attempt.loras, vec!["minimax_h3_turbo_4step_v01"]);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+        // The route hydrates each entry from the catalog, so the SENT weight survives as the
+        // catalog's declared one rather than being dropped.
+        assert_eq!(payload["loras"][0]["weight"], json!(1.0), "{payload}");
+        // The plan's override rides `advanced.steps` on both partitions and is what the record
+        // says ran — over the recipe's own 4.
+        assert_eq!(payload["advanced"]["steps"], json!(6), "{payload}");
+        assert_eq!(attempt.effective_steps, Some(6), "{}", shot.shot_id);
+        assert_eq!(
+            attempt.turbo_scheduler_shift,
+            Some(12.0),
+            "{}: a recipe applied, so its trained video shift is recorded",
+            shot.shot_id
+        );
+    }
+
+    // And on disk, where a later reader comparing this run against a 50-step one finds it.
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(options.out_dir.join("run.json")).expect("run.json written"),
+    )
+    .expect("run.json parses");
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .map(|shot| shot["attempts"][0].clone())
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(
+        attempt("SH010")["loras"],
+        json!(["minimax_h3_ref2v_turbo_4step"])
+    );
+    assert_eq!(
+        attempt("SH020")["loras"],
+        json!(["minimax_h3_turbo_4step_v01"])
+    );
+    assert_eq!(attempt("SH010")["effectiveSteps"], json!(6));
+    assert_eq!(attempt("SH010")["turboSchedulerShift"], json!(12.0));
+}
+
+/// The same plan with NO override: each shot records the step count its own partition's recipe
+/// declares, and a shot whose partition no accelerator reached records the model's own default.
+///
+/// The three-way distinction is the point — `advanced.steps`, the recipe, the model default are
+/// three different sources and a record that could not tell them apart would make a turbo run and
+/// a base run indistinguishable after the fact.
+#[tokio::test]
+async fn a_shot_whose_partition_no_accelerator_reaches_records_the_models_own_step_count() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.install_turbo_loras();
+    // Only the REFERENCE partition's adapter is declared, so SH020 (base) gets none.
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] = json!(["minimax_h3_ref2v_turbo_4step"]);
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-turbo-partial");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (_, job) = request_job(&harness, &job_id).await;
+        let payload = &job["payload"];
+        assert!(
+            payload["advanced"].get("steps").is_none(),
+            "no plan override ⇒ nothing dispatched; the recipe or the engine default governs: {}",
+            payload["advanced"]
+        );
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(attempt.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+                assert_eq!(attempt.effective_steps, Some(4), "the recipe's own count");
+                assert_eq!(attempt.turbo_scheduler_shift, Some(12.0));
+            }
+            "SH020" => {
+                assert!(
+                    payload
+                        .get("loras")
+                        .is_none_or(|loras| loras.as_array().is_some_and(|loras| loras.is_empty())),
+                    "the ref2v adapter must NOT reach the base checkpoint: {}",
+                    payload["loras"]
+                );
+                assert!(attempt.loras.is_empty());
+                assert_eq!(
+                    attempt.effective_steps,
+                    Some(50),
+                    "no recipe applied, so the model's declared default is what ran"
+                );
+                assert_eq!(attempt.turbo_scheduler_shift, None);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+    }
 }
 
 /// sc-23402 AC1, the refusals: too many roles for the RESOLVED partition, and a

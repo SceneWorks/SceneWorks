@@ -611,6 +611,90 @@ nor its attempt record. A reference attempt records the **effective** value — 
 when the plan named none — so a lowered run is comparable against a default one; a plan that names
 nothing dispatches exactly what it did before the knob existed.
 
+### Accelerators: `model.loras` and `advanced.steps` (sc-23406)
+
+The 50-step base regime renders a minute of MiniMax-H3 film in hours. sc-18729 measured **12.6 min
+against 2.42 h** at 1344x768 (11.57x), with a matched-geometry floor of **7.05x** at the courier
+plan's own 576x320. The step-distill ("turbo") adapters are therefore the path most runs take, and
+the plan declares them the same way it declares the tier — **once, on the family**:
+
+```jsonc
+"model": {
+  "id": "minimax_h3",
+  "tier": "q4",
+  "resolution": "576x320",
+  "loras": ["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"],
+  "advanced": { "steps": 6 }   // optional; omit it and the recipe governs
+}
+```
+
+**Per-partition resolution.** The plan never says which checkpoint an adapter attaches to, because
+the catalog already does: each entry carries a `modelIds` allowlist naming the partitions it was
+distilled for (sc-19563). So the one list above resolves **per shot**, against the partition that
+shot resolved to:
+
+| the shot resolves to | it dispatches |
+| --- | --- |
+| `minimax_h3_ref` | `minimax_h3_ref2v_turbo_4step` — the adapter that distils the reference path |
+| `minimax_h3` | `minimax_h3_turbo_4step_v01` — declared for the base checkpoint |
+| either, with no compatible entry declared | **nothing**, recorded as an empty list |
+
+Cross-attaching is what this prevents. The two MiniMax-H3 partitions are one DiT architecture with
+one geometry, so a ref2v adapter folds onto the base checkpoint **cleanly** — no shape error, no
+refusal, just a quality mismatch nothing would have noticed. The route refuses the pairing at
+enqueue; the harness never sends it.
+
+**The payload shape is the Studio's.** Each entry rides the job body as `{ "id", "weight" }` — what
+`apps/web/src/components/generationStudio.jsx` posts for a studio selection — with the weight the
+catalog declares (`defaultWeight`), which is the number the route's own `preset_lora_weight` would
+have filled in for an id alone. A harness render and a studio render of the same selection are
+therefore the same render. `advanced.steps` rides `advanced` beside `mlxQuantize`, and the worker's
+`minimax_h3_sampling` reads it exactly as it reads the Video Studio's.
+
+**Refusals, all by name, all before a weight is read:**
+
+- an id no shipped catalog entry carries (a typo);
+- the same id twice;
+- an adapter whose family the plan's model cannot load;
+- **two step-distill recipes that would both apply to one partition** — a render has one schedule,
+  so the plan is refused naming the partition and both adapters. One recipe *per partition* is not a
+  conflict: they reach different checkpoints, which is exactly what a mixed plan needs. The
+  judgement is `minimax_h3_turbo::resolve_turbo_recipe`'s — the resolver the **worker** runs — so a
+  list this accepts is not one the worker refuses after 18.78 GB is resident;
+- `advanced.steps` of `0` or less.
+
+**Provenance.** Each attempt record carries `loras` (the ids actually sent for that attempt,
+possibly empty), `effectiveSteps` (the count that ran) and `turboSchedulerShift` (the recipe's video
+sigma shift, absent in the base regime). `effectiveSteps` resolves through three sources, in order,
+and the record keeps the number rather than the rule:
+
+1. `model.advanced.steps`, when the plan set one — it wins over the recipe, exactly as it does on
+   the worker, for a caller who knows the checkpoint. The **shift** is not overridable that way: a
+   distilled checkpoint sampled at a shift it was not distilled for is the off-distribution render
+   the recipe exists to prevent.
+2. the selected recipe's own count (4 or 8, as the catalog declares per file);
+3. the partition's declared `defaults.steps` (50).
+
+The record agrees with the payload by construction: both read the compiled request, which is the one
+place the resolution happens. A plan that declares no `loras` dispatches exactly what it did before
+the field existed — no `loras` in the body, no `advanced.steps`, and `effectiveSteps: 50`.
+
+**The planner declares them by default.** The capability envelope lists the accelerators this host
+has **installed** — at most one per partition, paired by the catalog's `modelIds` — and the output
+contract shows the exact `loras` array to copy. Install state *is* a filter here (unlike the
+reference partition's, which is deliberately host-independent), because an adapter whose weights are
+not on the render host's disk is a 400 at enqueue. A draft naming an id the host does not offer is
+refused by name, with the offered ids handed back, and repaired in the normal repair round. A brief
+that sets **`"preferQuality": true`** keeps the full step path: nothing is offered, and any
+selection a draft writes anyway is stripped rather than argued with.
+
+**The shipped plans.** `config/film-harness/courier-workshop/plan.v2.turbo.jsonc` is
+`plan.v2.jsonc` with `model.loras` and nothing else — the same six beats, ids, durations, geometry,
+seeds and bound roles — so a turbo take and a 50-step take of the same film are directly comparable.
+Its header justifies the base-partition choice (`minimax_h3_turbo_4step_v01`, not the 8-step or
+768p files): the v0.1 544p pair declares the same `(4 NFE, video shift 12.0, audio shift 3.0)`
+triple as the ref2v adapter, so a mixed plan samples both halves of its film on one schedule.
+
 Validation follows the resolution: each shot is checked against the **resolved** partition's
 declared capabilities, menus and caps. A reference shot whose partition is not in the catalog is
 refused **by name, with the shot**, never dispatched at the base checkpoint.
