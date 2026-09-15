@@ -201,6 +201,10 @@ test("workflow exposes one fixed Windows diagnostic with offline cleanup and dia
   assert.match(workflow, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
   assert.match(job, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(job, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
+  assert.match(job, /Set up MSVC developer environment\n\s+uses: ilammy\/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756/);
+  assert.match(job, /Get-Command cl\.exe -ErrorAction SilentlyContinue/);
+  assert.match(job, /\$env:NVCC_CCBIN = \$nvccHost/);
+  assert.ok(job.indexOf("Get-Command cl.exe") < job.indexOf("cargo fetch --locked"));
   assert.match(job, /diagnostic\.mjs prepare/);
   assert.match(job, /cargo fetch --locked/);
   assert.match(job, /cargo build --release --locked/);
