@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import {
   diagnosticShouldStop,
   parseDiagnosticCudaGpu,
   parseDiagnosticCudaProcesses,
+  prepareDiagnosticOutput,
   readCurrentInferencePin,
   selectDiagnosticRecords,
   validateDiagnosticInvocation,
@@ -82,6 +84,18 @@ test("fixed diagnostic invocation is Windows-only, offline, and runner-temp conf
     { platform: "win32", runnerTemp: "/runner", noJobDownloads: "1", gpuId: "1" },
     { platform: "win32", runnerTemp: "/other", noJobDownloads: "1", gpuId: "0" },
   ]) assert.throws(() => validateDiagnosticInvocation({ ...options, ...mutation }), /requires Windows CUDA|no-job-downloads|requires GPU 0|confined runner/);
+});
+
+test("diagnostic prepares authenticated failure evidence before source compilation", async () => {
+  const runnerTemp = await mkdtemp(path.join(os.tmpdir(), "starvector-diagnostic-"));
+  const output = path.join(runnerTemp, "output"), options = { root: path.join(runnerTemp, "repo"), output, weightsRoot: path.join(runnerTemp, "weights"), corpusAssetsRoot: path.join(runnerTemp, "corpus"), permanentPin, corpusSourcePin: corpusPin, expectedSceneWorksRevision: sceneWorksRevision, leaseRoot: path.join(runnerTemp, "leases"), leaseHelper: path.join(runnerTemp, "lease"), platform: "win32", runnerTemp, noJobDownloads: "1", gpuId: "0" };
+  try {
+    const value = await prepareDiagnosticOutput(options);
+    assert.equal(value.status, "source_bootstrap");
+    assert.equal(value.usable_for_terminal_acceptance, false);
+    assert.deepEqual(JSON.parse(await readFile(path.join(output, "diagnostic-bootstrap.json"), "utf8")), value);
+    await assert.rejects(() => prepareDiagnosticOutput(options), /EEXIST/);
+  } finally { await rm(runnerTemp, { recursive: true, force: true }); }
 });
 
 test("selected records are the fixed former failures with the exact Detailed budget", async () => {
@@ -187,7 +201,10 @@ test("workflow exposes one fixed Windows diagnostic with offline cleanup and dia
   assert.match(workflow, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
   assert.match(job, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(job, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
-  assert.match(job, /cargo build --release --locked --offline/);
+  assert.match(job, /diagnostic\.mjs prepare/);
+  assert.match(job, /cargo fetch --locked/);
+  assert.match(job, /cargo build --release --locked/);
+  assert.doesNotMatch(job, /CARGO_NET_OFFLINE|cargo fetch[^\n]*--manifest-path|huggingface-cli|wget|curl/);
   assert.match(job, /starvector-terminal-diagnostic\.mjs/);
   assert.match(job, /source-pin "\$env:GITHUB_WORKSPACE"/);
   assert.match(job, /STARVECTOR_DIAGNOSTIC_PERMANENT_PIN=\$currentPin/);

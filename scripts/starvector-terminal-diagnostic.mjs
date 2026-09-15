@@ -4,7 +4,7 @@
 // acceptance, preflight, or performance evidence.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
@@ -180,12 +180,35 @@ async function writeRecord(file, value) {
   await rename(temporary, file);
 }
 
+function diagnosticBootstrap(inputs) {
+  return { schema_version: 1, kind: "starvector_cuda_product_route_diagnostic_bootstrap", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, sceneworks_revision: inputs.expectedSceneWorksRevision, inference_revision: inputs.permanentPin, corpus_source_revision: inputs.corpusSourcePin, tuple: DIAGNOSTIC_TUPLE, status: "source_bootstrap", workflow: { run_id: String(process.env.GITHUB_RUN_ID ?? "local"), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) }, recorded_at: new Date().toISOString() };
+}
+
+export async function prepareDiagnosticOutput(options) {
+  const inputs = validateDiagnosticInvocation(options);
+  await mkdir(inputs.output, { recursive: false });
+  const bootstrap = diagnosticBootstrap(inputs);
+  await writeFile(path.join(inputs.output, "diagnostic-bootstrap.json"), JSON.stringify(bootstrap, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  return bootstrap;
+}
+
+async function verifyDiagnosticBootstrap(inputs) {
+  const entries = await readdir(inputs.output);
+  if (JSON.stringify(entries.sort()) !== JSON.stringify(["diagnostic-bootstrap.json"])) die("diagnostic output is not a fresh prepared directory");
+  const file = path.join(inputs.output, "diagnostic-bootstrap.json"), info = await lstat(file);
+  if (!info.isFile() || info.isSymbolicLink()) die("diagnostic bootstrap is not a regular file");
+  const observed = JSON.parse(await readFile(file, "utf8")), expected = diagnosticBootstrap(inputs);
+  for (const key of ["schema_version", "kind", "acceptance_use", "usable_for_terminal_acceptance", "sceneworks_revision", "inference_revision", "corpus_source_revision", "tuple", "status"]) if (observed[key] !== expected[key]) die(`diagnostic bootstrap identity drifted at ${key}`);
+  if (observed.workflow?.run_id !== expected.workflow.run_id || observed.workflow?.run_attempt !== expected.workflow.run_attempt || typeof observed.recorded_at !== "string") die("diagnostic bootstrap workflow identity drifted");
+  return observed;
+}
+
 export async function runDiagnostic(options, dependencies = {}) {
   const inputs = validateDiagnosticInvocation(options);
   const apiUrl = "http://127.0.0.1:17831";
   const runId = `diagnostic-${process.env.GITHUB_RUN_ID ?? "local"}-${process.env.GITHUB_RUN_ATTEMPT ?? "0"}`;
   const acquire = dependencies.acquire ?? acquireStableLease, start = dependencies.start ?? startProductService, stop = dependencies.stop ?? stopProductService, importAssets = dependencies.importAssets ?? importTupleAssets, submit = dependencies.submit ?? submitAndPoll, preserve = dependencies.preserve ?? preserveTerminalDiagnostics, occupancy = dependencies.occupancy ?? captureDiagnosticCudaOccupancy;
-  await mkdir(inputs.output, { recursive: false });
+  await verifyDiagnosticBootstrap(inputs);
   const resultPath = path.join(inputs.output, "diagnostic-results.json"), transcript = path.join(inputs.output, "diagnostic-route.ndjson");
   const result = { schema_version: 1, kind: "starvector_cuda_product_route_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, tuple: DIAGNOSTIC_TUPLE, sceneworks_revision: inputs.expectedSceneWorksRevision, inference_revision: inputs.permanentPin, corpus_source_revision: inputs.corpusSourcePin, model: MODEL, detail_budget: DIAGNOSTIC_BUDGET, selected_case_indexes: [...DIAGNOSTIC_CASES], stop_rule: DIAGNOSTIC_STOP, workflow: { run_id: String(process.env.GITHUB_RUN_ID ?? "local"), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) }, status: "starting", results: [] };
   await writeRecord(resultPath, result);
@@ -238,6 +261,7 @@ export async function runDiagnostic(options, dependencies = {}) {
 
 if (isExecutedModule(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
-  const run = command === "source-pin" ? readCurrentInferencePin(args[0]).then((pin) => console.log(pin)) : command === "run" ? (() => { const [root, output, weightsRoot, corpusAssetsRoot, permanentPin, corpusSourcePin, expectedSceneWorksRevision, leaseRoot, leaseHelper] = args; return runDiagnostic({ root, output, weightsRoot, corpusAssetsRoot, permanentPin, corpusSourcePin, expectedSceneWorksRevision, leaseRoot, leaseHelper }).then((result) => console.log(JSON.stringify({ status: result.status, accepted: result.results.filter((item) => item.accepted).length, rejected: result.results.filter((item) => !item.accepted).length }))); })() : Promise.reject(new Error("usage: source-pin <root> | run <root> <output> <weights-root> <corpus-assets-root> <pin> <corpus-pin> <sceneworks-revision> <lease-root> <lease-helper>"));
+  const invocation = () => { const [root, output, weightsRoot, corpusAssetsRoot, permanentPin, corpusSourcePin, expectedSceneWorksRevision, leaseRoot, leaseHelper] = args; return { root, output, weightsRoot, corpusAssetsRoot, permanentPin, corpusSourcePin, expectedSceneWorksRevision, leaseRoot, leaseHelper }; };
+  const run = command === "source-pin" ? readCurrentInferencePin(args[0]).then((pin) => console.log(pin)) : command === "prepare" ? prepareDiagnosticOutput(invocation()).then((result) => console.log(JSON.stringify(result))) : command === "run" ? runDiagnostic(invocation()).then((result) => console.log(JSON.stringify({ status: result.status, accepted: result.results.filter((item) => item.accepted).length, rejected: result.results.filter((item) => !item.accepted).length }))) : Promise.reject(new Error("usage: source-pin <root> | prepare|run <root> <output> <weights-root> <corpus-assets-root> <pin> <corpus-pin> <sceneworks-revision> <lease-root> <lease-helper>"));
   run.catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
