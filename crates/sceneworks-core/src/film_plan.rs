@@ -2593,27 +2593,40 @@ fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
 /// Empty for a model the embedded catalog does not hold — a user-installed or external entry —
 /// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
 /// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
+///
+/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
+/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
+/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
 pub fn model_lora_families(model_id: &str) -> Vec<String> {
-    let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
-    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-        return Vec::new();
-    };
-    manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
-        .and_then(|model| model.get("loraCompatibility"))
-        .and_then(|compat| compat.get("families"))
-        .and_then(Value::as_array)
-        .map(|families| {
-            families
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
+    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
+        std::sync::OnceLock::new();
+    MODEL_LORA_FAMILIES
+        .get_or_init(|| {
+            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
+            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
+                return BTreeMap::new();
+            };
+            manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| {
+                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
+                    let families = model
+                        .get("loraCompatibility")?
+                        .get("families")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    Some((id, families))
+                })
                 .collect()
         })
+        .get(model_id)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -2743,10 +2756,17 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         .as_ref()
         .and_then(|advanced| advanced.steps)
     {
-        if steps < 1 {
+        // Both ends, because the COMPILER's `u32::try_from(..).ok()` silently drops anything
+        // outside the range: a `steps` above `u32::MAX` validated clean and then rendered at the
+        // recipe's own count, with no field named and nothing in the record to say the override
+        // was discarded. The validator owns the whole admitted range, so what validates compiles.
+        if steps < 1 || u32::try_from(steps).is_err() {
             findings.push(PlanDiagnostic::plan(
                 "model.advanced.steps",
-                format!("steps must be a positive number of model evaluations, got {steps}"),
+                format!(
+                    "steps must be a model-evaluation count between 1 and {}, got {steps}",
+                    u32::MAX
+                ),
             ));
         }
     }
@@ -3861,9 +3881,6 @@ mod tests {
         findings.iter().map(ToString::to_string).collect()
     }
 
-    /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
-    /// an out-of-range value is REFUSED naming the field and the range — never clamped, since the
-    /// value is the reference token budget the author asked for.
     /// A plan whose LoRA list names nothing the shipped catalog carries is refused, and the
     /// refusal NAMES the id — the fix is a one-word edit, so the message has to say which word.
     #[test]
@@ -3951,12 +3968,16 @@ mod tests {
         );
     }
 
-    /// `model.advanced.steps` is a POSITIVE model-evaluation count. Zero and a negative are both
-    /// refused by name rather than by a serde error that names no plan field — which is why the
-    /// field is typed signed.
+    /// `model.advanced.steps` is a model-evaluation count in `1..=u32::MAX`. Zero, a negative and a
+    /// value above the compiler's `u32` are all refused by name rather than by a serde error that
+    /// names no plan field — which is why the field is typed signed and wide.
+    ///
+    /// The upper bound is not decoration: `compile_shot` narrows the field with
+    /// `u32::try_from(..).ok()`, so a value above `u32::MAX` that validated clean would be dropped
+    /// silently and the film would render at the recipe's count with nothing saying so.
     #[test]
     fn film_advanced_steps_must_be_positive() {
-        for steps in [0, -4] {
+        for steps in [0, -4, i64::from(u32::MAX) + 1] {
             let mut document = plan_json();
             document["model"]["advanced"] = json!({ "steps": steps });
             let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
@@ -3974,10 +3995,18 @@ mod tests {
                 findings[0].message
             );
         }
-        let mut document = plan_json();
-        document["model"]["advanced"] = json!({ "steps": 4 });
-        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
-        assert!(validate_plan_structure(&plan).is_empty());
+        // Both ends of the admitted range are INCLUSIVE, so the refusals above are about the range
+        // rather than about a number near it.
+        for steps in [1, 4, i64::from(u32::MAX)] {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "steps": steps });
+            let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+            assert!(
+                validate_plan_structure(&plan).is_empty(),
+                "steps {steps}: {:?}",
+                messages(&validate_plan_structure(&plan))
+            );
+        }
     }
 
     /// A plan that declares NO LoRAs is unchanged: no field is serialized, nothing resolves, and
@@ -4034,6 +4063,9 @@ mod tests {
         .is_empty());
     }
 
+    /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
+    /// an out-of-range value is REFUSED naming the field and the range — never clamped, since the
+    /// value is the reference token budget the author asked for.
     #[test]
     fn plan_refuses_a_reference_image_short_edge_outside_1024_through_2048() {
         let with_edge = |edge: Value| -> ProductionPlan {

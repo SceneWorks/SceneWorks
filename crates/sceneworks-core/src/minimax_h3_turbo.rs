@@ -89,6 +89,17 @@ pub struct TurboRecipe {
     /// The audio sigma shift. Recorded on the asset; the engine is fixed at
     /// [`ENGINE_AUDIO_SIGMA_SHIFT`].
     pub audio_shift: f32,
+    /// The SHORT EDGE of the canvas this file was distilled at (`sampling.trainingShortEdge`), when
+    /// the catalog declares one — 768 for a 768p file, 544 for a 544p one.
+    ///
+    /// Optional, and NO shipped entry declares it today: upstream publishes the canvas as prose in
+    /// its model-specs table rather than as a number per file, and inferring one from a filename is
+    /// the kind of guess this module exists to avoid. An undeclared canvas is GENERIC — it matches
+    /// nothing and loses nothing, which is why
+    /// [`crate::film_planner::PlannerCapabilities::with_installed_turbo_loras`] falls straight
+    /// through its canvas rule on the shipped catalog. Declaring it on an entry is the one edit
+    /// that makes that rule bite for that file.
+    pub training_short_edge: Option<u32>,
 }
 
 static TURBO_RECIPES: OnceLock<Vec<TurboRecipe>> = OnceLock::new();
@@ -138,12 +149,18 @@ fn parse_turbo_recipes(contents: &str) -> Vec<TurboRecipe> {
                 .and_then(Value::as_str)
                 .unwrap_or(&lora_id)
                 .to_owned();
+            let training_short_edge = sampling
+                .get("trainingShortEdge")
+                .and_then(Value::as_u64)
+                .and_then(|edge| u32::try_from(edge).ok())
+                .filter(|edge| *edge > 0);
             (steps > 0 && video_shift > 0.0 && audio_shift > 0.0).then_some(TurboRecipe {
                 lora_id,
                 name,
                 steps,
                 video_shift,
                 audio_shift,
+                training_short_edge,
             })
         })
         .collect()
@@ -211,7 +228,11 @@ pub fn resolve_turbo_recipe(
 
 impl TurboRecipe {
     /// Whether two recipes ask for the same schedule (ignoring identity).
-    fn recipe_eq(&self, other: &Self) -> bool {
+    ///
+    /// This is also the planner's test for schedule PARITY across a mixed film's two partitions
+    /// (sc-23406): one notion of "the same schedule", shared with the refusal above, so the
+    /// envelope cannot offer a pair the worker would then call contradictory.
+    pub(crate) fn recipe_eq(&self, other: &Self) -> bool {
         self.steps == other.steps
             && self.video_shift.to_bits() == other.video_shift.to_bits()
             && self.audio_shift.to_bits() == other.audio_shift.to_bits()

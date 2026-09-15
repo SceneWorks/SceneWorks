@@ -6626,7 +6626,8 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
     assert_eq!(
         compiled["schemaVersion"],
         sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
-        "sc-23402 bumped this to 2: `model` is the RESOLVED partition id"
+        "sc-23402 bumped this to 2 (`model` is the RESOLVED partition id) and sc-23406 to 3 (a \
+         request carries its LoRAs and its step count)"
     );
     assert_eq!(compiled["planId"], "courier-workshop-planned");
     assert_eq!(compiled["model"]["fps"], 24);

@@ -27,11 +27,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::film_plan::{
-    parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits, PlanModel,
-    PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning, ShotDependency,
-    BINDABLE_REFERENCE_KINDS, PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
+    parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits,
+    PlanLoraEntry, PlanModel, PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning,
+    ShotDependency, BINDABLE_REFERENCE_KINDS, PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
+use crate::minimax_h3_turbo::TurboRecipe;
 use crate::video_request::{default_fps, default_resolution, reference_caps};
 
 /// Schema version of [`ProductionBrief`] documents this module reads.
@@ -276,6 +277,16 @@ pub struct PlannerCapabilities {
     /// unreachable instruction. Empty means the base regime — nothing installed, or the brief
     /// opted out with `preferQuality`.
     pub turbo_loras: Vec<PlannerTurboLora>,
+    /// Every LoRA id this host reports INSTALLED, as `GET /api/v1/loras` returned them — a superset
+    /// of [`Self::turbo_loras`], which is the subset the envelope chose to offer.
+    ///
+    /// Kept because "installed" and "offered" answer different questions and only one of them is a
+    /// rule for the planner: a BRIEF may declare an adapter the envelope did not offer (a second
+    /// recipe for a partition, or a non-accelerator LoRA), and that is the author's call, not a
+    /// draft's mistake. What it may not be is absent from this disk, since that 400s at enqueue —
+    /// so [`lora_offer_findings`] judges a brief-declared id against this list and a
+    /// draft-contributed one against the offers.
+    pub installed_lora_ids: Vec<String>,
 }
 
 /// One installed accelerator the planner may declare, as the envelope states it.
@@ -343,6 +354,7 @@ pub fn capabilities_for(
             .unwrap_or(true),
         min_memory_gb: crate::film_plan::model_min_memory_gb(entry, lane),
         turbo_loras: Vec::new(),
+        installed_lora_ids: Vec::new(),
     }
 }
 
@@ -408,29 +420,130 @@ impl PlannerCapabilities {
     /// the envelope can never offer an adapter onto the checkpoint it was not distilled for. At
     /// most one recipe per partition is offered, because a render has one schedule and a list the
     /// planner has to choose from is a list it can choose two from.
+    ///
+    /// # Which one, when a partition has several
+    ///
+    /// By RULE, never by position. The route hands its ids back sorted by `(scope, family, name)`
+    /// (`apps/rust-api/src/loras.rs`), which on the shipped catalog puts
+    /// `minimax_h3_turbo_4step_768p` ahead of `minimax_h3_turbo_4step_v01` for no reason anyone
+    /// chose — taking the first match would have made a display-name sort decide the film's video
+    /// shift. Per partition, in order:
+    ///
+    /// 1. **Schedule parity.** The accelerator whose recipe is the one already chosen for the other
+    ///    partition in use ([`TurboRecipe::recipe_eq`]). A mixed film dispatches both partitions,
+    ///    and sampling its two halves on two different schedules is the thing
+    ///    `plan.v2.turbo.jsonc`'s header exists to avoid.
+    /// 2. **Training canvas.** The accelerator whose declared training short edge equals this
+    ///    plan's own. Undeclared is GENERIC: it neither matches nor loses, and no shipped entry
+    ///    declares one today (see [`TurboRecipe::training_short_edge`]), so this rule is currently
+    ///    inert on the shipped catalog and becomes live the moment a canvas is declared.
+    /// 3. **Fewest steps, then catalog order.** Fewest steps because that is what the accelerator
+    ///    is FOR, and catalog order — not the route's — as the tiebreak, so the answer does not
+    ///    move when a display name is edited.
+    ///
+    /// The REFERENCE partition is resolved first when it is offered, because it is the constrained
+    /// end: exactly one shipped adapter distils the reference path, so resolving it first gives the
+    /// base partition a parity anchor to match, rather than the other way round.
+    ///
+    /// The reference partition is offered only when this envelope offers reference conditioning at
+    /// all ([`Self::offers_references`]) — on a run with no reference pack no shot can resolve
+    /// there, and an adapter for a partition the film never dispatches is a second id for the
+    /// planner to copy and nothing more.
     pub fn with_installed_turbo_loras(mut self, installed_lora_ids: &[String]) -> Self {
-        let mut offers: Vec<PlannerTurboLora> = Vec::new();
-        for partition in crate::film_plan::plan_partition_ids(&self.model_id) {
-            let owned: Vec<String> = installed_lora_ids.to_vec();
-            let Some(lora) = crate::film_plan::plan_loras_for_partition(&owned, &partition)
-                .into_iter()
-                .find_map(|lora| {
-                    crate::minimax_h3_turbo::turbo_recipe_for_lora_id(&lora.id)
-                        .map(|recipe| (lora, recipe))
-                })
-            else {
+        self.installed_lora_ids = installed_lora_ids.to_vec();
+        // Catalog order, not the caller's: the tiebreak below is the catalog's and the route's
+        // sort must not reach it. Membership is the only thing the host's list decides.
+        let installed: Vec<String> = crate::film_plan::builtin_plan_loras()
+            .iter()
+            .map(|lora| lora.id.clone())
+            .filter(|id| installed_lora_ids.contains(id))
+            .collect();
+        let partitions: Vec<String> = crate::film_plan::plan_partition_ids(&self.model_id)
+            .into_iter()
+            .filter(|id| {
+                !crate::film_plan::is_reference_partition_id(id) || self.offers_references()
+            })
+            .collect();
+        // Reference partition FIRST, base against it; emitted below in the declared partition
+        // order so the contract's array does not reorder itself with the pack.
+        let mut resolution_order = partitions.clone();
+        resolution_order.sort_by_key(|id| !crate::film_plan::is_reference_partition_id(id));
+        let plan_short_edge = self
+            .default_resolution
+            .as_deref()
+            .and_then(parse_resolution)
+            .map(|(width, height)| width.min(height));
+        let mut chosen: Vec<(String, PlannerTurboLora)> = Vec::new();
+        let mut anchor: Option<&'static TurboRecipe> = None;
+        for partition in &resolution_order {
+            let candidates: Vec<(&'static PlanLoraEntry, &'static TurboRecipe)> =
+                crate::film_plan::plan_loras_for_partition(&installed, partition)
+                    .into_iter()
+                    .filter_map(|lora| {
+                        crate::minimax_h3_turbo::turbo_recipe_for_lora_id(&lora.id)
+                            .map(|recipe| (lora, recipe))
+                    })
+                    .collect();
+            let recipes: Vec<&TurboRecipe> = candidates.iter().map(|(_, recipe)| *recipe).collect();
+            let Some(index) = Self::choose_turbo_offer(&recipes, anchor, plan_short_edge) else {
                 continue;
             };
-            let (lora, recipe) = lora;
-            offers.push(PlannerTurboLora {
-                id: lora.id.clone(),
-                name: lora.name.clone(),
-                model_id: partition,
-                steps: recipe.steps,
-            });
+            let (lora, recipe) = candidates[index];
+            anchor = Some(recipe);
+            chosen.push((
+                partition.clone(),
+                PlannerTurboLora {
+                    id: lora.id.clone(),
+                    name: lora.name.clone(),
+                    model_id: partition.clone(),
+                    steps: recipe.steps,
+                },
+            ));
         }
-        self.turbo_loras = offers;
+        self.turbo_loras = partitions
+            .iter()
+            .filter_map(|partition| {
+                chosen
+                    .iter()
+                    .find(|(id, _)| id == partition)
+                    .map(|(_, offer)| offer.clone())
+            })
+            .collect();
         self
+    }
+
+    /// Which of one partition's installed accelerators to offer: the index into `recipes`, which
+    /// are in CATALOG order, or `None` when the partition has none.
+    ///
+    /// Pure over the recipes so the rule can be exercised without a catalog, and so the three tiers
+    /// are one readable list rather than three passes through
+    /// [`PlannerCapabilities::with_installed_turbo_loras`]. The tiers are documented there; this is
+    /// their whole implementation.
+    fn choose_turbo_offer(
+        recipes: &[&TurboRecipe],
+        anchor: Option<&TurboRecipe>,
+        plan_short_edge: Option<u32>,
+    ) -> Option<usize> {
+        if let Some(anchor) = anchor {
+            if let Some(index) = recipes.iter().position(|recipe| recipe.recipe_eq(anchor)) {
+                return Some(index);
+            }
+        }
+        if let Some(edge) = plan_short_edge {
+            if let Some(index) = recipes
+                .iter()
+                .position(|recipe| recipe.training_short_edge == Some(edge))
+            {
+                return Some(index);
+            }
+        }
+        // `min_by_key` keeps the FIRST minimum, and `recipes` is in catalog order, so the tiebreak
+        // is the catalog's.
+        recipes
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, recipe)| recipe.steps)
+            .map(|(index, _)| index)
     }
 
     /// Whether this envelope offers reference conditioning at all — the one question the contract,
@@ -502,12 +615,17 @@ impl PlannerCapabilities {
         });
         if self.turbo_loras.is_empty() {
             lines.push(
-                "Accelerators: none are installed for this model, so write no loras field. Every                  shot renders at the model's full step count."
+                "Accelerators: none are installed for this model, so write no loras field. Every \
+                 shot renders at the model's full step count."
                     .to_owned(),
             );
         } else {
             lines.push(format!(
-                "Accelerators (step-distill LoRAs), INSTALLED and ON BY DEFAULT: {}. Declare every                  one of these ids in the top-level loras array — they are what make this film take                  minutes instead of hours, and each one is distilled for the checkpoint named                  beside it, so the ones that do not apply to a given shot are simply not used.                  Never invent an id, and never write more than these.",
+                "Accelerators (step-distill LoRAs), INSTALLED and ON BY DEFAULT: {}. Declare every \
+                 one of these ids in the top-level loras array — they are what make this film take \
+                 minutes instead of hours, and each one is distilled for the checkpoint named \
+                 beside it, so the ones that do not apply to a given shot are simply not used. \
+                 Never invent an id, and never write more than these.",
                 self.turbo_loras
                     .iter()
                     .map(|lora| format!(
@@ -1131,13 +1249,38 @@ pub fn shape_findings(brief: &ProductionBrief, plan: &ProductionPlan) -> Vec<Pla
 /// enqueue after the whole film had been planned, so they are repair-round findings naming the id —
 /// the repair round hands the planner the offered ids back, which is what turns a refusal into a
 /// repair.
+///
+/// # Only what the DRAFT contributed is judged against the offers
+///
+/// [`draft_to_plan`] keeps a brief's own `model.loras` and takes the draft's only when the brief
+/// left the field open, so `plan.model.loras` can hold ids the planner never wrote. The offer
+/// policy is a rule FOR THE PLANNER — at most one recipe per partition, chosen by the envelope —
+/// and holding an author's own selection to it produced a finding no repair round could clear: the
+/// draft cannot withdraw an id it never wrote, so every round re-emitted the same finding until the
+/// run gave up. A brief-declared id is still judged on everything that is not the offer policy: it
+/// must be INSTALLED here (below), and the document rules — family, `modelIds`, one recipe per
+/// partition — are [`crate::film_plan::validate_plan_structure`]'s, which judges the whole list.
 pub fn lora_offer_findings(
     caps: &PlannerCapabilities,
+    brief: &ProductionBrief,
     plan: &ProductionPlan,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     for id in &plan.model.loras {
         if caps.turbo_loras.iter().any(|offer| offer.id == *id) {
+            continue;
+        }
+        if brief.model.loras.contains(id) {
+            if !caps.installed_lora_ids.contains(id) {
+                findings.push(PlanDiagnostic::plan(
+                    "model.loras",
+                    format!(
+                        "{id:?} is declared by the brief but is not installed on this host, so \
+                         every shot would be refused at enqueue; install it, or drop it from the \
+                         brief's model.loras"
+                    ),
+                ));
+            }
             continue;
         }
         findings.push(PlanDiagnostic::plan(
@@ -1181,7 +1324,7 @@ pub fn validate_generated_plan(
     findings.extend(role_coverage_findings(brief, plan));
     findings.extend(shape_findings(brief, plan));
     if let Some(caps) = caps {
-        findings.extend(lora_offer_findings(caps, plan));
+        findings.extend(lora_offer_findings(caps, brief, plan));
     }
     findings.extend(validate_all(plan, pack, pack_dir, model_entry));
     findings
@@ -1381,7 +1524,9 @@ pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
         (
             format!("  \"loras\": [{ids}],\n"),
             format!(
-                "\n- loras is the top-level list of installed accelerators, copied EXACTLY as                  shown: [{ids}]. Write it. Omitting it, or naming any other id, makes this film                  render at the full step count — hours instead of minutes."
+                "\n- loras is the top-level list of installed accelerators, copied EXACTLY as \
+                 shown: [{ids}]. Write it. Omitting it, or naming any other id, makes this film \
+                 render at the full step count — hours instead of minutes."
             ),
         )
     };
@@ -1617,26 +1762,64 @@ mod tests {
 
     // ── sc-23406: the turbo recipes the envelope offers and the draft declares ───────────────
 
+    /// All FOUR shipped MiniMax-H3 accelerators, in the order `GET /api/v1/loras` hands them back.
+    ///
+    /// That route sorts by `(scope, family, name)` (`apps/rust-api/src/loras.rs`) and all four
+    /// share a scope and a family, so the display NAME alone orders them — which is why this list
+    /// leads with the ref2v adapter and puts the 768p file ahead of the v0.1 one. A test driven
+    /// from a hand-picked order would assert an outcome the route never produces; the guard below
+    /// pins this literal to the shipped catalog's own names rather than to that reasoning.
+    fn route_ordered_turbo_ids() -> Vec<String> {
+        [
+            "minimax_h3_ref2v_turbo_4step",
+            "minimax_h3_turbo_4step_768p",
+            "minimax_h3_turbo_4step_v01",
+            "minimax_h3_turbo_8step",
+        ]
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect()
+    }
+
+    /// 🔴 The order above IS `list_loras`'s: sorting the shipped catalog's own display names
+    /// reproduces it. Without this the offer tests would be driven from a literal nobody checked.
+    #[test]
+    fn the_route_hands_the_accelerators_back_in_display_name_order() {
+        let mut by_name = route_ordered_turbo_ids();
+        by_name.sort_by_key(|id| {
+            let entry = crate::film_plan::builtin_plan_lora(id).expect("a shipped id");
+            // Every one of the four is scope `builtin`, family `minimax-h3`; the name breaks it.
+            (entry.family.clone(), entry.name.clone())
+        });
+        assert_eq!(by_name, route_ordered_turbo_ids());
+    }
+
     /// The envelope built on what this host has INSTALLED: one accelerator per partition, paired
     /// by the catalog's own `modelIds` allowlist rather than by anything the test asserts twice.
+    ///
+    /// Reference conditioning is offered (the widened, pack-narrowed shape a mixed film plans
+    /// against), because the reference partition's accelerator is offered only when it is.
     fn turbo_caps() -> PlannerCapabilities {
-        capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx).with_installed_turbo_loras(
-            &[
-                "minimax_h3_ref2v_turbo_4step".to_owned(),
-                "minimax_h3_turbo_4step_v01".to_owned(),
-                // Installed but NOT offered: it would be a second recipe on the base partition.
-                "minimax_h3_turbo_8step".to_owned(),
-            ],
-        )
+        capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack())
+            .with_installed_turbo_loras(&route_ordered_turbo_ids())
     }
 
     /// 🔴 The envelope offers at most ONE accelerator per partition, paired to the checkpoint its
     /// catalog entry names — and the contract and the prompt section both say so with the ids the
     /// draft must copy.
     ///
-    /// The three-installed / two-offered shape is the point: two fl2v adapters are installed and
-    /// only one is offered, because offering both would let a draft declare two schedules for one
+    /// The four-installed / two-offered shape is the point: THREE fl2v adapters are installed and
+    /// only one is offered, because offering two would let a draft declare two schedules for one
     /// checkpoint — the conflict `validate_plan_structure` then refuses, after a full planning run.
+    ///
+    /// Which one is the rule's answer, not the list's: the route hands its ids back sorted by
+    /// display name, so a first-match implementation offers `minimax_h3_turbo_4step_768p` (video
+    /// shift 6.0) beside a ref2v adapter at shift 12.0 and samples the two halves of one film on
+    /// two schedules. Schedule parity with the reference partition picks
+    /// `minimax_h3_turbo_4step_v01`, which is what `plan.v2.turbo.jsonc`'s header says the shipped
+    /// plan uses.
     #[test]
     fn the_envelope_offers_one_installed_accelerator_per_partition() {
         let caps = turbo_caps();
@@ -1668,6 +1851,16 @@ mod tests {
             "the answer's shape carries the ids to copy: {contract}"
         );
 
+        // The choice is the RULE's, not the list's: permuting what the host reports changes
+        // nothing. (Reversed, a first-match implementation offers the 8-step adapter instead.)
+        let mut reversed = route_ordered_turbo_ids();
+        reversed.reverse();
+        let permuted = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack())
+            .with_installed_turbo_loras(&reversed);
+        assert_eq!(permuted.turbo_loras, caps.turbo_loras);
+
         // A host with nothing installed is shown NO loras field and no rule about one — an
         // instruction it could only be refused for following.
         let bare = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
@@ -1682,6 +1875,110 @@ mod tests {
             !plan_json_contract(&bare).contains("\"loras\""),
             "{}",
             plan_json_contract(&bare)
+        );
+    }
+
+    /// 🔴 The reference partition's accelerator is offered only when this envelope offers
+    /// reference conditioning at all.
+    ///
+    /// An envelope narrowed to a pack that approves nothing — or built where the catalog serves no
+    /// reference partition — can produce no shot that dispatches there, so the ref2v adapter is an
+    /// id the planner would copy into a list that reaches no shot, and a second name to get wrong.
+    ///
+    /// With no reference partition there is also no parity anchor, so the base offer falls to the
+    /// last tier: fewest steps, then CATALOG order — which is the 768p file, not the v0.1 one the
+    /// mixed envelope offers. Those are the same rule reaching two answers from two premises.
+    #[test]
+    fn the_reference_accelerator_is_offered_only_when_references_are() {
+        let offered = |caps: PlannerCapabilities| -> Vec<(String, String)> {
+            caps.with_installed_turbo_loras(&route_ordered_turbo_ids())
+                .turbo_loras
+                .iter()
+                .map(|lora| (lora.id.clone(), lora.model_id.clone()))
+                .collect()
+        };
+        let base_only = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx);
+        assert!(!base_only.offers_references());
+        let base_offer = vec![(
+            "minimax_h3_turbo_4step_768p".to_owned(),
+            "minimax_h3".to_owned(),
+        )];
+        assert_eq!(offered(base_only), base_offer);
+        // The tiebreak is the CATALOG's order, not the host's: reversing what the host reports
+        // must not move a tie (both 4-step files) onto the other file.
+        let mut reversed = route_ordered_turbo_ids();
+        reversed.reverse();
+        assert_eq!(
+            capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+                .with_installed_turbo_loras(&reversed)
+                .turbo_loras
+                .iter()
+                .map(|lora| (lora.id.clone(), lora.model_id.clone()))
+                .collect::<Vec<_>>(),
+            base_offer
+        );
+
+        // The reference partition IS served here, but the pack approves nothing bindable, so the
+        // envelope narrows out of reference conditioning and the offer goes with it.
+        let narrowed = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack_without_references());
+        assert!(!narrowed.offers_references());
+        assert_eq!(
+            offered(narrowed)
+                .iter()
+                .map(|(_, partition)| partition.clone())
+                .collect::<Vec<_>>(),
+            vec!["minimax_h3".to_owned()]
+        );
+    }
+
+    /// 🔴 The three tiers of the offer rule, driven directly so each one is asserted where it
+    /// DECIDES rather than only where the shipped catalog happens to exercise it.
+    ///
+    /// The canvas tier is the one the shipped catalog cannot reach — no entry declares a training
+    /// short edge — so without this it would be a rule nothing had ever run.
+    #[test]
+    fn the_offer_rule_prefers_parity_then_canvas_then_fewest_steps() {
+        let recipe = |id: &str, steps: u32, video_shift: f32, edge: Option<u32>| TurboRecipe {
+            lora_id: id.to_owned(),
+            name: id.to_owned(),
+            steps,
+            video_shift,
+            audio_shift: 3.0,
+            training_short_edge: edge,
+        };
+        let fast_768 = recipe("fast_768", 4, 6.0, Some(768));
+        let fast_544 = recipe("fast_544", 4, 12.0, None);
+        let slow_320 = recipe("slow_320", 8, 12.0, Some(320));
+        let candidates = [&fast_768, &fast_544, &slow_320];
+
+        // 1. Parity with the partition already resolved wins, even though the anchor's match is
+        //    neither first nor the fewest-steps answer's equal.
+        let anchor = recipe("ref", 8, 12.0, None);
+        assert_eq!(
+            PlannerCapabilities::choose_turbo_offer(&candidates, Some(&anchor), Some(768)),
+            Some(2),
+            "the 8-step schedule the other partition runs"
+        );
+        // 2. No parity: the declared canvas matching the plan's short edge, over fewer steps.
+        assert_eq!(
+            PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(320)),
+            Some(2)
+        );
+        // 3. Neither: fewest steps, then catalog order — `fast_544` ties `fast_768` and loses on
+        //    position. An undeclared canvas never matches, so it cannot win tier 2 by default.
+        assert_eq!(
+            PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(544)),
+            Some(0)
+        );
+        assert_eq!(
+            PlannerCapabilities::choose_turbo_offer(&candidates, None, None),
+            Some(0)
+        );
+        assert_eq!(
+            PlannerCapabilities::choose_turbo_offer(&[], None, None),
+            None
         );
     }
 
@@ -1722,13 +2019,15 @@ mod tests {
     /// than a dead end.
     ///
     /// Two shapes, because they fail in different places: an id no catalog carries at all (the
-    /// document validator's refusal) and an id the catalog carries but this host has not installed
-    /// (the envelope's, which the document validator cannot see).
+    /// document validator's refusal) and an id the catalog carries, and this host even has
+    /// installed, but the envelope did not offer (the envelope's, which the document validator
+    /// cannot see).
     #[test]
     fn a_draft_naming_an_unoffered_accelerator_is_refused_by_name() {
         let brief = brief();
         let caps = turbo_caps();
-        // Not installed here — a real catalog id, so only the envelope can refuse it.
+        // Installed here, and NOT offered: it is the second recipe on the base partition, so a
+        // draft that writes it is writing an id the envelope never showed it.
         let draft: PlannerDraft = serde_json::from_value(json!({
             "loras": ["minimax_h3_turbo_4step_768p"],
             "shots": [
@@ -1783,6 +2082,61 @@ mod tests {
                 .iter()
                 .any(|finding| finding.contains("minimax_h3_turbo_fastest")),
             "{findings:?}"
+        );
+    }
+
+    /// 🔴 An adapter the BRIEF declared is judged on install state, not on the offer policy.
+    ///
+    /// The offer policy is a rule for the planner — one recipe per partition, the envelope's pick —
+    /// and the draft never wrote this id, so a finding against it is one no repair round can clear:
+    /// the planner would be asked, round after round, to withdraw something it did not write, until
+    /// `generate` gave up. What the brief may NOT do is name an adapter this host has not
+    /// installed, because that 400s at enqueue whoever chose it.
+    #[test]
+    fn a_brief_declared_accelerator_is_judged_on_install_state_not_on_the_offer() {
+        let mut document = brief_json();
+        // Installed on this host (all four are) but NOT offered: a second recipe for the base
+        // partition, which is exactly the shape the offer policy withholds from the planner.
+        document["model"]["loras"] = json!(["minimax_h3_turbo_8step"]);
+        let author_brief: ProductionBrief = serde_json::from_value(document).expect("brief parses");
+        let draft = good_draft();
+        let plan = draft_to_plan(&author_brief, &draft);
+        assert_eq!(
+            plan.model.loras,
+            vec!["minimax_h3_turbo_8step"],
+            "the brief's own selection survives the draft"
+        );
+        let findings = messages(&validate_generated_plan(
+            &author_brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            Some(&turbo_caps()),
+        ));
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // Not installed, though: the envelope's own installed list is what says so, and the
+        // refusal names the id.
+        let uninstalled = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack())
+            .with_installed_turbo_loras(&["minimax_h3_ref2v_turbo_4step".to_owned()]);
+        let findings = messages(&validate_generated_plan(
+            &author_brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            Some(&uninstalled),
+        ));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("minimax_h3_turbo_8step") && findings[0].contains("not installed"),
+            "{}",
+            findings[0]
         );
     }
 
