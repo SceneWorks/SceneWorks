@@ -3975,6 +3975,96 @@ fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
     assert_eq!(request.temporal_upsample_rounds, Some(2));
 }
 
+/// sc-23402. The reference-image short edge the job asked for reaches the engine's
+/// `GenerationRequest`, and a request that named none leaves the field absent so gen-core's own
+/// default (2048) applies — the funnel neither invents a value nor drops one.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_video_funnel_carries_the_reference_image_short_edge_to_the_request() {
+    let probe = |short_edge: Option<u32>| -> Option<u32> {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let generator = ProbeGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "minimax_h3_ref",
+                family: "minimax_h3",
+                backend: "test",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            request: captured.clone(),
+            adapter_reports: Default::default(),
+            audio: None,
+        };
+        let input = VideoGenInput {
+            engine_id: "minimax_h3_ref",
+            prompt: "a courier".to_owned(),
+            width: 576,
+            height: 320,
+            frames: 125,
+            fps: 24,
+            reference_image_short_edge: short_edge,
+            ..VideoGenInput::default()
+        };
+        run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+            .expect("probe generation");
+        let request = captured.lock().unwrap().clone().expect("captured request");
+        request.reference_image_short_edge
+    };
+    assert_eq!(probe(Some(1536)), Some(1536));
+    assert_eq!(probe(Some(1024)), Some(1024));
+    assert_eq!(
+        probe(None),
+        None,
+        "an absent knob stays absent so the engine's own default resolves it"
+    );
+    // The recorded default and the engine's resolver are the same number.
+    assert_eq!(
+        sceneworks_core::video_request::effective_reference_image_short_edge(None),
+        gen_core::effective_reference_image_short_edge(&gen_core::GenerationRequest {
+            reference_image_short_edge: None,
+            ..Default::default()
+        }),
+    );
+}
+
+/// The `advanced.referenceImageShortEdge` parse the MiniMax-H3 arms run before any weight is read
+/// (sc-23402) — admitted inside 1024..=2048, refused outside it rather than clamped.
+#[test]
+fn minimax_h3_reference_short_edge_is_parsed_from_advanced_and_refused_out_of_range() {
+    let advanced = |value: Value| -> serde_json::Map<String, Value> {
+        json!({ "referenceImageShortEdge": value })
+            .as_object()
+            .cloned()
+            .expect("object")
+    };
+    assert_eq!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(
+            &serde_json::Map::new()
+        )
+        .expect("an absent knob parses"),
+        None
+    );
+    assert_eq!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(&advanced(json!(
+            1536
+        )))
+        .expect("1536 is admitted"),
+        Some(1536)
+    );
+    assert!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(&advanced(json!(512)))
+            .is_err(),
+        "below the floor is refused, never clamped"
+    );
+}
+
 /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.
 #[cfg(any(
     target_os = "macos",

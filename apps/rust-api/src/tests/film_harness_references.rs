@@ -213,13 +213,27 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
         );
     }
 
-    // THE acceptance criterion: `film-harness validate` accepts it for the courier plan.
-    let run_options = harness.options(harness.fixture_plan(), build.pack_path.clone(), None);
-    let (plan, validated) = film_harness::validate(Some(&harness.transport), &run_options)
-        .await
-        .expect("the generated pack validates for the courier plan");
-    assert_eq!(plan.id, "courier-workshop");
-    assert_eq!(validated.references.len(), 7);
+    // THE acceptance criterion: `film-harness validate` accepts it for the courier plan — both the
+    // phase-1 baseline `plan.jsonc` (keyframe conditioning off the inherited plate) and the
+    // reference-conditioned `plan.v2.jsonc` the epic acceptance test names, whose six shots bind
+    // the GENERATED character/prop/location plates as Ref2VA subjects. A pack that satisfies only
+    // the baseline would leave the generator free to produce roles no reference shot can use.
+    for (plan_path, expected_id) in [
+        (harness.fixture_plan(), "courier-workshop"),
+        (
+            Path::new(FIXTURE_DIR).join("plan.v2.jsonc"),
+            "courier-workshop-v2",
+        ),
+    ] {
+        let run_options = harness.options(plan_path, build.pack_path.clone(), None);
+        let (plan, validated) = film_harness::validate(Some(&harness.transport), &run_options)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("the generated pack validates for {expected_id}: {error}")
+            });
+        assert_eq!(plan.id, expected_id);
+        assert_eq!(validated.references.len(), 7);
+    }
 
     // A published pack is not silently replaced: the second run is refused, and the pack on disk
     // is untouched by the refusal.

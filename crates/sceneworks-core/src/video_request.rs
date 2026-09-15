@@ -46,6 +46,63 @@ pub const LTX25_VAE_DECODER_DIFFUSION: &str = "diffusion";
 /// LTX-2.5 exposes at most two temporal x2 refinement rounds.
 pub const LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS: u32 = 2;
 
+/// The admitted range and default for `advanced.referenceImageShortEdge` — the short edge a
+/// MiniMax-H3 image reference is encoded at, in pixels (sc-23402).
+///
+/// These mirror gen-core's `REFERENCE_IMAGE_SHORT_EDGE_{MIN,MAX,DEFAULT}` and exist here for the
+/// same reason [`VideoAutoDurationRange`] does: this crate deliberately has no gen-core dependency,
+/// so the API and the film harness can judge and record the value without taking a provider
+/// dependency. The default is upstream's own `reference_image_short_edge` pipeline value, and the
+/// engine resolves it with `sceneworks_gen_core::effective_reference_image_short_edge` — the same
+/// rule [`effective_reference_image_short_edge`] applies on this side of the boundary.
+///
+/// The knob only ever goes DOWNWARD from the default: it sizes the REFERENCE, never the render, so
+/// lowering it buys reference token count (roughly quadratic in the short edge) at the cost of
+/// reference detail. An out-of-range value is refused, never clamped — a clamp would change the
+/// token budget the caller believes it asked for.
+pub const REFERENCE_IMAGE_SHORT_EDGE_MIN: u32 = 1024;
+/// Largest admitted reference-image short edge; see [`REFERENCE_IMAGE_SHORT_EDGE_MIN`].
+pub const REFERENCE_IMAGE_SHORT_EDGE_MAX: u32 = 2048;
+/// The reference-image short edge when a request names none; see [`REFERENCE_IMAGE_SHORT_EDGE_MIN`].
+pub const REFERENCE_IMAGE_SHORT_EDGE_DEFAULT: u32 = 2048;
+
+/// The EFFECTIVE reference-image short edge for a requested value: the value itself, or
+/// [`REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`] when the request names none (sc-23402).
+///
+/// The local twin of gen-core's `effective_reference_image_short_edge`, applied here only because
+/// this crate has no gen-core dependency (see [`REFERENCE_IMAGE_SHORT_EDGE_MIN`]). Anything that
+/// RECORDS the value — the film harness's attempt record — resolves it through this function so the
+/// number written down cannot drift from the number the engine rendered at.
+pub fn effective_reference_image_short_edge(requested: Option<u32>) -> u32 {
+    requested.unwrap_or(REFERENCE_IMAGE_SHORT_EDGE_DEFAULT)
+}
+
+/// Parse `advanced.referenceImageShortEdge` (sc-23402). Omission is the engine's own default.
+///
+/// Refused, never clamped, naming the field, the value and the range — the same refusal gen-core's
+/// `validate_reference_image_short_edge` gives at the port's `validate`, given here so a job is
+/// refused before it costs a 53 GB text-encoder load.
+pub fn requested_reference_image_short_edge(advanced: &JsonObject) -> Result<Option<u32>, String> {
+    let Some(value) = advanced.get("referenceImageShortEdge") else {
+        return Ok(None);
+    };
+    let edge = value.as_u64().ok_or_else(|| {
+        format!(
+            "advanced.referenceImageShortEdge must be an integer from \
+             {REFERENCE_IMAGE_SHORT_EDGE_MIN} to {REFERENCE_IMAGE_SHORT_EDGE_MAX}"
+        )
+    })?;
+    if !(u64::from(REFERENCE_IMAGE_SHORT_EDGE_MIN)..=u64::from(REFERENCE_IMAGE_SHORT_EDGE_MAX))
+        .contains(&edge)
+    {
+        return Err(format!(
+            "advanced.referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to \
+             {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {edge}"
+        ));
+    }
+    Ok(Some(edge as u32))
+}
+
 /// Validated seconds window for LTX-2.5's opt-in duration predictor.
 ///
 /// This lives in core rather than gen-core so the API can reject malformed requests before a job
@@ -2057,6 +2114,51 @@ mod tests {
                 "temporalUpsampleRounds": invalid
             })))
             .is_err());
+        }
+    }
+
+    /// sc-23402. `advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE, refused
+    /// (never clamped) outside it naming the field, the range and the value, and absent means the
+    /// engine's own default — 2048, the value gen-core's
+    /// `effective_reference_image_short_edge` resolves.
+    #[test]
+    fn reference_image_short_edge_is_admitted_inclusively_and_defaults_to_2048() {
+        assert_eq!(REFERENCE_IMAGE_SHORT_EDGE_DEFAULT, 2048);
+        assert_eq!(REFERENCE_IMAGE_SHORT_EDGE_MAX, 2048);
+        assert_eq!(REFERENCE_IMAGE_SHORT_EDGE_MIN, 1024);
+        assert_eq!(effective_reference_image_short_edge(None), 2048);
+        assert_eq!(effective_reference_image_short_edge(Some(1024)), 1024);
+
+        assert_eq!(
+            requested_reference_image_short_edge(&JsonObject::new()).unwrap(),
+            None
+        );
+        for admitted in [1024, 1536, 2048] {
+            assert_eq!(
+                requested_reference_image_short_edge(&payload(json!({
+                    "referenceImageShortEdge": admitted
+                })))
+                .unwrap(),
+                Some(admitted)
+            );
+        }
+        for invalid in [
+            json!(0),
+            json!(1023),
+            json!(2049),
+            json!(1536.5),
+            json!("1536"),
+        ] {
+            let message = requested_reference_image_short_edge(&payload(json!({
+                "referenceImageShortEdge": invalid.clone()
+            })))
+            .expect_err("out of range or wrong type is refused, never clamped");
+            assert!(
+                message.contains("advanced.referenceImageShortEdge")
+                    && message.contains("1024")
+                    && message.contains("2048"),
+                "{invalid} was refused without naming the field and range: {message}"
+            );
         }
     }
 

@@ -32,6 +32,7 @@ use serde_json::{json, Map, Value};
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
+    REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 // Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
@@ -81,8 +82,11 @@ pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style",
 ///   * `plate` — a literal frame. It is placed through the KEYFRAME slots (`image_to_video` /
 ///     `first_last_frame`), a different conditioning task.
 ///
-/// Used to decide whether a pack can fill a reference shot at all: a pack approving only a style
-/// and a plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
+/// Used in two places, and they are the same rule read from one constant so they cannot drift:
+/// [`validate_plan_against_pack`] REFUSES any `conditioning.referenceRoles` entry whose pack kind
+/// is not listed here, and the planner ([`crate::film_planner`]) counts a pack's bindable entries
+/// to decide whether a pack can fill a reference shot at all — a pack approving only a style and a
+/// plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
 /// envelope rather than being offered and then refused a decode later.
 pub const BINDABLE_REFERENCE_KINDS: &[&str] = &["character", "prop", "location"];
 
@@ -315,6 +319,29 @@ pub struct PlanModel {
     pub fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// Per-family engine knobs the plan may set. Omitted by every plan that wants the engine's own
+    /// defaults, which is what a plan authored before sc-23402 is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<PlanModelAdvanced>,
+}
+
+/// The plan's opt-in engine knobs (sc-23402). Each one is a REQUEST axis, not a document axis: it
+/// rides `advanced` on the dispatched job exactly as the Video Studio's own knobs do, and a plan
+/// that names none dispatches exactly what it did before the knob existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanModelAdvanced {
+    /// The short edge an image REFERENCE is encoded at, in pixels — MiniMax-H3's `ref2va` knob
+    /// (`advanced.referenceImageShortEdge`), admitted over
+    /// [`REFERENCE_IMAGE_SHORT_EDGE_MIN`]`..=`[`REFERENCE_IMAGE_SHORT_EDGE_MAX`] inclusive and
+    /// defaulting to [`REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`].
+    ///
+    /// It sizes the reference, never the render: lowering it buys reference token count (roughly
+    /// quadratic in the short edge) at the cost of reference detail. It reaches only the shots that
+    /// resolve to the family's REFERENCE partition — a base-partition shot has no reference to
+    /// size, so the knob is not written into its request, its job body or its attempt record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
 }
 
 /// Finite limits declared BEFORE dispatch. Exceeding any of them stops new dispatch and leaves the
@@ -710,6 +737,27 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             findings.push(PlanDiagnostic::plan(
                 "model.tier",
                 format!("unknown tier {tier:?}; expected one of q4, q8, bf16"),
+            ));
+        }
+    }
+    // sc-23402. Refused, never clamped: the value is the reference TOKEN BUDGET the author asked
+    // for, so silently rendering at a different one would make the plan a false record of its own
+    // run. The same range the engine admits (gen-core's
+    // `validate_reference_image_short_edge`), refused here so a typo costs a document read rather
+    // than a 53 GB text-encoder load.
+    if let Some(edge) = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_short_edge)
+    {
+        if !(REFERENCE_IMAGE_SHORT_EDGE_MIN..=REFERENCE_IMAGE_SHORT_EDGE_MAX).contains(&edge) {
+            findings.push(PlanDiagnostic::plan(
+                "model.advanced.referenceImageShortEdge",
+                format!(
+                    "referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to \
+                     {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {edge}"
+                ),
             ));
         }
     }
@@ -1588,7 +1636,9 @@ fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic>
 }
 
 /// Findings that need both documents: every role a shot names must exist in the pack and be
-/// approved, and every shot must be anchored to at least one approved canonical reference.
+/// approved, every role bound in `conditioning.referenceRoles` must be a
+/// [`BINDABLE_REFERENCE_KINDS`] kind, and every shot must be anchored to at least one approved
+/// canonical reference.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -1616,6 +1666,31 @@ pub fn validate_plan_against_pack(
         }
         let mut anchored = false;
         for (field, role) in slots {
+            // A BOUND reference is a Ref2VA subject, and only the subject kinds belong there
+            // ([`BINDABLE_REFERENCE_KINDS`]). Without this the planner's rule — which counts a
+            // pack's bindable entries to decide whether a reference shot can be offered at all —
+            // and the validator disagree, and a plan binding a `plate` or a `style` validates,
+            // compiles and dispatches it as a subject to depict. Checked independently of
+            // `approved`, so approving the plate does not make the binding legal. `continuityRoles`
+            // and the keyframe slots are unaffected: a plate is exactly what a keyframe slot takes.
+            if field == "conditioning.referenceRoles" {
+                if let Some(entry) = roles.get(role) {
+                    if !BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str()) {
+                        findings.push(PlanDiagnostic::shot(
+                            &shot.id,
+                            field,
+                            format!(
+                                "reference role {role:?} is kind {:?}; only {} may be BOUND as a \
+                                 reference_to_video subject (a `style` is a look, not a subject, \
+                                 and a `plate` is a literal frame placed through firstFrameRole / \
+                                 lastFrameRole)",
+                                entry.kind,
+                                BINDABLE_REFERENCE_KINDS.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
             match roles.get(role) {
                 None => findings.push(PlanDiagnostic::shot(
                     &shot.id,
@@ -2237,6 +2312,19 @@ pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
         .iter()
         .find(|(base, _)| *base == model_id)
         .map(|(_, reference)| *reference)
+}
+
+/// Whether `model_id` IS a family's reference partition — the half of the split that conditions on
+/// references (sc-23402).
+///
+/// Read off the same table [`reference_partition_for`] reads, so "this request carries references"
+/// cannot be decided by one rule in the compiler and another in the recorder. It is what gates the
+/// reference-only knobs (`referenceImageShortEdge`): a base-partition request has no reference to
+/// size, so the knob must not appear on it at all.
+pub fn is_reference_partition_id(model_id: &str) -> bool {
+    REFERENCE_PARTITIONS
+        .iter()
+        .any(|(_, reference)| *reference == model_id)
 }
 
 /// Which catalog entry one shot renders through, and why.
@@ -3003,6 +3091,16 @@ pub struct AttemptRecord {
     /// Why that partition and not the other, in one sentence ([`ShotPartition::reason`]).
     #[serde(default)]
     pub partition_reason: String,
+    /// The EFFECTIVE reference-image short edge this attempt was dispatched at, in pixels — the
+    /// plan's requested value, or the engine's own default when it named none (sc-23402).
+    ///
+    /// Present only for an attempt on the family's REFERENCE partition: a base-partition attempt
+    /// encodes no reference, so recording a number for it would claim a knob that never applied.
+    /// Resolved through [`crate::video_request::effective_reference_image_short_edge`] — the local
+    /// twin of gen-core's resolver the engine itself uses — so the recorded value cannot drift from
+    /// the rendered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
@@ -3451,6 +3549,61 @@ mod tests {
         findings.iter().map(ToString::to_string).collect()
     }
 
+    /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
+    /// an out-of-range value is REFUSED naming the field and the range — never clamped, since the
+    /// value is the reference token budget the author asked for.
+    #[test]
+    fn plan_refuses_a_reference_image_short_edge_outside_1024_through_2048() {
+        let with_edge = |edge: Value| -> ProductionPlan {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "referenceImageShortEdge": edge });
+            serde_json::from_value(document).expect("plan parses")
+        };
+        for admitted in [1024, 1536, 2048] {
+            assert!(
+                validate_plan_structure(&with_edge(json!(admitted))).is_empty(),
+                "{admitted} is inside the admitted range: {:?}",
+                messages(&validate_plan_structure(&with_edge(json!(admitted))))
+            );
+        }
+        for refused in [0, 1, 1023, 2049, 4096] {
+            let findings = validate_plan_structure(&with_edge(json!(refused)));
+            assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+            assert_eq!(
+                findings[0].field, "model.advanced.referenceImageShortEdge",
+                "the refusal names the field"
+            );
+            assert!(
+                findings[0].message.contains("1024")
+                    && findings[0].message.contains("2048")
+                    && findings[0].message.contains(&refused.to_string()),
+                "the refusal names the range and the value, got {:?}",
+                findings[0].message
+            );
+        }
+    }
+
+    /// A plan that names no knob is byte-for-byte the plan it was before sc-23402: the block parses
+    /// to `None` and serializes with no `advanced` key at all, so an existing plan's sha256 — which
+    /// `staleness_findings` compares — does not move.
+    #[test]
+    fn a_plan_without_the_advanced_block_is_unchanged() {
+        let plan = plan();
+        assert_eq!(plan.model.advanced, None);
+        assert!(validate_plan_structure(&plan).is_empty());
+        let round_tripped = serde_json::to_value(&plan).expect("serializes");
+        assert!(
+            round_tripped["model"].get("advanced").is_none(),
+            "an absent block must not serialize a key: {}",
+            round_tripped["model"]
+        );
+        assert!(
+            !is_reference_partition_id("minimax_h3"),
+            "the base partition is not a reference partition"
+        );
+        assert!(is_reference_partition_id("minimax_h3_ref"));
+    }
+
     #[test]
     fn well_formed_plan_pack_and_model_produce_no_findings() {
         let plan = plan();
@@ -3553,6 +3706,74 @@ mod tests {
             .any(|m| m.contains("[SH010]") && m.contains("not approved")));
         // Both shots still list an approved role in continuityRoles, so the dangling and
         // unapproved conditioning slots are the ONLY findings — the anchor rule does not pile on.
+    }
+
+    /// Ref2VA treats every BOUND reference as a subject to depict, so only
+    /// [`BINDABLE_REFERENCE_KINDS`] may appear in `conditioning.referenceRoles`. The planner
+    /// already counts a pack's bindable entries to decide whether a reference shot can be offered
+    /// at all; before sc-23401's feature-end pass the validator did not check the kind, so a plan
+    /// binding a `plate` (or a `style`) validated, compiled and dispatched it as a subject.
+    #[test]
+    fn a_plate_or_style_role_bound_as_a_reference_subject_is_refused_naming_shot_role_and_kind() {
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["red_parcel", "workshop_plate"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        // Structurally and geometrically the plan is fine — nothing else refuses it.
+        assert!(validate_plan_structure(&plan).is_empty());
+        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"workshop_plate\"")
+                && findings[0].contains("\"plate\"")
+                && findings[0].contains("character, prop, location"),
+            "{findings:?}"
+        );
+
+        // A `style` is refused the same way, and APPROVING it does not make the binding legal:
+        // the kind rule is about what a bound reference means, not about review state.
+        let mut pack_value = pack_json();
+        pack_value["references"][2]["approved"] = json!(true);
+        let approved_style: ReferencePack =
+            serde_json::from_value(pack_value).expect("pack parses");
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["unapproved_look"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_pack(&plan, &approved_style));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"unapproved_look\"")
+                && findings[0].contains("\"style\""),
+            "{findings:?}"
+        );
+
+        // The kind rule applies to the BOUND slot only: the same plate in a keyframe slot, and in
+        // continuityRoles, is exactly where a plate belongs.
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] =
+            json!({ "mode": "image_to_video", "firstFrameRole": "workshop_plate" });
+        value["shots"][0]["continuityRoles"] = json!(["red_parcel", "workshop_plate"]);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
+
+        // And the shipped reference fixture binds only bindable kinds.
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
     }
 
     #[test]
@@ -3801,12 +4022,14 @@ mod tests {
         .unwrap()
     }
 
-    /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402).
+    /// A mixed plan: SH010 binds a reference role, SH020 binds none (sc-23402). The bound role is
+    /// the pack's only BINDABLE entry — `workshop_plate` is a `plate`, which
+    /// [`validate_plan_against_pack`] refuses in this slot.
     fn mixed_plan_json() -> Value {
         let mut value = plan_json();
         value["shots"][0]["conditioning"] = json!({
             "mode": "reference_to_video",
-            "referenceRoles": ["red_parcel", "workshop_plate"]
+            "referenceRoles": ["red_parcel"]
         });
         value["shots"][1]["conditioning"] = json!({ "mode": "text_to_video" });
         value
@@ -4411,6 +4634,7 @@ mod tests {
             idempotency_key: format!("run_1:SH010:a{number}"),
             resolved_model_id: "minimax_h3".into(),
             partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
+            reference_image_short_edge: None,
             job_id: Some(format!("job{number}")),
             status: "completed".into(),
             started_at: "t".into(),

@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
 use crate::film_plan::{
-    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
+    is_reference_partition_id, shot_resolution, ModelEntries, ModelLane, PlanDiagnostic,
+    ProductionPlan, ReferencePack, Shot,
 };
+use crate::video_request::effective_reference_image_short_edge;
 use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
@@ -77,6 +79,15 @@ pub struct CompiledRequest {
     /// model (sc-23402). [`CompiledRequest::to_job_body_with`] writes exactly this into the job
     /// body's `model`, so `compiled.json` and the route agree by construction.
     pub model: String,
+    /// The short edge this request's image references are encoded at, in pixels, when the plan asked
+    /// for one (`model.advanced.referenceImageShortEdge`, sc-23402).
+    ///
+    /// Written ONLY for a request that resolved to the family's reference partition: the base
+    /// partition encodes no reference, so carrying the knob there would dispatch a field the
+    /// checkpoint has nothing to apply it to. Absent means the engine's own default, which
+    /// [`CompiledRequest::effective_reference_image_short_edge`] resolves for the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
     /// Why this request resolved to `model` and not the family's other partition
     /// ([`crate::film_plan::ShotPartition::reason`]). Derived, like every other field but the
     /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
@@ -281,11 +292,21 @@ fn compile_shot(
         }
         None => (shot.prompt.clone(), PromptSource::Authored, None),
     };
+    // A reference-only knob reaches a reference-only request (sc-23402). The plan declares it once
+    // on the family; the shots that resolve to the base partition encode no reference, so the field
+    // is not written onto them and never reaches their job body or their attempt record.
+    let reference_image_short_edge = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_short_edge)
+        .filter(|_| is_reference_partition_id(&partition.model_id));
     Ok(CompiledRequest {
         shot_id: shot.id.clone(),
         beat: shot.beat.clone(),
         mode: shot.conditioning.mode.clone(),
         model: partition.model_id,
+        reference_image_short_edge,
         partition_reason: partition.reason,
         prompt,
         prompt_source,
@@ -329,6 +350,22 @@ pub struct ResolvedConditioning {
 }
 
 impl CompiledRequest {
+    /// The reference-image short edge this request will actually render at, for the attempt record
+    /// (sc-23402) — or `None` for a request that encodes no reference at all.
+    ///
+    /// `Some(requested)`, `Some(default)` and `None` are three different facts: a reference request
+    /// that named no value still renders at the engine's default, and recording that number is what
+    /// makes a run comparable against one that lowered it. A base-partition request has no reference
+    /// to size, so it records nothing rather than a number that never applied.
+    ///
+    /// The default comes from [`effective_reference_image_short_edge`], the local twin of gen-core's
+    /// `effective_reference_image_short_edge` (this crate has no gen-core dependency), so the
+    /// recorded value cannot drift from the value the engine resolved.
+    pub fn effective_reference_image_short_edge(&self) -> Option<u32> {
+        is_reference_partition_id(&self.model)
+            .then(|| effective_reference_image_short_edge(self.reference_image_short_edge))
+    }
+
     /// Resolve this request's reference roles against the imported assets. A role with no asset is
     /// a finding — the run never dispatches a keyframe shot with its keyframe quietly missing.
     pub fn resolve_conditioning(
@@ -389,6 +426,12 @@ impl CompiledRequest {
         let mut advanced = JsonObject::new();
         if let Some(tier) = context.tier {
             advanced.insert("mlxQuantize".to_owned(), mlx_quantize_for_tier(tier));
+        }
+        if let Some(edge) = self.reference_image_short_edge {
+            // The same `advanced` convention as the tier (sc-23402): a request axis the engine reads
+            // off the job, not a document axis. Only ever present on a reference-partition request,
+            // because `compile_shot` is the only thing that writes the field.
+            advanced.insert("referenceImageShortEdge".to_owned(), json!(edge));
         }
         let mut provenance = json!({
             "runId": context.run_id,
@@ -642,6 +685,7 @@ fn request_differences(
         beat,
         mode,
         model,
+        reference_image_short_edge,
         partition_reason,
         prompt: _,
         prompt_source: _,
@@ -676,6 +720,11 @@ fn request_differences(
         "compiled.partitionReason",
         quoted(&actual.partition_reason),
         quoted(partition_reason),
+    );
+    differ(
+        "compiled.referenceImageShortEdge",
+        format!("{:?}", actual.reference_image_short_edge),
+        format!("{reference_image_short_edge:?}"),
     );
     differ("compiled.beat", quoted(&actual.beat), quoted(beat));
     differ("compiled.mode", quoted(&actual.mode), quoted(mode));
@@ -1339,7 +1388,9 @@ mod tests {
                     "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
                     "conditioning": {
                         "mode": "reference_to_video",
-                        "referenceRoles": ["courier", "workshop_plate"]
+                        // Both BINDABLE kinds (character, prop): a `plate` is refused in this
+                        // slot by `validate_plan_against_pack`.
+                        "referenceRoles": ["courier", "red_parcel"]
                     },
                     "continuityRoles": ["courier"]
                 },
@@ -1352,6 +1403,153 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    /// The mixed plan with `model.advanced.referenceImageShortEdge` set, compiled against both
+    /// partitions.
+    fn mixed_compiled_with_short_edge(edge: Option<u32>) -> CompiledPlan {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        if let Some(edge) = edge {
+            document["model"]["advanced"] = json!({ "referenceImageShortEdge": edge });
+        }
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::with_reference_partition(
+                    "minimax_h3",
+                    &base,
+                    Some(("minimax_h3_ref", &reference)),
+                ),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles")
+    }
+
+    fn short_edge_context<'a>(assets: &'a BTreeMap<String, String>) -> DispatchContext<'a> {
+        DispatchContext {
+            project_id: "proj_1",
+            run_id: "run_abc",
+            plan_id: "courier-workshop",
+            plan_version: 2,
+            attempt: 1,
+            tier: Some("q4"),
+            idempotency_key: Some("run_abc:SH010:a1"),
+            role_assets: assets,
+        }
+    }
+
+    /// sc-23402. The plan declares the short edge ONCE on the family; it reaches only the request
+    /// that resolved to the reference partition, and only that request's job body.
+    #[test]
+    fn the_reference_short_edge_reaches_only_the_reference_partitions_request() {
+        let compiled = mixed_compiled_with_short_edge(Some(1536));
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.reference_image_short_edge, Some(1536));
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(
+            plain.reference_image_short_edge, None,
+            "the base partition encodes no reference, so it carries no short edge"
+        );
+
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        let body = referenced.to_job_body(&context).unwrap();
+        assert_eq!(body["advanced"]["referenceImageShortEdge"], json!(1536));
+        let body = plain.to_job_body(&context).unwrap();
+        assert!(
+            body["advanced"].get("referenceImageShortEdge").is_none(),
+            "{}",
+            body["advanced"]
+        );
+
+        // The document survives a conformance check, and a hand-edited value is caught by name —
+        // the compiled document, not the plan, is what becomes the job body.
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["advanced"] = json!({ "referenceImageShortEdge": 1536 });
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        assert!(compiled
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .is_empty());
+        let mut tampered = compiled.clone();
+        tampered.requests[0].reference_image_short_edge = Some(1024);
+        let fields: Vec<String> = tampered
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["compiled.referenceImageShortEdge".to_owned()],
+            "{fields:?}"
+        );
+    }
+
+    /// A plan that names no short edge compiles and dispatches exactly what it did before sc-23402,
+    /// and the EFFECTIVE value a reference attempt records is the engine's own default — 2048, the
+    /// same number `sceneworks_gen_core::effective_reference_image_short_edge` resolves (this crate
+    /// has no gen-core dependency, so the rule is applied locally).
+    #[test]
+    fn an_absent_short_edge_dispatches_nothing_and_records_the_default_2048() {
+        let compiled = mixed_compiled_with_short_edge(None);
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.reference_image_short_edge, None);
+        assert_eq!(plain.reference_image_short_edge, None);
+
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        for request in [referenced, plain] {
+            let body = request.to_job_body(&context).unwrap();
+            assert!(
+                body["advanced"].get("referenceImageShortEdge").is_none(),
+                "an absent knob dispatches no key: {}",
+                body["advanced"]
+            );
+        }
+
+        assert_eq!(
+            referenced.effective_reference_image_short_edge(),
+            Some(2048),
+            "a reference request with no value still renders at the engine's default"
+        );
+        assert_eq!(
+            plain.effective_reference_image_short_edge(),
+            None,
+            "a base-partition request records no short edge at all"
+        );
+        let asked = mixed_compiled_with_short_edge(Some(1024));
+        assert_eq!(
+            asked
+                .request("SH010")
+                .unwrap()
+                .effective_reference_image_short_edge(),
+            Some(1024),
+            "a requested value is recorded verbatim"
+        );
+        assert_eq!(
+            asked
+                .request("SH020")
+                .unwrap()
+                .effective_reference_image_short_edge(),
+            None
+        );
     }
 
     #[test]
@@ -1384,7 +1582,7 @@ mod tests {
         assert_eq!(referenced.mode, "reference_to_video");
         assert_eq!(
             referenced.reference_roles,
-            vec!["courier".to_owned(), "workshop_plate".to_owned()]
+            vec!["courier".to_owned(), "red_parcel".to_owned()]
         );
         assert!(
             referenced.partition_reason.contains("minimax_h3_ref")
@@ -1421,7 +1619,7 @@ mod tests {
         assert_eq!(body["mode"], "reference_to_video");
         assert_eq!(
             body["referenceAssetIds"],
-            json!(["asset_courier", "asset_plate"])
+            json!(["asset_courier", "asset_parcel"])
         );
         assert_eq!(
             body["advanced"]["filmHarness"]["partitionReason"],

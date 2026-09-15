@@ -65,6 +65,11 @@ image files; it is a separate versioned document, so approved references stay ad
 independently of any generated take. Every file here tolerates JSONC comments and refuses unknown
 fields.
 
+`referenceRoles` may bind only the **subject** kinds — `character`, `prop`, `location` — because
+Ref2VA treats every bound image as a subject to depict; a `style` (a look) or a `plate` (a literal
+frame, which belongs in `firstFrameRole` / `lastFrameRole`) bound there is refused naming the shot,
+the role and the kind.
+
 A pack entry with `"approved": false` is still imported (so a human can review it), but it is tagged
 `film-harness-reference-unapproved` instead of `film-harness-reference`, recorded with
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
@@ -592,6 +597,20 @@ Three documents carry the outcome, and they cannot disagree because all three re
   `advanced.filmHarness.partitionReason` carries the reason;
 - the attempt record's `resolvedModelId` / `partitionReason`, and the take's `model`.
 
+**The reference short edge is a plan-level knob (sc-23402).** `model.advanced.referenceImageShortEdge`
+sets the short edge, in pixels, that an image reference is *encoded* at — MiniMax-H3's own `ref2va`
+control, admitted over **1024..=2048 inclusive** and defaulting to the engine's 2048. It sizes the
+**reference**, never the render: lowering it buys reference token count (roughly quadratic in the
+short edge, so 1024 is about a quarter of 2048's tokens) at the cost of reference detail. A value
+outside the range is **refused** naming the field and the range — on the plan, before any weight is
+read, and again at the engine's own `validate` — never clamped, because a silent clamp would change
+the token budget the author measured. The knob declares once on the family and reaches only the
+shots that resolve to the **reference** partition: a base-partition shot encodes no reference, so it
+carries the field in neither its compiled request, its job body (`advanced.referenceImageShortEdge`),
+nor its attempt record. A reference attempt records the **effective** value — the plan's, or 2048
+when the plan named none — so a lowered run is comparable against a default one; a plan that names
+nothing dispatches exactly what it did before the knob existed.
+
 Validation follows the resolution: each shot is checked against the **resolved** partition's
 declared capabilities, menus and caps. A reference shot whose partition is not in the catalog is
 refused **by name, with the shot**, never dispatched at the base checkpoint.
@@ -632,7 +651,7 @@ refused by version — `unsupported compiled plan schema version 1` — and the 
 compile`, which rewrites it.
 
 `config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
-`courier` + `workshop_plate`, SH020 binds nothing — and
+`courier` + `workshop_location`, SH020 binds nothing — and
 `PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh` renders it
 end to end. Budget it longer than the base two-shot smoke: the run loads both DiTs.
 
@@ -1314,7 +1333,7 @@ scripts/film-harness-smoke.sh
 
 **Mixed partitions (sc-23402).** `config/film-harness/courier-workshop/plan.ref.jsonc` is two shots
 that resolve to two different MiniMax-H3 checkpoints out of one plan — SH010 binds `courier` +
-`workshop_plate` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
+`workshop_location` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
 renders on `minimax_h3` / `text_to_video`. It is the same `SH010,SH020` selection the script
 defaults to, so the plan is the only thing that changes:
 
