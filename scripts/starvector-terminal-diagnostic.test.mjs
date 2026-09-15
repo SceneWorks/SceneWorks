@@ -11,6 +11,7 @@ import {
   DIAGNOSTIC_BUDGET,
   DIAGNOSTIC_CASES,
   DIAGNOSTIC_LEGACY_CORPUS,
+  DIAGNOSTIC_SAMPLING,
   captureDiagnosticCudaOccupancy,
   diagnosticShouldStop,
   parseDiagnosticCudaGpu,
@@ -49,7 +50,7 @@ function indexFixture() {
       input_png_path: `rows/${case_index}.png`,
       png_sha256: sha((case_index % 10).toString()),
       reference_png_sha256: sha(((case_index + 2) % 10).toString()),
-      sampling: { seed: 7, temperature: 0.2 },
+      sampling: { temperature: 0, topP: 1, topK: 1, repetitionPenalty: 1, seed: 7 },
       detail_budgets: { "1b": { ...DIAGNOSTIC_BUDGET } },
     })),
   };
@@ -132,9 +133,10 @@ test("selected records are the fixed former failures with the exact Detailed bud
   const records = selectDiagnosticRecords(index, binding, corpusPin);
   assert.deepEqual(records.map((record) => record.case_index), DIAGNOSTIC_CASES);
   assert.ok(records.every((record) => record.model === "starvector_1b" && JSON.stringify(record.detailBudget) === JSON.stringify(DIAGNOSTIC_BUDGET)));
+  assert.ok(records.every((record) => JSON.stringify(record.sampling) === JSON.stringify(DIAGNOSTIC_SAMPLING)));
   for (const mutate of [
-    (next) => { next.rows[6].detail_budgets["1b"].maxNewTokens = 4000; },
-    (next) => { next.rows[6].png_sha256 = sha("a"); },
+    (next) => { next.rows[DIAGNOSTIC_CASES[0]].detail_budgets["1b"].maxNewTokens = 4000; },
+    (next) => { next.rows[DIAGNOSTIC_CASES[0]].png_sha256 = sha("a"); },
     (next) => { next.inference_revision = revision("f"); },
   ]) {
     const next = structuredClone(index); mutate(next);
@@ -199,7 +201,7 @@ test("driver exercises authenticated legacy corpus through exact requests, both 
         if (accepted) Object.assign(job.result.terminalEvidence, { canonicalSvgPath: acceptedFiles.svg, canonicalSvgSha256: digest(await readFile(acceptedFiles.svg)), previewPngPath: acceptedFiles.png, previewPngSha256: digest(await readFile(acceptedFiles.png)) });
         return job;
       },
-      preserve: async (_output, suite, caseId, job) => { assert.equal(suite, "image_quality"); assert.equal(caseId, "diagnostic-quality-v1-9"); assert.equal(job.result.terminalEvidence.accepted, false); return { artifacts: [] }; },
+      preserve: async (_output, suite, caseId, job) => { assert.equal(suite, "image_quality"); assert.equal(caseId, "diagnostic-quality-v1-11"); assert.equal(job.result.terminalEvidence.accepted, false); return { artifacts: [] }; },
       occupancy: async () => occupancy,
       stop: async () => { stopped = true; },
     });
@@ -295,11 +297,11 @@ test("current source derives one exact inference pin without a workflow input", 
   assert.equal(await readCurrentInferencePin(root), "48c85921bed02130070bd0bd4a211075296e6dba");
 });
 
-test("diagnostic stops only at three accepted or four rejected", () => {
+test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {
   assert.equal(diagnosticShouldStop([{ accepted: true }, { accepted: true }]), false);
   assert.equal(diagnosticShouldStop([{ accepted: true }, { accepted: true }, { accepted: true }]), true);
-  assert.equal(diagnosticShouldStop([{ accepted: false }, { accepted: false }, { accepted: false }]), false);
-  assert.equal(diagnosticShouldStop([{ accepted: false }, { accepted: false }, { accepted: false }, { accepted: false }]), true);
+  assert.equal(diagnosticShouldStop([{ accepted: false }, { accepted: false }]), false);
+  assert.equal(diagnosticShouldStop([{ accepted: false }, { accepted: false }, { accepted: false }]), true);
 });
 
 test("workflow exposes one fixed Windows diagnostic with offline cleanup and diagnostic-only artifacts", async () => {
