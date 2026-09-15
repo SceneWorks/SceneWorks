@@ -102,6 +102,7 @@ fn krea_control_memory_inputs(
         reference_count: KREA_CONTROL_REFERENCE_COUNT,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: None,
     }
 }
 

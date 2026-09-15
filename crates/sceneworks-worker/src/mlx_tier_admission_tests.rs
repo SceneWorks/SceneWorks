@@ -87,6 +87,7 @@ fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         reference_count: 0,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: None,
     }
 }
 
@@ -433,6 +434,14 @@ fn shipped_synthetic_contract(route: &'static str, assets_gib: f64) -> MemoryPro
     contract.asset_facts.conditioning_bytes = gib_to_bytes(assets_gib / 8.0);
     contract.asset_facts.transformer_bytes = gib_to_bytes(assets_gib * 7.0 / 8.0);
     contract.asset_facts.decoder_bytes = 0;
+    // This helper uses synthetic component sizes, so its exact streaming blocks are synthetic.
+    if let Some(phase) = contract.phase_facts.as_mut() {
+        phase.transformer_stream = Some(gen_core::StreamedWeightFacts {
+            resident_bytes: 0,
+            stacks: vec![vec![contract.asset_facts.transformer_bytes / 70; 70]],
+        });
+    }
+
     assert!(
         contract.conformance_errors().is_empty(),
         "{route}: {:?}",
