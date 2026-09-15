@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:218dc1b831c69e2599f0e98129daf72140eb1e90b5477899f6588dbe7867d64b",
+    "sceneWorksRevision": "source-tree:ef81f6beaf5e3ec842c922457d99878578cab49288f662eb973b822def8ea281",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "0de8503b216b8b33abf95161c5d4b7407418cbc9d8d66d1c1140230ac096c0ba"
+        "sha256": "20ded62ddc9b20a6d31a35cbe36c8de2978f7208cba5eb798107e17dfa929d28"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
