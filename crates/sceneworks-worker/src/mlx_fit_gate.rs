@@ -1298,6 +1298,39 @@ pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
     u32::try_from(bytes.div_ceil(75).max(1)).unwrap_or(u32::MAX)
 }
 
+/// Count the same untruncated CLIP tokens the loaded SDXL provider will window. The byte bound
+/// remains a conservative fallback when tokenizer assets cannot be read during preparation.
+#[cfg(target_os = "macos")]
+pub(crate) fn clip_windows_for_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+    prompt: &str,
+    negative: &str,
+) -> u32 {
+    if engine_id == "sdxl" {
+        use runtime_macos::providers::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
+        let root = match &spec.weights {
+            WeightsSource::Dir(root) => Some(root),
+            WeightsSource::File(_) => match spec.components.get(LDM_TOKENIZER_COMPONENT) {
+                Some(WeightsSource::Dir(root)) => Some(root),
+                _ => None,
+            },
+        };
+        let count = root
+            .and_then(|root| load_tokenizer(root).ok())
+            .and_then(|tokenizer| {
+                let positive = tokenizer.tokenize(prompt).ok()?;
+                let negative = tokenizer.tokenize(negative).ok()?;
+                let tokens = positive.len().max(negative.len()).saturating_sub(2);
+                u32::try_from(tokens.div_ceil(75).max(1)).ok()
+            });
+        if let Some(windows) = count {
+            return windows;
+        }
+    }
+    clip_window_upper_bound(prompt, negative)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
@@ -2881,36 +2914,32 @@ fn mlx_selected_phase_peak(
         })
     {
         let components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
-        if let Some(peaks) = anchor.derive_mlx_image_phase_peaks(
+        let residues = anchor.derive_mlx_image_activation_residues(
             AnchorMlxImageDeriveRequest {
                 width: geometry.width,
                 height: geometry.height,
             },
             components,
-        ) {
+        );
+        workspace.conditioning = residues[0].unwrap_or(workspace.conditioning);
+        workspace.denoise = residues[1].unwrap_or(workspace.denoise);
+        workspace.decode = residues[2].unwrap_or(workspace.decode);
+        if residues[1].is_some()
+            && phase.architecture == Some(gen_core::ImagePipelineArchitecture::ZImageDit)
+        {
+            // Fused SDPA scales with image tokens, without materializing a quadratic score matrix.
             let resident = components
                 .conditioning
                 .saturating_add(components.transformer)
                 .saturating_add(components.decoder);
-            workspace = Workspace {
-                conditioning: peaks.conditioning.checked_sub(resident)?,
-                denoise: peaks.denoise.checked_sub(resident)?,
-                decode: peaks.decode.checked_sub(resident)?,
-            };
-            if phase.architecture == Some(gen_core::ImagePipelineArchitecture::ZImageDit) {
-                // Fused SDPA does not materialize a heads x tokens² score tensor. Use the
-                // anchor's live activation residue and linear image-token growth, retaining it
-                // below the measured geometry. The general non-MLX anchor law is quadratic
-                // when attention architecture is unknown and cannot price this implementation.
-                let residue = anchor
-                    .phase_active_peak_bytes
-                    .denoise
-                    .checked_sub(resident)?;
-                let scale = (f64::from(geometry.width) * f64::from(geometry.height)
-                    / (f64::from(anchor.geometry.width) * f64::from(anchor.geometry.height)))
-                .max(1.0);
-                workspace.denoise = (residue as f64 * scale).ceil() as u64;
-            }
+            let residue = anchor
+                .phase_active_peak_bytes
+                .denoise
+                .checked_sub(resident)?;
+            let scale = (f64::from(geometry.width) * f64::from(geometry.height)
+                / (f64::from(anchor.geometry.width) * f64::from(anchor.geometry.height)))
+            .max(1.0);
+            workspace.denoise = (residue as f64 * scale).ceil() as u64;
         }
     }
     if phase.architecture == Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip) {
@@ -2925,6 +2954,25 @@ fn mlx_selected_phase_peak(
             * f64::from(windows)
             * (f64::from(geometry.width) * f64::from(geometry.height) / 1_048_576.0).max(1.0))
         .ceil() as u64;
+    }
+    if let Some(gen_core::ImagePipelineArchitecture::SanaLinearDit {
+        classifier_free_guidance,
+    }) = phase.architecture
+    {
+        if contract.engages_selection(selection, MemoryStrategy::BoundedDecode)
+            && selection.parameters.decode_overlap == Some(48)
+        {
+            if let Some(derived) = phase.decoder_workspace.as_ref().and_then(|facts| {
+                crate::mlx_phase_estimate::sana_workspace(
+                    facts,
+                    geometry,
+                    selection.parameters.decode_tile_edge,
+                    classifier_free_guidance,
+                )
+            }) {
+                workspace = derived;
+            }
+        }
     }
     if contract.engages_selection(selection, MemoryStrategy::BoundedDecode) {
         if let (Some(decoder), Some(edge)) = (
@@ -19377,9 +19425,12 @@ mod tests {
     /// Unlike the old 40 GiB fixture, these are the installed q4 artifacts from the reported failures.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "requires shipped Z-Image and SDXL q4 snapshots; SC23584_RENDER=all also executes on exclusive Metal"]
+    #[ignore = "requires shipped Z-Image, SDXL and SANA Sprint q4 snapshots; SC23584_RENDER=all also executes on exclusive Metal"]
     fn reported_q4_requests_credit_the_implemented_memory_ladder() {
         use crate::ladder_margin_policy::{admission_allowance, AdmissionSubject};
+        let prompt = std::env::var("SC23584_PROMPT")
+            .unwrap_or_else(|_| "A cinematic frame of a woman in a red raincoat holding a red umbrella standing in the middle of a neon street on a rainy night".to_owned());
+        let negative_prompt = std::env::var("SC23584_NEGATIVE_PROMPT").unwrap_or_default();
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
@@ -19390,7 +19441,7 @@ mod tests {
                 PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/huggingface/hub")
             });
         let mut failures = Vec::new();
-        for (id, count) in [("z_image_turbo", 2), ("sdxl", 1)] {
+        for (id, count) in [("z_image_turbo", 2), ("sdxl", 1), ("sana_sprint_1600m", 1)] {
             let model = manifest["models"]
                 .as_array()
                 .unwrap()
@@ -19405,7 +19456,11 @@ mod tests {
                 .iter()
                 .find(|download| {
                     download["variant"] == "q4"
-                        && download["repo"].as_str().unwrap_or("").ends_with("-mlx")
+                        && download["repo"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains("mlx")
                 })
                 .unwrap();
             let root = hub
@@ -19421,25 +19476,137 @@ mod tests {
                 "required snapshot missing: {}",
                 root.display()
             );
-            let policies = decode_quality_policies_from_manifest(model, id).unwrap();
-            let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+            let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
                 .with_resolved_route(id)
-                .with_quant(gen_core::Quant::Q4)
-                .with_offload_policy(OffloadPolicy::Sequential)
-                .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
-            if let Some(policy) = policies.first() {
-                spec = spec
-                    .with_decode_quality_runtime_identity(MemoryDecodeQualityRuntimeIdentity {
-                        artifact: policy.artifact.clone(),
-                    })
-                    .with_decode_geometry_policy_authority(true)
-                    .with_decode_geometry_policies(policies);
+                .with_quant(gen_core::Quant::Q4);
+            let mode = crate::memory_route_registry::MemoryRouteMode::TextToImage;
+            let context = crate::memory_route_registry::MemoryRouteRequestContext {
+                mode,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let supports_sequential = crate::inference_runtime::media_descriptor(id)
+                .unwrap()
+                .capabilities
+                .supports_sequential_offload;
+            let mut spec = crate::test_env::temp_env_var(MLX_MEMORY_CAP_ENV, "8", || {
+                crate::image_jobs::prepare_mlx_load_policy(
+                    id,
+                    Some("q4"),
+                    Some(mode),
+                    model,
+                    spec,
+                    context,
+                    true,
+                    supports_sequential,
+                )
+                .unwrap()
+            });
+            eprintln!(
+                "{id}: production shape={:?}, declaration={:?}, offload={:?}",
+                spec.load_shape, spec.load_shape_declaration_result, spec.offload_policy
+            );
+            // Resolve identity from the immutable cache coordinate, independently of quality rows.
+            let revision = root
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let repository = root
+                .ancestors()
+                .nth(3)
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .strip_prefix("models--")
+                .unwrap()
+                .replacen("--", "/", 1);
+            let provenance = ResolvedArtifactProvenance {
+                identity: crate::model_jobs::ResolvedArtifactIdentity {
+                    fingerprint: format!("{repository}@{revision}:q4"),
+                    repository,
+                    revision,
+                    variant: "q4".to_owned(),
+                },
+                fixed_artifact_tier: Some("q4".to_owned()),
+            };
+            let binding =
+                bind_decode_quality_policies_from_manifest(model, id, Some(&provenance)).unwrap();
+            spec = attach_decode_quality_binding(spec, binding, id);
+            let conditioning_windows = clip_windows_for_spec(id, &spec, &prompt, &negative_prompt);
+            if id == "sdxl" {
+                assert_eq!(clip_windows_for_spec(id, &spec, "fox", ""), 1);
+                assert_eq!(clip_windows_for_spec(id, &spec, &"fox ".repeat(76), ""), 2);
+                assert_eq!(
+                    clip_windows_for_spec(id, &spec, "fox", &"fox ".repeat(76)),
+                    2
+                );
+                assert_eq!(clip_windows_for_spec(id, &spec, "café ☔", ""), 1);
             }
-            let plan = MlxRequestPlan::for_spec_and_manifest(id, id, &spec, Some(model), None);
+            eprintln!("{id}: prompt demand {conditioning_windows} windows");
+            let plan =
+                MlxRequestPlan::for_spec_and_manifest(id, id, &spec, Some(model), Some(provenance));
             let contract = crate::inference_runtime::media()
                 .memory_strategy_contract(id, &spec)
                 .unwrap()
                 .unwrap();
+            if std::env::var("SC23648_DIAG_ROUTE").is_ok_and(|route| route == id) {
+                // Diagnostic on the development host's real capacity, independent of the emulated
+                // admission budget. Exercise only the provider's advertised staging/decode knobs.
+                mlx_rs::memory::clear_cache();
+                mlx_rs::memory::reset_peak_memory();
+                let generator = crate::inference_runtime::load(id, &spec).unwrap();
+                let request = gen_core::GenerationRequest {
+                    prompt: prompt.clone(),
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    steps: Some(2),
+                    seed: Some(1234),
+                    memory: Some(GenerationMemory {
+                        stage_residency: true,
+                        tile_vae_decode: true,
+                        decode_tile_edge: Some(192),
+                        decode_overlap: Some(48),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut phase_peaks = Vec::new();
+                let output = generator
+                    .generate(&request, &mut |event| {
+                        if matches!(
+                            event,
+                            gen_core::Progress::Loading(_) | gen_core::Progress::Decoding
+                        ) {
+                            phase_peaks.push((
+                                format!("{event:?}"),
+                                mlx_rs::memory::get_peak_memory(),
+                                mlx_rs::memory::get_active_memory(),
+                            ));
+                            mlx_rs::memory::reset_peak_memory();
+                        }
+                    })
+                    .unwrap();
+                phase_peaks.push((
+                    "complete".to_owned(),
+                    mlx_rs::memory::get_peak_memory(),
+                    mlx_rs::memory::get_active_memory(),
+                ));
+                eprintln!("SC23648 diagnostic phases {id}: {phase_peaks:?}");
+
+                eprintln!(
+                    "SC23648 diagnostic {id}: {:?}, final decode-phase peak {} bytes",
+                    std::mem::discriminant(&output),
+                    mlx_rs::memory::get_peak_memory()
+                );
+            }
             assert!(
                 contract.asset_facts.base_bytes > 0,
                 "production contracts must price loaded components"
@@ -19458,7 +19625,7 @@ mod tests {
                 false,
                 None,
                 &[],
-                Some(1),
+                Some(conditioning_windows),
             );
             let mut minimum = u64::MAX;
             eprintln!(
@@ -19491,7 +19658,7 @@ mod tests {
             if minimum > gib_to_bytes(6.0) {
                 failures.push(format!("{id}: the optimized ladder costs {minimum} bytes, above the 6 GiB request budget"));
             }
-            inputs.conditioning_windows = Some(1);
+            inputs.conditioning_windows = Some(conditioning_windows);
             let result = preflight_request(
                 &spec,
                 &plan,
@@ -19504,8 +19671,25 @@ mod tests {
                 },
             )
             .unwrap();
+            let insufficient = preflight_request(
+                &spec,
+                &plan,
+                &inputs,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(4.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(insufficient, MlxRequestAdmission::Rejected(_)),
+                "{id}: valid refusals must remain"
+            );
             match result {
                 MlxRequestAdmission::Rejected(error) => {
+                    eprintln!("{id}: production preflight refused: {error}");
                     failures.push(format!("{id}: production preflight refused: {error}"))
                 }
                 MlxRequestAdmission::Admitted(evaluation)
@@ -19521,7 +19705,9 @@ mod tests {
                             .unwrap()
                             .unwrap();
                         let mut request = gen_core::GenerationRequest {
-                            prompt: "a red fox in a snowy forest".into(),
+                            prompt: prompt.clone(),
+                            negative_prompt: (!negative_prompt.is_empty())
+                                .then(|| negative_prompt.clone()),
                             width: 1024,
                             height: 1024,
                             count: 1,

@@ -3978,6 +3978,67 @@ impl MemoryAnchor {
         )
     }
 
+    /// Recover each usable resident MLX phase independently. A cached conditioning capture may
+    /// omit its encoder weights; that phase remains unknown without discarding a valid denoise
+    /// or decode observation. These are activation residues, not complete optimized measurements.
+    pub fn derive_mlx_image_activation_residues(
+        &self,
+        request: AnchorMlxImageDeriveRequest,
+        components: ComponentBytes,
+    ) -> [Option<u64>; 3] {
+        if self.underived_reason.is_some()
+            || self.backend != AnchorBackend::Mlx
+            || self.load_shape != AnchorLoadShape::EagerMaterialization
+            || self.measured_regime.staged
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+            || self.transformer_variant.is_some()
+            || self.decoder.is_some()
+            || self.geometry.frames != 1
+            || self.geometry.width == 0
+            || self.geometry.height == 0
+            || request.width == 0
+            || request.height == 0
+        {
+            return [None; 3];
+        }
+        let resident = components
+            .conditioning
+            .saturating_add(components.transformer)
+            .saturating_add(components.decoder);
+        let pixels = u128::from(request.width) * u128::from(request.height);
+        let anchor_pixels = u128::from(self.geometry.width) * u128::from(self.geometry.height);
+        let scale = |residue: u64, quadratic: bool| {
+            let ratio = |numerator: u128, denominator: u128| {
+                u128::from(residue)
+                    .checked_mul(numerator)
+                    .map(|n| n.div_ceil(denominator))
+            };
+            let linear = ratio(pixels, anchor_pixels)?;
+            let scaled = if quadratic {
+                linear.max(ratio(pixels * pixels, anchor_pixels * anchor_pixels)?)
+            } else {
+                linear
+            };
+            // Retain observations below their capture geometry; the fixed/workspace split is unknown.
+            u64::try_from(scaled.max(u128::from(residue))).ok()
+        };
+        [
+            self.phase_active_peak_bytes
+                .conditioning
+                .checked_sub(resident),
+            self.phase_active_peak_bytes
+                .denoise
+                .checked_sub(resident)
+                .and_then(|r| scale(r, true)),
+            self.phase_active_peak_bytes
+                .decode
+                .checked_sub(resident)
+                .and_then(|r| scale(r, false)),
+        ]
+    }
+
     /// Derive the MLX image lane's non-reclaimable active working set.
     ///
     /// Reclaimable cache is retained as capture provenance only. Adding it to a physical-memory
@@ -6447,6 +6508,45 @@ mod tests {
                 anchor.id
             );
         }
+    }
+
+    #[test]
+    fn cached_conditioning_preserves_other_resident_mlx_phase_residues() {
+        let mut anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .unwrap()
+            .clone();
+        let components = ComponentBytes {
+            conditioning: 1,
+            transformer: 1,
+            decoder: 1,
+        };
+        let request = AnchorMlxImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+        };
+        let complete = anchor.derive_mlx_image_activation_residues(request, components);
+        assert!(complete.iter().all(Option::is_some));
+        anchor.phase_active_peak_bytes.conditioning = 0;
+        let partial = anchor.derive_mlx_image_activation_residues(request, components);
+        assert_eq!(partial, [None, complete[1], complete[2]]);
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, components)
+                .is_none(),
+            "whole-pipeline authority remains strict"
+        );
+        anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        anchor.measured_regime.decode_tiled = false;
+        anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
     }
 
     /// sc-22667 (epic 22657 D3, E6 "one MLX tier"): the packaged `z_image_turbo` q4 MLX anchor was

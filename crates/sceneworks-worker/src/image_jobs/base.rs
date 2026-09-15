@@ -5617,6 +5617,83 @@ mod candle_image_load_shape_tests {
     }
 }
 
+/// Finalize the manifest/provider load-shape intersection before pricing or loading a tier.
+/// Shared by production and real-artifact admission tests so neither can force an unshipped strategy.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_mlx_load_policy(
+    engine_id: &str,
+    effective_tier: Option<&str>,
+    declaration_mode: Option<crate::memory_route_registry::MemoryRouteMode>,
+    manifest: &serde_json::Map<String, serde_json::Value>,
+    mut spec: LoadSpec,
+    declaration_context: crate::memory_route_registry::MemoryRouteRequestContext,
+    plain_text_to_image: bool,
+    supports_sequential_offload: bool,
+) -> WorkerResult<LoadSpec> {
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        manifest,
+        spec,
+        declaration_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        manifest,
+        spec,
+        declaration_context,
+    );
+    if let Some(warning) =
+        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+    {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager load path"
+        );
+    }
+    if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::NotEvaluated
+    {
+        spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    }
+    if spec.offload_policy != gen_core::OffloadPolicy::Sequential {
+        let outcome = crate::mlx_fit_gate::decide_residency_for_spec(engine_id, &spec);
+        let deferred_can_stage = spec.load_shape_declaration_result
+            == gen_core::LoadShapeDeclarationResult::Applied
+            && spec.load_shape == gen_core::LoadShape::DeferredMaterialization
+            && supports_sequential_offload;
+        if deferred_can_stage
+            && !matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Resident)
+        {
+            spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+            spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                engine_id,
+                effective_tier,
+                declaration_mode,
+                manifest,
+                spec,
+                declaration_context,
+            );
+            spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+                engine_id,
+                effective_tier,
+                declaration_mode,
+                manifest,
+                spec,
+                declaration_context,
+            );
+        } else if matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Sequential) {
+            spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
+        }
+    }
+    Ok(spec)
+}
+
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
 /// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
 /// and can then select the provider's bounded transformer rung. Lens has two deliberately separate
@@ -8773,66 +8850,16 @@ async fn generate_stream(
             use_pid,
             has_phases: false,
         };
-        spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        spec = prepare_mlx_load_policy(
             engine_id,
             effective_tier,
             declaration_mode,
             &request.model_manifest_entry,
             spec,
             declaration_context,
-        );
-        spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
-            engine_id,
-            effective_tier,
-            declaration_mode,
-            &request.model_manifest_entry,
-            spec,
-            declaration_context,
-        );
-        if let Some(warning) =
-            crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
-        {
-            tracing::warn!(
-                event = "mlx_load_shape_declaration_warning",
-                provider = engine_id,
-                ?warning,
-                "provider refused deferred materialization; retaining the safe eager load path"
-            );
-        }
-        if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::NotEvaluated
-        {
-            spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
-        }
-        if spec.offload_policy != gen_core::OffloadPolicy::Sequential {
-            let outcome = crate::mlx_fit_gate::decide_residency_for_spec(engine_id, &spec);
-            let deferred_can_stage = spec.load_shape_declaration_result
-                == gen_core::LoadShapeDeclarationResult::Applied
-                && spec.load_shape == gen_core::LoadShape::DeferredMaterialization
-                && model.descriptor.capabilities.supports_sequential_offload;
-            if deferred_can_stage
-                && !matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Resident)
-            {
-                spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
-                spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
-                    engine_id,
-                    effective_tier,
-                    declaration_mode,
-                    &request.model_manifest_entry,
-                    spec,
-                    declaration_context,
-                );
-                spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
-                    engine_id,
-                    effective_tier,
-                    declaration_mode,
-                    &request.model_manifest_entry,
-                    spec,
-                    declaration_context,
-                );
-            } else if matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Sequential) {
-                spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
-            }
-        }
+            plain_text_to_image,
+            model.descriptor.capabilities.supports_sequential_offload,
+        )?;
         let decode_quality_binding =
             crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
                 &request.model_manifest_entry,
@@ -8910,8 +8937,8 @@ async fn generate_stream(
             reference_count,
             use_pid,
             has_phases: false,
-            conditioning_windows: Some(crate::mlx_fit_gate::clip_window_upper_bound(
-                &request.prompt,
+            conditioning_windows: Some(crate::mlx_fit_gate::clip_windows_for_spec(
+                engine_id, &spec, &request.prompt,
                 &request.negative_prompt,
             )),
         };
