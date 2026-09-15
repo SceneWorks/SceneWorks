@@ -15044,6 +15044,81 @@
                       "variant": "q4",
                       "fingerprint": "SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q4"
                     },
+                    "implementationFingerprint": "6c70ffaf9c9bbd23d449a4ee1c7dc4911b094878cd66283195d5ec98f8bd1a56",
+                    "mode": "text_to_image",
+                    "overlay": null,
+                    "geometry": {
+                      "width": 1024,
+                      "height": 1024,
+                      "batch": 1,
+                      "frames": 1,
+                      "referenceCount": 0
+                    },
+                    "usePid": false,
+                    "tileEdge": 256,
+                    "overlap": 64,
+                    "metric": "max_abs_rgb_u8",
+                    "maximumError": 48,
+                    "fixtures": [
+                      {
+                        "seed": 7,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "9ef91b3e1d0dfc746a51bdff13c110bda65c00fbe97f458ef7e61f56d3fc00b8",
+                        "denseOutputSha256": "830f102a4c295164cee9c50819c6c5a2753be04f740806f02066cc2dcf5e929b",
+                        "tiledOutputSha256": "ac2f4811b80b655c84459173f48b1af3e888174d173267ab3d5e712595177e78",
+                        "observedError": 35
+                      },
+                      {
+                        "seed": 99,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "1571d026d4fdecab7f39676fa26be1040325df90d38dc41c08b58be05405dec8",
+                        "denseOutputSha256": "69e8abb701fd157bfecfcad44c37daa33e7197f8f3ad1d30d573e81321e1e056",
+                        "tiledOutputSha256": "dcaa6a353c4c7486cbf71beeea6f4352685a85dd8738f6ff83972f253255c1b7",
+                        "observedError": 14
+                      },
+                      {
+                        "seed": 1234,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "fd9df674d6bef88ed92e0f13ded80b27c625e1f7d18c192ed7b0c4aba0883849",
+                        "denseOutputSha256": "46df4c2dcbfe0017163e68153f71a4777060363edfc1d417b8663763fc4b4285",
+                        "tiledOutputSha256": "61524b61c5428114a0d6f6d970e202779a41e5cdd583b2bbff1b8013edaa20bb",
+                        "observedError": 16
+                      },
+                      {
+                        "seed": 424242,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "641dcba95d29616a98ba5f9d72986cf79683e6f8e9b68e8b9379df0da6c2c477",
+                        "denseOutputSha256": "4f26223863ebd191d29669258da10da270ac880dc81ce9ed5113bce928d0ef49",
+                        "tiledOutputSha256": "fcc6563c6f1119ab1e7d57633d7fb1813b4a98db079efdf90af346e80894dd6b",
+                        "observedError": 15
+                      },
+                      {
+                        "seed": 20260805,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "aadd800bf5cb445f3a9005c6f46f3c3cd5ac5ff720e90dc3a9d38c5f4e7c3b02",
+                        "denseOutputSha256": "1648617798d45526ae6f3649e9133a39a24fe15007e55349e42e35479c737875",
+                        "tiledOutputSha256": "b5bdb57a756ebea553dbaf5041b3e358bda6a3d2fba7f0a5ac6f8e5009b68db9",
+                        "observedError": 15
+                      }
+                    ],
+                    "productionEvidenceSha256": "ad4096bf0af0bc964685acaf5127850f3645adaafe54319ced341442c5cf69fc",
+                    "disposition": {
+                      "kind": "admitted"
+                    }
+                  },
+                  {
+                    "qualityAbi": 2,
+                    "family": "sdxl",
+                    "resolvedRoute": "sdxl",
+                    "backend": "mlx",
+                    "tier": "q4",
+                    "loadShape": "deferred_materialization",
+                    "artifact": {
+                      "repository": "SceneWorks/sdxl-base-mlx",
+                      "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+                      "variant": "q4",
+                      "fingerprint": "SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q4"
+                    },
                     "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
                     "mode": "text_to_image",
                     "overlay": null,
