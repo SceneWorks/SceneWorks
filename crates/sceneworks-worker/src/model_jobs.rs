@@ -3374,6 +3374,7 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     )
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,
@@ -3461,6 +3462,7 @@ fn huggingface_receipt_weights_with_revision(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvenanceRepair {
     Allow,
+    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
     Skip,
 }
 
