@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provision.mjs";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalCudaWorkerGpuIdentity, assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -270,6 +270,27 @@ test("terminal product worker readiness binds each tuple to its native provider,
   }
   assert.throws(() => terminalProductWorkerContract("mlx:1b", "win32"), /requires darwin/);
   assert.throws(() => terminalProductWorkerId("mlx:1b", "short"), /exact tuple and instance token/);
+});
+
+test("terminal CUDA worker identity binds the same physical index, name, and memory", () => {
+  const physical = {
+    index: "0",
+    uuid: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+    name: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    total_bytes: 97887 * 1024 * 1024,
+  };
+  const worker = { gpu_id: "0", gpu_name: `${physical.name} (97887 MB)` };
+  assert.equal(assertTerminalCudaWorkerGpuIdentity(worker, physical), worker);
+  for (const mutate of [
+    (candidate) => { candidate.gpu_id = "1"; },
+    (candidate) => { candidate.gpu_name = "NVIDIA GeForce RTX 4090 (24564 MB)"; },
+    (candidate) => { candidate.gpu_name = `${physical.name} (97886 MB)`; },
+  ]) {
+    const candidate = structuredClone(worker);
+    mutate(candidate);
+    assert.throws(() => assertTerminalCudaWorkerGpuIdentity(candidate, physical), /selected physical GPU differ/);
+  }
+  assert.throws(() => assertTerminalCudaWorkerGpuIdentity(worker, { ...physical, total_bytes: physical.total_bytes + 1 }), /inputs are malformed/);
 });
 
 test("terminal product worker readiness rejects CPU-only, stale, wrong-backend, and unavailable-provider sets", () => {

@@ -54,6 +54,15 @@ export function terminalProductWorkerId(tuple, instanceToken) {
   if (!TERMINAL_PRODUCT_WORKERS[tuple] || !/^[a-f0-9]{64}$/.test(instanceToken ?? "")) die("exact tuple and instance token are required for worker identity");
   return `starvector-terminal-${tuple.replace(/[^a-z0-9]+/gi, "-")}-${instanceToken}`;
 }
+
+export function assertTerminalCudaWorkerGpuIdentity(worker, physicalGpu) {
+  const totalMb = physicalGpu?.total_bytes / (1024 * 1024);
+  if (!worker || !physicalGpu || !Number.isSafeInteger(totalMb) || totalMb <= 0) die("CUDA worker identity inputs are malformed");
+  const expectedName = `${physicalGpu.name} (${totalMb} MB)`;
+  if (physicalGpu.index !== worker.gpu_id || worker.gpu_name !== expectedName) die("registered worker and selected physical GPU differ");
+  return worker;
+}
+
 export function validateTerminalProductWorkerReadiness(workers, models, contract, expectedWorkerId) {
   if (!Array.isArray(workers) || !Array.isArray(models) || !contract || typeof expectedWorkerId !== "string" || expectedWorkerId.length === 0) die("worker readiness response is malformed");
   const matching = workers.filter((worker) => worker?.id === expectedWorkerId);
@@ -458,7 +467,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
     const selectedWorker = await waitForTerminalProductWorker(url, tuple, workerId, assertRunning);
     if (gpuBinding.backend === "candle") {
       const current = await probeTerminalCuda(gpuBinding.uuid, { expectedUuid: gpuBinding.uuid });
-      if (current.index !== selectedWorker.gpu_id || current.name !== selectedWorker.gpu_name) die("registered worker and selected physical GPU differ");
+      assertTerminalCudaWorkerGpuIdentity(selectedWorker, current);
     }
     assertRunning();
     const record = { ...identity, ...weights, tuple, gpu_binding: gpuBinding, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, worker: selectedWorker, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
