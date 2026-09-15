@@ -1088,6 +1088,7 @@ impl PhasePeaks {
 /// `mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged) + headroom_bytes`, the same
 /// number the cold-load residency gate already charges this load. It is phase-blind, so all three
 /// phases carry it and [`PhasePeaks::peak_bytes`] returns that scalar unchanged.
+#[cfg(test)]
 fn floor_phase_peaks(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -1112,7 +1113,21 @@ fn profiled_floor_phase_peaks(
     selection: MemorySelection,
     engaged: &[MemoryStrategy],
 ) -> (PhasePeaks, Option<&'static str>) {
-    let generic = floor_phase_peaks(selector.contract, engaged, selector.headroom_bytes);
+    let weights = if selector.backend() == MemoryBackend::Mlx {
+        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
+            selector.contract,
+            engaged,
+            selection.parameters,
+        )
+    } else {
+        crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged)
+    };
+    let scalar = weights.saturating_add(selector.headroom_bytes);
+    let generic = PhasePeaks {
+        conditioning_bytes: scalar,
+        denoise_bytes: scalar,
+        decode_bytes: scalar,
+    };
     let resolved = match (selector.decode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
@@ -1128,7 +1143,6 @@ fn profiled_floor_phase_peaks(
     let Some(resolved) = resolved else {
         return (generic, None);
     };
-    let weights = crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged);
     let Some(profiled) = resolved
         .profile
         .checked_composed_peak(weights, selector.contract.asset_facts.decoder_bytes)
@@ -1564,9 +1578,16 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
             let unmodeled_activation_bytes =
                 matches!(basis, CandidateBasis::EstimateFloor).then(|| {
-                    let counted_weights =
+                    let weights = if backend == MemoryBackend::Mlx {
+                        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
+                            self.contract,
+                            &engaged,
+                            parameters,
+                        )
+                    } else {
                         crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
-                            .saturating_sub(self.attributable_resident_bytes);
+                    };
+                    let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
                     predicted_peak_bytes.saturating_sub(counted_weights)
                 });
             if strategy == MemoryStrategy::Resident {

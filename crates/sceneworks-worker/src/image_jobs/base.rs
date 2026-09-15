@@ -8910,6 +8910,10 @@ async fn generate_stream(
             reference_count,
             use_pid,
             has_phases: false,
+            conditioning_windows: Some(crate::mlx_fit_gate::clip_window_upper_bound(
+                &request.prompt,
+                &request.negative_prompt,
+            )),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,

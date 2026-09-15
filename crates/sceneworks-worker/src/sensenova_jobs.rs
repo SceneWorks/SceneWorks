@@ -378,6 +378,7 @@ fn sensenova_selection_parameters(
         None
     };
     Some(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
             &ranges.decode_tile_edges
         })?,

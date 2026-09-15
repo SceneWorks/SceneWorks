@@ -294,6 +294,7 @@ async fn generate_krea_edit_stream(
     )
     .with_resolved_artifact_tier(resolved_tier)?;
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        conditioning_windows: None,
         width,
         height,
         count: request.count,
