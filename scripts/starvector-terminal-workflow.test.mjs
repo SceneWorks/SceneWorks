@@ -54,8 +54,20 @@ async function productServiceFixture({ tamperRelocation = false, tuple = process
   const runtime = path.join(sandbox, "fake-service.cjs");
   await writeFile(runtime, `const http = require("node:http");
 const path = require("node:path");
-if ((process.argv[1] ?? "").startsWith("--id=")) { process.stdout.write("0, GPU-12345678-1234-1234-1234-123456789abc, NVIDIA Fixture GPU, 580.0, 32768, 30000, 2768\\n"); process.exit(0); }
-if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
+// Node parses --id before loading preloads, so aliasing node.exe to nvidia-smi.exe
+// cannot serve as a Windows executable fixture. Intercept only the device probe.
+const childProcess = require("node:child_process");
+const originalExecFile = childProcess.execFile;
+childProcess.execFile = function(file, ...args) {
+  if (file !== "nvidia-smi") return originalExecFile.call(this, file, ...args);
+  const callback = args.at(-1);
+  process.nextTick(() => callback(null, "0, GPU-12345678-1234-1234-1234-123456789abc, NVIDIA Fixture GPU, 580.0, 32768, 30000, 2768\\n", ""));
+};
+childProcess.execFile[require("node:util").promisify.custom] = (...args) => new Promise((resolve, reject) => {
+  childProcess.execFile(...args, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
+});
+require("node:module").syncBuiltinESMExports();
+if (path.basename(process.argv[1] ?? "") === "build") process.exit(process.argv.includes("--release") ? 0 : 1);
 if (process.argv.length === 1 && process.env.SCENEWORKS_GPU_CHECK === "1") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
@@ -93,7 +105,7 @@ if (process.argv.length === 1) {
         const mlx = process.env.SCENEWORKS_GPU_ID === "mlx";
         const capabilities = mlx ? ["gpu", "vector_image_to_svg"] : ["gpu", "nvidia", "candle", "vector_image_to_svg"];
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU", status: "idle", currentJobId: null, capabilities }]));
+        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU (32768 MB)", status: "idle", currentJobId: null, capabilities }]));
         return;
       }
       if (request.method === "GET" && request.url === "/api/v1/models") {
@@ -116,8 +128,7 @@ if (process.argv.length === 1) {
 }
 `);
   await executableAlias(path.join(shimRoot, process.platform === "win32" ? "cargo.exe" : "cargo"));
-  if (process.platform === "win32") await executableAlias(path.join(shimRoot, "nvidia-smi.exe"));
-  await executableAlias(path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
+  await executableAlias(path.join(root, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
   await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
   await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
   const manifest = {
@@ -135,7 +146,7 @@ if (process.argv.length === 1) {
   const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
   const contract = terminalProductWorkerContract(tuple);
-  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime.replaceAll("\\", "/")}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
   const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
   return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript };
 }
@@ -208,7 +219,7 @@ test("terminal workflow has no install or model download step", () => {
 });
 
 test("source-built product service enables the native backend for each campaign host", () => {
-  assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--locked", "-p", "sceneworks-rust-api"]);
+  assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api"]);
   assert.deepEqual(productServiceBackendEnv("darwin"), {
     SCENEWORKS_BACKEND_MLX_ENABLED: "true",
     SCENEWORKS_BACKEND_CANDLE_ENABLED: "false",
@@ -216,7 +227,7 @@ test("source-built product service enables the native backend for each campaign 
     SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce",
     SCENEWORKS_CANDLE_REQUIRED: "0",
   });
-  assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
+  assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
   assert.deepEqual(productServiceBackendEnv("win32"), {
     SCENEWORKS_BACKEND_MLX_ENABLED: "false",
     SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",

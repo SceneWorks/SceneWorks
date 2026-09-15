@@ -18,7 +18,9 @@ const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (value) => { throw new Error(`starvector terminal service: ${value}`); };
 export function productServiceBuildArgs(platform = process.platform) {
-  const args = ["build", "--locked", "-p", "sceneworks-rust-api"];
+  // Latency and admission measure the optimized shipping path, including host
+  // tokenization and Candle dispatch; a dev binary cannot certify those gates.
+  const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api"];
   if (platform === "win32") args.push("--features", "backend-candle");
   return args;
 }
@@ -414,7 +416,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
   // this contract.  It never downloads model weights; the controller separately
   // rejects any model acquisition at job time.
   await execFile("cargo", productServiceBuildArgs(), { cwd: root });
-  const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  const binary = path.join(root, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const common = { cwd: root, detached: true }, stateRoot = productServiceStateRoot(output);
   if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
   const logPaths = productServiceLogPaths(output), instanceToken = randomBytes(32).toString("hex"), workerId = terminalProductWorkerId(tuple, instanceToken);
@@ -555,7 +557,7 @@ export async function reloadOwnedWorker(root, output, { waitReady = waitForTermi
   const previousPid = owned.history.events.at(-1).previous_worker_pid;
   const identity = await serviceIdentity(root, owned.record.inference_revision);
   if (identity.sceneworks_revision !== owned.record.sceneworks_revision) die("worker reload source revision changed");
-  const binary = path.resolve(root, owned.record.worker_binary), expectedBinary = path.join(path.resolve(root), "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  const binary = path.resolve(root, owned.record.worker_binary), expectedBinary = path.join(path.resolve(root), "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const info = await lstat(binary);
   if (binary !== expectedBinary || info.isSymbolicLink() || !info.isFile() || await fileSha256(binary) !== owned.record.api_binary_sha256) die("worker reload binary differs from initial provenance");
   const hfHome = path.join(owned.stateRoot, "hf");
