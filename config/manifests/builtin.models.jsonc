@@ -26493,7 +26493,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+            "inferenceRevision": "48c85921bed02130070bd0bd4a211075296e6dba",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
@@ -26521,7 +26521,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "befa9ff46b88a3cdf65e71089eae8b7b2b4cddf248851043e000e2131cb08ed4",
+              "sha256": "a2d231d0b07e38f81e57f30aa5e963cadf0c6257e8c40d4a686a9177186eeadc",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26541,12 +26541,12 @@
                 {
                   "path": "Cargo.lock",
                   "byteSize": 250714,
-                  "sha256": "32b3810a3bd382b7fac82a0cf0bc0ee52271ecf9ba11efba07340b65f618c6bd"
+                  "sha256": "db6d7d0ab52086648d5870c2166ecfd1a3d11df1d7c6421a4dea93b857a187a2"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9798,
-                  "sha256": "275a6f964d8b62b97eaaf502d28044c07aa8ac8296fd54e3e6d023575aa736e1"
+                  "sha256": "2f64beb693cfadbd9860b0f4956222d4b80629ff1c896ab4560601e61a4be512"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -26561,7 +26561,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
-                  "sha256": "5ca3bfd2d67c0374057832d9d2364af9124a6750f30871df6f16e9650e5c8d32"
+                  "sha256": "b585f44764adc0f4ec68f2c2f9f01ea882ae924172109179fc0339913ce7d5c6"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",

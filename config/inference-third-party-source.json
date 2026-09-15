@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 252e6a7a (merged PRs #976, #977 and #978). This pin combines the reviewed PID real-weight fixture alignment with StarVector outcome-parity receipt validation and context-derived generation budgets. The advance from the previous app pin fff98b05 adds one receipt schema plus bounded StarVector validator/provider changes and updates two existing PID fixture revisions; no new production crate or embedded asset was added. Scanner and crate inventories were regenerated. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
-  "inferenceRevision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
-  "auditDigest": "d6bfb2b048b2196b3447277b4c119af2c90eed316bfae2da181eec018ae61266",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 48c85921 (merged PR #984 over the prior 252e6a7a pin). This pin adds stateful StarVector MLX detokenization for the 1B and 8B providers while preserving final-byte and bounded-stream semantics; it also includes the intervening reviewed MiniMax-H3 reference-image control work. The advance changes no production embedded asset. Scanner and crate inventories were regenerated; changed candidate hashes remain within existing disposition areas. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
+  "inferenceRevision": "48c85921bed02130070bd0bd4a211075296e6dba",
+  "auditDigest": "ba1b390a536c5d5fbd820020db09e994c601a6c49932dfd0973e5e6c2857397d",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+    "revision": "48c85921bed02130070bd0bd4a211075296e6dba",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 683,
-    "populationSha256": "8ee3ebf1e12e489a1074c2c506f0cdf16f5383368a4609c76b99fa3799b71fc7"
+    "populationSha256": "e5014a8ab61caec6a8830ee615efc756acc80b1bb57fc0f1713172b12f7796e5"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+    "revision": "48c85921bed02130070bd0bd4a211075296e6dba",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

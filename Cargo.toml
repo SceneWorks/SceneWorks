@@ -145,7 +145,7 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "252e6a7a0fee08d2e07b0e8652234e4cea28aa59" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "48c85921bed02130070bd0bd4a211075296e6dba" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #
