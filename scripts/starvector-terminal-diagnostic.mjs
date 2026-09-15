@@ -24,7 +24,6 @@ const MODEL = Object.freeze({
   backend: "candle",
   repository: "starvector/starvector-1b-im2svg",
   revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
-  inventory: "fb4ad01f6a5a37fdc28b7c0aef488f844d82d37bdc1b5e3501123ed66811458d",
 });
 const REVISION = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -48,11 +47,17 @@ export function validateDiagnosticInvocation({ root, output, weightsRoot, corpus
   return { root: path.resolve(root), output: path.resolve(output), weightsRoot: path.resolve(weightsRoot), corpusAssetsRoot: path.resolve(corpusAssetsRoot), permanentPin, corpusSourcePin, expectedSceneWorksRevision, leaseRoot: path.resolve(leaseRoot), leaseHelper: path.resolve(leaseHelper) };
 }
 
-export function validateDiagnosticService(service, { sceneWorksRevision, permanentPin }) {
+export function validateDiagnosticWeightsManifest(manifest) {
+  const model = manifest?.models?.["starvector-1b"];
+  if (manifest?.schema_version !== 1 || model?.relative_path !== "models/starvector-1b" || model?.revision !== MODEL.revision || !SHA256.test(model?.inventory_sha256 ?? "")) die("selected Windows weights identity is invalid");
+  return model.inventory_sha256;
+}
+
+export function validateDiagnosticService(service, { sceneWorksRevision, permanentPin, modelInventory }) {
   const model = service?.models?.["starvector-1b"];
   const worker = service?.worker;
   if (service?.sceneworks_revision !== sceneWorksRevision || service?.inference_revision !== permanentPin || service?.tuple !== DIAGNOSTIC_TUPLE) die("product service source identity drifted");
-  if (model?.revision !== MODEL.revision || model?.inventory_sha256 !== MODEL.inventory) die("product service model inventory drifted");
+  if (!SHA256.test(modelInventory ?? "") || model?.revision !== MODEL.revision || model?.inventory_sha256 !== modelInventory) die("product service model inventory drifted");
   if (worker?.model_id !== MODEL.id || worker?.provider_id !== MODEL.provider || worker?.backend !== MODEL.backend || worker?.gpu_id !== "0" || worker?.status !== "idle" || worker?.current_job_id != null) die("product worker route identity drifted");
   if (!SHA256.test(service.api_binary_sha256 ?? "") || !service.api_url?.startsWith("http://127.0.0.1:")) die("product service binary or endpoint identity is missing");
   return service;
@@ -205,12 +210,13 @@ async function verifyDiagnosticBootstrap(inputs) {
 
 export async function runDiagnostic(options, dependencies = {}) {
   const inputs = validateDiagnosticInvocation(options);
+  const modelInventory = validateDiagnosticWeightsManifest(JSON.parse(await readFile(path.join(inputs.weightsRoot, "starvector-terminal-weights-v1.json"), "utf8")));
   const apiUrl = "http://127.0.0.1:17831";
   const runId = `diagnostic-${process.env.GITHUB_RUN_ID ?? "local"}-${process.env.GITHUB_RUN_ATTEMPT ?? "0"}`;
   const acquire = dependencies.acquire ?? acquireStableLease, start = dependencies.start ?? startProductService, stop = dependencies.stop ?? stopProductService, importAssets = dependencies.importAssets ?? importTupleAssets, submit = dependencies.submit ?? submitAndPoll, preserve = dependencies.preserve ?? preserveTerminalDiagnostics, occupancy = dependencies.occupancy ?? captureDiagnosticCudaOccupancy;
   await verifyDiagnosticBootstrap(inputs);
   const resultPath = path.join(inputs.output, "diagnostic-results.json"), transcript = path.join(inputs.output, "diagnostic-route.ndjson");
-  const result = { schema_version: 1, kind: "starvector_cuda_product_route_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, tuple: DIAGNOSTIC_TUPLE, sceneworks_revision: inputs.expectedSceneWorksRevision, inference_revision: inputs.permanentPin, corpus_source_revision: inputs.corpusSourcePin, model: MODEL, detail_budget: DIAGNOSTIC_BUDGET, selected_case_indexes: [...DIAGNOSTIC_CASES], stop_rule: DIAGNOSTIC_STOP, workflow: { run_id: String(process.env.GITHUB_RUN_ID ?? "local"), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) }, status: "starting", results: [] };
+  const result = { schema_version: 1, kind: "starvector_cuda_product_route_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, tuple: DIAGNOSTIC_TUPLE, sceneworks_revision: inputs.expectedSceneWorksRevision, inference_revision: inputs.permanentPin, corpus_source_revision: inputs.corpusSourcePin, model: { ...MODEL, inventory: modelInventory }, detail_budget: DIAGNOSTIC_BUDGET, selected_case_indexes: [...DIAGNOSTIC_CASES], stop_rule: DIAGNOSTIC_STOP, workflow: { run_id: String(process.env.GITHUB_RUN_ID ?? "local"), run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) }, status: "starting", results: [] };
   await writeRecord(resultPath, result);
   let release, serviceStarted = false, primaryError;
   try {
@@ -222,7 +228,7 @@ export async function runDiagnostic(options, dependencies = {}) {
     await writeRecord(resultPath, result);
     if (!result.cuda_occupancy_before_start.functional_execution_allowed) die("CUDA occupancy does not permit uncontended functional execution");
     const service = await start({ root: inputs.root, output: inputs.output, permanentPin: inputs.permanentPin, url: apiUrl, weightsRoot: inputs.weightsRoot, tuple: DIAGNOSTIC_TUPLE }); serviceStarted = true;
-    validateDiagnosticService(service, { sceneWorksRevision: inputs.expectedSceneWorksRevision, permanentPin: inputs.permanentPin });
+    validateDiagnosticService(service, { sceneWorksRevision: inputs.expectedSceneWorksRevision, permanentPin: inputs.permanentPin, modelInventory });
     const live = await assertTerminalProductWorkerReady(apiUrl, DIAGNOSTIC_TUPLE, service.worker.worker_id);
     if (JSON.stringify(live) !== JSON.stringify(service.worker)) die("live product worker changed after startup");
     const bindingPath = path.join(inputs.output, "imported-assets.json");

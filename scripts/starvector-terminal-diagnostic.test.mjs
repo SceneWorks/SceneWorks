@@ -19,6 +19,7 @@ import {
   validateDiagnosticManifest,
   validateDiagnosticOutcome,
   validateDiagnosticService,
+  validateDiagnosticWeightsManifest,
 } from "./starvector-terminal-diagnostic.mjs";
 
 const sha = (character) => character.repeat(64);
@@ -61,9 +62,13 @@ function serviceFixture() {
     tuple: "candle-cuda:1b",
     api_binary_sha256: sha("d"),
     api_url: "http://127.0.0.1:17831",
-    models: { "starvector-1b": { revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", inventory_sha256: "fb4ad01f6a5a37fdc28b7c0aef488f844d82d37bdc1b5e3501123ed66811458d" } },
+    models: { "starvector-1b": { revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", inventory_sha256: "a1ab79c36eec58747bf40e1de981497e15ecb0e2af15c62a4f033030555766e4" } },
     worker: { model_id: "starvector_1b", provider_id: "candle-starvector-1b", backend: "candle", gpu_id: "0", status: "idle", current_job_id: null },
   };
+}
+
+function weightsFixture() {
+  return { schema_version: 1, models: { "starvector-1b": { relative_path: "models/starvector-1b", revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", inventory_sha256: "a1ab79c36eec58747bf40e1de981497e15ecb0e2af15c62a4f033030555766e4" } } };
 }
 
 function manifestFixture() {
@@ -125,15 +130,28 @@ test("service and terminal results bind exact source, model, provider, backend, 
     const next = structuredClone(manifestFixture()); mutate(next);
     assert.throws(() => validateDiagnosticManifest(next), /budget drifted|route identity drifted|snapshot identity drifted/);
   }
-  assert.equal(validateDiagnosticService(serviceFixture(), { sceneWorksRevision, permanentPin }).tuple, "candle-cuda:1b");
+  const modelInventory = validateDiagnosticWeightsManifest(weightsFixture());
+  assert.equal(modelInventory, "a1ab79c36eec58747bf40e1de981497e15ecb0e2af15c62a4f033030555766e4");
+  for (const mutate of [
+    (next) => { next.schema_version = 2; },
+    (next) => { next.models["starvector-1b"].relative_path = "models/starvector-8b"; },
+    (next) => { next.models["starvector-1b"].revision = revision("0"); },
+    (next) => { next.models["starvector-1b"].inventory_sha256 = "invalid"; },
+  ]) {
+    const next = weightsFixture(); mutate(next);
+    assert.throws(() => validateDiagnosticWeightsManifest(next), /Windows weights identity is invalid/);
+  }
+  assert.equal(validateDiagnosticService(serviceFixture(), { sceneWorksRevision, permanentPin, modelInventory }).tuple, "candle-cuda:1b");
   for (const [field, value] of [["sceneworks_revision", revision("0")], ["inference_revision", revision("1")], ["tuple", "mlx:1b"]]) {
     const next = serviceFixture(); next[field] = value;
-    assert.throws(() => validateDiagnosticService(next, { sceneWorksRevision, permanentPin }), /source identity drifted/);
+    assert.throws(() => validateDiagnosticService(next, { sceneWorksRevision, permanentPin, modelInventory }), /source identity drifted/);
   }
   for (const [field, value] of [["provider_id", "other"], ["backend", "mlx"], ["model_id", "starvector_8b"]]) {
     const next = serviceFixture(); next.worker[field] = value;
-    assert.throws(() => validateDiagnosticService(next, { sceneWorksRevision, permanentPin }), /worker route identity drifted/);
+    assert.throws(() => validateDiagnosticService(next, { sceneWorksRevision, permanentPin, modelInventory }), /worker route identity drifted/);
   }
+  const wrongInventory = serviceFixture(); wrongInventory.models["starvector-1b"].inventory_sha256 = sha("0");
+  assert.throws(() => validateDiagnosticService(wrongInventory, { sceneWorksRevision, permanentPin, modelInventory }), /model inventory drifted/);
   const record = { case_index: 6, input_png_sha256: sha("6"), projectId: "project", sourceAssetId: "asset-6", model: "starvector_1b", sampling: { seed: 7 }, detailBudget: { ...DIAGNOSTIC_BUDGET } };
   assert.equal(validateDiagnosticOutcome(record, outcomeFixture(record)).accepted, true);
   for (const [field, value] of [["providerId", "other"], ["backend", "mlx"], ["modelId", "starvector_8b"], ["sourceRasterSha256", sha("7")]]) {
