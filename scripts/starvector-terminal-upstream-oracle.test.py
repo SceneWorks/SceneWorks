@@ -527,7 +527,7 @@ class OracleTests(unittest.TestCase):
         (self.root / 'real').write_text('bytes')
         (self.root / 'link').symlink_to(self.root / 'real')
         for path in ['../real', '/real', 'link', 'a\\b']:
-            with self.assertRaises(ValueError):
+            with self.subTest(path=path), self.assertRaises(ValueError):
                 oracle.local_file(self.root, path)
 
     def test_inventory_matches_native_json_byte_order(self):
@@ -571,7 +571,7 @@ class OracleTests(unittest.TestCase):
 
     def test_source_hash_binds_actual_checkout_and_rejects_extra_python(self):
         directory = self.root / 'starvector'; directory.mkdir()
-        (directory / 'source.py').write_text('def upstream(): return 1\n')
+        (directory / 'source.py').write_bytes(b'def upstream(): return 1\n')
         entries = [{'path': 'starvector/source.py', 'sha256': oracle.digest(directory / 'source.py')}]
         lock = {'implementation_revision': 'a' * 40, 'python_source_sha256': hashlib.sha256(oracle.canonical(entries)).hexdigest()}
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
@@ -582,7 +582,7 @@ class OracleTests(unittest.TestCase):
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             with self.assertRaisesRegex(ValueError, 'expected=' + lock['python_source_sha256'] + ' actual=' + changed_hash + ' files=1'):
                 oracle.source_identity(self.root, lock)
-        (directory / 'source.py').write_text('def upstream(): return 1\n')
+        (directory / 'source.py').write_bytes(b'def upstream(): return 1\n')
         (directory / 'injected.py').write_text('raise RuntimeError()')
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             with self.assertRaisesRegex(ValueError, 'untracked'):

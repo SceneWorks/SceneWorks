@@ -218,7 +218,9 @@ def absolute_regular_file(value, description):
 
 
 def local_file(root, relative):
-    if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '\\' in relative or any(x in ('..', '.') for x in relative.split('/')):
+    # Corpus paths use forward slashes on every host. Windows considers /name
+    # drive-relative, so Path.is_absolute() alone does not reject that spelling.
+    if not isinstance(relative, str) or not relative or relative.startswith('/') or Path(relative).is_absolute() or '\\' in relative or any(x in ('..', '.') for x in relative.split('/')):
         fail('invalid relative file path: ' + str(relative))
     item = Path(root)
     for part in relative.split('/'):
