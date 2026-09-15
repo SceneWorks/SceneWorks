@@ -2102,8 +2102,8 @@ fn mlx_image_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::M
 
 /// The anchor-derived admission peak for one image-MLX request (epic 22505 feature-end fix round,
 /// E2/E7): the packaged measured anchor for this `(model, tier, mlx lane)` priced through
-/// `MemoryAnchor::derive_mlx_image_phase_peaks` — per-phase ALLOCATOR envelopes, so the returned
-/// peak is directly comparable to the measured admission envelopes the fitted arm scales.
+/// `MemoryAnchor::derive_mlx_image_phase_peaks`. The returned peak contains active allocations;
+/// the selector adds recapture uncertainty separately.
 ///
 /// Carries the FULL guard set the other anchor consumers carry, every conjunct fail-open to the
 /// caller's floor:
@@ -2836,41 +2836,10 @@ fn estimate_floor_parameters(
     (candidates, decisions)
 }
 
-/// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
-/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
-/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
-///
-/// Peak source per rung, in preference order:
-///
-/// 1. **Fitted curve** — a verified measured cell of the same provider/tier/mode/overlay at a
-///    different geometry ([`MeasuredRungBasis`]), extrapolated over output area: the conditioning
-///    peak is area-flat (text encoding does not grow with the render target) while denoise,
-///    decode, and the admission envelope scale by the area ratio, floored at 1.0 so a
-///    smaller-than-measured request never predicts below the measurement. Gated by
-///    [`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]: if the
-///    extrapolated triple's binding phase differs from the measured cell's, the fitted candidate
-///    is NOT emitted (no per-phase variance re-derivation exists) and the rung falls back to the
-///    floor, whose no-measured-basis path the constraint's scope sentence explicitly exempts.
-/// 2. **Anchor-derived** (epic 22505 feature-end fix round, E2/E7) — the measured image anchor
-///    for this `(model, tier, mlx lane)` priced through the per-output-pixel allocator law
-///    ([`mlx_image_anchor_derived_peak`]), when the anchor is current and every identity/regime
-///    conjunct holds. Deliberately AHEAD of the floor: the derivation prices its own uncertainty
-///    terms, so the selector grades it with no additional allowance, where the floor's activation
-///    term carries the full measured allocator-envelope allowance.
-/// 3. **Weights + activation floor** — [`estimate_floor_weights_bytes`] plus an activation term
-///    that is, in preference order (sc-22665, epic 22657 E4): the image derivation law's per-phase
-///    residue for THIS rung's regime, priced off the same measured anchor rung 2 uses
-///    ([`mlx_image_anchor_activation_residue`]), so the request's decode tile, attention chunk and
-///    transformer window reach the estimate; otherwise the exact same fixed-reserve + area-scaled
-///    headroom the resident baseline charges ([`MlxRequestPlan::generic_headroom_bytes`]), which
-///    is what every request the anchor or the law refuses keeps — at this pin, all of them.
-///
-/// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
-/// (`memory_strategy::select_strategy`).
-#[allow(clippy::too_many_arguments)]
 /// Price active memory under the selected execution schedule. A resident anchor supplies
 /// only activation residues; changing the load shape here does not relabel it as a measured
 /// optimized run. Unsupported modes and auxiliary ownership retain the conservative fallback.
+#[allow(clippy::too_many_arguments)]
 fn mlx_selected_phase_peak(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -2995,6 +2964,10 @@ fn synthesize_estimate_ladder(
     )
 }
 
+/// Price implemented selections, including supported staging compositions. Compatible fitted
+/// cells take precedence; provider phase facts and retained active observations then derive an
+/// estimate. Unknown facts retain conservative weights and workspace. The selector owns margin
+/// widening, and every tiled candidate still requires its exact decode-quality policy.
 #[allow(clippy::too_many_arguments)]
 fn synthesize_estimate_ladder_with_conditioning(
     contract: &MemoryProviderContract,
