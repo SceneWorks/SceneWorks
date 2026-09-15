@@ -471,6 +471,47 @@ class OracleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ordered'):
             oracle.select_rows(self.root, '1b')
 
+    def legacy_diagnostic_rows(self):
+        rows = []
+        for index in range(120):
+            path = self.root / ('legacy-%s.png' % index)
+            path.write_bytes(('legacy PNG fixture %s' % index).encode())
+            rows.append({'case_index': index, 'dataset': 'fixture/data', 'revision': 'a' * 40,
+                         'row_index': index, 'filename': str(index), 'svg_sha256': 'b' * 64,
+                         'input_png_path': path.name, 'png_sha256': oracle.digest(path),
+                         'sampling': dict(oracle.DIAGNOSTIC_SAMPLING),
+                         'detail_budget': {'maxNewTokens': 4000, 'maxSvgBytes': 262144,
+                                           'maxWallTimeMs': 120000}})
+        row_identity = oracle.source_rows_sha256(rows)
+        value = {'schema_version': 1, 'row_identity_sha256': row_identity, 'rows': rows}
+        index_path = self.root / 'starvector-terminal-row-index-v1.json'
+        index_path.write_text(json.dumps(value))
+        return rows, index_path, row_identity
+
+    def test_fixed_case_9_diagnostic_authenticates_legacy_corpus_without_relabeling(self):
+        rows, index_path, row_identity = self.legacy_diagnostic_rows()
+        with patch.object(oracle, 'DIAGNOSTIC_CORPUS_SHA256', oracle.digest(index_path)), \
+             patch.object(oracle, 'DIAGNOSTIC_ROWS_SHA256', row_identity):
+            selected = oracle.select_diagnostic_case_9(self.root, '1b')
+        self.assertEqual((selected['case_index'], selected['source_case_index'], selected['seed']),
+                         (9, 9, 7))
+        self.assertEqual(selected['input_png_sha256'], rows[9]['png_sha256'])
+        self.assertEqual(selected['sampling'], oracle.DIAGNOSTIC_SAMPLING)
+        self.assertEqual(selected['detail_budget'], oracle.DIAGNOSTIC_BUDGET)
+        self.assertEqual(rows[9]['detail_budget']['maxNewTokens'], 4000,
+                         'the retired corpus row must not be rewritten as a shipping-budget row')
+
+    def test_fixed_case_9_diagnostic_rejects_tamper_and_other_tiers(self):
+        _, index_path, row_identity = self.legacy_diagnostic_rows()
+        authenticated = oracle.digest(index_path)
+        with patch.object(oracle, 'DIAGNOSTIC_CORPUS_SHA256', authenticated), \
+             patch.object(oracle, 'DIAGNOSTIC_ROWS_SHA256', row_identity):
+            with self.assertRaisesRegex(ValueError, 'fixed to StarVector 1B'):
+                oracle.select_diagnostic_case_9(self.root, '8b')
+            index_path.write_text(index_path.read_text() + '\n')
+            with self.assertRaisesRegex(ValueError, 'authenticated readiness input'):
+                oracle.select_diagnostic_case_9(self.root, '1b')
+
     def test_path_escape_and_symlink_are_rejected(self):
         (self.root / 'real').write_text('bytes')
         (self.root / 'link').symlink_to(self.root / 'real')

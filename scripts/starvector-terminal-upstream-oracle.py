@@ -53,6 +53,12 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 LOCK = HERE.parent / 'release/starvector-terminal-upstream-lock-v1.json'
 SOURCE_INDICES = [base + i for base in (0, 30, 60, 90) for i in range(5)]
+DIAGNOSTIC_CASE_INDEX = 9
+DIAGNOSTIC_CORPUS_SHA256 = 'dbfd6b6ef972f3104f7a20c2033af6157b720e49adf46c506e0b34ef612d3a59'
+DIAGNOSTIC_ROWS_SHA256 = 'f9529c2e5a86bef6644054c909c4f621991f6384d9b33a029ad46ff2e6cd3b88'
+DIAGNOSTIC_BUDGET = {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}
+DIAGNOSTIC_SAMPLING = {'temperature': 0.0, 'topP': 1.0, 'topK': 1,
+                       'repetitionPenalty': 1.0, 'seed': 7}
 _CAIRO_HANDLES = []
 
 
@@ -294,6 +300,37 @@ def select_rows(assets_root, tier):
     return selected
 
 
+def source_rows_sha256(rows):
+    fields = ['dataset', 'revision', 'row_index', 'filename', 'svg_sha256']
+    serialized = ''.join(json.dumps({key: row[key] for key in fields}, ensure_ascii=False,
+                                    separators=(',', ':')) + '\n'
+                         for row in rows)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def select_diagnostic_case_9(assets_root, tier):
+    """Authenticate the retired readiness corpus and expose its fixed case 9 diagnostic view."""
+    if tier != '1b':
+        fail('case 9 diagnostic is fixed to StarVector 1B')
+    index_path = local_file(assets_root, 'starvector-terminal-row-index-v1.json')
+    if digest(index_path) != DIAGNOSTIC_CORPUS_SHA256:
+        fail('case 9 diagnostic corpus index is not the authenticated readiness input')
+    index = json.loads(index_path.read_text())
+    rows = index.get('rows', [])
+    if (index.get('schema_version') != 1 or len(rows) != 120
+            or [row.get('case_index') for row in rows] != list(range(120))
+            or index.get('row_identity_sha256') != DIAGNOSTIC_ROWS_SHA256
+            or source_rows_sha256(rows) != DIAGNOSTIC_ROWS_SHA256):
+        fail('case 9 diagnostic corpus row identities drifted')
+    row = rows[DIAGNOSTIC_CASE_INDEX]
+    png = verified_file(assets_root, row['input_png_path'], row['png_sha256'])
+    if row.get('sampling') != DIAGNOSTIC_SAMPLING:
+        fail('case 9 diagnostic greedy sampling drifted')
+    return {'case_index': DIAGNOSTIC_CASE_INDEX, 'source_case_index': DIAGNOSTIC_CASE_INDEX,
+            'seed': 7, 'input_png': str(png), 'input_png_sha256': row['png_sha256'],
+            'sampling': dict(DIAGNOSTIC_SAMPLING), 'detail_budget': dict(DIAGNOSTIC_BUDGET)}
+
+
 def checkpoint_map(model_root):
     index = json.loads(local_file(model_root, 'model.safetensors.index.json').read_text())
     mapping = index.get('weight_map')
@@ -391,7 +428,9 @@ def validate(args, packages=True):
         configs[key] = str(verified_file(args.components_root, component['config_path'], component['config_sha256']))
     sanitizer = absolute_regular_file(args.sanitizer, 'production sanitizer binary')
     args.sanitizer = str(sanitizer)
-    rows = select_rows(args.assets_root, args.tier)
+    rows = ([select_diagnostic_case_9(args.assets_root, args.tier)]
+            if args.command in ('diagnose-case-9', '_diagnostic_worker')
+            else select_rows(args.assets_root, args.tier))
     runtime = import_upstream_runtime(args.upstream_root, lock) if packages else None
     return {'lock': lock, 'source_sha256': source_hash, 'model_root': str(model_root), 'model_inventory_sha256': model_hash,
             'config_path': str(config_path), 'processor_path': str(processor_path), 'components': components,
@@ -811,6 +850,69 @@ def worker(args, facts):
     durable_json(output / ('upstream-reference-' + args.tier + suffix), value)
 
 
+def diagnostic_worker(args, facts):
+    """Run only authenticated legacy case 9 and emit evidence that cannot be promoted."""
+    import torch
+    sys.path.insert(0, str(Path(args.upstream_root).resolve()))
+    if args.tier != '1b' or not args.device.startswith('cuda:') or not torch.cuda.is_available():
+        fail('case 9 diagnostic requires the coordinator-admitted CUDA 1B device')
+    device = torch.device(args.device)
+    free, total = torch.cuda.mem_get_info(device)
+    if free < args.min_free_vram_gib * 1024**3:
+        fail('insufficient free CUDA memory for admitted diagnostic bound')
+    if args.max_vram_gib * 1024**3 > total:
+        fail('CUDA allocation cap exceeds device memory')
+    torch.cuda.set_per_process_memory_fraction(args.max_vram_gib * 1024**3 / total, device)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.use_deterministic_algorithms(True)
+    output = Path(args.output)
+    tier_root = output / 'diagnostic-case-9'
+    tier_root.mkdir(parents=True, exist_ok=False)
+    transcript_path = tier_root / 'transcript.jsonl'
+    row = facts['rows'][0]
+    with transcript_path.open('x') as transcript:
+        def record(event):
+            transcript.write(json.dumps(event, separators=(',', ':')) + '\n')
+            transcript.flush(); os.fsync(transcript.fileno())
+        record({'event': 'start', 'kind': 'starvector_upstream_case_9_diagnostic',
+                'acceptance_use': 'diagnostic_only', 'usable_for_terminal_acceptance': False,
+                'implementation_revision': facts['lock']['implementation_revision'],
+                'source_sha256': facts['source_sha256'],
+                'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
+                'runtime': facts['runtime'], 'attention_implementation': 'eager',
+                'max_rss_gib': args.max_rss_gib, 'max_vram_gib': args.max_vram_gib,
+                'timeout_seconds': args.timeout_seconds})
+        model, coverage = load_model(facts, device)
+        try:
+            record({'event': 'model_loaded', **coverage})
+            record({'event': 'case_started', 'started_at': time.time(), **row})
+            raw, generation = generate(model, row, device)
+            raw_path = tier_root / 'raw.svg'
+            raw_path.write_bytes(raw.encode('utf-8'))
+            result = {'schema_version': 1, 'kind': 'starvector_upstream_case_9_diagnostic',
+                      'acceptance_use': 'diagnostic_only', 'usable_for_terminal_acceptance': False,
+                      'tier': '1b', 'case_index': DIAGNOSTIC_CASE_INDEX,
+                      'source_case_index': DIAGNOSTIC_CASE_INDEX, 'seed': 7,
+                      'input_png_sha256': row['input_png_sha256'],
+                      'sampling': row['sampling'], 'detail_budget': row['detail_budget'],
+                      'finish_reason': generation['finish_reason'],
+                      'generated_tokens': generation['generated_tokens'],
+                      'generated_bytes': generation['generated_bytes'],
+                      'raw_svg': raw_path.relative_to(output).as_posix(),
+                      'raw_svg_sha256': digest(raw_path),
+                      'implementation_revision': facts['lock']['implementation_revision'],
+                      'checkpoint_revision': facts['lock']['checkpoints']['1b']['revision'],
+                      'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
+                      'transcript': transcript_path.relative_to(output).as_posix()}
+            record({'event': 'case_completed', **result})
+        finally:
+            del model
+            torch.cuda.empty_cache()
+    result['transcript_sha256'] = digest(transcript_path)
+    durable_json(output / 'diagnostic-case-9.json', result)
+
+
 def reference_metadata(facts, tier, config_path, processor_path, transcript_path):
     checkpoint = facts['lock']['checkpoints'][tier]
     return {'implementation_repository': facts['lock']['implementation_repository'],
@@ -865,14 +967,18 @@ def verify_collected_rejections(output, tier, rows):
     return summaries
 
 
-def supervise(args, facts):
+def supervise(args, facts, diagnostic=False):
     import psutil
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
-    if (output / ('upstream-' + args.tier)).exists() or (output / ('upstream-reference-' + args.tier + '.json')).exists():
-        fail('output already contains this tier; preserve the attempt and select a fresh output directory')
-    command = [sys.executable, str(Path(__file__).resolve()), '_worker', *sys.argv[2:]]
+    tier_directory = 'diagnostic-case-9' if diagnostic else 'upstream-' + args.tier
+    result_file = 'diagnostic-case-9.json' if diagnostic else 'upstream-reference-' + args.tier + '.json'
+    if (output / tier_directory).exists() or (output / result_file).exists():
+        fail('output already contains this run; preserve the attempt and select a fresh output directory')
+    worker_command = '_diagnostic_worker' if diagnostic else '_worker'
+    command = [sys.executable, str(Path(__file__).resolve()), worker_command, *sys.argv[2:]]
     start = time.monotonic()
-    with (output / ('upstream-' + args.tier + '-process.log')).open('x') as log:
+    process_log = 'diagnostic-case-9-process.log' if diagnostic else 'upstream-' + args.tier + '-process.log'
+    with (output / process_log).open('x') as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         try:
             while process.poll() is None:
@@ -889,7 +995,7 @@ def supervise(args, facts):
                     break
                 if rss > args.max_rss_gib * 1024**3:
                     fail('host RSS limit exceeded')
-                transcript_path = output / ('upstream-' + args.tier) / 'transcript.jsonl'
+                transcript_path = output / tier_directory / 'transcript.jsonl'
                 if transcript_path.is_file():
                     lines = transcript_path.read_text().splitlines()
                     try:
@@ -901,7 +1007,7 @@ def supervise(args, facts):
                 if time.monotonic() - start > args.timeout_seconds:
                     fail('hard runtime deadline exceeded')
                 time.sleep(1)
-            if process.returncode == 3:
+            if process.returncode == 3 and not diagnostic:
                 verify_collected_rejections(output, args.tier, facts['rows'])
                 raise CollectedSvgRejections('upstream tier completed with rejected SVG cases; '
                                              'preserved process log, raw SVGs, sanitizer logs, and transcript')
@@ -921,7 +1027,8 @@ def main():
         print(json.dumps(provision_native_cairo(sys.argv[2], sys.argv[3], json.loads(LOCK.read_text()))))
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['validate', 'prepare', '_worker'])
+    parser.add_argument('command', choices=['validate', 'prepare', 'diagnose-case-9', '_worker',
+                                            '_diagnostic_worker'])
     for key in ['upstream-root', 'weights-root', 'assets-root', 'output', 'components-root', 'sanitizer']:
         parser.add_argument('--' + key, required=True)
     parser.add_argument('--tier', choices=['1b', '8b'], required=True)
@@ -943,6 +1050,10 @@ def main():
         print(json.dumps({'status': 'validated', 'tier': args.tier, 'model_inventory_sha256': facts['model_inventory_sha256'], 'source_sha256': facts['source_sha256'], 'cases': len(facts['rows']), 'runtime': facts['runtime']}))
     elif args.command == '_worker':
         worker(args, facts)
+    elif args.command == '_diagnostic_worker':
+        diagnostic_worker(args, facts)
+    elif args.command == 'diagnose-case-9':
+        supervise(args, facts, diagnostic=True)
     else:
         supervise(args, facts)
 
