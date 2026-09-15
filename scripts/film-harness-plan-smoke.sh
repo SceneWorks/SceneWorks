@@ -12,6 +12,19 @@
 #   BRIEF=... REFERENCES=... scripts/film-harness-plan-smoke.sh
 #   MAX_REPAIR_ROUNDS=0 scripts/film-harness-plan-smoke.sh  # one planning call, no repair
 #
+# REFERENCES selects the approved pack the planner is shown, and since sc-23405 it decides the SHAPE
+# of what comes back. A pack that approves references, on a catalog that serves the family's
+# reference partition, makes `reference_to_video` the envelope's default: expect a plan whose shots
+# bind the approved roles they depict and whose compiled requests resolve to `minimax_h3_ref`. A
+# pack that approves none gets the phase-1 modes and the base checkpoint. The generated courier pack
+# (sc-23403) is the one to point this at when you want the reference shape:
+#
+#   REFERENCES=~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc \
+#     scripts/film-harness-plan-smoke.sh
+#
+# `--skip-install-check` below is also what keeps that from demanding the 18.78 GB reference DiT:
+# planning validates against the partition's DECLARED menus, not against weights on this disk.
+#
 # NO VIDEO WEIGHTS ARE LOADED and nothing is rendered: the only model that loads is the
 # prompt-refine checkpoint (~16 GB, `TheDrummer/Anubis-Mini-8B-v1`), once, reused across calls.
 # Expect one decode for the plan (plus one per repair round) and one per shot for the prompt

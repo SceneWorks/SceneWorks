@@ -427,39 +427,57 @@ pub struct PlannerArtifacts {
 async fn resolve_envelope(
     transport: &dyn ApiTransport,
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     require_installed: bool,
     facts: &HostFacts,
 ) -> Result<(PlanCatalog, PlannerCapabilities), HarnessError> {
     // The reference partition is RESOLVED unconditionally here (sc-23402): the draft this envelope
     // is about to produce does not exist yet, so whether any shot will bind reference roles is not
-    // knowable, and having the entry in hand costs one catalog read.
-    //
-    // It is NOT gated. The envelope below is built from the BASE entry alone — `modes` omits
-    // `reference_to_video` and `max_reference_images` is 0 — so a PLANNER-GENERATED draft can never
-    // bind reference roles. Planner-generated reference shots are S4's (sc-23405) scope, not this
-    // story's: do not widen the envelope here. Gating the reference partition would therefore
-    // refuse every `film-harness plan` on a host that never downloaded the 18.78 GB reference DiT,
-    // for weights the resulting text-only film could not load — and references are OPTIONAL (E1).
-    // `compile` and `run` gate it when a plan's shots actually resolve to it.
+    // knowable from the draft, and having the entry in hand costs one catalog read.
     let catalog = crate::film_harness::plan_catalog_for(transport, &brief.model.id, true).await?;
+    // The lane follows the API HOST's platform, not this process's: `--api` may be another machine.
+    let lane = facts.lane();
+    // Whether this planning run will offer reference conditioning at all is decided from TWO facts
+    // and neither of them is install state (sc-23405):
+    //
+    //   * the catalog SERVES the family's reference partition — an envelope built on an entry the
+    //     API does not hold would offer a mode whose every use is refused per shot; and
+    //   * the pack approves at least one reference the shots could bind — references are OPTIONAL
+    //     (E1), and a user who supplies none gets the phase-1 envelope and the base path.
+    //
+    // Install state is deliberately NOT one of them: what the planner writes must not depend on
+    // which weights happen to be on this disk, or the same brief and pack would produce a
+    // different film on two machines. It is GATED below instead, exactly as `validate` and `run`
+    // gate the partition a selected shot resolves to — a refusal in seconds, naming the partition,
+    // rather than twenty-five minutes of decoding a plan that could never render. A host that
+    // wants the plan anyway passes `--skip-install-check`.
+    let caps = {
+        let base = catalog.base_entry();
+        let widened = base.map(|entry| {
+            let caps = capabilities_for(&brief.model, entry, lane);
+            match catalog.reference_entry() {
+                Some((_, reference)) => caps.with_reference_partition(reference),
+                None => caps,
+            }
+        });
+        widened.map(|caps| caps.narrowed_to_pack(pack))
+    };
+    let gate_reference = caps
+        .as_ref()
+        .is_some_and(PlannerCapabilities::offers_references);
     // The SAME entry-level gate the dispatch path runs — catalog presence, video type, install
-    // state, and the route's own platform-reachability check — rather than a second copy of it,
-    // on the BASE partition only.
+    // state, and the route's own platform-reachability check — rather than a second copy of it.
     let findings = crate::film_harness::catalog_entry_findings(
         &catalog,
         brief.model.tier.as_deref(),
         require_installed,
         facts,
-        false,
+        gate_reference,
     );
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    let entry = catalog
-        .base_entry()
-        .expect("findings are empty only with an entry");
-    // The lane follows the API HOST's platform, not this process's: `--api` may be another machine.
-    let caps = capabilities_for(&brief.model, entry, facts.lane());
+    let caps = caps.expect("findings are empty only with an entry");
     Ok((catalog, caps))
 }
 
@@ -567,7 +585,7 @@ async fn prepare(
     }
     let facts = crate::film_harness::host_facts_for(transport).await?;
     let (catalog, caps) =
-        resolve_envelope(transport, &brief, options.require_installed, &facts).await?;
+        resolve_envelope(transport, &brief, &pack, options.require_installed, &facts).await?;
     let findings = brief_model_findings(
         &brief,
         catalog

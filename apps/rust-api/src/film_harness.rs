@@ -1121,6 +1121,17 @@ impl PlanCatalog {
     pub(crate) fn base_entry(&self) -> Option<&JsonObject<String, Value>> {
         self.base.as_ref()
     }
+
+    /// The family's reference partition as the catalog actually SERVES it (sc-23405), or `None`
+    /// when this catalog was not asked for one or the API has no such entry.
+    ///
+    /// This is the fact the planner's capability envelope widens on: the reference entry's own
+    /// `capabilities` and `limits.maxReferenceAssets` are what a reference shot dispatches against,
+    /// and an envelope built from a partition the catalog does not serve would hand the planner a
+    /// mode whose every use is refused by `missing_partition_finding` on each repair round.
+    pub(crate) fn reference_entry(&self) -> Option<(&str, &JsonObject<String, Value>)> {
+        self.reference_id.as_deref().zip(self.reference.as_ref())
+    }
 }
 
 /// The entry-level gate — catalog presence, video type, install state, platform reachability.

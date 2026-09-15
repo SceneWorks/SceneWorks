@@ -42,7 +42,7 @@ fixed; and a **revise** recommendation with its reasoning.
 | Document | Schema | Fixture |
 | --- | --- | --- |
 | Brief | `sceneworks_core::film_planner::ProductionBrief` | `config/film-harness/courier-workshop/brief.jsonc` |
-| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3), `plan.ltx25.jsonc` (LTX-2.5, same six shots), `plan.ref.jsonc` (two shots on two MiniMax-H3 partitions) |
+| Production plan | `sceneworks_core::film_plan::ProductionPlan` | `config/film-harness/courier-workshop/plan.jsonc` (MiniMax-H3, no references), `plan.v2.jsonc` (same six shots, every one reference-conditioned), `plan.ltx25.jsonc` (LTX-2.5, same six shots), `plan.ref.jsonc` (two shots on two MiniMax-H3 partitions) |
 | Reference pack | `sceneworks_core::film_plan::ReferencePack` | `config/film-harness/courier-workshop/references.jsonc` |
 | Reference spec (fixtures only) | `sceneworks_core::film_plan::ReferenceSpec` | `config/film-harness/courier-workshop/references.spec.jsonc` |
 | Compiled requests | `sceneworks_core::film_compile::CompiledPlan` | written to `--out/compiled.json` |
@@ -107,7 +107,7 @@ and writes a `references.jsonc`. No new job type, no new model, no new route.
 
 The shipped courier spec generates five roles (`courier`, `recipient`, `red_parcel`,
 `workshop_location`, `workbench_table`) and inherits two (`house_style`, `workshop_plate`) and the
-four sound clips. Its prompts are written for **cross-image consistency**: the same workshop
+whole `sound` block — three spoken `dialogue` lines and two bed WAVs since sc-23404. Its prompts are written for **cross-image consistency**: the same workshop
 description appears verbatim in every prompt, each character is one figure in a neutral
 three-quarter pose, the parcel sits alone on a plain surface, and the location plate is the wide
 shot that establishes the bench. Editing one prompt without editing the shared clause in the others
@@ -196,14 +196,16 @@ film-harness make-references \
   --api  http://127.0.0.1:8000
 film-harness validate \
   --plan       config/film-harness/courier-workshop/plan.jsonc \
-  --references film-harness-evidence/sc-23403/courier-refs/references.jsonc
+  --references film-harness-evidence/sc-23403/courier-refs/references.jsonc \
+  --api        http://127.0.0.1:8000
 ```
 
 Expect roughly 10–20 minutes for the five plates: the first job pays the weight load (several
 minutes), the remaining four are an 8-step 1024² render each on a warm engine. `--model krea_2_raw`
 is the undistilled 52-step alternative and takes substantially longer per plate. The evidence is the
-`--out` directory itself: five PNGs under `references/`, the two inherited plates, the four sound
-clips and the `references.jsonc` with its provenance.
+`--out` directory itself: five PNGs under `references/`, the two inherited plates, the inherited
+`sound` block — three spoken `dialogue` lines and two bed WAVs (sc-23404) — and the
+`references.jsonc` with its provenance.
 
 ## Sound (sc-22712)
 
@@ -490,6 +492,31 @@ draft that drops a beat is refused, never accepted as a shorter film.
   model block against the installed menus — an `fps` off the declared menu or a `limits.maxMemoryGb`
   below the lane's `minMemoryGb` fails here rather than after `1 + rounds` full local decodes that
   then blame the planner for its input.
+- **Planning a reference film (sc-23405).** Whether the planner may write reference shots is decided
+  from exactly two facts, and **install state is not one of them**: the catalog must SERVE the
+  family's reference partition (an envelope built on an entry the API does not hold would offer a
+  mode refused on every shot), and the pack must approve at least one reference for a shot to bind.
+  With both, the envelope carries the reference partition's own `maxReferenceAssets`, the default
+  mode INVERTS — `reference_to_video` for every shot that shows an approved character, prop or
+  location, `text_to_video` only for one that shows none — and the contract's one worked example
+  models that form rather than contradicting it. With either missing the planner emits exactly the
+  phase-1 modes and the plan stays on the base checkpoint: **references are optional, and a user who
+  supplies none gets the base path**. What the planner writes therefore depends on the catalog and
+  the pack, never on which weights happen to be on this disk — the same brief and pack produce the
+  same film on two machines.
+
+  The reference partition's **install state** is gated instead, exactly as `validate`/`run` gate the
+  partition a selected shot resolves to: a refusal in seconds naming `minimax_h3_ref`, rather than
+  twenty-five minutes of decoding a plan whose every request needs 18.78 GB that are not here.
+  `--skip-install-check` turns it off and plans the same film. A catalog with no reference partition
+  is never a refusal — it is the text-only case, and it costs nothing.
+
+  `requiredRoles` is enforced unchanged: a role bound in `referenceRoles` covers its beat (it is on
+  screen by the plan's own account), and a role bound nowhere is a finding naming the role and its
+  beat, handed back verbatim to the repair round.
+
+  Which pack the planner is shown is `--references`, the same flag every other command takes — see
+  *Choosing the pack* under *The reference-conditioned courier plan*.
 - **Human correction.** `plan.json` is the correction surface. Edit it, then `film-harness compile`
   to rebuild the requests and `film-harness validate` to check them. `plan` refuses to overwrite a
   `plan.json` that differs from what it just generated unless `--force`. `plan` also copies the
@@ -607,12 +634,11 @@ the run dispatches on, keyed by catalog model id, so a mixed run's record names 
 There are no per-shot model overrides across families: the only id resolution can ever produce is
 the declared model's own reference partition.
 
-**The planner does not generate reference shots.** `film-harness plan` builds its capability
-envelope from the base entry alone — `modes` omits `reference_to_video` and `maxReferenceImages` is
-0 — so an LLM-generated draft can never bind reference roles. Mixed-partition plans are authored by
-hand today (`plan.ref.jsonc`); teaching the planner to produce them is **sc-23405 (S4)**, not this
-story. `film-harness compile` and `film-harness run` resolve and validate hand-authored reference
-shots fully.
+**The planner generates reference shots when — and only when — there are any to generate**
+(sc-23405). `film-harness plan` widens its capability envelope to the family's reference partition,
+so the caps the planner is held to are the ones a reference shot actually dispatches against
+(`minimax_h3_ref`'s nine images, not the base entry's zero). See *Planning a reference film* below
+for the two facts that decide it and for what the planner is told.
 
 `compiled.json` is **schema version 2** (sc-23402): its `model` field is the RESOLVED partition id
 rather than the plan's declared family model, with `partitionReason` beside it. A v1 document is
@@ -623,6 +649,87 @@ compile`, which rewrites it.
 `courier` + `workshop_plate`, SH020 binds nothing — and
 `PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh` renders it
 end to end. Budget it longer than the base two-shot smoke: the run loads both DiTs.
+
+### The reference-conditioned courier plan (`plan.v2.jsonc`, sc-23405)
+
+`plan.v2.jsonc` is the six-shot courier film with **every** shot reference-conditioned. It is the
+same film as `plan.jsonc` shot for shot — the same ids, beats, framings, durations, intended states,
+`dependsOn` edges and spoken lines — so the two are comparable answer for answer, and the only thing
+that differs is what each shot is conditioned on:
+
+| | `plan.jsonc` (phase 1) | `plan.v2.jsonc` (phase 2) |
+| --- | --- | --- |
+| conditioning | `text_to_video`, and `image_to_video` off the approved `workshop_plate` on SH020/SH040 | `reference_to_video` on all six |
+| roles bound | none | `workshop_location` + `workbench_table` + `red_parcel` + whichever of `courier` / `recipient` is on screen |
+| resolves to | `minimax_h3` throughout | `minimax_h3_ref` throughout |
+| `limits.maxShotSeconds` | 2700 | 10800 |
+
+Keep both. The baseline is what a reference-conditioned take is judged against: it is the same film
+with the identity of the courier, the recipient, the parcel and the room left to the model, which is
+exactly the thing references are meant to fix.
+
+`house_style` stays in `continuityRoles` and is bound nowhere: it is a style reference, and Ref2VA
+treats every bound image as a **subject to depict**, so binding a look as a subject asks for a shot
+of the look. The budget is the one `plan.ref.jsonc` measured (sc-23402) — a ~21-minute cold load of
+the 18.78 GB `transformer_ref` DiT plus ~143 s per denoise step at 576x320 — times six shots.
+
+Each shot carries the `beatId` of the beat it covers in `brief.jsonc`, so `film-harness compile`
+re-checks coverage against that brief (with no `--brief` it picks the sibling up) and a hand edit
+that drops the parcel out of the handover is refused rather than compiled. `plan.jsonc` carries
+none, which is the ordinary hand-authored case and stays legal.
+
+**Choosing the pack.** The plan names roles, never files, so it runs against any pack that declares
+them. `--references` selects which:
+
+- **The checked-in stand-in pack beside it**, `config/film-harness/courier-workshop/references.jsonc`
+  — deterministic placeholder plates from `film-harness fixture-images`. It proves the *plumbing*:
+  the right checkpoint, the right payload, the right record. It cannot prove likeness, because the
+  plates are flat colour. It is what the smoke scripts fall back to when `REFERENCES=` is unset;
+  `--references` itself is always required on the command line.
+- **A generated pack** written by `film-harness make-references --spec references.spec.jsonc`
+  (sc-23403) — Krea 2 plates of one courier, one recipient, one red parcel, one workshop and one
+  workbench, all from the same verbatim workshop description. This is the pack the sc-23405 evidence
+  was produced against,
+  `~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc`. It is *not* checked in
+  (PNGs), so it is named by `--references` on the command line.
+- **A pack the user supplied themselves**, declaring the same seven roles. References are
+  user-provided input; Krea 2 is only how the test fixtures were made.
+
+`scripts/film-harness-smoke.sh` takes both as `PLAN=` / `REFERENCES=`, so the two-shot GPU smoke on
+the generated pack is one line:
+
+```sh
+eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)"
+export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH
+PLAN=config/film-harness/courier-workshop/plan.v2.jsonc \
+  REFERENCES=~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc \
+  scripts/film-harness-smoke.sh
+```
+
+Budget it like `plan.ref.jsonc`, not like the base smoke: every shot loads the reference DiT.
+
+```bash
+# the checked-in stand-in pack: deterministic placeholder plates, proves the plumbing, not likeness
+film-harness run --plan config/film-harness/courier-workshop/plan.v2.jsonc \
+  --references config/film-harness/courier-workshop/references.jsonc --out DIR
+
+# the GENERATED pack (sc-23403). Not checked in — the PNGs live outside the repo.
+film-harness run --plan config/film-harness/courier-workshop/plan.v2.jsonc \
+  --references ~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc --out DIR
+
+# a pack the user supplied, with the same seven roles
+film-harness run --plan config/film-harness/courier-workshop/plan.v2.jsonc \
+  --references /path/to/their/references.jsonc --out DIR
+```
+
+`review.jsonc` (version 3) reviews **either** plan. What changed with `plan.v2.jsonc` is the
+premise, not the shot list: every shot binds the pack's `workshop_location` and `workbench_table`,
+so there is one approved room and one approved bench behind every cut. Each `acrossCut` question now
+names in its `intended` the approved role both sides of the cut are conditioned on and asks about a
+feature of that reference — the workshop's pegboard of hand tools where the room is in frame, the
+parcel on the two close-ups where it is not. In phase 1 those questions could only ask whether two
+independently invented rooms happened to agree, which is exactly the miss the first real-weights
+smoke reported as a clean cut.
 
 ### Dependencies (plan schema 2)
 

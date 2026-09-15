@@ -55,9 +55,12 @@ Rules:
 - Name every approved role that is on screen in a shot in that shot's continuityRoles — the people,
   the prop the beat turns on, the location — and describe them in the prompt too. A beat the brief
   says must show something is not covered by a shot that leaves it out.
-- Reach for text_to_video first; it is the right mode for most shots. Use a keyframe mode only when
-  a specific approved plate belongs in a specific frame, and never put the same role in both the
-  first and the last slot.
+- Use the mode the user turn's envelope names as its default; where it names none, reach for
+  text_to_video. Use a keyframe mode only when a specific approved plate belongs in a specific
+  frame, and never put the same role in both the first and the last slot. (The default is a
+  property of the model and the approved pack the user turn was composed from — a checkpoint with
+  reference conditioning and a pack to fill it wants its references bound, one with neither cannot
+  take them at all — so it is stated there and never here.)
 - Write prompts as the model's own prompt guidance asks: one paragraph per shot, positive
   statements only, describing subject, action, setting, light, shot size and camera movement.
 - If something the brief asks for cannot be expressed inside the stated limits, still return the
