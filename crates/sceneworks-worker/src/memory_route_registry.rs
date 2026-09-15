@@ -3824,6 +3824,56 @@ mod tests {
             .clone()
     }
 
+    #[test]
+    fn shipped_sdxl_packed_tiers_reach_declared_streaming() {
+        for id in ["sdxl", "realvisxl", "realvisxl_lightning"] {
+            let manifest = shipped_model(id);
+            for tier in [MemoryRouteTier::Q4, MemoryRouteTier::Q8] {
+                for profile in [MemoryRouteLoadProfile::Plain, MemoryRouteLoadProfile::Lora] {
+                    let input = spec(tier, profile).with_resolved_route(id);
+                    let shaped = evaluate_declared_mlx_load_shape_with(
+                        "sdxl",
+                        Some(tier.as_str()),
+                        Some(MemoryRouteMode::TextToImage),
+                        &manifest,
+                        input.clone(),
+                        |_| true,
+                    );
+                    assert_eq!(
+                        shaped.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Applied,
+                        "{id} {tier:?} {profile:?}"
+                    );
+                    let refused = evaluate_declared_mlx_load_shape_with(
+                        "sdxl",
+                        Some(tier.as_str()),
+                        Some(MemoryRouteMode::TextToImage),
+                        &manifest,
+                        input,
+                        |_| false,
+                    );
+                    assert_eq!(
+                        refused.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Refused,
+                        "provider cannot be bypassed"
+                    );
+                }
+            }
+            let unsupported = evaluate_declared_mlx_load_shape_with(
+                "sdxl",
+                Some("nvfp4"),
+                Some(MemoryRouteMode::TextToImage),
+                &manifest,
+                spec(MemoryRouteTier::Nvfp4, MemoryRouteLoadProfile::Plain).with_resolved_route(id),
+                |_| true,
+            );
+            assert_eq!(
+                unsupported.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+    }
+
     fn spec(tier: MemoryRouteTier, profile: MemoryRouteLoadProfile) -> LoadSpec {
         let base = LoadSpec::new(WeightsSource::Dir("fixture".into()));
         let base = match tier {
