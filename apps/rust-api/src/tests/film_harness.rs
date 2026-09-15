@@ -1580,6 +1580,74 @@ impl Harness {
         path
     }
 
+    /// The shipped pack with every BINDABLE reference unapproved — only the `style` and the `plate`
+    /// stay approved — copied into the temp dir so the relative `file` paths still resolve.
+    ///
+    /// This, and not a pack that approves literally nothing, is the reachable "the pack fills no
+    /// reference shot" case, for two reasons found while covering this seam:
+    ///
+    ///   * the ANCHOR RULE (`film_plan.rs`) makes every shot name at least one APPROVED role in its
+    ///     conditioning slots or `continuityRoles`, so on a pack that approves nothing EVERY shot of
+    ///     EVERY plan is a finding and no plan can be produced at all; and
+    ///   * `brief.requiredBeats[].requiredRoles` must each be approved by the pack, so the shipped
+    ///     brief refuses an all-unapproved pack up front, before an envelope is ever built.
+    ///
+    /// Approving the style and the plate satisfies both — `house_style` is what every shot of the
+    /// scripted drafts declares — while approving no SUBJECT a `reference_to_video` shot could bind
+    /// (`BINDABLE_REFERENCE_KINDS`: character/prop/location). `sound` is left alone: a pack that
+    /// approves no conditioning images still carries its beds, and the lines are what SH020/SH050/
+    /// SH060 speak.
+    pub(crate) fn fixture_pack_without_bindable_references(&self) -> PathBuf {
+        let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
+        let mut pack: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("fixture pack parses");
+        let entries = pack["references"]
+            .as_array_mut()
+            .expect("the pack declares references");
+        assert!(!entries.is_empty(), "the shipped pack declares references");
+        let mut approved_kinds = Vec::new();
+        for entry in entries {
+            let entry = entry.as_object_mut().expect("reference entry object");
+            let bindable = sceneworks_core::film_plan::BINDABLE_REFERENCE_KINDS
+                .contains(&entry["kind"].as_str().expect("every entry declares a kind"));
+            // Explicit `false`: `approved` DEFAULTS to true when the key is absent, so removing the
+            // key would approve the entry instead of unapproving it.
+            entry.insert("approved".to_owned(), json!(!bindable));
+            if !bindable {
+                approved_kinds.push(entry["kind"].as_str().unwrap().to_owned());
+            }
+        }
+        approved_kinds.sort();
+        approved_kinds.dedup();
+        assert_eq!(
+            approved_kinds,
+            vec!["plate".to_owned(), "style".to_owned()],
+            "the shipped pack must still leave exactly a style and a plate approved, or this \
+             fixture no longer anchors the shots it is used with"
+        );
+        let dir = self.temp_dir.path().join("pack-unbindable");
+        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("references"))
+            .expect("fixture references dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
+                .expect("plate copies");
+        }
+        std::fs::create_dir_all(dir.join("sound")).expect("sound dir");
+        for entry in
+            std::fs::read_dir(Path::new(FIXTURE_DIR).join("sound")).expect("fixture sound dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("sound").join(entry.file_name()))
+                .expect("bed copies");
+        }
+        let path = dir.join("references.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+        path
+    }
+
     /// Copy the checked-in fixture into the temp dir with `edit` applied to the parsed plan, so a
     /// test can break one field without touching the shipped documents.
     ///
@@ -2348,6 +2416,19 @@ fn only_the_base_partition_is_installed(body: &mut Value) {
                 variant["installState"] = json!("installed");
             }
         }
+    }
+}
+
+/// The same rewrite, plus the family's REFERENCE partition removed from the catalog entirely
+/// (sc-23405): the host that serves `minimax_h3` and has no `minimax_h3_ref` row at all.
+///
+/// That is the catalog fact the planner's envelope narrows on — a mode whose partition the API does
+/// not serve could only ever be refused per shot — and it is the shape a `plan` on a
+/// reference-less catalog has to keep working through.
+fn only_the_base_partition_exists(body: &mut Value) {
+    only_the_base_partition_is_installed(body);
+    if let Some(entries) = body.as_array_mut() {
+        entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some("minimax_h3_ref"));
     }
 }
 
@@ -6081,6 +6162,34 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
     })
 }
 
+/// The same shot, written the way the sc-23405 envelope asks for it: `reference_to_video`, binding
+/// the approved roles the beat is about.
+///
+/// `house_style` stays in `continuityRoles` only. It is a style reference, and MiniMax-H3's Ref2VA
+/// treats every bound image as a subject to depict — binding a look as a subject asks for a shot OF
+/// the look — which is also why the shipped `plan.v2.jsonc` binds it nowhere.
+fn reference_draft_shot(id: &str, beat_id: &str) -> Value {
+    let mut shot = draft_shot(id, beat_id);
+    let roles: Vec<&str> = beat_roles(beat_id)
+        .into_iter()
+        .filter(|role| *role != "house_style")
+        .collect();
+    shot["conditioning"] = json!({ "mode": "reference_to_video", "referenceRoles": roles });
+    shot
+}
+
+/// A well-formed draft covering every beat of the checked-in brief with every shot bound to the
+/// approved roles it depicts — what the planner is asked for when the pack has references.
+pub(crate) fn reference_draft() -> Value {
+    json!({
+        "shots": BRIEF_BEATS
+            .iter()
+            .enumerate()
+            .map(|(index, beat)| reference_draft_shot(&format!("SH{:03}0", index + 1), beat))
+            .collect::<Vec<_>>()
+    })
+}
+
 /// A well-formed draft covering every beat of the checked-in brief.
 pub(crate) fn full_draft() -> Value {
     json!({
@@ -6285,21 +6394,23 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
     assert!(request.contains("workshop_plate (plate)"), "{request}");
 }
 
-/// sc-23402 review, E1. `film-harness plan` gates the BASE partition only.
+/// sc-23402 review, E1, as sc-23405 leaves it. A host whose catalog serves NO reference partition
+/// plans a text-only film and is never asked for the reference weights.
 ///
-/// The story's first cut resolved the reference partition AND ran the entry-level gate on it for
+/// sc-23402's first cut resolved the reference partition AND ran the entry-level gate on it for
 /// every `plan`, so with the CLI's default `--require-installed` a brief that produces a text-only
 /// film refused with "minimax_h3_ref tier q4 is not installed on this host" — demanding an 18.78 GB
-/// download the resulting plan could never load. References are OPTIONAL input, and the planner's
-/// envelope is built from the base entry alone, so it cannot even generate a shot that would need
-/// them (that is sc-23405 / S4). The dispatch path still gates it when a plan's shots resolve to it.
+/// download the resulting plan could never load. The envelope now DOES widen to that partition when
+/// one is on offer (sc-23405), so the property is kept where it belongs: the planner offers
+/// reference conditioning only when the catalog serves the partition and the pack can fill it, and
+/// where it offers none the film, the envelope and the requests are exactly the phase-1 ones.
 #[tokio::test]
-async fn planning_a_text_only_film_does_not_demand_the_reference_partition() {
+async fn planning_without_a_reference_partition_in_the_catalog_stays_on_the_base_checkpoint() {
     let harness = Harness::start(true, vec![]).await;
     set_plan_replies(&harness, vec![draft_text(&full_draft())]);
-    // The base checkpoint installed, the reference DiT not — the state the gate has to tolerate.
+    // The base checkpoint installed, and no `minimax_h3_ref` row in the catalog at all.
     let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
-        only_the_base_partition_is_installed(body);
+        only_the_base_partition_exists(body);
     });
     let mut options = planner_options(&harness, "planned-require-installed");
     options.require_installed = true;
@@ -6314,7 +6425,17 @@ async fn planning_a_text_only_film_does_not_demand_the_reference_partition() {
             .shots
             .iter()
             .all(|shot| shot.conditioning.reference_roles.is_empty()),
-        "the planner's envelope cannot produce a reference-binding shot (sc-23405 owns that)"
+        "with no partition to dispatch them against, reference shots are never offered"
+    );
+    // The envelope said so in as many words, so the planner was never invited to write one.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(request.contains("THIS CHECKPOINT HAS NONE"), "{request}");
+    assert!(
+        !request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
     );
     // Every compiled request stays on the base partition, so nothing here would load the ref DiT.
     assert!(
@@ -6346,6 +6467,278 @@ async fn planning_a_text_only_film_does_not_demand_the_reference_partition() {
         findings
             .iter()
             .any(|m| m.contains("minimax_h3") && m.contains("not installed")),
+        "{findings:?}"
+    );
+}
+
+/// sc-23405 AC2, the reference half. With a pack that approves references and a catalog that serves
+/// the family's reference partition, the planner is TOLD to bind approved roles on every shot, and
+/// the draft that does compiles to `reference_to_video` on `minimax_h3_ref` throughout.
+///
+/// The draft is scripted rather than decoded, so what this asserts is the two halves the harness
+/// owns: the request the planner composes (the envelope's caps and its default mode), and the
+/// resolution of what comes back. Whether a real 8B model follows the instruction is the coordinator's
+/// real-LLM smoke (`scripts/film-harness-plan-smoke.sh`).
+#[tokio::test]
+async fn the_planner_binds_approved_roles_on_every_shot_when_the_pack_has_references() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let options = planner_options(&harness, "planned-references");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a reference-binding draft is a plan");
+    assert_eq!(artifacts.repair_rounds, 0);
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    for shot in &artifacts.plan.shots {
+        assert_eq!(shot.conditioning.mode, "reference_to_video", "{}", shot.id);
+        assert!(
+            !shot.conditioning.reference_roles.is_empty(),
+            "{} binds nothing",
+            shot.id
+        );
+    }
+    // Every request resolves to the reference partition, in the draft's own role order.
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(request.mode, "reference_to_video", "{}", request.shot_id);
+        let shot = artifacts
+            .plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot");
+        assert_eq!(
+            request.reference_roles, shot.conditioning.reference_roles,
+            "{}",
+            request.shot_id
+        );
+    }
+    // The plan still declares the FAMILY once — the planner cannot swap the brief's model.
+    assert_eq!(artifacts.plan.model.id, "minimax_h3");
+    assert_eq!(artifacts.compiled.model.id, "minimax_h3");
+
+    // And the planner was actually told to do this: the REFERENCE partition's cap, the inverted
+    // default mode, the standing binding rule and a worked example that models it.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(
+        request.contains("at most 9 reference roles"),
+        "the cap is the REFERENCE partition's maxReferenceAssets, not the base entry's 0: {request}"
+    );
+    assert!(
+        request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    assert!(
+        request.contains("An approved reference pack is available"),
+        "{request}"
+    );
+    assert!(
+        request.contains("\"conditioning\": { \"mode\": \"reference_to_video\""),
+        "the one worked example must model the default, not contradict it: {request}"
+    );
+}
+
+/// sc-23405, E1 and the install gate. The reference partition the planner's envelope will send
+/// every shot to is gated by install state exactly as `validate`/`run` gate the partition a
+/// selected shot resolves to — a refusal in seconds naming the partition, rather than a full
+/// planning run whose every request needs 18.78 GB that are not on this disk.
+///
+/// `--skip-install-check` is the documented escape, and it still plans the same film: what the
+/// planner writes is decided by the catalog and the pack, never by which weights happen to be here,
+/// or the same brief would produce two different films on two machines.
+#[tokio::test]
+async fn the_reference_partition_the_planner_will_use_is_gated_by_install_state() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let mut options = planner_options(&harness, "planned-ref-uninstalled");
+    options.require_installed = true;
+    let findings = findings_of(
+        film_planner::generate(&transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("the reference DiT is not on this disk"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("minimax_h3_ref") && m.contains("not installed")),
+        "{findings:?}"
+    );
+    // Refused BEFORE the first decode: no planning job was ever created.
+    assert!(
+        refine_job_payloads(&harness, true).is_empty(),
+        "the gate runs before a token is spent"
+    );
+
+    // `--skip-install-check`: the same catalog, the same pack, the same film.
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let mut options = planner_options(&harness, "planned-ref-skipped");
+    options.require_installed = false;
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("--skip-install-check plans the reference film anyway");
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3_ref"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// sc-23405 review, E1 at the SEAM. A pack that approves no BINDABLE reference plans a text-only
+/// film and is never asked for the reference weights — even though the catalog SERVES the reference
+/// partition and that partition is not installed.
+///
+/// This is the pack half of the property
+/// `planning_without_a_reference_partition_in_the_catalog_stays_on_the_base_checkpoint` holds for the
+/// catalog half, and it is a separate test because it fails for a different reason. The narrowing
+/// that carries it — `narrowed_to_pack` inside `resolve_envelope` — had no harness-level cover: both
+/// pack fixtures approve all seven roles, so deleting the call left all 159 film_harness tests green
+/// while a pack that fills no reference shot still set `gate_reference` and made
+/// `plan --require-installed` demand the 18.78 GB `transformer_ref` for a plan that could never load
+/// it. That is the sc-23402/E1 regression, asserted here through the whole planner rather than only
+/// on `narrowed_to_pack` directly.
+///
+/// The pack approves a style and a plate rather than nothing at all, and the brief's `requiredRoles`
+/// are stripped, because a pack approving NOTHING is refused before an envelope exists — the anchor
+/// rule and `requiredRoles` both demand an approved role. See
+/// `fixture_pack_without_bindable_references`. What is left is the case the narrowing actually has
+/// to carry: approved references that are not SUBJECTS, so no `reference_to_video` shot could bind
+/// one.
+#[tokio::test]
+async fn a_pack_that_fills_no_reference_shot_plans_a_text_only_film_on_a_reference_serving_catalog()
+{
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The FULL catalog: `minimax_h3_ref` is present and is NOT installed. With an approving pack
+    // this exact transport + `require_installed` refuses by name
+    // (`the_reference_partition_the_planner_will_use_is_gated_by_install_state`), which is what
+    // makes a plan coming back here evidence that the envelope narrowed.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    // `requiredRoles` stripped: they name the subjects this pack deliberately does not approve, and
+    // an unmet required role is a refusal on the BRIEF, which would mask the envelope question.
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    for beat in brief["requiredBeats"].as_array_mut().unwrap() {
+        beat.as_object_mut().unwrap().remove("requiredRoles");
+    }
+    let brief_path = harness.temp_dir.path().join("brief-no-required-roles.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+
+    let mut options = planner_options(&harness, "planned-unbindable-pack");
+    options.brief_path = brief_path;
+    options.reference_pack_path = harness.fixture_pack_without_bindable_references();
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a pack that fills no reference shot must not demand the reference weights");
+
+    // No shot was offered references, so none binds any.
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "a pack approving no bindable subject fills no reference shot"
+    );
+    // The envelope told the planner so in as many words: the phase-1 envelope, not the widened one.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(request.contains("THIS CHECKPOINT HAS NONE"), "{request}");
+    assert!(
+        !request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    // And every compiled request stays on the base partition, so nothing here loads the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// sc-23405 AC2, the enforcement half. `requiredRoles` is enforced exactly as before, through the
+/// roles a shot BINDS — conditioning slots included. A reference draft that leaves the parcel out
+/// of the handover is a finding that names the role, handed back verbatim to a repair round; a
+/// planner that never binds it is refused rather than looped on.
+#[tokio::test]
+async fn a_reference_draft_that_leaves_a_required_role_unbound_is_repaired_then_refused_by_name() {
+    let harness = Harness::start(true, vec![]).await;
+    // The handover beat MUST show `red_parcel`; this draft binds it nowhere on that shot.
+    let mut unbound = reference_draft();
+    for shot in unbound["shots"].as_array_mut().unwrap() {
+        if shot["beatId"] != "handover" {
+            continue;
+        }
+        shot["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["courier", "workbench_table"]
+        });
+        shot["continuityRoles"] = json!(["courier", "workbench_table", "house_style"]);
+    }
+    set_plan_replies(
+        &harness,
+        vec![draft_text(&unbound), draft_text(&reference_draft())],
+    );
+    let options = planner_options(&harness, "repaired-references");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("the repair round binds the parcel");
+    assert_eq!(artifacts.repair_rounds, 1);
+    let repair = refine_job_payloads(&harness, true)
+        .get(1)
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a second planning job was created");
+    assert!(
+        repair.contains("red_parcel") && repair.contains("handover"),
+        "the finding names the unbound role and its beat: {repair}"
+    );
+
+    // A planner that never binds it is refused after the declared rounds, naming the role.
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&unbound)]);
+    let mut options = planner_options(&harness, "exhausted-references");
+    options.max_repair_rounds = 0;
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("an uncorrected draft is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("red_parcel") && m.contains("handover")),
         "{findings:?}"
     );
 }

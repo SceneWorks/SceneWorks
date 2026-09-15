@@ -70,6 +70,22 @@ pub const SHOT_CONDITIONING_MODES: &[&str] = &[
 /// Reference kinds a pack entry may declare.
 pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style", "plate"];
 
+/// The subset of [`REFERENCE_KINDS`] a `reference_to_video` shot may legitimately BIND.
+///
+/// Ref2VA treats every bound image as a **subject to depict**, so only the kinds that name a
+/// subject belong in `conditioning.referenceRoles`. The two excluded kinds are excluded for that
+/// reason, not by oversight:
+///
+///   * `style` — a look, not a subject. Binding it asks for a shot OF the look, which is why the
+///     shipped pack's `house_style` lives in `continuityRoles` and is bound nowhere.
+///   * `plate` — a literal frame. It is placed through the KEYFRAME slots (`image_to_video` /
+///     `first_last_frame`), a different conditioning task.
+///
+/// Used to decide whether a pack can fill a reference shot at all: a pack approving only a style
+/// and a plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
+/// envelope rather than being offered and then refused a decode later.
+pub const BINDABLE_REFERENCE_KINDS: &[&str] = &["character", "prop", "location"];
+
 /// Dependency kinds one shot may declare on another (sc-22711).
 ///
 /// * `conditioning` — this shot's conditioning is derived from the other shot's **selected take**
