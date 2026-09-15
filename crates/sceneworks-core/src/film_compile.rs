@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
 use crate::film_plan::{
-    is_reference_partition_id, shot_resolution, ModelEntries, ModelLane, PlanDiagnostic,
-    ProductionPlan, ReferencePack, Shot,
+    is_reference_partition_id, plan_lora_payload_entries, plan_loras_for_partition,
+    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
 };
+use crate::minimax_h3_turbo::resolve_turbo_recipe;
 use crate::video_request::effective_reference_image_short_edge;
 use crate::MAX_PROMPT_CHARS;
 
@@ -33,7 +34,12 @@ use crate::MAX_PROMPT_CHARS;
 /// let a v1 document parse with an empty reason and then fail [`request_differences`] as
 /// hand-edited, which blames the operator for a schema migration. The remedy either way is
 /// `film-harness compile`.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 2;
+/// **3** (sc-23406): a request carries the LoRAs it dispatches with and the step count it renders
+/// at. Both are DERIVED fields [`request_differences`] compares, so a v2 document read under this
+/// build would default them to "none / unknown" and then be blamed as hand-edited — the same
+/// migration trap the v2 bump above exists to avoid. The remedy is the same one line:
+/// `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 3;
 
 /// How far apart one shot's successive attempts are seeded (sc-22715).
 ///
@@ -88,6 +94,32 @@ pub struct CompiledRequest {
     /// [`CompiledRequest::effective_reference_image_short_edge`] resolves for the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// The catalog LoRA ids this request dispatches with, resolved PER PARTITION from the plan's
+    /// one `model.loras` list (sc-23406).
+    ///
+    /// A step-distill adapter declares the partitions it was distilled for, so the same plan-level
+    /// list produces the ref2v turbo on a `minimax_h3_ref` request and the fl2v turbo on a
+    /// `minimax_h3` one — and neither on a request whose partition has no compatible entry, which
+    /// is an empty list rather than a silent substitution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
+    /// `model.advanced.steps`, when the plan set one — the value DISPATCHED as `advanced.steps`.
+    /// `None` leaves the step count to the recipe or the model default, which is what
+    /// [`CompiledRequest::effective_steps`] records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    /// The model-evaluation count this request will actually render at: `steps` above, else the
+    /// selected turbo recipe's own count, else the partition's declared `defaults.steps`.
+    ///
+    /// Resolved HERE rather than on read because only the compile holds all three inputs at once —
+    /// the plan's override, the partition this shot resolved to, and that partition's catalog
+    /// entry. The attempt record copies it, so the document and the record state one number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_steps: Option<u32>,
+    /// The video sigma shift the selected turbo recipe imposes, when one applies to this request's
+    /// partition. Absent in the base regime, where the engine's own constant governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_scheduler_shift: Option<f64>,
     /// Why this request resolved to `model` and not the family's other partition
     /// ([`crate::film_plan::ShotPartition::reason`]). Derived, like every other field but the
     /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
@@ -166,6 +198,18 @@ pub struct PlannerCostRecord {
     /// record carries the bound beside the measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner_max_memory_gb: Option<f64>,
+}
+
+/// The model-evaluation count a catalog entry declares as its default (`defaults.steps`) — what
+/// the engine renders at when nothing names a count (sc-23406).
+fn default_steps(entry: &JsonObject<String, Value>) -> Option<u32> {
+    entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("steps"))
+        .and_then(Value::as_u64)
+        .and_then(|steps| u32::try_from(steps).ok())
+        .filter(|steps| *steps > 0)
 }
 
 /// `advanced.mlxQuantize` for a tier — the shared convention the MLX lanes read.
@@ -301,12 +345,45 @@ fn compile_shot(
         .as_ref()
         .and_then(|advanced| advanced.reference_image_short_edge)
         .filter(|_| is_reference_partition_id(&partition.model_id));
+    // The plan's one LoRA list, resolved against the partition this shot ACTUALLY dispatches as
+    // (sc-23406). A shot whose partition has no compatible entry gets none — the empty list is the
+    // record of that, and `effective_steps` below then resolves to the model's own default.
+    let loras: Vec<String> = plan_loras_for_partition(&plan.model.loras, &partition.model_id)
+        .into_iter()
+        .map(|lora| lora.id.clone())
+        .collect();
+    // Resolved through the SAME resolver the worker calls, on the same payload shape, so the
+    // schedule this document promises is the schedule the engine runs. A conflict is refused by
+    // `validate_plan_structure` before a compile is attempted; reaching it here means the plan was
+    // compiled anyway, and a finding beats compiling a request with two schedules in it.
+    let payload_loras = plan_lora_payload_entries(&plan.model.loras, &partition.model_id);
+    let recipe = match resolve_turbo_recipe(&partition.model_id, &payload_loras) {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            return Err(vec![PlanDiagnostic::shot(&shot.id, "model.loras", error)]);
+        }
+    };
+    let steps = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+        .and_then(|steps| u32::try_from(steps).ok())
+        .filter(|steps| *steps > 0);
+    let effective_steps = steps
+        .or_else(|| recipe.map(|recipe| recipe.steps))
+        .or_else(|| default_steps(partition_entry));
+    let turbo_scheduler_shift = recipe.map(|recipe| f64::from(recipe.video_shift));
     Ok(CompiledRequest {
         shot_id: shot.id.clone(),
         beat: shot.beat.clone(),
         mode: shot.conditioning.mode.clone(),
         model: partition.model_id,
         reference_image_short_edge,
+        loras,
+        steps,
+        effective_steps,
+        turbo_scheduler_shift,
         partition_reason: partition.reason,
         prompt,
         prompt_source,
@@ -427,6 +504,12 @@ impl CompiledRequest {
         if let Some(tier) = context.tier {
             advanced.insert("mlxQuantize".to_owned(), mlx_quantize_for_tier(tier));
         }
+        if let Some(steps) = self.steps {
+            // The plan-level override, dispatched on the same `advanced` convention the Video
+            // Studio uses and read by the same worker branch (`minimax_h3_sampling`), where it
+            // wins over a selected recipe's own count.
+            advanced.insert("steps".to_owned(), json!(steps));
+        }
         if let Some(edge) = self.reference_image_short_edge {
             // The same `advanced` convention as the tier (sc-23402): a request axis the engine reads
             // off the job, not a document axis. Only ever present on a reference-partition request,
@@ -478,6 +561,14 @@ impl CompiledRequest {
             "requestedGpu": "auto",
             "advanced": advanced,
         });
+        if !self.loras.is_empty() {
+            // `{ id, weight }` per entry — the exact shape `generationStudio.jsx` posts for a
+            // studio selection, so the route's `hydrate_lora_spec` hydrates it from the catalog the
+            // same way and the worker's `resolve_turbo_recipe` reads the same ids. The weight is
+            // the catalog's own `defaultWeight`, which is what the route would have filled in for
+            // an id alone; sending it explicitly keeps the body readable beside a studio job.
+            body["loras"] = json!(plan_lora_payload_entries(&self.loras, &self.model));
+        }
         if let Some(negative) = self.negative_prompt.as_deref() {
             body["negativePrompt"] = json!(negative);
         }
@@ -686,6 +777,10 @@ fn request_differences(
         mode,
         model,
         reference_image_short_edge,
+        loras,
+        steps,
+        effective_steps,
+        turbo_scheduler_shift,
         partition_reason,
         prompt: _,
         prompt_source: _,
@@ -725,6 +820,26 @@ fn request_differences(
         "compiled.referenceImageShortEdge",
         format!("{:?}", actual.reference_image_short_edge),
         format!("{reference_image_short_edge:?}"),
+    );
+    differ(
+        "compiled.loras",
+        format!("{:?}", actual.loras),
+        format!("{loras:?}"),
+    );
+    differ(
+        "compiled.steps",
+        format!("{:?}", actual.steps),
+        format!("{steps:?}"),
+    );
+    differ(
+        "compiled.effectiveSteps",
+        format!("{:?}", actual.effective_steps),
+        format!("{effective_steps:?}"),
+    );
+    differ(
+        "compiled.turboSchedulerShift",
+        format!("{:?}", actual.turbo_scheduler_shift),
+        format!("{turbo_scheduler_shift:?}"),
     );
     differ("compiled.beat", quoted(&actual.beat), quoted(beat));
     differ("compiled.mode", quoted(&actual.mode), quoted(mode));
@@ -840,7 +955,9 @@ mod tests {
     fn entry() -> JsonObject<String, Value> {
         json!({
             "id": "minimax_h3",
-            "defaults": { "fps": 24, "resolution": "1344x768" },
+            // `steps` mirrors the shipped catalog: it is what the engine renders at when nothing
+            // names a count, and therefore what `effective_steps` records in the base regime.
+            "defaults": { "fps": 24, "resolution": "1344x768", "steps": 50 },
             "limits": { "resolutions": ["1344x768", "576x320"] }
         })
         .as_object()
@@ -851,7 +968,7 @@ mod tests {
     fn reference_entry() -> JsonObject<String, Value> {
         json!({
             "id": "minimax_h3_ref",
-            "defaults": { "fps": 24, "resolution": "1344x768" },
+            "defaults": { "fps": 24, "resolution": "1344x768", "steps": 50 },
             "limits": { "resolutions": ["1344x768", "576x320"], "maxReferenceAssets": 9 }
         })
         .as_object()
@@ -1443,6 +1560,186 @@ mod tests {
             tier: Some("q4"),
             idempotency_key: Some("run_abc:SH010:a1"),
             role_assets: assets,
+        }
+    }
+
+    /// The mixed plan with a turbo selection and, optionally, a `model.advanced.steps` override.
+    fn mixed_compiled_with_turbo(loras: Value, steps: Option<i64>) -> CompiledPlan {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["loras"] = loras;
+        if let Some(steps) = steps {
+            document["model"]["advanced"] = json!({ "steps": steps });
+        }
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::with_reference_partition(
+                    "minimax_h3",
+                    &base,
+                    Some(("minimax_h3_ref", &reference)),
+                ),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the turbo plan compiles")
+    }
+
+    /// 🔴 sc-23406. ONE plan-level LoRA list, resolved PER PARTITION — into the compiled request,
+    /// into the dispatched body, and into the schedule each request records.
+    ///
+    /// Every assertion here is a silent failure if it goes the other way: the ref2v adapter on the
+    /// base checkpoint folds cleanly at the wrong quality, and an fl2v adapter on the reference one
+    /// does the same in the other direction (sc-19563). The step count and the shift are asserted
+    /// as VALUES rather than as "not the default", because 4/12.0 is what the catalog declares for
+    /// both of these files and 50/absent is what the base regime is.
+    #[test]
+    fn the_plans_loras_resolve_per_partition_into_the_request_and_the_body() {
+        let compiled = mixed_compiled_with_turbo(
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]),
+            None,
+        );
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(plain.loras, vec!["minimax_h3_turbo_4step_v01"]);
+        // The schedule each one will actually run, from the catalog's own declaration.
+        assert_eq!(referenced.effective_steps, Some(4));
+        assert_eq!(referenced.turbo_scheduler_shift, Some(12.0));
+        assert_eq!(plain.effective_steps, Some(4));
+        assert_eq!(plain.turbo_scheduler_shift, Some(12.0));
+        assert_eq!(referenced.steps, None, "no plan-level override was set");
+
+        // The body: `{ id, weight }`, the shape `generationStudio.jsx` posts, on the partition it
+        // belongs to and NOWHERE else.
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        let referenced_body = referenced.to_job_body(&context).expect("SH010 body");
+        let plain_body = plain.to_job_body(&context).expect("SH020 body");
+        assert_eq!(
+            referenced_body["loras"],
+            json!([{ "id": "minimax_h3_ref2v_turbo_4step", "weight": 1.0 }])
+        );
+        assert_eq!(
+            plain_body["loras"],
+            json!([{ "id": "minimax_h3_turbo_4step_v01", "weight": 1.0 }])
+        );
+        assert!(
+            referenced_body["advanced"].get("steps").is_none(),
+            "no override ⇒ no advanced.steps; the recipe governs: {}",
+            referenced_body["advanced"]
+        );
+
+        // A plan that names ONLY the ref2v adapter leaves the base shot with none — an empty list,
+        // recorded as such, rather than the ref2v file quietly attaching to the wrong checkpoint.
+        let compiled = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), None);
+        let plain = compiled.request("SH020").unwrap();
+        assert!(plain.loras.is_empty());
+        assert_eq!(
+            plain.effective_steps,
+            Some(50),
+            "no recipe applies, so the model's declared default governs"
+        );
+        assert_eq!(plain.turbo_scheduler_shift, None);
+        let body = plain.to_job_body(&context).expect("SH020 body");
+        assert!(
+            body.get("loras").is_none(),
+            "an empty list writes no field: {body}"
+        );
+    }
+
+    /// `model.advanced.steps` overrides the recipe's own count — the plan-level twin of the knob
+    /// `minimax_h3_sampling` already honours — and rides `advanced.steps` on every partition,
+    /// including the one no accelerator reached.
+    #[test]
+    fn a_plan_level_steps_override_wins_over_the_recipe_and_rides_the_body() {
+        let compiled = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), Some(6));
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.steps, Some(6));
+        assert_eq!(
+            referenced.effective_steps,
+            Some(6),
+            "the override wins over the recipe's 4"
+        );
+        assert_eq!(
+            referenced.turbo_scheduler_shift,
+            Some(12.0),
+            "the SHIFT is not overridable: a distilled checkpoint keeps its trained shift"
+        );
+        assert_eq!(
+            plain.effective_steps,
+            Some(6),
+            "the override wins over the model's 50 as well"
+        );
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        for request in [referenced, plain] {
+            let body = request.to_job_body(&context).expect("body");
+            assert_eq!(body["advanced"]["steps"], json!(6), "{}", request.shot_id);
+        }
+    }
+
+    /// A plan that declares no LoRAs compiles exactly as it did before the field existed, and a
+    /// hand edit to any of the four new derived fields is caught as a hand edit.
+    #[test]
+    fn a_plan_without_loras_compiles_unchanged_and_the_derived_fields_are_conformance_checked() {
+        let compiled = mixed_compiled_with_turbo(json!([]), None);
+        for request in &compiled.requests {
+            assert!(request.loras.is_empty(), "{}", request.shot_id);
+            assert_eq!(request.steps, None, "{}", request.shot_id);
+            assert_eq!(request.effective_steps, Some(50), "{}", request.shot_id);
+            assert_eq!(request.turbo_scheduler_shift, None, "{}", request.shot_id);
+        }
+        let document = serde_json::to_value(&compiled).expect("serializes");
+        assert!(
+            document["requests"][0].get("loras").is_none()
+                && document["requests"][0].get("turboSchedulerShift").is_none(),
+            "absent values write no fields: {}",
+            document["requests"][0]
+        );
+
+        // Conformance: each derived field is compared, so a hand-edited compiled document is
+        // refused by the field that was edited rather than dispatched.
+        let mut plan_document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        plan_document["model"]["loras"] = json!(["minimax_h3_ref2v_turbo_4step"]);
+        let plan = parse_plan(&plan_document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let clean = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), None);
+        type Tamper = fn(&mut CompiledRequest);
+        let cases: Vec<(&str, Tamper)> = vec![
+            ("compiled.loras", |request| request.loras.clear()),
+            ("compiled.steps", |request| request.steps = Some(9)),
+            ("compiled.effectiveSteps", |request| {
+                request.effective_steps = Some(50)
+            }),
+            ("compiled.turboSchedulerShift", |request| {
+                request.turbo_scheduler_shift = None
+            }),
+        ];
+        for (field, edit) in cases {
+            let mut tampered = clean.clone();
+            edit(&mut tampered.requests[0]);
+            let fields: Vec<String> = tampered
+                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .into_iter()
+                .map(|finding| finding.field)
+                .collect();
+            assert!(fields.contains(&field.to_owned()), "{field}: {fields:?}");
         }
     }
 

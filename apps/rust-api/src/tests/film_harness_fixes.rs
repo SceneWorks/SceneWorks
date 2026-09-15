@@ -1929,6 +1929,139 @@ async fn rejecting_a_take_records_that_the_shot_stays_in_the_cut_carrying_it() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// sc-23406 (S5) — the turbo courier plan
+// ---------------------------------------------------------------------------------------------
+
+/// `plan.v2.turbo.jsonc` validates and compiles against the LIVE catalog, and it is the SAME FILM
+/// as `plan.v2.jsonc` in every respect but its LoRA selection — asserted field by field rather
+/// than trusted, because the two files are maintained side by side and a drift between them makes
+/// the turbo-vs-base comparison they exist for meaningless.
+///
+/// All six shots resolve to `minimax_h3_ref`, so all six carry the ref2v turbo and NONE carries the
+/// base-partition one — even though the plan declares both. That is the per-partition resolution:
+/// the base entry is declared for the family and simply never dispatched by this plan.
+#[tokio::test]
+async fn the_turbo_plan_puts_the_ref2v_recipe_on_every_shot_and_the_base_recipe_on_none() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let turbo_path = Path::new(FIXTURE_DIR).join("plan.v2.turbo.jsonc");
+    let v2_path = Path::new(FIXTURE_DIR).join("plan.v2.jsonc");
+
+    let (plan, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(turbo_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.turbo.jsonc validates against the live catalog");
+    assert_eq!(
+        plan.model.loras,
+        vec!["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"],
+        "the regime is declared once on the family"
+    );
+
+    // The same film as its sibling apart from `model.loras`. Compared on the parsed documents, so
+    // a comment-only difference is not a false failure and a substantive one cannot hide.
+    let (base, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(v2_path, harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.jsonc validates");
+    assert!(base.model.loras.is_empty(), "the sibling declares none");
+    let mut stripped = plan.clone();
+    stripped.model.loras.clear();
+    assert_eq!(
+        stripped, base,
+        "plan.v2.turbo.jsonc differs from plan.v2.jsonc in model.loras and nothing else"
+    );
+
+    // Compile: every one of the six requests is on the reference partition and carries the ref2v
+    // recipe at the schedule the catalog declares for it — and the base-partition adapter reaches
+    // nothing, because no shot of this plan resolves to the base checkpoint.
+    let options = planner_options(&harness, "plan-v2-turbo");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &turbo_path,
+    )
+    .await
+    .expect("plan.v2.turbo.jsonc compiles");
+    assert_eq!(artifacts.compiled.requests.len(), 6);
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(
+            request.loras,
+            vec!["minimax_h3_ref2v_turbo_4step"],
+            "{}: the ref2v recipe, and only it",
+            request.shot_id
+        );
+        assert!(
+            !request
+                .loras
+                .contains(&"minimax_h3_turbo_4step_v01".to_owned()),
+            "{}: the base-partition adapter must reach no reference shot",
+            request.shot_id
+        );
+        assert_eq!(request.effective_steps, Some(4), "{}", request.shot_id);
+        assert_eq!(
+            request.turbo_scheduler_shift,
+            Some(12.0),
+            "{}",
+            request.shot_id
+        );
+        assert_eq!(
+            request.steps, None,
+            "{}: the plan sets no override, so the recipe governs",
+            request.shot_id
+        );
+    }
+}
+
+/// The MIXED case the shipped plans do not cover: one plan, one LoRA list, shots on BOTH
+/// partitions — each getting the adapter its own checkpoint was distilled for.
+///
+/// In code rather than as a fourth checked-in plan, because `plan.ref.jsonc` already IS the mixed
+/// fixture and a second copy of it that differed only in `model.loras` would be one more document
+/// to keep in step with the other three.
+#[tokio::test]
+async fn a_mixed_plan_gets_the_right_recipe_on_each_partition() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] =
+            serde_json::json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+    });
+    let options = planner_options(&harness, "plan-mixed-turbo");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &plan_path,
+    )
+    .await
+    .expect("the mixed plan compiles");
+    let request = |shot_id: &str| {
+        artifacts
+            .compiled
+            .request(shot_id)
+            .unwrap_or_else(|| panic!("no compiled request for {shot_id}"))
+    };
+    let referenced = request("SH010");
+    let plain = request("SH020");
+    assert_eq!(referenced.model, "minimax_h3_ref");
+    assert_eq!(referenced.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+    assert_eq!(plain.model, "minimax_h3");
+    assert_eq!(plain.loras, vec!["minimax_h3_turbo_4step_v01"]);
+    // Both recipes declare the same (4, 12.0) schedule — the reason `plan.v2.turbo.jsonc` pairs
+    // the v0.1 files rather than the 8-step one — so the two halves of a mixed film are comparable.
+    assert_eq!(referenced.effective_steps, plain.effective_steps);
+    assert_eq!(referenced.effective_steps, Some(4));
+    assert_eq!(
+        referenced.turbo_scheduler_shift,
+        plain.turbo_scheduler_shift
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // sc-23405 (S4) — the reference-conditioned courier plan
 // ---------------------------------------------------------------------------------------------
 

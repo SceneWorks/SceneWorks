@@ -462,6 +462,17 @@ async fn resolve_envelope(
         });
         widened.map(|caps| caps.narrowed_to_pack(pack))
     };
+    // The installed step-distill accelerators, offered unless the brief opted out (sc-23406).
+    // Install state IS the filter here — unlike the reference partition's, which is deliberately
+    // host-independent — because an adapter whose weights are not on the render host's disk is a
+    // 400 at enqueue, so offering one would teach the planner an unreachable answer.
+    let caps = match caps {
+        Some(caps) if !brief.prefer_quality => {
+            let installed = crate::film_harness::installed_lora_ids(transport).await?;
+            Some(caps.with_installed_turbo_loras(&installed))
+        }
+        other => other,
+    };
     let gate_reference = caps
         .as_ref()
         .is_some_and(PlannerCapabilities::offers_references);
@@ -693,6 +704,7 @@ pub async fn generate(
                     &pack,
                     Some(&pack_dir(&options.reference_pack_path)),
                     Some((&entries, facts.lane())),
+                    Some(&caps),
                 );
                 if findings.is_empty() {
                     break plan;

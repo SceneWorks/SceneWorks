@@ -1216,6 +1216,30 @@ pub(crate) async fn plan_catalog_for(
     resolve_catalog(&client, model_id, include_reference).await
 }
 
+/// The ids `GET /api/v1/loras` reports INSTALLED on the API host (sc-23406).
+///
+/// On the transport rather than off the local catalog for the same reason the model entries are:
+/// `--api` may point at another machine, and which adapters are on ITS disk is the only answer
+/// that decides whether a plan naming one will enqueue.
+pub(crate) async fn installed_lora_ids(
+    transport: &dyn ApiTransport,
+) -> Result<Vec<String>, HarnessError> {
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    let catalog = client.expect_ok("GET", "/api/v1/loras", None).await?;
+    Ok(catalog
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lora| lora.get("installState").and_then(Value::as_str) == Some("installed"))
+        .filter_map(|lora| lora.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// The family's reference partition when THIS plan needs it: some shot binds reference roles and
 /// the declared model's family splits reference conditioning into a second catalog entry. A plan
 /// whose shots bind none never resolves it, so a run that needs only the base checkpoint neither
@@ -2172,6 +2196,21 @@ impl Session<'_> {
             .and_then(CompiledRequest::effective_reference_image_short_edge)
     }
 
+    /// The LoRAs one shot dispatches with, the step count it renders at, and the turbo video shift
+    /// that governs it (sc-23406) — all three read off the compiled request for the same reason
+    /// [`Session::resolved_partition`] is, so the payload the route receives and the numbers the
+    /// record keeps are one resolution rather than two.
+    fn resolved_sampling(&self, shot_id: &str) -> (Vec<String>, Option<u32>, Option<f64>) {
+        match self.compiled.request(shot_id) {
+            Some(request) => (
+                request.loras.clone(),
+                request.effective_steps,
+                request.turbo_scheduler_shift,
+            ),
+            None => (Vec::new(), None, None),
+        }
+    }
+
     /// The partition one RECORDED attempt dispatched as, for the take it produced.
     ///
     /// A run record written before sc-23402 carries no `resolvedModelId` at all, and
@@ -2198,6 +2237,7 @@ impl Session<'_> {
         // controller would have written. A base-partition shot resolves to `None`, so the absence
         // stays an absence rather than becoming a number that never applied.
         let short_edge = self.resolved_reference_short_edge(shot_id);
+        let sampling = self.resolved_sampling(shot_id);
         let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
         attempt.resolved_model_id = model.clone();
         if attempt.partition_reason.is_empty() {
@@ -2205,6 +2245,16 @@ impl Session<'_> {
         }
         if attempt.reference_image_short_edge.is_none() {
             attempt.reference_image_short_edge = short_edge;
+        }
+        // Same rule for the sampling provenance (sc-23406): a pre-story record carries none, and
+        // what this shot resolves to is what the first controller would have written.
+        if attempt.effective_steps.is_none() {
+            let (loras, steps, shift) = sampling;
+            if attempt.loras.is_empty() {
+                attempt.loras = loras;
+            }
+            attempt.effective_steps = steps;
+            attempt.turbo_scheduler_shift = shift;
         }
         model
     }
@@ -3432,12 +3482,17 @@ impl Session<'_> {
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
                     let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
                     let reference_image_short_edge = self.resolved_reference_short_edge(&shot.id);
+                    let (loras, effective_steps, turbo_scheduler_shift) =
+                        self.resolved_sampling(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
                         attempt: number,
                         idempotency_key: key,
                         resolved_model_id,
                         partition_reason,
                         reference_image_short_edge,
+                        loras,
+                        effective_steps,
+                        turbo_scheduler_shift,
                         job_id: None,
                         status: "dispatching".to_owned(),
                         started_at: utc_now(),
@@ -5334,12 +5389,16 @@ pub async fn replace_take(
     let key = idempotency_key(&session.record.run_id, shot_id, number);
     let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
     let reference_image_short_edge = session.resolved_reference_short_edge(shot_id);
+    let (loras, effective_steps, turbo_scheduler_shift) = session.resolved_sampling(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
         idempotency_key: key,
         resolved_model_id,
         partition_reason,
         reference_image_short_edge,
+        loras,
+        effective_steps,
+        turbo_scheduler_shift,
         job_id: None,
         status: "dispatching".to_owned(),
         started_at: utc_now(),
@@ -6367,6 +6426,9 @@ mod unit_tests {
             resolved_model_id: "minimax_h3".to_owned(),
             partition_reason: String::new(),
             reference_image_short_edge: None,
+            loras: Vec::new(),
+            effective_steps: None,
+            turbo_scheduler_shift: None,
             job_id: job_id.map(str::to_owned),
             status: "dispatching".to_owned(),
             started_at: started_at.to_owned(),

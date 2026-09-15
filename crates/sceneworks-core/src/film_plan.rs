@@ -315,6 +315,18 @@ pub struct PlanModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Catalog LoRA ids this plan renders with, declared ONCE on the family exactly as `tier` is
+    /// (sc-23406).
+    ///
+    /// A plan does not say which of a split family's partitions a LoRA attaches to, because the
+    /// catalog already does: an entry's `modelIds` allowlist names the partitions it was distilled
+    /// for, and [`plan_loras_for_partition`] emits each id only onto the shots whose resolved
+    /// partition it is declared for. So one list covers a mixed plan — the ref2v turbo reaches the
+    /// reference shots, an fl2v turbo reaches the base ones, and neither reaches the other.
+    ///
+    /// Empty is the base regime: a plan authored before this field dispatches exactly what it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,6 +354,17 @@ pub struct PlanModelAdvanced {
     /// size, so the knob is not written into its request, its job body or its attempt record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// Model evaluations (NFE) every shot renders at, overriding whatever the rest of the plan
+    /// would have resolved — the plan-level twin of the Video Studio's `advanced.steps` (sc-23406).
+    ///
+    /// It wins over a selected turbo recipe's own step count, exactly as it does on the worker
+    /// (`minimax_h3_sampling`): a caller who knows the checkpoint may run the 8-step file at 4.
+    /// Omitted, the recipe's count governs, and with no recipe the model's declared default does.
+    ///
+    /// Typed as a signed integer so a plan that writes `0` or `-4` is refused BY NAME here rather
+    /// than failing to parse with a serde message that names no plan field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
 }
 
 /// Finite limits declared BEFORE dispatch. Exceeding any of them stops new dispatch and leaves the
@@ -777,6 +800,7 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    findings.extend(validate_plan_loras(plan));
     findings.extend(validate_limits(&plan.limits));
     findings.extend(validate_plan_sound(&plan.sound));
     if plan.shots.is_empty() {
@@ -2462,6 +2486,293 @@ impl<'a> ModelEntries<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Plan LoRAs (sc-23406)
+// ---------------------------------------------------------------------------------------------
+
+/// One catalog LoRA, as the plan validator and the compiler need it.
+///
+/// Read from the EMBEDDED builtin manifest rather than from the API's live catalog, for the same
+/// reason [`crate::minimax_h3_turbo`] resolves its recipe there: the identity of a published
+/// adapter — which family it belongs to, which partitions it was distilled for, what weight it
+/// folds at — is a property of the shipped catalog, not of the host. Install state is the one fact
+/// that IS per-host, and it is gated where it belongs: the video route refuses an uninstalled
+/// adapter at enqueue, and the planner's envelope offers only installed ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanLoraEntry {
+    pub id: String,
+    /// Display name — what a refusal names, so an operator reads the adapter rather than the key.
+    pub name: String,
+    /// The catalog family token (`minimax-h3`).
+    pub family: String,
+    /// The `modelIds` allowlist. EMPTY means family-wide: the adapter attaches to any model of its
+    /// family. Non-empty means it was distilled for exactly those partitions (sc-19563).
+    pub model_ids: Vec<String>,
+    /// The runtime `lora_scale` multiplier the catalog declares (`defaultWeight`), which is what
+    /// the Studio sends and what the route would fill in for a request that omits it.
+    pub default_weight: f64,
+}
+
+impl PlanLoraEntry {
+    /// Whether this adapter may attach to catalog model `model_id` on its declared allowlist alone.
+    /// Family compatibility is a separate question ([`lora_family_matches_model`]).
+    pub fn allows_model(&self, model_id: &str) -> bool {
+        self.model_ids.is_empty() || self.model_ids.iter().any(|id| id == model_id)
+    }
+}
+
+static BUILTIN_PLAN_LORAS: std::sync::OnceLock<Vec<PlanLoraEntry>> = std::sync::OnceLock::new();
+
+/// Every LoRA in the embedded builtin catalog, in catalog order.
+pub fn builtin_plan_loras() -> &'static [PlanLoraEntry] {
+    BUILTIN_PLAN_LORAS.get_or_init(|| parse_plan_loras(embedded_manifest("builtin.loras.jsonc")))
+}
+
+/// The embedded builtin catalog entry for `id`, or `None` when the id names nothing shipped.
+pub fn builtin_plan_lora(id: &str) -> Option<&'static PlanLoraEntry> {
+    builtin_plan_loras().iter().find(|lora| lora.id == id)
+}
+
+fn embedded_manifest(name: &str) -> &'static str {
+    crate::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(manifest, _)| *manifest == name)
+        .map(|(_, contents)| *contents)
+        .unwrap_or("")
+}
+
+/// Parse a `builtin.loras.jsonc` body. Split out so tests can drive synthetic catalogs; a malformed
+/// manifest yields an EMPTY list rather than a panic, exactly as [`crate::minimax_h3_turbo`] does.
+fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
+    let stripped = strip_jsonc_comments(contents);
+    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
+        return Vec::new();
+    };
+    let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    loras
+        .iter()
+        .filter_map(|lora| {
+            let id = lora.get("id")?.as_str()?.to_owned();
+            let family = lora.get("family")?.as_str()?.to_owned();
+            let model_ids = lora
+                .get("modelIds")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let name = lora
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_owned();
+            Some(PlanLoraEntry {
+                id,
+                name,
+                family,
+                model_ids,
+                default_weight: lora
+                    .get("defaultWeight")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0),
+            })
+        })
+        .collect()
+}
+
+/// The LoRA families catalog model `model_id` declares it can load
+/// (`loraCompatibility.families`), read from the embedded model catalog.
+///
+/// Empty for a model the embedded catalog does not hold — a user-installed or external entry —
+/// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
+/// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
+///
+/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
+/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
+/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
+pub fn model_lora_families(model_id: &str) -> Vec<String> {
+    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
+        std::sync::OnceLock::new();
+    MODEL_LORA_FAMILIES
+        .get_or_init(|| {
+            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
+            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
+                return BTreeMap::new();
+            };
+            manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| {
+                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
+                    let families = model
+                        .get("loraCompatibility")?
+                        .get("families")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    Some((id, families))
+                })
+                .collect()
+        })
+        .get(model_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Whether `lora`'s family is one catalog model `model_id` declares it can load. Permissive for a
+/// model the embedded catalog does not hold; see [`model_lora_families`].
+pub fn lora_family_matches_model(lora: &PlanLoraEntry, model_id: &str) -> bool {
+    let families = model_lora_families(model_id);
+    families.is_empty() || families.contains(&lora.family)
+}
+
+/// The partitions a plan declaring `plan_model_id` may ever dispatch as: the declared model, plus
+/// its family's reference partition when the catalog serves one.
+///
+/// Read off the same table [`resolve_shot_partition`] reads, so the set the validator judges a
+/// LoRA list against is exactly the set the compiler can produce.
+pub fn plan_partition_ids(plan_model_id: &str) -> Vec<String> {
+    let mut ids = vec![plan_model_id.to_owned()];
+    if let Some(reference) = reference_partition_for(plan_model_id) {
+        ids.push(reference.to_owned());
+    }
+    ids
+}
+
+/// The plan's declared LoRAs that actually attach to `partition_model_id`, in the plan's own order.
+///
+/// This is the per-shot resolution sc-23406 asks for, and it is ONE function so the compiled
+/// request, the dispatched payload and the attempt record cannot each answer it differently. Both
+/// halves of the question are asked: the adapter's declared `modelIds` allowlist (a ref2v turbo
+/// never reaches a base-partition shot, and an fl2v turbo never reaches a reference one) and its
+/// family against the partition's own declared `loraCompatibility.families`.
+///
+/// An id that names nothing in the embedded catalog is skipped rather than guessed at;
+/// [`validate_plan_structure`] has already refused it by name, so reaching here means the caller
+/// chose to compile a plan it was told not to.
+pub fn plan_loras_for_partition(
+    plan_lora_ids: &[String],
+    partition_model_id: &str,
+) -> Vec<&'static PlanLoraEntry> {
+    plan_lora_ids
+        .iter()
+        .filter_map(|id| builtin_plan_lora(id))
+        .filter(|lora| lora.allows_model(partition_model_id))
+        .filter(|lora| lora_family_matches_model(lora, partition_model_id))
+        .collect()
+}
+
+/// The `loras` entries a job body carries for `partition_model_id` — the SHAPE the Video Studio
+/// sends, not a second spelling of it.
+///
+/// `generationStudio.jsx` posts `selectedLoras.map((lora) => ({ id, weight }))`, the route's
+/// `hydrate_lora_spec` keys on `id` and `preset_lora_weight` fills an omitted weight from the
+/// catalog's `defaultWeight`. Sending the id AND the declared weight is therefore byte-identical to
+/// what the studio sends for the same selection, and identical to what the route would have filled
+/// in for an id alone — which is the property that makes a harness render and a studio render the
+/// same render.
+pub fn plan_lora_payload_entries(plan_lora_ids: &[String], partition_model_id: &str) -> Vec<Value> {
+    plan_loras_for_partition(plan_lora_ids, partition_model_id)
+        .into_iter()
+        .map(|lora| json!({ "id": lora.id, "weight": lora.default_weight }))
+        .collect()
+}
+
+/// Findings on the plan's `model.loras` and `model.advanced.steps` (sc-23406).
+///
+/// Four refusals, each by NAME, because every one of them is a document the author can fix in the
+/// plan and none of them is worth a model load to discover:
+///
+/// 1. an id no shipped catalog entry carries — a typo, refused with the id in the message;
+/// 2. the same id twice — a selection the route would silently collapse;
+/// 3. an adapter whose family the plan's model cannot load at all;
+/// 4. two step-distill recipes that would BOTH apply to one partition. A render has one schedule,
+///    so the harness refuses here rather than letting `resolve_turbo_recipe` refuse it on the
+///    worker after the weights are resident.
+fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let families = model_lora_families(&plan.model.id);
+    for id in &plan.model.loras {
+        if !seen.insert(id.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!("{id:?} is listed twice; declare each LoRA once"),
+            ));
+            continue;
+        }
+        let Some(lora) = builtin_plan_lora(id) else {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!(
+                    "{id:?} is not a LoRA in this build's catalog; the installed ids are listed by \
+                     `GET /api/v1/loras`"
+                ),
+            ));
+            continue;
+        };
+        if !families.is_empty() && !families.contains(&lora.family) {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!(
+                    "{:?} is a {} LoRA, which {} cannot load (it declares {})",
+                    lora.id,
+                    lora.family,
+                    plan.model.id,
+                    families.join(", ")
+                ),
+            ));
+        }
+    }
+    // One recipe per partition. Checked per partition rather than across the list, because a plan
+    // that names the fl2v turbo AND the ref2v turbo is CORRECT — they reach different checkpoints —
+    // while two fl2v turbos would both reach the base one.
+    //
+    // The judgement is [`crate::minimax_h3_turbo::resolve_turbo_recipe`]'s, not a second copy of
+    // it: it is the resolver the WORKER runs, on the same payload entries this plan will dispatch,
+    // so a list this accepts cannot be one the worker then refuses after the weights are resident.
+    // It also already draws the distinctions a hand-rolled count gets wrong — the same id twice,
+    // and two distinct adapters that declare the SAME schedule, are neither of them conflicts.
+    for partition in plan_partition_ids(&plan.model.id) {
+        let entries = plan_lora_payload_entries(&plan.model.loras, &partition);
+        if let Err(error) = crate::minimax_h3_turbo::resolve_turbo_recipe(&partition, &entries) {
+            findings.push(PlanDiagnostic::plan("model.loras", error));
+        }
+    }
+    if let Some(steps) = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+    {
+        // Both ends, because the COMPILER's `u32::try_from(..).ok()` silently drops anything
+        // outside the range: a `steps` above `u32::MAX` validated clean and then rendered at the
+        // recipe's own count, with no field named and nothing in the record to say the override
+        // was discarded. The validator owns the whole admitted range, so what validates compiles.
+        if steps < 1 || u32::try_from(steps).is_err() {
+            findings.push(PlanDiagnostic::plan(
+                "model.advanced.steps",
+                format!(
+                    "steps must be a model-evaluation count between 1 and {}, got {steps}",
+                    u32::MAX
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 /// The finding for a shot whose resolved partition is not in the catalog this run judged against.
 fn missing_partition_finding(shot_id: &str, partition: &ShotPartition) -> PlanDiagnostic {
     PlanDiagnostic::shot(
@@ -3101,6 +3412,27 @@ pub struct AttemptRecord {
     /// the rendered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// The catalog LoRA ids this attempt was DISPATCHED with, in the order they ride the payload
+    /// (sc-23406). Empty means none applied to this attempt's partition — which is a real,
+    /// recorded state, not an absence: a mixed plan that declares only the ref2v turbo renders its
+    /// base-partition shots at the full step count, and the empty list beside `effectiveSteps` is
+    /// what says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
+    /// The model-evaluation count this attempt actually rendered at: `model.advanced.steps` when
+    /// the plan set one, else the selected turbo recipe's own count, else the model's declared
+    /// `defaults.steps` (sc-23406).
+    ///
+    /// Recorded rather than derived on read, because the three sources resolve differently per
+    /// shot on a mixed plan and a reader comparing a turbo run against a 50-step one needs the
+    /// number that ran, not the rule that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_steps: Option<u32>,
+    /// The video flow-matching sigma shift the selected turbo recipe imposed, when one applied.
+    /// Absent in the base regime, where the engine's own `VIDEO_SIGMA_SHIFT` governs — the same
+    /// three-state distinction `referenceImageShortEdge` keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_scheduler_shift: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
@@ -3547,6 +3879,188 @@ mod tests {
 
     fn messages(findings: &[PlanDiagnostic]) -> Vec<String> {
         findings.iter().map(ToString::to_string).collect()
+    }
+
+    /// A plan whose LoRA list names nothing the shipped catalog carries is refused, and the
+    /// refusal NAMES the id — the fix is a one-word edit, so the message has to say which word.
+    #[test]
+    fn film_loras_refuse_an_id_the_catalog_does_not_carry() {
+        let mut document = plan_json();
+        document["model"]["loras"] = json!(["minimax_h3_turbo_4step_768"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.contains("minimax_h3_turbo_4step_768")
+                && findings[0].message.contains("not a LoRA"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// A catalog LoRA of a family this model cannot load is refused by name, and the refusal says
+    /// which family it is and which the model declares. This is the arm a plan hits by copying an
+    /// id out of another film's plan.
+    #[test]
+    fn film_loras_refuse_a_family_the_model_cannot_load() {
+        let mut document = plan_json();
+        document["model"]["loras"] = json!(["scail2_lightning"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.contains("scail2") && findings[0].message.contains("minimax-h3"),
+            "the refusal names the LoRA's family and the model's: {}",
+            findings[0].message
+        );
+    }
+
+    /// TWO step-distill accelerators that would both apply to ONE partition is refused by name.
+    ///
+    /// `minimax_h3_turbo_8step` and `minimax_h3_turbo_4step_v01` both declare
+    /// `modelIds: ["minimax_h3"]`, so both reach the base checkpoint and they ask for different
+    /// schedules (8 NFE vs 4). A render has one schedule. The pairing that is NOT a conflict —
+    /// one fl2v adapter plus the ref2v one, which reach different checkpoints — is asserted in the
+    /// same test, because a rule that refused it would make a mixed turbo plan inexpressible.
+    #[test]
+    fn film_loras_refuse_two_recipes_for_one_partition_but_allow_one_per_partition() {
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_turbo_8step", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.starts_with("minimax_h3:")
+                && findings[0].message.contains("MiniMax-H3 Turbo (8-step)")
+                && findings[0]
+                    .message
+                    .contains("MiniMax-H3 Turbo (4-step, v0.1)"),
+            "the refusal names the partition and BOTH adapters: {}",
+            findings[0].message
+        );
+
+        // One per partition — the shape `plan.v2.turbo.jsonc` ships — is accepted.
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+
+        // The same id twice is a plain duplicate, refused on its own terms.
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_turbo_4step_v01", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert!(
+            findings[0].message.contains("listed twice"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// `model.advanced.steps` is a model-evaluation count in `1..=u32::MAX`. Zero, a negative and a
+    /// value above the compiler's `u32` are all refused by name rather than by a serde error that
+    /// names no plan field — which is why the field is typed signed and wide.
+    ///
+    /// The upper bound is not decoration: `compile_shot` narrows the field with
+    /// `u32::try_from(..).ok()`, so a value above `u32::MAX` that validated clean would be dropped
+    /// silently and the film would render at the recipe's count with nothing saying so.
+    #[test]
+    fn film_advanced_steps_must_be_positive() {
+        for steps in [0, -4, i64::from(u32::MAX) + 1] {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "steps": steps });
+            let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(
+                findings.len(),
+                1,
+                "steps {steps}: {:?}",
+                messages(&findings)
+            );
+            assert_eq!(findings[0].field, "model.advanced.steps");
+            assert!(
+                findings[0].message.contains(&steps.to_string()),
+                "{}",
+                findings[0].message
+            );
+        }
+        // Both ends of the admitted range are INCLUSIVE, so the refusals above are about the range
+        // rather than about a number near it.
+        for steps in [1, 4, i64::from(u32::MAX)] {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "steps": steps });
+            let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+            assert!(
+                validate_plan_structure(&plan).is_empty(),
+                "steps {steps}: {:?}",
+                messages(&validate_plan_structure(&plan))
+            );
+        }
+    }
+
+    /// A plan that declares NO LoRAs is unchanged: no field is serialized, nothing resolves, and
+    /// the payload helper produces nothing to send.
+    #[test]
+    fn a_plan_without_loras_is_unchanged() {
+        let plan: ProductionPlan = serde_json::from_value(plan_json()).expect("plan parses");
+        assert!(plan.model.loras.is_empty());
+        assert!(validate_plan_structure(&plan).is_empty());
+        let round_trip = serde_json::to_value(&plan).expect("serializes");
+        assert!(
+            round_trip["model"].get("loras").is_none(),
+            "an empty list writes no field: {}",
+            round_trip["model"]
+        );
+        assert!(plan_loras_for_partition(&plan.model.loras, "minimax_h3").is_empty());
+        assert!(plan_lora_payload_entries(&plan.model.loras, "minimax_h3_ref").is_empty());
+    }
+
+    /// 🔴 The `modelIds` allowlist routes each accelerator to its OWN partition, and the payload
+    /// entry is the shape the Video Studio sends.
+    ///
+    /// Both directions are asserted because both are silent failures: the ref2v adapter on the base
+    /// checkpoint and an fl2v adapter on the reference one BOTH fold cleanly and render at the
+    /// wrong quality (sc-19563). A resolution that emitted the whole list on every partition would
+    /// pass any test that only checked "the turbo reached the shot".
+    #[test]
+    fn the_model_ids_allowlist_routes_each_turbo_to_its_own_partition() {
+        let declared = vec![
+            "minimax_h3_ref2v_turbo_4step".to_owned(),
+            "minimax_h3_turbo_4step_v01".to_owned(),
+        ];
+        let ids = |partition: &str| -> Vec<String> {
+            plan_loras_for_partition(&declared, partition)
+                .into_iter()
+                .map(|lora| lora.id.clone())
+                .collect()
+        };
+        assert_eq!(ids("minimax_h3_ref"), vec!["minimax_h3_ref2v_turbo_4step"]);
+        assert_eq!(ids("minimax_h3"), vec!["minimax_h3_turbo_4step_v01"]);
+
+        // The payload shape: `{ id, weight }` with the catalog's declared `defaultWeight`, which is
+        // what `generationStudio.jsx` posts and what `preset_lora_weight` would have filled in.
+        assert_eq!(
+            plan_lora_payload_entries(&declared, "minimax_h3_ref"),
+            vec![json!({ "id": "minimax_h3_ref2v_turbo_4step", "weight": 1.0 })]
+        );
+
+        // A partition with no compatible entry gets NOTHING rather than a fallback.
+        assert!(plan_loras_for_partition(
+            &["minimax_h3_ref2v_turbo_4step".to_owned()],
+            "minimax_h3"
+        )
+        .is_empty());
     }
 
     /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
@@ -4635,6 +5149,9 @@ mod tests {
             resolved_model_id: "minimax_h3".into(),
             partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
             reference_image_short_edge: None,
+            loras: Vec::new(),
+            effective_steps: None,
+            turbo_scheduler_shift: None,
             job_id: Some(format!("job{number}")),
             status: "completed".into(),
             started_at: "t".into(),
