@@ -12,7 +12,7 @@
 #   PLAN=... REFERENCES=... scripts/film-harness-smoke.sh
 #
 # MIXED-PARTITION smoke (sc-23402) — SH010 renders on `minimax_h3_ref` (reference_to_video,
-# `courier` + `workshop_plate`), SH020 on `minimax_h3` (text_to_video), from one plan:
+# `courier` + `workshop_location`), SH020 on `minimax_h3` (text_to_video), from one plan:
 #
 #   PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh
 #

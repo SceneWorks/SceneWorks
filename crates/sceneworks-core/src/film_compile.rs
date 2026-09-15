@@ -1388,7 +1388,9 @@ mod tests {
                     "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
                     "conditioning": {
                         "mode": "reference_to_video",
-                        "referenceRoles": ["courier", "workshop_plate"]
+                        // Both BINDABLE kinds (character, prop): a `plate` is refused in this
+                        // slot by `validate_plan_against_pack`.
+                        "referenceRoles": ["courier", "red_parcel"]
                     },
                     "continuityRoles": ["courier"]
                 },
@@ -1580,7 +1582,7 @@ mod tests {
         assert_eq!(referenced.mode, "reference_to_video");
         assert_eq!(
             referenced.reference_roles,
-            vec!["courier".to_owned(), "workshop_plate".to_owned()]
+            vec!["courier".to_owned(), "red_parcel".to_owned()]
         );
         assert!(
             referenced.partition_reason.contains("minimax_h3_ref")
@@ -1617,7 +1619,7 @@ mod tests {
         assert_eq!(body["mode"], "reference_to_video");
         assert_eq!(
             body["referenceAssetIds"],
-            json!(["asset_courier", "asset_plate"])
+            json!(["asset_courier", "asset_parcel"])
         );
         assert_eq!(
             body["advanced"]["filmHarness"]["partitionReason"],

@@ -82,8 +82,11 @@ pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style",
 ///   * `plate` — a literal frame. It is placed through the KEYFRAME slots (`image_to_video` /
 ///     `first_last_frame`), a different conditioning task.
 ///
-/// Used to decide whether a pack can fill a reference shot at all: a pack approving only a style
-/// and a plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
+/// Used in two places, and they are the same rule read from one constant so they cannot drift:
+/// [`validate_plan_against_pack`] REFUSES any `conditioning.referenceRoles` entry whose pack kind
+/// is not listed here, and the planner ([`crate::film_planner`]) counts a pack's bindable entries
+/// to decide whether a pack can fill a reference shot at all — a pack approving only a style and a
+/// plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
 /// envelope rather than being offered and then refused a decode later.
 pub const BINDABLE_REFERENCE_KINDS: &[&str] = &["character", "prop", "location"];
 
@@ -1633,7 +1636,9 @@ fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic>
 }
 
 /// Findings that need both documents: every role a shot names must exist in the pack and be
-/// approved, and every shot must be anchored to at least one approved canonical reference.
+/// approved, every role bound in `conditioning.referenceRoles` must be a
+/// [`BINDABLE_REFERENCE_KINDS`] kind, and every shot must be anchored to at least one approved
+/// canonical reference.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -1661,6 +1666,31 @@ pub fn validate_plan_against_pack(
         }
         let mut anchored = false;
         for (field, role) in slots {
+            // A BOUND reference is a Ref2VA subject, and only the subject kinds belong there
+            // ([`BINDABLE_REFERENCE_KINDS`]). Without this the planner's rule — which counts a
+            // pack's bindable entries to decide whether a reference shot can be offered at all —
+            // and the validator disagree, and a plan binding a `plate` or a `style` validates,
+            // compiles and dispatches it as a subject to depict. Checked independently of
+            // `approved`, so approving the plate does not make the binding legal. `continuityRoles`
+            // and the keyframe slots are unaffected: a plate is exactly what a keyframe slot takes.
+            if field == "conditioning.referenceRoles" {
+                if let Some(entry) = roles.get(role) {
+                    if !BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str()) {
+                        findings.push(PlanDiagnostic::shot(
+                            &shot.id,
+                            field,
+                            format!(
+                                "reference role {role:?} is kind {:?}; only {} may be BOUND as a \
+                                 reference_to_video subject (a `style` is a look, not a subject, \
+                                 and a `plate` is a literal frame placed through firstFrameRole / \
+                                 lastFrameRole)",
+                                entry.kind,
+                                BINDABLE_REFERENCE_KINDS.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
             match roles.get(role) {
                 None => findings.push(PlanDiagnostic::shot(
                     &shot.id,
@@ -3678,6 +3708,74 @@ mod tests {
         // unapproved conditioning slots are the ONLY findings — the anchor rule does not pile on.
     }
 
+    /// Ref2VA treats every BOUND reference as a subject to depict, so only
+    /// [`BINDABLE_REFERENCE_KINDS`] may appear in `conditioning.referenceRoles`. The planner
+    /// already counts a pack's bindable entries to decide whether a reference shot can be offered
+    /// at all; before sc-23401's feature-end pass the validator did not check the kind, so a plan
+    /// binding a `plate` (or a `style`) validated, compiled and dispatched it as a subject.
+    #[test]
+    fn a_plate_or_style_role_bound_as_a_reference_subject_is_refused_naming_shot_role_and_kind() {
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["red_parcel", "workshop_plate"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        // Structurally and geometrically the plan is fine — nothing else refuses it.
+        assert!(validate_plan_structure(&plan).is_empty());
+        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"workshop_plate\"")
+                && findings[0].contains("\"plate\"")
+                && findings[0].contains("character, prop, location"),
+            "{findings:?}"
+        );
+
+        // A `style` is refused the same way, and APPROVING it does not make the binding legal:
+        // the kind rule is about what a bound reference means, not about review state.
+        let mut pack_value = pack_json();
+        pack_value["references"][2]["approved"] = json!(true);
+        let approved_style: ReferencePack =
+            serde_json::from_value(pack_value).expect("pack parses");
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["unapproved_look"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_pack(&plan, &approved_style));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"unapproved_look\"")
+                && findings[0].contains("\"style\""),
+            "{findings:?}"
+        );
+
+        // The kind rule applies to the BOUND slot only: the same plate in a keyframe slot, and in
+        // continuityRoles, is exactly where a plate belongs.
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] =
+            json!({ "mode": "image_to_video", "firstFrameRole": "workshop_plate" });
+        value["shots"][0]["continuityRoles"] = json!(["red_parcel", "workshop_plate"]);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
+
+        // And the shipped reference fixture binds only bindable kinds.
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
+    }
+
     #[test]
     fn a_shot_must_bind_a_canonical_role_and_a_chain_is_never_the_only_anchor() {
         let mut value = plan_json();
@@ -3924,12 +4022,14 @@ mod tests {
         .unwrap()
     }
 
-    /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402).
+    /// A mixed plan: SH010 binds a reference role, SH020 binds none (sc-23402). The bound role is
+    /// the pack's only BINDABLE entry — `workshop_plate` is a `plate`, which
+    /// [`validate_plan_against_pack`] refuses in this slot.
     fn mixed_plan_json() -> Value {
         let mut value = plan_json();
         value["shots"][0]["conditioning"] = json!({
             "mode": "reference_to_video",
-            "referenceRoles": ["red_parcel", "workshop_plate"]
+            "referenceRoles": ["red_parcel"]
         });
         value["shots"][1]["conditioning"] = json!({ "mode": "text_to_video" });
         value

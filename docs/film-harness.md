@@ -65,6 +65,11 @@ image files; it is a separate versioned document, so approved references stay ad
 independently of any generated take. Every file here tolerates JSONC comments and refuses unknown
 fields.
 
+`referenceRoles` may bind only the **subject** kinds — `character`, `prop`, `location` — because
+Ref2VA treats every bound image as a subject to depict; a `style` (a look) or a `plate` (a literal
+frame, which belongs in `firstFrameRole` / `lastFrameRole`) bound there is refused naming the shot,
+the role and the kind.
+
 A pack entry with `"approved": false` is still imported (so a human can review it), but it is tagged
 `film-harness-reference-unapproved` instead of `film-harness-reference`, recorded with
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
@@ -646,7 +651,7 @@ refused by version — `unsupported compiled plan schema version 1` — and the 
 compile`, which rewrites it.
 
 `config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
-`courier` + `workshop_plate`, SH020 binds nothing — and
+`courier` + `workshop_location`, SH020 binds nothing — and
 `PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh` renders it
 end to end. Budget it longer than the base two-shot smoke: the run loads both DiTs.
 
@@ -1328,7 +1333,7 @@ scripts/film-harness-smoke.sh
 
 **Mixed partitions (sc-23402).** `config/film-harness/courier-workshop/plan.ref.jsonc` is two shots
 that resolve to two different MiniMax-H3 checkpoints out of one plan — SH010 binds `courier` +
-`workshop_plate` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
+`workshop_location` and renders on `minimax_h3_ref` / `reference_to_video`, SH020 binds nothing and
 renders on `minimax_h3` / `text_to_video`. It is the same `SH010,SH020` selection the script
 defaults to, so the plan is the only thing that changes:
 

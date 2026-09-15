@@ -1140,9 +1140,15 @@ impl PlanCatalog {
 /// `gate_reference` says THIS invocation will load it (sc-23402): the reference DiT is a separate
 /// 18.78 GB download with its own install state, so a run that discovers it uninstalled at
 /// dispatch has already spent the base checkpoint's load — but references are OPTIONAL (E1), and a
-/// caller that will never load those weights must not be asked to have them on disk. The planner
-/// passes `false` (no draft exists yet, and its envelope cannot produce a reference shot at all),
-/// and `validate`/`run` pass whether a SELECTED shot resolves to it.
+/// caller that will never load those weights must not be asked to have them on disk.
+///
+/// `validate`/`run` pass whether a SELECTED shot resolves to it. The planner (sc-23405) has no
+/// draft yet, so it passes the PACK-AND-CATALOG gate instead —
+/// `PlannerCapabilities::offers_references`, true only when the catalog serves a reference
+/// partition AND the chosen pack approves at least one reference the mode could bind
+/// ([`sceneworks_core::film_plan::BINDABLE_REFERENCE_KINDS`]). That is exactly the condition under
+/// which the envelope offers `reference_to_video` at all, so the weights are demanded only when
+/// the plan the planner is allowed to draft could need them.
 ///
 /// A partition the catalog does not serve at all is deliberately NOT reported here: the per-shot
 /// validator names it together with the shot that needs it, which is the actionable form.

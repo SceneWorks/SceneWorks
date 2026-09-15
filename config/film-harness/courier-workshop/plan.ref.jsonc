@@ -2,8 +2,8 @@
   // Courier / workshop — the MIXED-PARTITION fixture (epic 23401, sc-23402). Two shots, and they
   // deliberately resolve to DIFFERENT checkpoints of the same family:
   //
-  //   SH010  binds `courier` + `workshop_plate`  -> minimax_h3_ref / reference_to_video
-  //   SH020  binds nothing                       -> minimax_h3     / text_to_video
+  //   SH010  binds `courier` + `workshop_location` -> minimax_h3_ref / reference_to_video
+  //   SH020  binds nothing                         -> minimax_h3     / text_to_video
   //
   // The plan declares the family ONCE (`model.id: "minimax_h3"`, as every other plan does). The
   // compiler resolves the partition per shot and writes the resolved id and the reason onto each
@@ -54,11 +54,13 @@
       "startState": "Empty workshop, door closed, workbench clear.",
       "endState": "Courier standing in the doorway holding the red parcel.",
       "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
-      // Reference conditioning, in ROLE ORDER: the courier first, the workshop plate second. The
-      // compiled request's `referenceAssetIds` keeps exactly this order.
+      // Reference conditioning, in ROLE ORDER: the courier first, the workshop location second.
+      // The compiled request's `referenceAssetIds` keeps exactly this order. Both are BINDABLE
+      // kinds (character, location) — the pack's `workshop_plate` is a `plate` and a plate is a
+      // literal frame for a keyframe slot, never a Ref2VA subject, so binding it here is refused.
       "conditioning": {
         "mode": "reference_to_video",
-        "referenceRoles": ["courier", "workshop_plate"]
+        "referenceRoles": ["courier", "workshop_location"]
       },
       "seed": 23402,
       "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
