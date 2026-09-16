@@ -2,7 +2,7 @@ use super::*;
 
 use sceneworks_core::film_plan::{
     validate_plan_against_pack, validate_plan_structure, validate_reference_pack, PlanDiagnostic,
-    RunRecord,
+    ReferencePack, RunRecord,
 };
 use sceneworks_core::film_workspace::{FilmDraft, FilmRunLocator};
 
@@ -12,6 +12,13 @@ use crate::film_harness::{ControllerLease, HttpTransport, RunControl, RunOptions
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CreateFilmDraftRequest {
     pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ReferencePackUpdate {
+    pub draft_revision: u32,
+    pub reference_pack: ReferencePack,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +75,54 @@ pub(crate) async fn update_film_draft(
         })
         .await?,
     ))
+}
+
+pub(crate) async fn get_reference_pack(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+) -> Result<Json<ReferencePack>, ApiError> {
+    let draft = project_call(state, move |store| {
+        store.get_film_draft(&project_id, &draft_id)
+    })
+    .await?;
+    Ok(Json(draft.reference_pack))
+}
+
+pub(crate) async fn update_reference_pack(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<ReferencePackUpdate>,
+) -> Result<Json<FilmDraft>, ApiError> {
+    let findings = validate_reference_pack(&payload.reference_pack);
+    if !findings.is_empty() {
+        return Err(invalid_film_document(findings));
+    }
+    Ok(Json(
+        project_call(state, move |store| {
+            let mut draft = store.get_film_draft(&project_id, &draft_id)?;
+            if draft.revision != payload.draft_revision {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film draft revision conflict: expected {}, got {}",
+                    draft.revision, payload.draft_revision
+                )));
+            }
+            draft.reference_pack = payload.reference_pack;
+            store.save_film_draft(&project_id, &draft_id, draft)
+        })
+        .await?,
+    ))
+}
+
+pub(crate) async fn add_film_reference(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<FilmReferenceInput>,
+) -> Result<(StatusCode, Json<FilmDraft>), ApiError> {
+    let draft = project_call(state, move |store| {
+        store.add_film_reference(&project_id, &draft_id, payload)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(draft)))
 }
 
 pub(crate) async fn create_film_run(

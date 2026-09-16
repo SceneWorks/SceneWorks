@@ -697,6 +697,7 @@ async fn generate_into(
             role: role.role.clone(),
             kind: role.kind.clone(),
             file: role.file.clone(),
+            source_asset_id: None,
             description: role.description.clone(),
             approved: true,
             generated: true,

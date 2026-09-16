@@ -34,6 +34,7 @@ use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
+use crate::film_plan::{validate_reference_pack, ReferenceEntry, REFERENCE_KINDS};
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
@@ -74,6 +75,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "recipes",
     "timelines",
     "films/drafts",
+    "films/draft-assets",
     "films/runs",
     "training/datasets",
     "training/uploads",
@@ -419,6 +421,19 @@ pub struct UploadAsset {
     /// Optional free-form provenance (e.g. the Image Editor edit chain) stored
     /// under the asset's top-level `extra`, mirroring generated-asset extras.
     pub provenance: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmReferenceInput {
+    pub draft_revision: u32,
+    pub asset_id: String,
+    pub role: String,
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -814,6 +829,98 @@ impl ProjectStore {
         Ok(draft)
     }
 
+    /// Copy a project-library image into a draft-owned reference pack and persist the new draft
+    /// revision. Runs later copy from this immutable draft input rather than reading mutable asset
+    /// library state.
+    pub fn add_film_reference(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        input: FilmReferenceInput,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) || !is_safe_id(&input.asset_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or source asset ID".to_owned(),
+            ));
+        }
+        if !REFERENCE_KINDS.contains(&input.kind.as_str()) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Reference kind must be one of {}",
+                REFERENCE_KINDS.join(", ")
+            )));
+        }
+        let source = self.resolve_asset_media_path(project_id, &input.asset_id)?;
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Film references must use a PNG, JPEG, or WebP image asset".to_owned(),
+                )
+            })?;
+
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let mut draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if input.draft_revision != draft.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                draft.revision, input.draft_revision
+            )));
+        }
+
+        let relative_file = format!("references/{}.{}", input.asset_id, extension);
+        draft.reference_pack.references.push(ReferenceEntry {
+            role: input.role,
+            kind: input.kind,
+            file: relative_file.clone(),
+            source_asset_id: Some(input.asset_id.clone()),
+            description: input.description,
+            approved: input.approved,
+            generated: false,
+            generation: None,
+        });
+        draft.reference_pack.version = draft.reference_pack.version.saturating_add(1);
+        let findings = validate_reference_pack(&draft.reference_pack);
+        if !findings.is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+
+        let destination = project_path
+            .join("films/draft-assets")
+            .join(draft_id)
+            .join(&relative_file);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&source, &destination)?;
+        draft.revision = draft.revision.saturating_add(1);
+        draft.production_plan.version = draft.revision;
+        draft.updated_at = utc_now();
+        write_json(&draft_path, &draft)?;
+        Ok(draft)
+    }
+
     pub fn create_film_run(
         &self,
         project_id: &str,
@@ -848,8 +955,36 @@ impl ProjectStore {
             ));
         }
         fs::create_dir_all(&run_dir)?;
-        write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
-        write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+        let pin_result = (|| -> ProjectStoreResult<()> {
+            let draft_assets = project_path.join("films/draft-assets").join(draft_id);
+            for reference in &draft.reference_pack.references {
+                if !is_safe_relative_path(&reference.file) {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "Film reference {:?} has an unsafe file path",
+                        reference.role
+                    )));
+                }
+                let source = draft_assets.join(&reference.file);
+                if !source.is_file() {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "Film reference {:?} is missing its staged image {}",
+                        reference.role, reference.file
+                    )));
+                }
+                let destination = run_dir.join(&reference.file);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(source, destination)?;
+            }
+            write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
+            write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+            Ok(())
+        })();
+        if let Err(error) = pin_result {
+            let _ = fs::remove_dir_all(&run_dir);
+            return Err(error);
+        }
         let locator = FilmRunLocator {
             schema_version: crate::film_workspace::FILM_RUN_LOCATOR_SCHEMA_VERSION,
             id: run_locator_id.to_owned(),

@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { apiFetch } from "../../api.js";
 import { useAppStatic } from "../../context/AppContext.js";
+import { FilmReferences } from "./FilmReferences.jsx";
 
 export function FilmWorkspace() {
-  const { activeProject, token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
+  const { activeProject, assets, importAsset, token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState(null);
@@ -86,6 +87,11 @@ export function FilmWorkspace() {
     return saved;
   }
 
+  function replaceDraft(next) {
+    setDraft(next);
+    setDrafts((items) => [next, ...items.filter((item) => item.id !== next.id)]);
+  }
+
   async function startRun() {
     setBusy(true);
     setNotice("");
@@ -140,6 +146,17 @@ export function FilmWorkspace() {
           <label>Framing<input value={shot.framing} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].framing = event.target.value; })} /></label>
           <label>Duration (seconds)<input min="0.1" step="0.0001" type="number" value={shot.targetDurationSeconds} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].targetDurationSeconds = Number(event.target.value); })} /></label>
           <label>Video model<input value={draft.productionPlan.model.id} onChange={(event) => updateDraft((next) => { next.productionPlan.model.id = event.target.value; })} /></label>
+          <FilmReferences
+            assets={assets}
+            busy={busy}
+            draft={draft}
+            importAsset={importAsset}
+            onDraftChange={updateDraft}
+            onReplaceDraft={replaceDraft}
+            saveDraft={saveDraft}
+            setNotice={setNotice}
+            token={token}
+          />
           <div className="ve-film-actions">
             <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>
             <button className="ve-generate" disabled={busy} onClick={startRun} type="button">Render shot</button>

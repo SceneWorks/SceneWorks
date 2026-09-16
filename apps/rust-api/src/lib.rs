@@ -49,8 +49,9 @@ use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url
 use sceneworks_core::project_store::{
     AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
     CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
-    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
-    ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR, POSE_UPLOADS_CACHE_DIR,
+    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput,
+    FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
+    POSE_UPLOADS_CACHE_DIR,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
@@ -285,8 +286,8 @@ pub mod film_planner;
 mod films;
 pub(crate) use error::ApiError;
 use films::{
-    create_film_draft, create_film_run, get_film_draft, get_film_run, list_film_drafts,
-    start_film_run, update_film_draft,
+    add_film_reference, create_film_draft, create_film_run, get_film_draft, get_film_run,
+    get_reference_pack, list_film_drafts, start_film_run, update_film_draft, update_reference_pack,
 };
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
@@ -1696,6 +1697,14 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/films/:draft_id",
             get(get_film_draft).put(update_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/reference-pack",
+            get(get_reference_pack).put(update_reference_pack),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/references",
+            post(add_film_reference),
         )
         .route(
             "/api/v1/projects/:project_id/films/:draft_id/runs",

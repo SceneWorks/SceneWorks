@@ -10856,6 +10856,31 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text);
   padding: 7px 9px;
 }
+.ve-film-references {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.ve-film-reference-heading,
+.ve-film-reference-add,
+.ve-film-reference-row,
+.ve-film-bindings,
+.ve-film-bindings li {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ve-film-reference-heading span { color: var(--text-muted); margin-right: auto; }
+.ve-film-reference-add label,
+.ve-film-bindings label { display: grid; gap: 4px; }
+.ve-film-reference-row > input { min-width: 140px; flex: 1; }
+.ve-film-reference-check { display: flex !important; align-items: center; }
+.ve-film-file-button input { max-width: 220px; }
+.ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
+.ve-film-bindings li span { min-width: 140px; }
 .workspace > section.ve-editor {
   flex: 1 1 auto;
   min-height: 0;

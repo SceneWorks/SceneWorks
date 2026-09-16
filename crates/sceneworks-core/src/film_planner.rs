@@ -2647,7 +2647,8 @@ mod tests {
             "{findings:?}"
         );
 
-        // An unapproved role cannot be conditioned on, and leaves the shot unanchored.
+        // An unapproved role cannot be conditioned on. The presence of other references in the
+        // pack does not independently require this shot to invent a continuity binding.
         let mut draft = good_draft();
         draft.shots[0].conditioning = ShotConditioning {
             mode: "image_to_video".to_owned(),
@@ -2671,12 +2672,7 @@ mod tests {
             findings.iter().any(|m| m.contains("not approved")),
             "{findings:?}"
         );
-        assert!(
-            findings
-                .iter()
-                .any(|m| m.contains("[SH010] continuityRoles")),
-            "{findings:?}"
-        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[test]
