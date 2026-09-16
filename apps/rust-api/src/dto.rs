@@ -401,6 +401,7 @@ pub(crate) struct TimelineCreateRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimelineSaveRequest {
     pub(crate) timeline: Value,
+    pub(crate) expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

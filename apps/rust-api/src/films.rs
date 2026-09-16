@@ -172,17 +172,28 @@ async fn load_run_view(
     project_id: String,
     run_id: String,
 ) -> Result<FilmRunView, ApiError> {
+    let store_state = state.clone();
+    let saved_project_id = project_id.clone();
     let (locator, files) = project_call(state, move |store| {
         let locator = store.get_film_run(&project_id, &run_id)?;
         let files = store.film_run_files(&project_id, &run_id)?;
         Ok((locator, files))
     })
     .await?;
-    let record = match crate::film_harness::read_run_record(&files.directory) {
+    let mut record = match crate::film_harness::read_run_record(&files.directory) {
         Ok(record) => Some(record),
         Err(crate::film_harness::HarnessError::Refused(_)) => None,
         Err(error) => return Err(ApiError::internal(error.to_string())),
     };
+    if let Some(record) = record.as_mut() {
+        if let Some(timeline_id) = record.timeline.as_ref().map(|t| t.timeline_id.clone()) {
+            let saved = project_call(store_state, move |store| {
+                store.get_timeline(&saved_project_id, &timeline_id)
+            })
+            .await?;
+            crate::film_harness::reconcile_saved_cut(record, &saved);
+        }
+    }
     Ok(FilmRunView {
         locator,
         record,

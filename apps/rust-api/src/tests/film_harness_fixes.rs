@@ -2241,3 +2241,108 @@ async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_c
             .collect::<Vec<_>>()
     );
 }
+
+/// Controlled completion through real routes: an operator edits/deletes A while B still renders.
+/// Delivery B must preserve that cut, and replaying A must respect the stored deletion.
+#[tokio::test]
+async fn incremental_film_delivery_preserves_concurrent_cut_and_tombstones() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 20.0,
+                },
+            ),
+            (
+                "SH020",
+                VideoBehavior::Complete {
+                    delay_secs: 2,
+                    peak_pct: 20.0,
+                },
+            ),
+        ],
+    )
+    .await;
+    let mut options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    options.export = false;
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let second_started =
+                    harness
+                        .script
+                        .lock()
+                        .claimed
+                        .iter()
+                        .any(|(kind, _, payload)| {
+                            kind == "video_generate"
+                                && payload["advanced"]["filmHarness"]["shotId"] == "SH020"
+                        });
+                if second_started {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("second shot starts");
+        let record = harness.run_record();
+        let project_id = record["projectId"].as_str().unwrap();
+        let timeline_id = record["timeline"]["timelineId"]
+            .as_str()
+            .expect("first shot delivered before second starts");
+        let original = saved_timeline(&harness.app, project_id, timeline_id).await;
+        assert_eq!(picture_order(&original), vec!["SH010"]);
+        let mut deleted = original.clone();
+        deleted["tracks"][0]["items"] = json!([]);
+        deleted["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["kind"] == "audio")
+            .unwrap()["gain"] = json!(0.35);
+        let (status, saved) = request(
+            harness.app.clone(),
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            json!({"timeline":deleted,"expectedRevision":original["revision"]}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+        assert!(
+            !saved["filmAssembly"]["runs"][record["runId"].as_str().unwrap()]["deletedShots"]
+                ["SH010"]
+                .is_null()
+        );
+    };
+    let (result, ()) = tokio::join!(film_harness::run(&harness.transport, &options), observer);
+    let record = result.expect("incremental run completes");
+    let project_id = record.project_id.as_deref().unwrap();
+    let timeline_id = &record.timeline.as_ref().unwrap().timeline_id;
+    let saved = saved_timeline(&harness.app, project_id, timeline_id).await;
+    assert_eq!(picture_order(&saved), vec!["SH020"]);
+    assert_eq!(
+        saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["kind"] == "audio")
+            .unwrap()["gain"],
+        0.35
+    );
+    assert!(record.export.is_none());
+    assert!(!harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .any(|(kind, _, _)| kind == "timeline_export"));
+    assert_eq!(record.timeline.as_ref().unwrap().items.len(), 1);
+}

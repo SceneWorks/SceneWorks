@@ -1,3 +1,4 @@
+import { timelineEdit, applyTimelineEdit, invertTimelineEdit } from "../timelineEdits.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { formatTimecode } from "../formatting.js";
@@ -34,12 +35,15 @@ export function EditorScreen() {
     exportTimeline,
     queueTimelineVideoJob,
     saveTimeline,
+    resolveTimelineTrim,
     selectedTimelineId,
     setActiveTimeline,
     setSelectedTimelineId,
     isActiveTimelineDirty,
     timelines,
   } = app;
+  const liveTimelineRef = useRef(activeTimeline);
+  liveTimelineRef.current = activeTimeline;
   const assets = mediaAssets;
   const gen = useEditorGeneration({ context: app });
 
@@ -169,7 +173,7 @@ export function EditorScreen() {
     if (!activeTimeline) {
       return;
     }
-    setHistory((items) => [...items.slice(-24), activeTimeline]);
+    setHistory((items) => [...items.slice(-24), timelineEdit(activeTimeline, nextTimeline)]);
     setFuture([]);
     setActiveTimeline({ ...nextTimeline, duration: timelineDuration(nextTimeline) });
   }
@@ -189,24 +193,73 @@ export function EditorScreen() {
     };
   }
 
-  function undo() {
+  async function undo() {
     if (!history.length || !activeTimeline) {
       return;
     }
-    const previous = history[history.length - 1];
+    const edit = history[history.length - 1];
+    if (!await applyHistoryEdit(invertTimelineEdit(edit))) return;
     setHistory((items) => items.slice(0, -1));
-    setFuture((items) => [activeTimeline, ...items]);
-    setActiveTimeline(previous);
+    setFuture((items) => [edit, ...items]);
   }
 
-  function redo() {
-    if (!future.length || !activeTimeline) {
+  async function applyHistoryEdit(edit) {
+    const applied = applyTimelineEdit(activeTimeline, edit);
+    if (applied.conflicts.length) {
+      const names = applied.conflicts.map((c) => c.label).join(", ");
+      if (!await appConfirm({ title: "Resolve undo conflict", message: `These clips changed since this edit: ${names}.`, confirmLabel: "Apply my edit", cancelLabel: "Keep current clips" })) return false;
+      if (liveTimelineRef.current?.id !== activeTimeline.id) return false;
+      setActiveTimeline(applyTimelineEdit(liveTimelineRef.current, edit, { force: true }).timeline);
+    } else setActiveTimeline(applied.timeline);
+    return true;
+  }
+
+  async function redo() {
+    if (!future.length || !activeTimeline) return;
+    const edit = future[0];
+    if (!await applyHistoryEdit(edit)) return;
+    setFuture((items) => items.slice(1));
+    setHistory((items) => [...items, edit]);
+  }
+
+  function trimSelected(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const sourceIn = Number(form.get("sourceIn"));
+    const sourceOut = Number(form.get("sourceOut"));
+    const measured = Number(selectedAsset?.file?.duration);
+    if (!Number.isFinite(sourceIn) || !Number.isFinite(sourceOut) || sourceIn < 0 || sourceOut - sourceIn < 0.1 || (measured > 0 && sourceOut > measured)) {
+      setTimelineNotice("Choose a source range of at least 0.1 seconds within the selected take.");
       return;
     }
-    const next = future[0];
-    setFuture((items) => items.slice(1));
-    setHistory((items) => [...items, activeTimeline]);
-    setActiveTimeline(next);
+    commit({ ...activeTimeline, tracks: activeTimeline.tracks.map((track) => ({ ...track,
+      items: track.items.map((item) => item.id === selectedItemId ? { ...item, sourceIn, sourceOut,
+        timelineEnd: item.timelineStart + (sourceOut - sourceIn) / (item.speed || 1) } : item),
+    })) });
+    setTimelineNotice("Trim applied. Other clips keep their positions.");
+  }
+
+  function moveSelected(direction) {
+    const track = activeTimeline.tracks.find((t) => t.items.some((i) => i.id === selectedItemId));
+    if (!track) return;
+    const ordered = [...track.items].sort((a, b) => a.timelineStart - b.timelineStart);
+    const index = ordered.findIndex((i) => i.id === selectedItemId);
+    if (index + direction < 0 || index + direction >= ordered.length) return;
+    [ordered[index], ordered[index + direction]] = [ordered[index + direction], ordered[index]];
+    let cursor = Math.min(...ordered.map((i) => i.timelineStart));
+    const shifts = new Map();
+    const items = ordered.map((item) => {
+      const span = item.timelineEnd - item.timelineStart;
+      if (item.filmHarness?.runId && item.filmHarness?.shotId) shifts.set(`${item.filmHarness.runId}:${item.filmHarness.shotId}`, cursor - item.timelineStart);
+      const moved = { ...item, timelineStart: cursor, timelineEnd: cursor + span };
+      cursor += span; return moved;
+    });
+    commit({ ...activeTimeline, tracks: activeTimeline.tracks.map((current) => current.id === track.id ? { ...current, items } : {
+      ...current, items: current.items.map((item) => {
+        const delta = current.kind === "audio" ? shifts.get(`${item.filmHarness?.runId}:${item.filmHarness?.shotId}`) : undefined;
+        return delta === undefined ? item : { ...item, timelineStart: item.timelineStart + delta, timelineEnd: item.timelineEnd + delta };
+      }),
+    }) });
   }
 
   function addAssetToTrack(asset, trackId = MAIN_TRACK_ID) {
@@ -616,6 +669,25 @@ export function EditorScreen() {
         zoomPct={`${Math.round(zoom * 100)}%`}
       />
 
+      {Object.entries(activeTimeline.generationTrimConflicts ?? {}).map(([jobId, conflict]) => (
+        <div className="ve-notice" role="alert" key={jobId}>
+          <p>The replacement for {conflict.itemId} is {conflict.newDuration}s; the saved trim is {conflict.sourceIn}–{conflict.sourceOut}s.</p>
+          {(conflict.choices ?? []).map((choice) => <button key={choice} type="button" onClick={() => resolveTimelineTrim(null, jobId, choice)}>
+            {choice === "clamp" ? "Keep in-point, shorten end" : choice === "reset" ? "Use full new take" : "Keep current take"}
+          </button>)}
+        </div>
+      ))}
+      {Object.entries(activeTimeline.filmAssembly?.runs ?? {}).flatMap(([runId, run]) =>
+        Object.entries(run.trimConflicts ?? {}).map(([shotId, conflict]) => (
+          <div className="ve-notice" role="alert" key={`${runId}:${shotId}`}>
+            <p>{shotId}: the new take is {conflict.newDuration}s; your trim is {conflict.sourceIn}–{conflict.sourceOut}s. Choose how to use this take.</p>
+            {(conflict.choices ?? []).map((choice) => <button key={choice} type="button" onClick={() => resolveTimelineTrim(runId, shotId, choice)}>
+              {choice === "clamp" ? "Keep in-point, shorten end" : choice === "reset" ? "Use full new take" : "Keep current take"}
+            </button>)}
+          </div>
+        )),
+      )}
+
       <div className="ve-upper">
         <MediaBin assets={assets} onAddToTrack={(asset) => addAssetToTrack(asset)} onPreview={(asset) => setPreviewAsset(asset, assets)} />
         <ProgramMonitor
@@ -643,7 +715,18 @@ export function EditorScreen() {
         />
       </div>
 
+      {assets.filter((asset) => asset.recipe?.normalizedSettings?.timelineId === activeTimeline.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 1).map((asset) => (
+        <p className="ve-notice" key={asset.id}>{Number.isInteger(asset.recipe.normalizedSettings.timelineRevision) && asset.recipe.normalizedSettings.timelineRevision === activeTimeline.revision && !isActiveTimelineDirty?.() ? "Latest export matches this saved timeline." : "Latest export is stale. Export again when your edits are ready."}</p>
+      ))}
       {timelineNotice ? <p className="ve-notice">{timelineNotice}</p> : null}
+
+      {selectedItem?.type === "video" ? <form className="ve-notice" onSubmit={trimSelected} key={`${selectedItem.id}:${selectedItem.sourceIn}:${selectedItem.sourceOut}`} aria-label="Edit selected clip">
+        <label>Source in (seconds) <input name="sourceIn" type="number" min="0" step="0.01" defaultValue={selectedItem.sourceIn} required /></label>
+        <label>Source out (seconds) <input name="sourceOut" type="number" min="0.1" step="0.01" defaultValue={selectedItem.sourceOut} required /></label>
+        <button type="submit">Apply trim</button>
+        <button type="button" onClick={() => moveSelected(-1)}>Move clip earlier</button>
+        <button type="button" onClick={() => moveSelected(1)}>Move clip later</button>
+      </form> : null}
 
       <StoryboardStrip
         assetsById={assetsById}

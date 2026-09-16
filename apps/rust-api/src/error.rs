@@ -203,6 +203,12 @@ impl From<ProjectStoreError> for ApiError {
     fn from(error: ProjectStoreError) -> Self {
         match error {
             ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
+            ProjectStoreError::TimelineConflict { code, context } => Self {
+                status: StatusCode::CONFLICT,
+                detail: "The timeline changed. Review and resolve the conflicting edit.".into(),
+                code: Some(code),
+                context: Some(context),
+            },
             ProjectStoreError::NotFound(detail) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail,

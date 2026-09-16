@@ -379,3 +379,31 @@ describe("EditorScreen keep-alive keydown gating (sc-13589)", () => {
     expect(setActiveTimeline).not.toHaveBeenCalled();
   });
 });
+
+describe("incremental film history (sc-23737)", () => {
+  it("undo and redo a deletion after another shot arrives without erasing the new shot", async () => {
+    let install, latest;
+    const clip = (id, start) => ({ id, trackId: "track_main", assetId: id, displayName: id, type: "video", sourceIn: 0, sourceOut: 4, timelineStart: start, timelineEnd: start + 4, speed: 1, fit: "fit", volume: 1 });
+    const original = makeTimeline("tl_1", "Film"); original.tracks[0].items = [clip("A",0)];
+    function Harness() {
+      const [timeline, setTimeline] = React.useState(original);
+      install = setTimeline; latest = timeline;
+      return <AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [], timelines: [timeline], selectedTimelineId: timeline.id,
+        setActiveTimeline: setTimeline, setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}>
+        <EditorScreen />
+      </AppContext.Provider>;
+    }
+    root = createRoot(container); act(() => root.render(<Harness />));
+    act(() => container.querySelector(".ve-clip").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    act(() => window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Delete", bubbles: true })));
+    expect(latest.tracks[0].items).toEqual([]);
+    act(() => install((cut) => ({ ...cut, revision: 2, tracks: [{ ...cut.tracks[0], items: [clip("B",4)] }] })));
+    act(() => window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "z", code: "KeyZ", metaKey: true, bubbles: true })));
+    await flush();
+    expect(latest.tracks[0].items.map((i) => i.id).sort()).toEqual(["A", "B"]);
+    act(() => window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "z", code: "KeyZ", metaKey: true, shiftKey: true, bubbles: true })));
+    await flush();
+    expect(latest.tracks[0].items.map((i) => i.id)).toEqual(["B"]);
+    expect(appConfirmMock).not.toHaveBeenCalled();
+  });
+});
