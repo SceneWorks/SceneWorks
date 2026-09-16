@@ -5397,63 +5397,53 @@ mod tests {
         }
     }
 
-    /// sc-22667: an attested anchor carries the WHOLE justification, and the attestation binds to
-    /// the pin it names — a packaged attestation whose `attestedRevision` is not the pin the
-    /// closures were derived at is an attestation of some other pin, and the anchor it keys must
-    /// not read current on the strength of it. Read off the packaged closure file's own
-    /// `inferenceRevision`, so this cannot drift into a hand-kept literal.
+    /// sc-23692: historical attestations remain valid provenance after either a pin-only
+    /// bump or a shared-loader edit. Test both anchors and bounds without requiring the
+    /// packaged store to carry any particular current/historical attestation population.
     #[test]
-    fn a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let closures = packaged_closures();
-        let pin: serde_json::Value =
-            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
-        let pin = pin["inferenceRevision"]
-            .as_str()
-            .expect("the closure file names its pin");
-        // sc-22738: a measured lower bound is attested from the same file and stamped by the same
-        // walk, so it is held to the same contradiction check — an attested bound that reads stale
-        // would be one the probe tooling re-measures on the strength of a justification saying it
-        // need not.
-        let attested: Vec<(&str, AnchorBackend, &AnchorSource)> = store
+    fn historical_attestations_load_regardless_of_live_pin_or_closure() {
+        let original = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("store loads");
+        let mut store = original.clone();
+        for source in store
             .anchors
-            .iter()
-            .map(|anchor| (anchor.id.as_str(), anchor.backend, &anchor.source))
+            .iter_mut()
+            .map(|anchor| &mut anchor.source)
             .chain(
                 store
                     .exceeded_bounds
-                    .iter()
-                    .map(|bound| (bound.id.as_str(), bound.backend, &bound.source)),
+                    .iter_mut()
+                    .map(|bound| &mut bound.source),
             )
-            .filter(|(_, _, source)| source.currency_attestation.is_some())
-            .collect();
-        for (id, backend, source) in &attested {
-            let attestation = source.currency_attestation.as_ref().unwrap();
-            let model_id = id
-                .strip_prefix("exceeded:")
-                .unwrap_or(id)
-                .split(':')
-                .next()
-                .unwrap();
-            let is_current = closures.digest_for(model_id, *backend)
-                == Some(source.loader_closure_digest.as_str());
-            // Current BY ATTESTATION means: keyed at the pin, on a stated reading of the diff.
-            // An attestation of an older revision would leave the row stale AND claim a
-            // justification — the contradiction this test exists to catch.
-            assert_eq!(
-                is_current,
-                attestation.attested_revision == pin,
-                "{id}: attested at {} against pin {pin} but is_current={is_current}",
-                attestation.attested_revision,
-            );
-            assert!(
-                matches!(
-                    attestation.class.as_str(),
-                    "accounting-only" | "witnessed-unchanged"
-                ),
-                "{id}: attestation class {:?} is not one the doctrine names",
-                attestation.class
-            );
+        {
+            source.currency_attestation = Some(AnchorCurrencyAttestation {
+                measured_revision: "1".repeat(40),
+                attested_revision: "2".repeat(40),
+                attested_at: "2026-09-16".into(),
+                story: "sc-23692".into(),
+                class: "accounting-only".into(),
+                why: "fixture: no loading change".into(),
+                witness: "fixture: source review".into(),
+            });
+        }
+        let serialized = serde_json::to_string(&store).unwrap();
+        let mut live: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).unwrap();
+        live["inferenceRevision"] = serde_json::json!("3".repeat(40));
+        for change_closure in [false, true] {
+            if change_closure {
+                for entry in live["models"].as_object_mut().unwrap().values_mut() {
+                    entry["digest"] = serde_json::json!("0".repeat(64));
+                }
+            }
+            let closures = load_anchor_loader_closures(&live.to_string()).unwrap();
+            let loaded = load_memory_anchors(&serialized).expect("historical attestations load");
+            assert_eq!(loaded, store);
+            if change_closure {
+                assert!(loaded
+                    .anchors
+                    .iter()
+                    .all(|anchor| !anchor_is_current(anchor, &closures)));
+            }
         }
     }
 
