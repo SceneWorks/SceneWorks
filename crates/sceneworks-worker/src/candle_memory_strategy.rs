@@ -935,6 +935,7 @@ fn parse_parameters(
         Some(_) => return None,
     };
     Some(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: integer("decodeTileEdge", 1),
         decode_overlap: integer("decodeOverlap", 0),
         attention_chunk_size: integer("attentionChunkSize", 1),
@@ -1235,6 +1236,7 @@ fn estimate_floor_parameters(
             None
         };
     Some(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
             &ranges.decode_tile_edges
         })?,
@@ -4606,6 +4608,7 @@ mod tests {
             selection(
                 MemoryStrategy::BoundedTransformerResidency,
                 gen_core::MemoryStrategyParameters {
+                    stage_residency: None,
                     decode_tile_edge: Some(512),
                     decode_overlap: Some(64),
                     attention_chunk_size: Some(64 * 1024 * 1024),
@@ -5996,6 +5999,7 @@ mod tests {
         assert_eq!(
             selection.parameters,
             gen_core::MemoryStrategyParameters {
+                stage_residency: None,
                 decode_tile_edge: Some(512),
                 decode_overlap: Some(128),
                 attention_chunk_size: Some(64 * 1024 * 1024),

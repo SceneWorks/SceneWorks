@@ -186,6 +186,8 @@ pub mod memory_strategy;
 // two are symmetric, so one module serves both and names the difference explicitly.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mlx_phase_estimate;
 #[cfg_attr(
     not(any(
         target_os = "macos",

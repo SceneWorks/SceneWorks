@@ -1105,6 +1105,7 @@ fn krea_rung_parameters(
             .and_then(|value| u32::try_from(value).ok())
     };
     Some(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: value("decodeTileEdge"),
         decode_overlap: value("decodeOverlap"),
         attention_chunk_size: value("attentionChunkSize"),

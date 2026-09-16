@@ -1481,6 +1481,30 @@ async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> Worke
     })
 }
 
+/// Snapshot the host/allocator ceiling on the serialized MLX worker. Tier probes describe a cold
+/// complete pipeline; the real cache transaction credits retained weights and charges unrelated
+/// allocations again immediately before generation.
+#[cfg(target_os = "macos")]
+pub(crate) async fn mlx_tier_budget(
+    engine_id: &'static str,
+) -> WorkerResult<gen_core::MemoryBudget> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let job: GeneratorJob = Box::new(move |_cache| {
+        let result = crate::mlx_fit_gate::live_request_budget(engine_id).map(|mut budget| {
+            budget.committed_bytes = 0;
+            budget.reclaimable_bytes = 0;
+            budget
+        });
+        let _ = reply_tx.send(result);
+    });
+    generator_worker()
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        crate::WorkerError::Engine("MLX generator cache worker dropped the tier budget".to_owned())
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

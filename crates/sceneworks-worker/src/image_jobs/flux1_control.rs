@@ -383,6 +383,7 @@ async fn generate_flux1_dev_control_stream(
         reference_count: 1,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: None,
     };
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),

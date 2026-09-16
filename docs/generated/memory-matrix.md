@@ -7,7 +7,7 @@
 - Out-of-matrix entries (subtracted from the universe): `minimax_h3` — both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells (sc-17137); `minimax_h3_ref` — both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells (sc-17137)
 - Resolved coordinates: 9390
 - Published cells: 3810
-- Elided coordinates: 5580 (Implemented 1164, Missing 4416)
+- Elided coordinates: 5580 (Implemented 1178, Missing 4402)
 - MLX staged-residency static coverage: image 47/53, video 9/11
 - Measured anchors: 247 (covering 3810 coordinates; 243 stale; 4 current by attestation)
 - Coordinates the store classifies analytic-only: 96
