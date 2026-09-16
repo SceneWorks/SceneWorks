@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision ebc97be1 (merged PR #989, sc-23648). The advance from fe5b5513 changes only gen-core memory_phases.rs and MLX SANA memory_strategy.rs, adding architecture and decoder workspace facts with contract tests. No dependency, production crate, embedded asset, provenance candidate path or ported-source marker was added or removed. The regenerated candidate rows differ only in the SANA memory_strategy.rs source blob hash. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
-  "inferenceRevision": "ebc97be15522ff263f76897f430053953e010e94",
-  "auditDigest": "14c71fa38a6ff0e5467daa0f291f2627a55dbe24ad853e458b9ceef61fdaad04",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 8e2d9671 (inference `main`, merge of PR #990, the sc-23648 forward-port). This pin move leaves the release lineage: the previous app pin ebc97be1 sat on release/next, which does not contain the epic-23401 inference work, while 8e2d9671 contains BOTH that work (e497db46) and the forward-ports of the sc-23584 and sc-23648 fixes ebc97be1 carried. No dependency, production crate, embedded asset, provenance candidate path or ported-source marker was added or removed across the move: the reviewed population is byte-identical apart from two rows whose git_blob_sha1 changed because main carries newer source for them - mlx-gen-minimax-h3/src/vae.rs (the sc-23402 ref2va/coherence work) and mlx-gen-wan/src/transformer.rs (a rustdoc MLX-version note release/next refreshed and main has not). Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes.",
+  "inferenceRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
+  "auditDigest": "31cbeca764473924da0b587a6becd53ced2086cbe893083f060fc9dfadbef13a",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "ebc97be15522ff263f76897f430053953e010e94",
+    "revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 683,
-    "populationSha256": "098d0d3c0bb1f46f81daeee526c541503c03c282bea4886f5f904ad444b27689"
+    "populationSha256": "ef31b3d48803e9e9be6bc309970c0d2711815a20947aef0371269686de4009c0"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "ebc97be15522ff263f76897f430053953e010e94",
+    "revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
