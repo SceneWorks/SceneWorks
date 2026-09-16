@@ -15,19 +15,75 @@ use crate::time::utc_now;
 pub const FILM_DRAFT_SCHEMA_VERSION: u32 = 1;
 pub const FILM_RUN_LOCATOR_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_FILM_PLANNING_PROVIDER: &str = "prompt_refiner";
+pub const QWEN36_FILM_PLANNER_MODEL_ID: &str = "film_planner_qwen3_6_27b";
+pub const QWEN36_FILM_PLANNER_REPO: &str = "Qwen/Qwen3.6-27B";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilmPlanningSelection {
     pub provider: String,
+    /// Catalog identity of an explicitly selected native planner. The built-in provider keeps this
+    /// empty and therefore continues to use the small prompt-refiner checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// `disabled`, `enabled`, or `auto`. Thinking is an LLM control and never changes the target
+    /// video model stored in `productionPlan.model.id`.
+    #[serde(default = "default_planning_thinking_mode")]
+    pub thinking_mode: String,
+    /// Prompt refinement after planning is a separate compile choice, not an implicit side effect
+    /// of selecting a more capable planning LLM.
+    #[serde(default)]
+    pub refine_prompts: bool,
+}
+
+fn default_planning_thinking_mode() -> String {
+    "disabled".to_owned()
 }
 
 impl Default for FilmPlanningSelection {
     fn default() -> Self {
         Self {
             provider: DEFAULT_FILM_PLANNING_PROVIDER.to_owned(),
+            model_id: None,
+            thinking_mode: default_planning_thinking_mode(),
+            refine_prompts: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmBriefDocument {
+    #[serde(default)]
+    pub synopsis: String,
+    #[serde(default)]
+    pub style_notes: String,
+    #[serde(default = "default_target_seconds")]
+    pub target_total_seconds: f64,
+    #[serde(default)]
+    pub beats: Vec<FilmBeat>,
+    #[serde(default)]
+    pub dialogue: Vec<FilmDialogueLine>,
+}
+
+fn default_target_seconds() -> f64 {
+    30.0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmBeat {
+    pub id: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmDialogueLine {
+    pub id: String,
+    pub beat_id: String,
+    pub speaker: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +98,8 @@ pub struct FilmDraft {
     pub original_script: String,
     #[serde(default)]
     pub brief: String,
+    #[serde(default)]
+    pub structured_brief: FilmBriefDocument,
     #[serde(default)]
     pub planning: FilmPlanningSelection,
     pub production_plan: ProductionPlan,
@@ -70,6 +128,7 @@ impl FilmDraft {
             title: title.to_owned(),
             original_script: String::new(),
             brief: String::new(),
+            structured_brief: FilmBriefDocument::default(),
             planning: FilmPlanningSelection::default(),
             production_plan: ProductionPlan {
                 schema_version: PLAN_SCHEMA_VERSION,
@@ -135,6 +194,105 @@ impl FilmDraft {
     }
 }
 
+/// Convert pasted prose or screenplay text into an editable starting document. This is deliberately
+/// deterministic and conservative: it identifies scene/action paragraphs and screenplay dialogue,
+/// but leaves every extracted field editable before an LLM is asked to plan shots.
+pub fn parse_film_script(script: &str) -> FilmBriefDocument {
+    let lines = script.lines().map(str::trim).collect::<Vec<_>>();
+    let mut beats = Vec::new();
+    let mut dialogue = Vec::new();
+    let mut paragraph = Vec::<String>::new();
+    let mut index = 0_usize;
+
+    let push_beat = |parts: &mut Vec<String>, beats: &mut Vec<FilmBeat>| {
+        let summary = parts.join(" ").trim().to_owned();
+        parts.clear();
+        if summary.is_empty() || beats.len() >= crate::film_planner::MAX_PLANNER_SHOTS {
+            return;
+        }
+        beats.push(FilmBeat {
+            id: format!("B{:03}", beats.len() + 1),
+            summary,
+        });
+    };
+
+    while index < lines.len() {
+        let line = lines[index];
+        if line.is_empty() {
+            push_beat(&mut paragraph, &mut beats);
+            index += 1;
+            continue;
+        }
+        let next = lines.get(index + 1).copied().unwrap_or_default();
+        let screenplay_speaker = is_screenplay_speaker(line) && !next.is_empty();
+        if screenplay_speaker {
+            push_beat(&mut paragraph, &mut beats);
+            if beats.is_empty() {
+                beats.push(FilmBeat {
+                    id: "B001".to_owned(),
+                    summary: "Opening dialogue".to_owned(),
+                });
+            }
+            dialogue.push(FilmDialogueLine {
+                id: format!("D{:03}", dialogue.len() + 1),
+                beat_id: beats.last().expect("created above").id.clone(),
+                speaker: line.trim_matches(['(', ')']).to_owned(),
+                text: next.to_owned(),
+            });
+            index += 2;
+            continue;
+        }
+        if is_scene_heading(line) {
+            push_beat(&mut paragraph, &mut beats);
+            paragraph.push(line.to_owned());
+            push_beat(&mut paragraph, &mut beats);
+        } else {
+            paragraph.push(line.to_owned());
+        }
+        index += 1;
+    }
+    push_beat(&mut paragraph, &mut beats);
+
+    if beats.is_empty() && !script.trim().is_empty() {
+        beats.push(FilmBeat {
+            id: "B001".to_owned(),
+            summary: script.split_whitespace().collect::<Vec<_>>().join(" "),
+        });
+    }
+    let synopsis = beats
+        .iter()
+        .take(3)
+        .map(|beat| beat.summary.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    FilmBriefDocument {
+        synopsis,
+        style_notes: String::new(),
+        target_total_seconds: (beats.len().max(1) as f64 * 5.1667).clamp(5.1667, 120.0),
+        beats,
+        dialogue,
+    }
+}
+
+fn is_scene_heading(line: &str) -> bool {
+    let upper = line.to_ascii_uppercase();
+    upper.starts_with("INT.")
+        || upper.starts_with("EXT.")
+        || upper.starts_with("INT/")
+        || upper.starts_with("EXT/")
+}
+
+fn is_screenplay_speaker(line: &str) -> bool {
+    let cleaned = line.trim_matches(['(', ')']);
+    !cleaned.is_empty()
+        && cleaned.len() <= 48
+        && cleaned.chars().any(char::is_alphabetic)
+        && cleaned
+            .chars()
+            .all(|character| !character.is_alphabetic() || character.is_uppercase())
+        && !is_scene_heading(cleaned)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilmRunLocator {
@@ -170,5 +328,22 @@ mod tests {
         assert!(
             validate_plan_against_pack(&draft.production_plan, &draft.reference_pack).is_empty()
         );
+    }
+
+    #[test]
+    fn pasted_screenplay_extracts_editable_beats_and_dialogue_without_changing_source() {
+        let source = "INT. WORKSHOP - NIGHT\nA courier enters with a parcel.\n\nMARA\nPut it on the bench.\n\nThe lights fail.";
+        let parsed = parse_film_script(source);
+        assert_eq!(parsed.beats[0].summary, "INT. WORKSHOP - NIGHT");
+        assert!(parsed
+            .beats
+            .iter()
+            .any(|beat| beat.summary.contains("courier")));
+        assert_eq!(parsed.dialogue[0].speaker, "MARA");
+        assert_eq!(parsed.dialogue[0].text, "Put it on the bench.");
+        assert!(parsed
+            .beats
+            .iter()
+            .any(|beat| beat.summary.contains("lights fail")));
     }
 }

@@ -1,6 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { apiFetch } from "../../api.js";
+import {
+  applyFilmPlanning,
+  cancelFilmPlanning,
+  getFilmPlannerAvailability,
+  getFilmPlanning,
+  installFilmPlanner,
+  parseFilmScript,
+  startFilmPlanning,
+} from "../../api/films.js";
 import { useAppStatic } from "../../context/AppContext.js";
+import { FilmBrief } from "./FilmBrief.jsx";
+import { FilmPlanning } from "./FilmPlanning.jsx";
 
 export function FilmWorkspace() {
   const { activeProject, token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
@@ -9,6 +20,8 @@ export function FilmWorkspace() {
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [plannerAvailability, setPlannerAvailability] = useState(null);
+  const [planningOperation, setPlanningOperation] = useState(null);
 
   useEffect(() => {
     let canceled = false;
@@ -16,6 +29,8 @@ export function FilmWorkspace() {
     setDraft(null);
     setSelectedId("");
     setNotice("");
+    setPlannerAvailability(null);
+    setPlanningOperation(null);
     if (!activeProject?.id) return undefined;
     apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
       .then((items) => {
@@ -30,6 +45,29 @@ export function FilmWorkspace() {
     return () => { canceled = true; };
   }, [activeProject?.id, token]);
 
+  useEffect(() => {
+    if (!activeProject?.id || !draft?.id) return undefined;
+    let canceled = false;
+    getFilmPlannerAvailability(activeProject.id, draft.id, token)
+      .then((value) => !canceled && setPlannerAvailability(value))
+      .catch((error) => !canceled && setNotice(error.message));
+    getFilmPlanning(activeProject.id, draft.id, token)
+      .then((value) => !canceled && setPlanningOperation(value))
+      .catch(() => {});
+    return () => { canceled = true; };
+  }, [activeProject?.id, draft?.id, token]);
+
+  useEffect(() => {
+    if (!activeProject?.id || !draft?.id || !["running", "canceling"].includes(planningOperation?.status)) return undefined;
+    let canceled = false;
+    const timer = window.setTimeout(() => {
+      getFilmPlanning(activeProject.id, draft.id, token)
+        .then((value) => !canceled && setPlanningOperation(value))
+        .catch((error) => !canceled && setNotice(error.message));
+    }, 500);
+    return () => { canceled = true; window.clearTimeout(timer); };
+  }, [activeProject?.id, draft?.id, planningOperation, token]);
+
   if (!activeProject) return null;
 
   async function createDraft() {
@@ -43,6 +81,7 @@ export function FilmWorkspace() {
       setDrafts((items) => [created, ...items]);
       setSelectedId(created.id);
       setDraft(created);
+      setPlanningOperation(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -60,6 +99,7 @@ export function FilmWorkspace() {
     setBusy(true);
     try {
       setDraft(await apiFetch(`/api/v1/projects/${activeProject.id}/films/${id}`, token));
+      setPlanningOperation(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -84,6 +124,70 @@ export function FilmWorkspace() {
     setDraft(saved);
     setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
     return saved;
+  }
+
+  async function extractBrief() {
+    if (!draft) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const structured = await parseFilmScript(activeProject.id, draft.id, draft.originalScript, token);
+      updateDraft((next) => { next.structuredBrief = structured; next.brief = structured.synopsis; });
+      setNotice("Editable beats and dialogue extracted. Review them before planning.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generatePlan() {
+    setBusy(true);
+    setNotice("");
+    try {
+      const saved = await saveDraft();
+      const operation = await startFilmPlanning(activeProject.id, saved.id, token);
+      setPlanningOperation(operation);
+      setNotice(operation.status === "failed" ? operation.detail : "Planning started. Rendering will not start automatically.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelPlan() {
+    try {
+      setPlanningOperation(await cancelFilmPlanning(activeProject.id, draft.id, token));
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  async function applyCandidate() {
+    setBusy(true);
+    try {
+      const saved = await applyFilmPlanning(activeProject.id, draft.id, planningOperation.id, token);
+      setDraft(saved);
+      setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+      setNotice("Generated candidate replaced the previous edited plan. Review or edit every shot before rendering.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installPlanner(modelId) {
+    setBusy(true);
+    try {
+      await installFilmPlanner(modelId, token);
+      setNotice("Qwen3.6-27B download queued. The built-in planner remains selected until you opt in.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function startRun() {
@@ -133,13 +237,42 @@ export function FilmWorkspace() {
         <button disabled={busy} onClick={createDraft} type="button">New film draft</button>
       </div>
       {draft && shot ? (
-        <div className="ve-film-form">
-          <label>Film title<input value={draft.title} onChange={(event) => updateDraft((next) => { next.title = event.target.value; })} /></label>
-          <label className="ve-film-prompt">Shot prompt<textarea aria-label="Shot prompt" rows="3" value={shot.prompt} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].prompt = event.target.value; })} /></label>
-          <label>Beat<input value={shot.beat} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].beat = event.target.value; })} /></label>
-          <label>Framing<input value={shot.framing} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].framing = event.target.value; })} /></label>
-          <label>Duration (seconds)<input min="0.1" step="0.0001" type="number" value={shot.targetDurationSeconds} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[0].targetDurationSeconds = Number(event.target.value); })} /></label>
-          <label>Video model<input value={draft.productionPlan.model.id} onChange={(event) => updateDraft((next) => { next.productionPlan.model.id = event.target.value; })} /></label>
+        <div>
+          <div className="ve-film-form">
+            <label>Film title<input value={draft.title} onChange={(event) => updateDraft((next) => { next.title = event.target.value; })} /></label>
+          </div>
+          <FilmBrief disabled={busy} draft={draft} onChange={updateDraft} onParse={extractBrief} />
+          <FilmPlanning
+            availability={plannerAvailability}
+            disabled={busy}
+            draft={draft}
+            onApply={applyCandidate}
+            onCancel={cancelPlan}
+            onChange={updateDraft}
+            onInstall={installPlanner}
+            onStart={generatePlan}
+            operation={planningOperation}
+          />
+          <section aria-labelledby="film-manual-shot-heading" className="ve-film-section">
+            <h3 id="film-manual-shot-heading">Current shot plan</h3>
+            {draft.productionPlan.shots.map((currentShot, index) => (
+              <article className="ve-film-shot-editor" key={currentShot.id}>
+                <h4>{currentShot.id}</h4>
+                <div className="ve-film-form">
+                  <label className="ve-film-prompt">Shot prompt<textarea aria-label={`Shot ${currentShot.id} prompt`} rows="3" value={currentShot.prompt} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].prompt = event.target.value; })} /></label>
+                  <label>Beat<input aria-label={`Shot ${currentShot.id} beat`} value={currentShot.beat} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].beat = event.target.value; })} /></label>
+                  <label>Framing<input aria-label={`Shot ${currentShot.id} framing`} value={currentShot.framing} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].framing = event.target.value; })} /></label>
+                  <label>Duration (seconds)<input aria-label={`Shot ${currentShot.id} duration`} min="0.1" step="0.0001" type="number" value={currentShot.targetDurationSeconds} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].targetDurationSeconds = Number(event.target.value); })} /></label>
+                  <label>Start state<input aria-label={`Shot ${currentShot.id} start state`} value={currentShot.startState} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].startState = event.target.value; })} /></label>
+                  <label>End state<input aria-label={`Shot ${currentShot.id} end state`} value={currentShot.endState} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].endState = event.target.value; })} /></label>
+                  <label className="ve-film-prompt">Dialogue<textarea aria-label={`Shot ${currentShot.id} dialogue`} rows="2" value={currentShot.dialogue ?? ""} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].dialogue = event.target.value || undefined; })} /></label>
+                </div>
+              </article>
+            ))}
+            <div className="ve-film-form">
+              <label>Video model<input value={draft.productionPlan.model.id} onChange={(event) => updateDraft((next) => { next.productionPlan.model.id = event.target.value; })} /></label>
+            </div>
+          </section>
           <div className="ve-film-actions">
             <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>
             <button className="ve-generate" disabled={busy} onClick={startRun} type="button">Render shot</button>

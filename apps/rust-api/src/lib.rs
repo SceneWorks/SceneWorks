@@ -282,8 +282,13 @@ mod error;
 // Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
 pub mod film_harness;
 pub mod film_planner;
+mod film_planning;
 mod films;
 pub(crate) use error::ApiError;
+use film_planning::{
+    apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
+    get_film_planning_operation, parse_film_draft_script, start_film_planning,
+};
 use films::{
     create_film_draft, create_film_run, get_film_draft, get_film_run, list_film_drafts,
     start_film_run, update_film_draft,
@@ -1700,6 +1705,26 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/films/:draft_id/runs",
             post(create_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/brief/parse",
+            post(parse_film_draft_script),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planners",
+            get(film_planner_availability),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning",
+            get(get_film_planning_operation).post(start_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/cancel",
+            post(cancel_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
+            post(apply_film_planning_candidate),
         )
         .route(
             "/api/v1/projects/:project_id/film-runs/:run_id",

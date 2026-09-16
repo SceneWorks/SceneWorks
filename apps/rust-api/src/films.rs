@@ -62,12 +62,48 @@ pub(crate) async fn update_film_draft(
     Path((project_id, draft_id)): Path<(String, String)>,
     ApiJson(draft): ApiJson<FilmDraft>,
 ) -> Result<Json<FilmDraft>, ApiError> {
+    validate_planning_selection(&draft)?;
     Ok(Json(
         project_call(state, move |store| {
             store.save_film_draft(&project_id, &draft_id, draft)
         })
         .await?,
     ))
+}
+
+fn validate_planning_selection(draft: &FilmDraft) -> Result<(), ApiError> {
+    match draft.planning.provider.as_str() {
+        "prompt_refiner" => {
+            if draft.planning.model_id.is_some() {
+                return Err(ApiError::bad_request(
+                    "The built-in prompt refiner does not take a separate planner modelId",
+                ));
+            }
+        }
+        "native" => {
+            if draft.planning.model_id.as_deref()
+                != Some(sceneworks_core::film_workspace::QWEN36_FILM_PLANNER_MODEL_ID)
+            {
+                return Err(ApiError::bad_request(
+                    "Native film planning requires modelId film_planner_qwen3_6_27b",
+                ));
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "planning.provider must be prompt_refiner or native",
+            ));
+        }
+    }
+    if !matches!(
+        draft.planning.thinking_mode.as_str(),
+        "disabled" | "enabled" | "auto"
+    ) {
+        return Err(ApiError::bad_request(
+            "planning.thinkingMode must be disabled, enabled, or auto",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_film_run(

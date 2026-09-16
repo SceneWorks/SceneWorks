@@ -29,7 +29,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, COMPILED_PLAN_SCHEMA_VERSION,
+    compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, PlannerExecutionRecord,
+    COMPILED_PLAN_SCHEMA_VERSION,
 };
 use sceneworks_core::film_plan::{self, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack};
 use sceneworks_core::film_planner::{
@@ -106,12 +107,17 @@ pub struct LlmRequest {
 #[derive(Debug, Clone, Default)]
 pub struct LlmReply {
     pub text: String,
+    pub thinking: Option<String>,
     pub job_id: Option<String>,
+    pub execution: Option<PlannerExecutionRecord>,
     pub elapsed_seconds: f64,
     pub peak_memory_bytes: Option<u64>,
 }
 
 pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmReply, HarnessError>> + Send + 'a>>;
+type JobCreatedCallback = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+type JobProgressCallback = std::sync::Arc<dyn Fn(&str, f64) + Send + Sync>;
+type CancelRequestedCallback = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// The planner's only dependency on a language model. Implemented over the SceneWorks LLM seam for
 /// real runs and by a scripted fake in tests, so every rule in this module is exercised against
@@ -127,6 +133,7 @@ struct PlannerCost {
     job_ids: Vec<String>,
     elapsed_seconds: f64,
     peak_memory_bytes: Option<u64>,
+    executions: Vec<PlannerExecutionRecord>,
 }
 
 impl PlannerCost {
@@ -138,6 +145,9 @@ impl PlannerCost {
         if let Some(peak) = reply.peak_memory_bytes {
             self.peak_memory_bytes = Some(self.peak_memory_bytes.map_or(peak, |max| max.max(peak)));
         }
+        if let Some(execution) = &reply.execution {
+            self.executions.push(execution.clone());
+        }
     }
 
     fn into_record(self, repair_rounds: u32, budget_gb: Option<f64>) -> PlannerCostRecord {
@@ -147,6 +157,7 @@ impl PlannerCost {
             peak_memory_bytes: self.peak_memory_bytes,
             repair_rounds,
             planner_max_memory_gb: budget_gb,
+            executions: self.executions,
         }
     }
 }
@@ -157,6 +168,11 @@ pub struct SceneWorksLlm<'a> {
     transport: &'a dyn ApiTransport,
     poll_interval: Duration,
     job_timeout: Duration,
+    planner_model: Option<String>,
+    thinking_mode: String,
+    on_job_created: Option<JobCreatedCallback>,
+    on_job_progress: Option<JobProgressCallback>,
+    cancel_requested: Option<CancelRequestedCallback>,
 }
 
 impl<'a> SceneWorksLlm<'a> {
@@ -169,13 +185,48 @@ impl<'a> SceneWorksLlm<'a> {
             transport,
             poll_interval,
             job_timeout,
+            planner_model: None,
+            thinking_mode: "disabled".to_owned(),
+            on_job_created: None,
+            on_job_progress: None,
+            cancel_requested: None,
         }
+    }
+
+    pub fn with_planner_model(
+        mut self,
+        model: Option<String>,
+        thinking_mode: impl Into<String>,
+    ) -> Self {
+        self.planner_model = model;
+        self.thinking_mode = thinking_mode.into();
+        self
+    }
+
+    pub fn on_job_created(mut self, callback: JobCreatedCallback) -> Self {
+        self.on_job_created = Some(callback);
+        self
+    }
+
+    pub fn on_job_progress(mut self, callback: JobProgressCallback) -> Self {
+        self.on_job_progress = Some(callback);
+        self
+    }
+
+    pub fn cancel_requested(mut self, callback: CancelRequestedCallback) -> Self {
+        self.cancel_requested = Some(callback);
+        self
     }
 }
 
 impl PlannerLlm for SceneWorksLlm<'_> {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_> {
         Box::pin(async move {
+            if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+                return Err(HarnessError::Refused(
+                    "planning canceled before the next local model request".to_owned(),
+                ));
+            }
             let started = Instant::now();
             let mut body = json!({
                 "prompt": request.prompt,
@@ -186,6 +237,12 @@ impl PlannerLlm for SceneWorksLlm<'_> {
             }
             if let Some(model_id) = request.model_id.as_deref() {
                 body["modelId"] = json!(model_id);
+            }
+            if request.task.as_deref() == Some(FILM_PLAN_TASK) {
+                if let Some(model) = self.planner_model.as_deref() {
+                    body["model"] = json!(model);
+                }
+                body["thinkingMode"] = json!(self.thinking_mode);
             }
             if let Some(guide) = request
                 .guide
@@ -208,8 +265,23 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                     HarnessError::Transport(format!("refine job response has no id: {created}"))
                 })?
                 .to_owned();
+            if let Some(callback) = &self.on_job_created {
+                callback(&job_id);
+            }
             let deadline = Instant::now() + self.job_timeout;
             loop {
+                if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+                    let _ = crate::film_harness::expect_ok_on(
+                        self.transport,
+                        "POST",
+                        &format!("/api/v1/jobs/{job_id}/cancel"),
+                        None,
+                    )
+                    .await;
+                    return Err(HarnessError::Refused(
+                        "planning canceled by user".to_owned(),
+                    ));
+                }
                 let snapshot = crate::film_harness::expect_ok_on(
                     self.transport,
                     "GET",
@@ -221,6 +293,12 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if let (Some(callback), Some(progress)) = (
+                    &self.on_job_progress,
+                    snapshot.get("progress").and_then(Value::as_f64),
+                ) {
+                    callback(&job_id, progress.clamp(0.0, 1.0));
+                }
                 match status {
                     "completed" => {
                         let text = snapshot
@@ -242,9 +320,44 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                         let peak_memory_bytes =
                             crate::film_harness::job_peak_memory_bytes(self.transport, &job_id)
                                 .await;
+                        let result = snapshot.get("result").and_then(Value::as_object);
+                        let thinking = result
+                            .and_then(|result| result.get("thinking"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .filter(|value| !value.trim().is_empty());
+                        let identity = result
+                            .and_then(|result| result.get("executionIdentity"))
+                            .and_then(Value::as_object);
+                        let execution = identity.map(|identity| PlannerExecutionRecord {
+                            job_id: Some(job_id.clone()),
+                            provider: identity
+                                .get("provider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("native")
+                                .to_owned(),
+                            model: identity
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                                .to_owned(),
+                            backend: identity
+                                .get("backend")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            target_video_model_id: request.model_id.clone().unwrap_or_default(),
+                            thinking_mode: identity
+                                .get("thinkingMode")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&self.thinking_mode)
+                                .to_owned(),
+                            thinking: thinking.clone(),
+                        });
                         return Ok(LlmReply {
                             text,
+                            thinking,
                             job_id: Some(job_id),
+                            execution,
                             elapsed_seconds: started.elapsed().as_secs_f64(),
                             peak_memory_bytes,
                         });
@@ -1105,6 +1218,43 @@ pub fn read_compiled_file(path: &Path) -> Result<CompiledPlan, PlanDiagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoCallsTransport;
+
+    impl ApiTransport for NoCallsTransport {
+        fn call(
+            &self,
+            _request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            Box::pin(async { panic!("a canceled planning request must not dispatch") })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("a canceled planning request must not fetch files") })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_dispatch_never_creates_a_model_job() {
+        let transport = NoCallsTransport;
+        let llm = SceneWorksLlm::new(
+            &transport,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .cancel_requested(std::sync::Arc::new(|| true));
+        let error = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+            })
+            .await
+            .expect_err("the cancellation is reported");
+        assert!(format!("{error}").contains("canceled before"));
+    }
 
     #[test]
     fn hosted_credentials_and_remote_apis_are_refused_before_any_generation() {

@@ -198,6 +198,25 @@ pub struct PlannerCostRecord {
     /// record carries the bound beside the measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner_max_memory_gb: Option<f64>,
+    /// One entry per LLM call, preserving the actual planner checkpoint separately from the target
+    /// video model. Thinking is kept out of the accepted plan text and stored only in its own field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executions: Vec<PlannerExecutionRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannerExecutionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    pub target_video_model_id: String,
+    pub thinking_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// The model-evaluation count a catalog entry declares as its default (`defaults.steps`) — what
