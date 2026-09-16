@@ -2,27 +2,27 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 95,
+    "modelCount": 96,
     "importedFamilyCount": 4,
-    "cellCount": 947,
+    "cellCount": 949,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 51,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "fcd52ee7c04534dad262d796612092237da0823b4d0f6ed8f4b255c33955c702",
-    "apiDto": "f7942944e603a00c57afc147dc6899cad2722200341a852814f7bf4c4305a8a3",
+    "apiContractEntry": "a8c7dcefd98945540bcac02ae26de25b9c5e1e1db4efb8d67c8174378ae0bf9f",
+    "apiDto": "88e0fb43a7058496ea78bf4137a03e9c3eaa187f4125cc1d1dae1c30c1303bd3",
     "apiGeneration": "7f13327d3fe0723041c38dc45320705dc13860b3bc817927a2aac5dbfc2d3787",
     "apiValidation": "b9f21500465791d78015f258623acbf946333746147c65ffd477605c0c9ce43e",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "855b6e2f575889b0c2ab452a51487d5aa03ce1a79c45b274b81b887de1c5f312",
-    "descriptorCandleFacts": "b04efe2aa7a0d104dfc8f273392d173cdf070089980894127c737e29537020ae",
-    "descriptorCandleRuntime": "d928929dddd339a6336b88aa2e6fbf7fbdd56d6eae647e40f41ad426019237c3",
-    "descriptorMlxFacts": "8ec11b927072ae2b8eb41e64d32418b9772edea333d3ed8bfdde146d7d7e65a2",
-    "descriptorMlxRuntime": "4d90094061d636f68cb9694ba4677cf8c4c6b199b45f4f626ed2e4dfe6606684",
-    "descriptorPreviewFacts": "e5ee4a90699dc8ea0ea367b4cd1367e1b57a61262a05236b37893763dddd419e",
+    "descriptorAudioFacts": "3d46fb5b5de95a3a662020e7a59a3db2bec5f10c195b8b5ae93141abc3db2f71",
+    "descriptorCandleFacts": "f0382fea791fb51196798e68cf6ae0096b485d463fa06ef8101843e931723947",
+    "descriptorCandleRuntime": "bde2d848bb7799e507bb62f705e423fe610a744a2faee4f4431d1afe6b8b459d",
+    "descriptorMlxFacts": "1fc77548723ccd40d88632b4b8f37407e27dc6e4ceb815a3960280d775e8ee57",
+    "descriptorMlxRuntime": "ca182d2238dd79c219ef3490b8b45bc3c7e720d2b47adecb7431b37f2d92edd6",
+    "descriptorPreviewFacts": "df83a4d19b7644fcf117509f7611980389db380a5fcc02ee17ac1f19e3d5c5eb",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "af38bc1ec14d7a3a83cae88250d28780a2d6aa1d44786d381e2248e025ff88c6",
+    "manifest": "e2d47bbc1c7c8b425aa52ad8bb03aa70945f8d08c4a012f3c1534c3f37e9e8ee",
     "modelImportDefaults": "d8c158e20ffeac282c8887696c4f96e05ceca1636bde9896e71d7faf10c3e3d3",
     "routerCandle": "794455a403de845173d1fbb266f02596c06888117a4a1305680edbe38f7b0864",
     "routerCatalog": "ad7e85c2ef8d6c115ee2bc9d28109a0ab5129e70c57197cf7e1f1b8339673f09",
@@ -45,17 +45,17 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
-    "workerDispatch": "7169d28d3da74b7d8e902199404d1ef91b578f20be914a647395d7ac34f25f30",
+    "workerDispatch": "8876e16ad0a3e3c0c30c2705f48f5ea3477e217e5d36dd232a03cdc078860147",
     "workerEngineTable": "61a1de2beb3e1b6d91d07ba44e206e45ae4b201ea6afa650b3fd469cb921289e",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "a834e1c144dfb4c5b762e2b294fe82989d559b848ab9c9220406a7be01ba599d",
-    "workerImageKreaImported": "a135f3821548c4b9ca01f4c626a18ff324167116b142a5f729b0160c3c317d3b",
-    "workerImageMageFinetuned": "6e09c17ae055289c8ba3aeafdb6faba00561a97219f8cf2d7bd94b84c6740c54",
-    "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
-    "workerImagePulidCandle": "ef37dd61757bd6a35cf2da1255527d3a557ebc93ca91a7a9b49e69d687610359",
-    "workerImageQwenEditCandle": "ec7f1f1fb625e6177e8aa55179fc6f8286a6bbbfe74e8e0caf774955b30b3d91",
+    "workerImageDispatch": "4b0c57c32ec6cfed7895ca9ba76dbb864aa576f0ed081dc2a853f31b86539a65",
+    "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
+    "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
+    "workerImagePulid": "d4158f30e1f5ae0301faad211e4cac4419ebd984729f849dbc7bc73a15c465d5",
+    "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
+    "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "8ef905e05e13b104e84c0d576e6d0496c49c69383194651d13320353552365f7",
+    "workerTrainingDispatch": "b8fc3d6b70910e042a52af1c2527bc01b8c95e1c1a83e8b2ec02c4fca3adef79",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "ac0ccbab8225051ab23a1e08c3c6a97b61c98e5cd75d12eb62a03c4e5460f2ba",
-    "workerVideoWan": "92d45f09eec151466de568b5d36a2f3c0875e316102622649e532f3d7700491f"
+    "workerVideoWan": "68d0555c2feb07cbc18a80ac4f6c83fcd1a6280352c46f67883b9e5b7a269cd2"
   },
   "models": [
     {
@@ -1040,6 +1040,29 @@
       "operationAndMode": [
         {
           "capability": "pose_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "film_planner_qwen3_6_27b",
+      "family": "film-planner",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "prompt_refine:film_plan",
           "mlx": true,
           "candle": true
         }
