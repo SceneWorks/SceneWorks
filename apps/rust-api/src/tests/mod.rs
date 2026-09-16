@@ -12,6 +12,7 @@ mod embedded_web;
 // instead of standing up a second one.
 pub(crate) mod film_harness;
 mod film_harness_fixes;
+mod film_harness_references;
 mod film_harness_review;
 mod jobs;
 mod mcp;

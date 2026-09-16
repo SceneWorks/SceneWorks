@@ -1,0 +1,94 @@
+{
+  // Recipe for GENERATING the courier/workshop reference plates (sc-23403, epic 23401).
+  //
+  // TEST FIXTURES ONLY. In the product the user supplies the reference images; this document
+  // exists so the film harness can make its own fixtures locally instead of shipping placeholder
+  // plates forever. `film-harness make-references --spec <this file> --out <pack dir>` renders one
+  // image per role through the ordinary `POST /api/v1/image/jobs` route and writes a
+  // `references.jsonc` whose generated entries carry `generated: true` plus the model, prompt,
+  // seed, job id, asset id and sha256 they came from.
+  //
+  // The prompts are written for CROSS-IMAGE CONSISTENCY, which is the whole reason they are a
+  // checked-in document rather than five command lines: every prompt repeats the SAME workshop
+  // description verbatim, each character is a single figure in a neutral three-quarter pose, the
+  // parcel sits on a plain surface with nothing else in frame, and the location plate is the wide
+  // shot that establishes where the bench is. Editing one prompt without editing the shared
+  // clause in the others is how a pack stops looking like one place.
+  "schemaVersion": 1,
+  "id": "courier-workshop-refs",
+  // 2, because the pack this writes REPLACES the v1 placeholder plates
+  // (`film-harness fixture-images`) for the same roles the courier plan names.
+  "version": 2,
+  "description": "Krea 2 plates for the courier/workshop/red-parcel sequence (generated fixtures).",
+  "model": {
+    // Krea 2 Turbo: TDM-distilled, 8 steps, CFG-free — it declares
+    // `image.supportsGuidance: false` / `image.supportsNegativePrompt: false`, so no negative
+    // prompt is declared here and `make-references` refuses one rather than sending text the
+    // engine drops. `--model krea_2_raw` (52 steps, true CFG, negative prompts) renders the same
+    // spec on the undistilled base when a plate needs the extra fidelity.
+    "id": "krea_2_turbo",
+    // The shipped default tier. Checked against the catalog's install state before dispatch.
+    "tier": "q8",
+    "mode": "text_to_image",
+    // Square, inside Krea's declared resolution menu. These are conditioning plates, not frames of
+    // the sequence: the plan's shots render at their own geometry.
+    "resolution": "1024x1024"
+  },
+  "limits": {
+    // Generous per job because the FIRST job of a run also pays for loading ~20 GB of weights; the
+    // later roles land in a couple of minutes each on a warm engine.
+    "maxJobSeconds": 1800,
+    "maxAttemptsPerRole": 2,
+    // Measured Q8 peak at 1024²/8-step is ~27 GB (see the manifest entry's `mlx` block); the
+    // budget is checked against the host's reported memory before dispatch and against every
+    // job's observed peak after it.
+    "maxMemoryGb": 64
+  },
+  // Role `n` renders at `seedBase + n`, so re-running this spec asks for the same five images.
+  "seedBase": 4200,
+  // The two roles the courier plan needs that this spec does not render — the style reference and
+  // the keyframe plate the image-conditioned shots start from — plus the approved sound, copied
+  // verbatim from the pack beside this file so the written pack validates against the same plan.
+  "inherit": {
+    "pack": "references.jsonc",
+    "references": ["house_style", "workshop_plate"],
+    "sound": true
+  },
+  "references": [
+    {
+      "role": "courier",
+      "kind": "character",
+      "file": "references/courier.png",
+      "description": "The courier: blue jacket, carries the parcel.",
+      "prompt": "Full-length character reference photograph of a courier standing in a neutral three-quarter pose, arms relaxed at their sides, looking slightly off-camera, wearing a plain blue work jacket over a grey shirt, dark trousers and scuffed boots, a canvas satchel on one shoulder. Standing in a cluttered woodworking workshop: raw timber stacked against the walls, hand tools hung on a pegboard, sawdust on the floor, a doorway to the left letting in warm late-afternoon light. Natural colour, soft film grain, even exposure on the face, no text, no props held in the hands."
+    },
+    {
+      "role": "recipient",
+      "kind": "character",
+      "file": "references/recipient.png",
+      "description": "The recipient: grey work apron, rolled sleeves.",
+      "prompt": "Full-length character reference photograph of a workshop owner standing in a neutral three-quarter pose, arms relaxed at their sides, looking slightly off-camera, wearing a grey canvas work apron over a shirt with the sleeves rolled to the elbow, dark trousers, work boots. Standing in a cluttered woodworking workshop: raw timber stacked against the walls, hand tools hung on a pegboard, sawdust on the floor, a doorway to the left letting in warm late-afternoon light. Natural colour, soft film grain, even exposure on the face, no text, no props held in the hands."
+    },
+    {
+      "role": "red_parcel",
+      "kind": "prop",
+      "file": "references/red_parcel.png",
+      "description": "Small bright red cardboard parcel.",
+      "prompt": "Product reference photograph of a single small bright red cardboard parcel, about the size of a shoebox, taped shut with a plain paper label on top, sitting alone and centred on a plain neutral grey surface against a plain neutral background, nothing else in frame. Lit by warm late-afternoon light from the left, soft shadow to the right. Natural colour, soft film grain, no text on the label, no hands."
+    },
+    {
+      "role": "workshop_location",
+      "kind": "location",
+      "file": "references/workshop_location.png",
+      "description": "Cluttered woodworking workshop, door camera-left.",
+      "prompt": "Wide establishing photograph of an empty cluttered woodworking workshop with no people in it: a long wooden workbench running through the centre of the frame, raw timber stacked against the walls, hand tools hung on a pegboard, sawdust on the floor, a doorway on the left letting in warm late-afternoon light. Eye-level camera, the whole room visible. Natural colour, soft film grain, no text."
+    },
+    {
+      "role": "workbench_table",
+      "kind": "prop",
+      "file": "references/workbench_table.png",
+      "description": "Long wooden workbench, sawdust, centre of frame.",
+      "prompt": "Reference photograph of a long scarred wooden workbench filling the centre of the frame, its surface bare except for sawdust and a few hand tools pushed to one end, a vice clamped to the near corner. Standing in a cluttered woodworking workshop: raw timber stacked against the walls, hand tools hung on a pegboard, sawdust on the floor, a doorway to the left letting in warm late-afternoon light. Eye-level camera, no people. Natural colour, soft film grain, no text."
+    }
+  ]
+}

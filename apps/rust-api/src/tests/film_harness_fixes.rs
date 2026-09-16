@@ -936,7 +936,9 @@ async fn resume_refuses_compiled_requests_that_changed_under_it() {
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: None,
         project_id: None,
         shot_ids: None,
@@ -1313,11 +1315,16 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
     {
         let mut script = harness.script.lock();
         script.real_takes = true;
+        // Everything the harness drives EXCEPT `timeline_export`, which is the one job this test
+        // hands to the REAL utility worker. `audio_generate` stays on the fake (sc-23404): the
+        // fixture's dialogue is synthesized, and the point here is the real ffmpeg MIX, not a real
+        // Kokoro decode.
         script.capabilities = Some(vec![
             "video_generate",
             "frame_extract",
             "image_vqa",
             "prompt_refine",
+            "audio_generate",
         ]);
         script.behaviors = fast(&["SH010", "SH020"])
             .into_iter()
@@ -1481,7 +1488,8 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
             "{label} must not step at the cut: {b:.5} -> {a:.5}"
         );
     }
-    // The line sits 1.2s into SH020 (6.37s..8.37s in the file) and nowhere else.
+    // The line sits 1.2s into SH020 — 6.37s..7.87s in the file, the 1.5s the fake speaks that
+    // text for — and nowhere else.
     let line_inside = tone_level(&decode_window(&render_path, 6.7, 0.4), 400.0);
     let line_outside = tone_level(&decode_window(&render_path, 2.0, 0.4), 400.0);
     assert!(
@@ -1917,5 +1925,319 @@ async fn rejecting_a_take_records_that_the_shot_stays_in_the_cut_carrying_it() {
             && note.detail.contains("replace-take --shot SH050"),
         "the note has to say what the cut shows AND what changes it: {}",
         note.detail
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-23406 (S5) — the turbo courier plan
+// ---------------------------------------------------------------------------------------------
+
+/// `plan.v2.turbo.jsonc` validates and compiles against the LIVE catalog, and it is the SAME FILM
+/// as `plan.v2.jsonc` in every respect but its LoRA selection — asserted field by field rather
+/// than trusted, because the two files are maintained side by side and a drift between them makes
+/// the turbo-vs-base comparison they exist for meaningless.
+///
+/// All six shots resolve to `minimax_h3_ref`, so all six carry the ref2v turbo and NONE carries the
+/// base-partition one — even though the plan declares both. That is the per-partition resolution:
+/// the base entry is declared for the family and simply never dispatched by this plan.
+#[tokio::test]
+async fn the_turbo_plan_puts_the_ref2v_recipe_on_every_shot_and_the_base_recipe_on_none() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let turbo_path = Path::new(FIXTURE_DIR).join("plan.v2.turbo.jsonc");
+    let v2_path = Path::new(FIXTURE_DIR).join("plan.v2.jsonc");
+
+    let (plan, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(turbo_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.turbo.jsonc validates against the live catalog");
+    assert_eq!(
+        plan.model.loras,
+        vec!["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"],
+        "the regime is declared once on the family"
+    );
+
+    // The same film as its sibling apart from `model.loras`. Compared on the parsed documents, so
+    // a comment-only difference is not a false failure and a substantive one cannot hide.
+    let (base, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(v2_path, harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.jsonc validates");
+    assert!(base.model.loras.is_empty(), "the sibling declares none");
+    let mut stripped = plan.clone();
+    stripped.model.loras.clear();
+    assert_eq!(
+        stripped, base,
+        "plan.v2.turbo.jsonc differs from plan.v2.jsonc in model.loras and nothing else"
+    );
+
+    // Compile: every one of the six requests is on the reference partition and carries the ref2v
+    // recipe at the schedule the catalog declares for it — and the base-partition adapter reaches
+    // nothing, because no shot of this plan resolves to the base checkpoint.
+    let options = planner_options(&harness, "plan-v2-turbo");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &turbo_path,
+    )
+    .await
+    .expect("plan.v2.turbo.jsonc compiles");
+    assert_eq!(artifacts.compiled.requests.len(), 6);
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(
+            request.loras,
+            vec!["minimax_h3_ref2v_turbo_4step"],
+            "{}: the ref2v recipe, and only it",
+            request.shot_id
+        );
+        assert!(
+            !request
+                .loras
+                .contains(&"minimax_h3_turbo_4step_v01".to_owned()),
+            "{}: the base-partition adapter must reach no reference shot",
+            request.shot_id
+        );
+        assert_eq!(request.effective_steps, Some(4), "{}", request.shot_id);
+        assert_eq!(
+            request.turbo_scheduler_shift,
+            Some(12.0),
+            "{}",
+            request.shot_id
+        );
+        assert_eq!(
+            request.steps, None,
+            "{}: the plan sets no override, so the recipe governs",
+            request.shot_id
+        );
+    }
+}
+
+/// The MIXED case the shipped plans do not cover: one plan, one LoRA list, shots on BOTH
+/// partitions — each getting the adapter its own checkpoint was distilled for.
+///
+/// In code rather than as a fourth checked-in plan, because `plan.ref.jsonc` already IS the mixed
+/// fixture and a second copy of it that differed only in `model.loras` would be one more document
+/// to keep in step with the other three.
+#[tokio::test]
+async fn a_mixed_plan_gets_the_right_recipe_on_each_partition() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] =
+            serde_json::json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+    });
+    let options = planner_options(&harness, "plan-mixed-turbo");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &plan_path,
+    )
+    .await
+    .expect("the mixed plan compiles");
+    let request = |shot_id: &str| {
+        artifacts
+            .compiled
+            .request(shot_id)
+            .unwrap_or_else(|| panic!("no compiled request for {shot_id}"))
+    };
+    let referenced = request("SH010");
+    let plain = request("SH020");
+    assert_eq!(referenced.model, "minimax_h3_ref");
+    assert_eq!(referenced.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+    assert_eq!(plain.model, "minimax_h3");
+    assert_eq!(plain.loras, vec!["minimax_h3_turbo_4step_v01"]);
+    // Both recipes declare the same (4, 12.0) schedule — the reason `plan.v2.turbo.jsonc` pairs
+    // the v0.1 files rather than the 8-step one — so the two halves of a mixed film are comparable.
+    assert_eq!(referenced.effective_steps, plain.effective_steps);
+    assert_eq!(referenced.effective_steps, Some(4));
+    assert_eq!(
+        referenced.turbo_scheduler_shift,
+        plain.turbo_scheduler_shift
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-23405 (S4) — the reference-conditioned courier plan
+// ---------------------------------------------------------------------------------------------
+
+/// AC1. `plan.v2.jsonc` validates and compiles against the LIVE catalog with every one of its six
+/// shots resolved to `minimax_h3_ref`, every beat of the shipped brief covered and every role that
+/// brief requires bound — and `plan.jsonc` still validates unchanged beside it as the phase-1
+/// no-reference baseline, every request on `minimax_h3`.
+///
+/// The pack here is the checked-in stand-in (deterministic placeholder plates). It declares exactly
+/// the roles a GENERATED pack declares, so what this proves is the plumbing — the right partition,
+/// the right payload, the right coverage — which is the part a test can prove. Likeness needs real
+/// plates and a GPU.
+#[tokio::test]
+async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_covers_the_brief() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let v2_path = Path::new(FIXTURE_DIR).join("plan.v2.jsonc");
+    let baseline_path = Path::new(FIXTURE_DIR).join("plan.jsonc");
+
+    // `validate` first — the same command a human runs, against the live catalog entries.
+    let (plan, pack) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(v2_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.v2.jsonc validates against the live catalog");
+    assert_eq!(plan.id, "courier-workshop-v2");
+    assert_eq!(plan.shots.len(), 6);
+    assert_eq!(pack.references.len(), 7);
+    for shot in &plan.shots {
+        assert_eq!(shot.conditioning.mode, "reference_to_video", "{}", shot.id);
+        assert!(
+            shot.conditioning
+                .reference_roles
+                .contains(&"workshop_location".to_owned())
+                && shot
+                    .conditioning
+                    .reference_roles
+                    .contains(&"red_parcel".to_owned()),
+            "every shot is conditioned on the one approved room and the one approved parcel: {} \
+             binds {:?}",
+            shot.id,
+            shot.conditioning.reference_roles
+        );
+    }
+
+    // Beat coverage and the brief's REQUIRED ROLES, by identity, through the `beatId` each shot
+    // carries. `compile_existing` refuses on these findings too (it picks the sibling brief up);
+    // asserting them here says which rule holds rather than only that compiling succeeded.
+    let brief = sceneworks_core::film_planner::read_brief_file(Path::new(BRIEF_FIXTURE))
+        .expect("the shipped brief reads");
+    let coverage = sceneworks_core::film_planner::plan_coverage_findings(&brief, &plan, &pack);
+    assert!(
+        coverage.is_empty(),
+        "{:?}",
+        coverage
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>()
+    );
+    let claimed: Vec<&str> = plan
+        .shots
+        .iter()
+        .filter_map(|shot| shot.beat_id.as_deref())
+        .collect();
+    assert_eq!(
+        claimed,
+        vec![
+            "arrival",
+            "approach",
+            "handover",
+            "departure",
+            "discovery",
+            "opening"
+        ]
+    );
+
+    // Compile: every request resolves to the reference partition, says why, and keeps the plan's
+    // role order.
+    let mut options = planner_options(&harness, "plan-v2");
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &v2_path,
+    )
+    .await
+    .expect("plan.v2.jsonc compiles");
+    assert_eq!(artifacts.compiled.requests.len(), 6);
+    // The plan still declares the FAMILY once; only the requests resolve.
+    assert_eq!(artifacts.compiled.model.id, "minimax_h3");
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(request.mode, "reference_to_video", "{}", request.shot_id);
+        assert!(
+            request.partition_reason.contains("minimax_h3_ref"),
+            "{}: {}",
+            request.shot_id,
+            request.partition_reason
+        );
+        let shot = plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot of the plan");
+        assert_eq!(
+            request.reference_roles, shot.conditioning.reference_roles,
+            "{}",
+            request.shot_id
+        );
+        assert!(
+            request.reference_roles.len() <= 9,
+            "{}: minimax_h3_ref declares maxReferenceAssets 9",
+            request.shot_id
+        );
+    }
+
+    // The phase-1 baseline is UNCHANGED: still validates, still entirely on the base checkpoint,
+    // and still the same film shot for shot — which is what makes the two comparable.
+    let (baseline, _) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(baseline_path.clone(), harness.fixture_pack(), None),
+    )
+    .await
+    .expect("plan.jsonc still validates");
+    assert_eq!(baseline.id, "courier-workshop");
+    assert!(
+        baseline
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "the baseline binds no reference roles at all"
+    );
+    let ids = |plan: &sceneworks_core::film_plan::ProductionPlan| {
+        plan.shots
+            .iter()
+            .map(|shot| shot.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&plan), ids(&baseline), "the same six shots, same ids");
+    for (v2, phase1) in plan.shots.iter().zip(&baseline.shots) {
+        assert!(close(
+            v2.target_duration_seconds,
+            phase1.target_duration_seconds
+        ));
+        assert_eq!(v2.start_state, phase1.start_state, "{}", v2.id);
+        assert_eq!(v2.end_state, phase1.end_state, "{}", v2.id);
+        assert_eq!(v2.dialogue, phase1.dialogue, "{}", v2.id);
+        assert_eq!(
+            v2.dialogue_clip.as_ref().map(|clip| clip.role.as_str()),
+            phase1.dialogue_clip.as_ref().map(|clip| clip.role.as_str()),
+            "{}",
+            v2.id
+        );
+    }
+
+    options.out_dir = harness.temp_dir.path().join("plan-baseline");
+    let baseline_artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &baseline_path,
+    )
+    .await
+    .expect("plan.jsonc compiles");
+    assert!(
+        baseline_artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        baseline_artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| (request.shot_id.clone(), request.model.clone()))
+            .collect::<Vec<_>>()
     );
 }

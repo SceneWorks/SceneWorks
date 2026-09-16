@@ -11,6 +11,14 @@
 #   SHOTS=SH010 scripts/film-harness-smoke.sh           # one shot
 #   PLAN=... REFERENCES=... scripts/film-harness-smoke.sh
 #
+# MIXED-PARTITION smoke (sc-23402) — SH010 renders on `minimax_h3_ref` (reference_to_video,
+# `courier` + `workshop_location`), SH020 on `minimax_h3` (text_to_video), from one plan:
+#
+#   PLAN=config/film-harness/courier-workshop/plan.ref.jsonc scripts/film-harness-smoke.sh
+#
+# Budget it longer than the base two-shot smoke: the run loads BOTH 18.78 GB DiTs, the reference
+# one for SH010 and the base one for SH020, so there is an extra checkpoint load in the middle.
+#
 # Runs one GPU render at a time; budget the wall clock from the plan's `limits` (7200 s for the
 # fixture). Requires `ffmpeg` on PATH (or SCENEWORKS_FFMPEG) for the export.
 #
@@ -48,6 +56,29 @@ else
 fi
 
 mkdir -p "$SMOKE_DIR/data" "$SMOKE_DIR/config"
+
+# The pack directory is WRITTEN TO (sc-23404): a run speaks every `dialogue` entry carrying `text`
+# and leaves the WAV in `sound/` beside the beds. Pointing --references at the checked-in pack would
+# therefore write `sound/<role>.tts-<sha>.wav` into the source tree, and two smokes running at once
+# would race on that one filename. So copy the pack — document, `references/`, `sound/` — into
+# $SMOKE_DIR and run from there, mirroring what `Harness::fixture_pack` does for the tests. The
+# document is byte-for-byte the shipped one, so the run record's `referencePack.sha256` is
+# unchanged; only its directory moves. An explicit REFERENCES= is taken as given and not copied —
+# a caller pointing at their own pack has already chosen where it lives.
+if [ "$REFERENCES" = "$ROOT/config/film-harness/courier-workshop/references.jsonc" ]; then
+  PACK_SRC="$(dirname "$REFERENCES")"
+  PACK_DIR="$SMOKE_DIR/references"
+  mkdir -p "$PACK_DIR"
+  cp "$REFERENCES" "$PACK_DIR/"
+  for sub in references sound; do
+    if [ -d "$PACK_SRC/$sub" ]; then
+      mkdir -p "$PACK_DIR/$sub"
+      cp "$PACK_SRC/$sub"/* "$PACK_DIR/$sub/"
+    fi
+  done
+  REFERENCES="$PACK_DIR/$(basename "$REFERENCES")"
+  echo "film-harness-smoke: pack copied to $PACK_DIR (the run writes its spoken clips there)"
+fi
 
 if [ -z "${SCENEWORKS_FFMPEG:-}" ] && ! command -v ffmpeg >/dev/null 2>&1; then
   echo "film-harness-smoke: ffmpeg is not on PATH and SCENEWORKS_FFMPEG is unset; the export needs it" >&2
