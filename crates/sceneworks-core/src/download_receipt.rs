@@ -93,14 +93,26 @@ pub fn recover_revision(receipt: &Value, repo_root: &Path) -> Option<String> {
         }
     }
     if let Some(expected) = receipt.get("artifactTreeStamp").filter(|v| !v.is_null()) {
-        if expected.as_str()? != resolved_files_tree_stamp(snapshot, &files).ok()? {
+        if !resolved_files_tree_stamp_matches(snapshot, &files, expected.as_str()?).ok()? {
             return None;
         }
     }
     Some(revision.clone())
 }
 
+/// Persistent stamps must not include `st_dev`: macOS can renumber an unchanged mounted
+/// volume across boots. Keep inode, size and nanosecond modification/change times.
 pub fn update_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) {
+    update_metadata_stamp_format(digest, metadata, false);
+}
+
+pub fn update_legacy_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) {
+    update_metadata_stamp_format(digest, metadata, true);
+}
+
+fn update_metadata_stamp_format(digest: &mut Sha256, metadata: &std::fs::Metadata, legacy: bool) {
+    #[cfg(not(unix))]
+    let _ = legacy;
     digest.update(metadata.len().to_le_bytes());
     let modified = metadata
         .modified()
@@ -119,7 +131,9 @@ pub fn update_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.dev().to_le_bytes());
+        if legacy {
+            digest.update(metadata.dev().to_le_bytes());
+        }
         digest.update(metadata.ino().to_le_bytes());
         digest.update(metadata.ctime().to_le_bytes());
         digest.update(metadata.ctime_nsec().to_le_bytes());
@@ -130,6 +144,25 @@ pub fn resolved_files_tree_stamp(
     root: &Path,
     files: &[impl AsRef<str>],
 ) -> std::io::Result<String> {
+    resolved_files_tree_stamp_format(root, files, false)
+}
+
+/// Compatibility for receipts recorded before mount-independent stamps. A mismatch is never
+/// accepted here: callers must independently verify content before replacing a stale baseline.
+pub fn resolved_files_tree_stamp_matches(
+    root: &Path,
+    files: &[impl AsRef<str>],
+    expected: &str,
+) -> io::Result<bool> {
+    Ok(resolved_files_tree_stamp(root, files)? == expected
+        || resolved_files_tree_stamp_format(root, files, true)? == expected)
+}
+
+fn resolved_files_tree_stamp_format(
+    root: &Path,
+    files: &[impl AsRef<str>],
+    legacy: bool,
+) -> io::Result<String> {
     let mut names = files.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     names.sort_unstable();
     let mut digest = Sha256::new();
@@ -149,11 +182,11 @@ pub fn resolved_files_tree_stamp(
         let metadata = std::fs::symlink_metadata(&path)?;
         digest.update(name.as_bytes());
         digest.update([0]);
-        update_metadata_stamp(&mut digest, &metadata);
+        update_metadata_stamp_format(&mut digest, &metadata, legacy);
         if metadata.file_type().is_symlink() {
             digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
             digest.update(b"followed-target");
-            update_metadata_stamp(&mut digest, &std::fs::metadata(&path)?);
+            update_metadata_stamp_format(&mut digest, &std::fs::metadata(&path)?, legacy);
         }
         digest.update([0xff]);
     }
