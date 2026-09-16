@@ -1464,12 +1464,6 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             "reference pack version must be >= 1",
         ));
     }
-    if pack.references.is_empty() {
-        findings.push(PlanDiagnostic::plan(
-            "referencePack.references",
-            "a reference pack needs at least one reference",
-        ));
-    }
     let mut seen = BTreeSet::new();
     for (index, entry) in pack.references.iter().enumerate() {
         let field = format!("referencePack.references[{index}]");
@@ -1661,8 +1655,9 @@ fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic>
 
 /// Findings that need both documents: every role a shot names must exist in the pack and be
 /// approved, every role bound in `conditioning.referenceRoles` must be a
-/// [`BINDABLE_REFERENCE_KINDS`] kind, and every shot must be anchored to at least one approved
-/// canonical reference.
+/// [`BINDABLE_REFERENCE_KINDS`] kind. When the pack contains canonical references, every shot must
+/// be anchored to at least one approved role; an empty pack instead describes a reference-free
+/// film, whose shots must not name fabricated roles.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -1739,7 +1734,7 @@ pub fn validate_plan_against_pack(
         // end on. A shot that names no approved role has nothing canonical holding it to the rest
         // of the sequence — and a shot that only declares a chain is exactly the case where the
         // last frame would silently become the sole anchor.
-        if !anchored {
+        if !pack.references.is_empty() && !anchored {
             let message = match shot.conditioning.chain_from_shot_id.as_deref() {
                 Some(target) => format!(
                     "the only continuity this shot declares is the chain from {target:?}; a \

@@ -31,12 +31,9 @@
 //!    model/backend/hardware) beside copies of the two source documents — on every path past
 //!    step 1, refusals and mid-run failures included.
 //!
-//! **One controller per run directory, and nothing locks it.** `run`, [`resume`] and
-//! [`replace_take`] each rewrite `run.json` as they go; two of them held against the same directory
-//! at the same time interleave their writes and the last one wins. The idempotency keys make a
-//! SEQUENTIAL replay safe — they are not a lock between two live controllers. `run` refuses
-//! outright when the directory already holds a run record, and `replace_take` refuses while the
-//! shot still has an unsettled attempt; neither is a substitute for not starting two at once.
+//! **One controller per new run directory.** New-run entry points take an atomic filesystem lease
+//! before dispatch, so API and CLI callers cannot drive the same run concurrently. The later
+//! lifecycle slice widens that shared lease across resume, review, repair, and editing.
 
 pub mod references;
 pub mod review;
@@ -115,6 +112,50 @@ pub const RUN_RECORD_FILE: &str = "run.json";
 /// it, which is what makes cancellation work without a shared handle to the running controller
 /// (sc-22711).
 pub const CANCEL_SENTINEL_FILE: &str = "cancel.requested";
+pub const CONTROLLER_LOCK_FILE: &str = "controller.lock";
+
+#[derive(Debug)]
+pub struct ControllerLease {
+    path: PathBuf,
+    owner: String,
+}
+
+impl ControllerLease {
+    pub fn acquire(run_dir: &Path, owner: impl Into<String>) -> Result<Self, HarnessError> {
+        std::fs::create_dir_all(run_dir)?;
+        let owner = owner.into();
+        let path = run_dir.join(CONTROLLER_LOCK_FILE);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    HarnessError::Refused(format!(
+                        "run mutation refused: another controller holds {}",
+                        path.display()
+                    ))
+                } else {
+                    HarnessError::Io(error.to_string())
+                }
+            })?;
+        use std::io::Write as _;
+        file.write_all(format!("{owner}\n").as_bytes())?;
+        file.sync_all()?;
+        Ok(Self { path, owner })
+    }
+}
+
+impl Drop for ControllerLease {
+    fn drop(&mut self) {
+        let owned = std::fs::read_to_string(&self.path)
+            .ok()
+            .is_some_and(|value| value.trim() == self.owner);
+        if owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 
 /// How many jobs a reconciliation lists when looking for a job this run created.
 const JOB_LOOKUP_LIMIT: u32 = 500;
@@ -1666,7 +1707,9 @@ fn persist_record(
         }
     }
     if let Some(project_path) = record.project_path.as_deref().map(Path::new) {
-        if project_path.is_dir() {
+        // A Film workspace run already lives under its project. In that case `record_path` is the
+        // canonical run record the locator names, so do not create a second mutable mirror.
+        if project_path.is_dir() && !record_path.starts_with(project_path) {
             let project_record_dir = project_path.join("film-harness").join(&record.run_id);
             std::fs::create_dir_all(&project_record_dir)?;
             write_atomically(&project_record_dir.join(RUN_RECORD_FILE), json.as_bytes())?;
@@ -4122,6 +4165,12 @@ impl Session<'_> {
                 .iter()
                 .find(|shot| &shot.id == shot_id)
                 .expect("selected takes come from the plan");
+            let planned_index = self
+                .plan
+                .shots
+                .iter()
+                .position(|planned| planned.id == shot.id)
+                .expect("selected takes come from the plan");
             let length = take
                 .encoded_duration_seconds
                 .filter(|seconds| *seconds > 0.0)
@@ -4155,6 +4204,9 @@ impl Session<'_> {
                     item["sourceIn"] = json!(0.0);
                     item["sourceOut"] = json!(length);
                     item[HARNESS_KEY]["attempt"] = json!(attempt);
+                    item[HARNESS_KEY]["plannedIndex"] = json!(planned_index);
+                    item[HARNESS_KEY]["jobId"] = json!(job_id);
+                    item[HARNESS_KEY]["selectedTakeAssetId"] = json!(take.asset_id);
                     let entry = json!({
                         "assetId": take.asset_id,
                         "source": "replacement",
@@ -4204,7 +4256,14 @@ impl Session<'_> {
                             "jobId": job_id,
                             "note": format!("film-harness {} shot {}", self.record.run_id, shot.id),
                         }],
-                        HARNESS_KEY: picture_block(&self.record.run_id, &shot.id, *attempt),
+                        HARNESS_KEY: picture_block(
+                            &self.record.run_id,
+                            &shot.id,
+                            planned_index,
+                            *attempt,
+                            job_id.as_deref(),
+                            &take.asset_id,
+                        ),
                     }));
                 }
             }
@@ -4338,6 +4397,12 @@ impl Session<'_> {
                 tracks.push(track.clone());
             }
         }
+        if timeline.get("revision").is_none() {
+            timeline["revision"] = json!(1);
+        }
+        timeline["filmAssembly"]["runs"][&self.record.run_id] = json!({
+            "shotOrder": self.plan.shots.iter().map(|shot| &shot.id).collect::<Vec<_>>()
+        });
         timeline["tracks"] = Value::Array(tracks);
 
         let planned_duration = relayout_timeline(&mut timeline, Some(&order))?;
@@ -4592,9 +4657,6 @@ impl Session<'_> {
     /// Assemble and export, unless a stop already landed. A canceled run stops here with its takes
     /// intact: the assets are already the project's, and a resume finishes the assembly.
     async fn assemble_and_export(&mut self) -> Result<bool, HarnessError> {
-        if !self.export {
-            return Ok(true);
-        }
         if matches!(
             self.stop.as_ref().map(|(outcome, _)| *outcome),
             Some(RunOutcome::Canceled | RunOutcome::StoppedRunBudget)
@@ -4603,6 +4665,9 @@ impl Session<'_> {
         }
         if !self.assemble_timeline().await? {
             return Ok(false);
+        }
+        if !self.export {
+            return Ok(true);
         }
         self.run_export().await
     }
@@ -4839,6 +4904,20 @@ pub async fn run_with_control(
     options: &RunOptions,
     control: &RunControl,
 ) -> Result<RunRecord, HarnessError> {
+    let lease = ControllerLease::acquire(
+        &options.out_dir,
+        format!("controller_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    run_with_control_and_lease(transport, options, control, lease).await
+}
+
+/// Run with a lease acquired by the caller before it acknowledged a mutating request.
+pub async fn run_with_control_and_lease(
+    transport: &dyn ApiTransport,
+    options: &RunOptions,
+    control: &RunControl,
+    _lease: ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     // A `run` over a directory that already holds a record would mint a NEW run id and persist over
     // the previous run's state, while `persist_record` keeps the plan/pack copies it finds (they
     // are written once and then left alone) — so the surviving documents would belong to the old
@@ -4924,7 +5003,7 @@ pub async fn run_with_control(
     // document and re-checks the same hash, so the requests a replay dispatches are the ones the
     // first controller did.
     let supplied_compiled = read_compiled_for(options)?;
-    record.compiled = match supplied_compiled.as_ref() {
+    let supplied_compiled_source = match supplied_compiled.as_ref() {
         // The hash is what makes the run reproducible, so an unreadable file is an error rather
         // than an empty string on the record. It was read successfully microseconds ago in
         // `read_compiled_for`, so `?` here can only surface a real io failure.
@@ -4944,6 +5023,21 @@ pub async fn run_with_control(
         &record.plan.sha256,
         supplied_compiled.map(|(compiled, _)| compiled),
     )?;
+    record.compiled = match supplied_compiled_source {
+        Some(source) => Some(source),
+        None => {
+            let path = options.out_dir.join("compiled.json");
+            let bytes = serde_json::to_vec_pretty(&compiled)
+                .map_err(|error| HarnessError::Io(error.to_string()))?;
+            write_atomically(&path, &bytes)?;
+            Some(SourceDocument {
+                id: compiled.plan_id.clone(),
+                version: compiled.plan_version,
+                path: path.display().to_string(),
+                sha256: sha256_hex(&bytes),
+            })
+        }
+    };
     record.model = Some(ModelRecord {
         id: plan.model.id.clone(),
         tier_requested: plan.model.tier.clone(),
@@ -6573,9 +6667,19 @@ fn harness_block(role: &str, run_id: &str, shot_id: Option<&str>, offset: f64) -
 /// A picture item's harness block: the shot, plus the attempt whose take the item was ALIGNED
 /// with when the harness last wrote it (sc-22715). A merge compares this against the shot's
 /// current `selectedAttempt` to decide whether the selection moved.
-fn picture_block(run_id: &str, shot_id: &str, attempt: u32) -> Value {
+fn picture_block(
+    run_id: &str,
+    shot_id: &str,
+    planned_index: usize,
+    attempt: u32,
+    job_id: Option<&str>,
+    take_asset_id: &str,
+) -> Value {
     let mut block = harness_block(ROLE_PICTURE, run_id, Some(shot_id), 0.0);
+    block["plannedIndex"] = json!(planned_index);
     block["attempt"] = json!(attempt);
+    block["jobId"] = json!(job_id);
+    block["selectedTakeAssetId"] = json!(take_asset_id);
     block
 }
 

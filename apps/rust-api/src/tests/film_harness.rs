@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::Request;
 use parking_lot::Mutex;
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
+use sceneworks_core::film_workspace::FilmDraft;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -34,6 +35,88 @@ pub(crate) const FIXTURE_DIR: &str = concat!(
 /// [`ApiTransport`] over the in-process router: the same `oneshot` driver every route test uses.
 pub(crate) struct RouterTransport {
     pub(crate) app: axum::Router,
+}
+
+#[test]
+fn a_second_new_run_controller_is_refused_while_the_first_holds_the_directory() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    let first = film_harness::ControllerLease::acquire(&directory, "api:first")
+        .expect("first controller acquires");
+    let refused = film_harness::ControllerLease::acquire(&directory, "cli:second")
+        .expect_err("a competing controller must be refused");
+    assert!(refused.to_string().contains("another controller"));
+    drop(first);
+    film_harness::ControllerLease::acquire(&directory, "cli:after")
+        .expect("the lease releases when its owner finishes");
+}
+
+#[tokio::test]
+async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = FilmDraft::manual_one_shot("project-film", "film-draft", "Manual film");
+    draft.production_plan.shots[0].prompt = "a courier crosses a quiet workshop".to_owned();
+    draft.production_plan.shots[0].beat = "The courier crosses the workshop".to_owned();
+    let document_dir = harness.temp_dir.path().join("reference-free-film");
+    std::fs::create_dir_all(&document_dir).expect("document directory");
+    let plan_path = document_dir.join("plan.json");
+    let pack_path = document_dir.join("references.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::to_vec_pretty(&draft.production_plan).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &pack_path,
+        serde_json::to_vec_pretty(&draft.reference_pack).unwrap(),
+    )
+    .unwrap();
+    let mut options = harness.options(plan_path, pack_path, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("controlled worker completion succeeds");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let compiled = record.compiled.as_ref().expect("compiled request document");
+    assert!(Path::new(&compiled.path).is_file());
+    assert!(record.export.is_none(), "assembly must not start export");
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+    assert_eq!(timeline.items.len(), 1);
+    let project_id = record.project_id.as_deref().expect("project");
+    let saved = saved_timeline(&harness.app, project_id, &timeline.timeline_id).await;
+    assert_eq!(saved["revision"], 1);
+    assert_eq!(
+        saved["filmAssembly"]["runs"][&record.run_id]["shotOrder"],
+        json!(["SH010"])
+    );
+    let item = &saved["tracks"][0]["items"][0];
+    assert_eq!(item["filmHarness"]["runId"], record.run_id);
+    assert_eq!(item["filmHarness"]["shotId"], "SH010");
+    assert_eq!(item["filmHarness"]["plannedIndex"], 0);
+    assert_eq!(item["filmHarness"]["selectedTakeAssetId"], item["assetId"]);
+    assert!(item["filmHarness"]["jobId"].as_str().is_some());
+
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("repeating the same run directory is refused");
+    assert!(error.to_string().contains("already holds run"));
+    let (_, timelines) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/timelines"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        timelines.as_array().unwrap().len(),
+        1,
+        "replay made no duplicate timeline"
+    );
 }
 
 impl ApiTransport for RouterTransport {

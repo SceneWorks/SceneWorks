@@ -17,6 +17,7 @@ import { ProgramMonitor } from "../components/editor/ProgramMonitor.jsx";
 import { GenerationRail } from "../components/editor/GenerationRail.jsx";
 import { StoryboardStrip } from "../components/editor/StoryboardStrip.jsx";
 import { Timeline } from "../components/editor/Timeline.jsx";
+import { FilmWorkspace } from "../components/editor/FilmWorkspace.jsx";
 import { useEditorGeneration } from "../components/editor/useEditorGeneration.js";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, MAIN_TRACK_ID } from "../components/editor/editorUtils.js";
 
@@ -576,6 +577,7 @@ export function EditorScreen() {
   if (!activeTimeline) {
     return (
       <section className="ve-editor ve-editor-empty">
+        <FilmWorkspace />
         <div className="empty-panel">
           <p>Create a timeline to start editing.</p>
           <button className="ve-generate" onClick={handleNewTimeline} type="button">
@@ -591,6 +593,7 @@ export function EditorScreen() {
 
   return (
     <section className="ve-editor">
+      <FilmWorkspace />
       <EditorToolbar
         canRedo={future.length > 0}
         canUndo={history.length > 0}

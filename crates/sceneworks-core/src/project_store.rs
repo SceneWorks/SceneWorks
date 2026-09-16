@@ -34,6 +34,7 @@ use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
+use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
@@ -72,6 +73,8 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "person-tracks",
     "recipes",
     "timelines",
+    "films/drafts",
+    "films/runs",
     "training/datasets",
     "training/uploads",
     "trash",
@@ -217,6 +220,13 @@ pub struct TimelineFile {
 pub struct TimelineFileDocument {
     pub file: TimelineFile,
     pub document: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilmRunFiles {
+    pub directory: PathBuf,
+    pub plan: PathBuf,
+    pub reference_pack: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +698,207 @@ impl ProjectStore {
         }
 
         self.provision_project_locked(&project_id, name, &project_path, &mut registry_cache)
+    }
+
+    pub fn list_film_drafts(&self, project_id: &str) -> ProjectStoreResult<Vec<FilmDraft>> {
+        let project_path = self.find_project_path(project_id)?;
+        let drafts_dir = project_path.join("films/drafts");
+        if !drafts_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut drafts = Vec::new();
+        for path in read_dir_paths(&drafts_dir)? {
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let draft: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+            if draft.project_id != project_id {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "film draft {} belongs to a different project",
+                    draft.id
+                )));
+            }
+            drafts.push(draft);
+        }
+        drafts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(drafts)
+    }
+
+    pub fn create_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        title: &str,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft ID".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if path.exists() {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft already exists".to_owned(),
+            ));
+        }
+        let draft = FilmDraft::manual_one_shot(project_id, draft_id, title);
+        write_json(&path, &draft)?;
+        Ok(draft)
+    }
+
+    pub fn get_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        Ok(draft)
+    }
+
+    pub fn save_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        mut draft: FilmDraft,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) || draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity cannot be changed".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let current: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+        if draft.revision != current.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                current.revision, draft.revision
+            )));
+        }
+        draft.revision = current.revision.saturating_add(1);
+        draft.created_at = current.created_at;
+        draft.updated_at = utc_now();
+        draft.production_plan.id = draft.id.clone();
+        draft.production_plan.version = draft.revision;
+        draft.production_plan.title = draft.title.clone();
+        write_json(&path, &draft)?;
+        Ok(draft)
+    }
+
+    pub fn create_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        if !is_safe_id(run_locator_id) || !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film run ID".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        let relative_dir = format!("films/runs/{run_locator_id}");
+        let run_dir = project_path.join(&relative_dir);
+        if run_dir.exists() {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run already exists".to_owned(),
+            ));
+        }
+        fs::create_dir_all(&run_dir)?;
+        write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
+        write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+        let locator = FilmRunLocator {
+            schema_version: crate::film_workspace::FILM_RUN_LOCATOR_SCHEMA_VERSION,
+            id: run_locator_id.to_owned(),
+            project_id: project_id.to_owned(),
+            draft_id: draft_id.to_owned(),
+            draft_revision: draft.revision,
+            record_directory: relative_dir,
+            created_at: utc_now(),
+        };
+        write_json(&run_dir.join("locator.json"), &locator)?;
+        Ok(locator)
+    }
+
+    pub fn get_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        let files = self.film_run_files(project_id, run_locator_id)?;
+        let path = files.directory.join("locator.json");
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound("Film run not found".to_owned()));
+        }
+        let locator: FilmRunLocator = serde_json::from_value(read_json(&path)?)?;
+        if locator.id != run_locator_id || locator.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run identity does not match its project path".to_owned(),
+            ));
+        }
+        Ok(locator)
+    }
+
+    pub fn film_run_files(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<FilmRunFiles> {
+        if !is_safe_id(run_locator_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film run ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let directory = project_path.join("films/runs").join(run_locator_id);
+        Ok(FilmRunFiles {
+            plan: directory.join("plan.json"),
+            reference_pack: directory.join("references.json"),
+            directory,
+        })
     }
 
     /// Provision a project directory (folders + project file + db + registry entry)

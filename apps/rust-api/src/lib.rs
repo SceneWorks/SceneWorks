@@ -282,7 +282,12 @@ mod error;
 // Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
 pub mod film_harness;
 pub mod film_planner;
+mod films;
 pub(crate) use error::ApiError;
+use films::{
+    create_film_draft, create_film_run, get_film_draft, get_film_run, list_film_drafts,
+    start_film_run, update_film_draft,
+};
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
 // call sites keep resolving unchanged.
@@ -1683,6 +1688,26 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/timelines",
             get(list_timelines).post(create_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films",
+            get(list_film_drafts).post(create_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id",
+            get(get_film_draft).put(update_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/runs",
+            post(create_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id",
+            get(get_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/start",
+            post(start_film_run),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",
