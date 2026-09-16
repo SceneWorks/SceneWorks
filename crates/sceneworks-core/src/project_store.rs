@@ -137,6 +137,10 @@ pub enum ProjectStoreError {
     Json(serde_json::Error),
     BadRequest(String),
     NotFound(String),
+    TimelineConflict {
+        code: &'static str,
+        context: Value,
+    },
     /// The workspace storage location rejected the writes a project needs — the
     /// raw SQLite/IO error ("attempt to write a readonly database", permission
     /// denied) is opaque, so this carries an actionable, path-naming message
@@ -154,6 +158,7 @@ impl std::fmt::Display for ProjectStoreError {
             Self::Json(error) => write!(formatter, "{error}"),
             Self::BadRequest(detail) => write!(formatter, "{detail}"),
             Self::NotFound(detail) => write!(formatter, "{detail}"),
+            Self::TimelineConflict { code, context } => write!(formatter, "{code}: {context}"),
             Self::StorageNotWritable(detail) => write!(formatter, "{detail}"),
         }
     }
@@ -1628,6 +1633,36 @@ impl ProjectStore {
                 "Invalid timeline id".to_owned(),
             ));
         }
+        let existing = match find_timeline_file(&project_path, &timeline_id) {
+            Ok(file) => Some(read_json(&file.path)?),
+            Err(ProjectStoreError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let current_revision = existing
+            .as_ref()
+            .map(crate::film_timeline::revision)
+            .unwrap_or(0);
+        if timeline
+            .get("revision")
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "revision must be a non-negative integer".into(),
+            ));
+        }
+        let expected_revision = crate::film_timeline::revision(&timeline);
+        if expected_revision != current_revision {
+            return Err(ProjectStoreError::TimelineConflict {
+                code: "timeline_revision_conflict",
+                context: json!({"timelineId": timeline_id, "expectedRevision": expected_revision, "currentRevision": current_revision}),
+            });
+        }
+        crate::film_timeline::validate_metadata(&timeline)?;
+        if let Some(previous) = &existing {
+            crate::film_timeline::validate_metadata(previous)?;
+            crate::film_timeline::reconcile_cut(previous, &mut timeline, current_revision + 1);
+        }
+        timeline["revision"] = json!(current_revision + 1);
         let timeline_project_id = required_str(&timeline, "projectId")?;
         if timeline_project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
@@ -1686,7 +1721,64 @@ impl ProjectStore {
                 "Timeline ID mismatch".to_owned(),
             ));
         }
+        let (_path, _guard) = self.lock_project(project_id)?;
+        self.get_timeline(project_id, timeline_id)?;
         self.save_timeline(project_id, timeline)
+    }
+
+    /// The same project lock covers delivery read, merge, validation and CAS write.
+    pub fn deliver_film_timeline(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+        delivery: Value,
+    ) -> ProjectStoreResult<Value> {
+        let (_path, _guard) = self.lock_project(project_id)?;
+        let mut timeline = self.get_timeline(project_id, timeline_id)?;
+        if let Some(expected) = delivery.get("expectedRevision").and_then(Value::as_u64) {
+            let current = crate::film_timeline::revision(&timeline);
+            if expected != current {
+                return Err(ProjectStoreError::TimelineConflict {
+                    code: "timeline_revision_conflict",
+                    context: json!({"timelineId": timeline_id, "expectedRevision": expected, "currentRevision": current}),
+                });
+            }
+        }
+        let before = timeline.clone();
+        crate::film_timeline::deliver(&mut timeline, delivery, |asset_id| {
+            let asset = self.get_asset(project_id, asset_id)?;
+            asset
+                .get("file")
+                .and_then(|file| file.get("duration"))
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or_else(|| {
+                    ProjectStoreError::BadRequest(format!(
+                        "Asset {asset_id} has no measured duration"
+                    ))
+                })
+        })?;
+        if timeline == before {
+            return Ok(before);
+        }
+        self.save_existing_timeline(project_id, timeline_id, timeline)
+    }
+
+    /// Freeze the document the export worker will actually read. A later edit cannot change it.
+    pub fn snapshot_timeline_export(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+    ) -> ProjectStoreResult<TimelineFileDocument> {
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let mut result = self.timeline_file_and_document(project_id, timeline_id)?;
+        let dir = project_path.join("timeline-exports");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}_{}.json", timeline_id, random_hex(16)?));
+        write_json(&path, &result.document)?;
+        result.file.relative_path = relative_string(&project_path, &path)?;
+        result.file.path = path;
+        Ok(result)
     }
 
     pub fn timeline_file(
@@ -12861,6 +12953,10 @@ mod tests {
             ],
             "transitions": []
         });
+        // Model an actual legacy file (revision 0), rather than a stale revisionless
+        // client overwriting the freshly created revision 1 document.
+        let legacy_file = store.timeline_file(&project.id, &timeline_id).unwrap();
+        super::write_json(&legacy_file.path, &legacy).unwrap();
         let saved = store
             .save_timeline(&project.id, legacy)
             .expect("a pre-sc-22712 timeline still saves");
@@ -13956,5 +14052,65 @@ mod tests {
             }
             other => panic!("expected StorageNotWritable, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod timeline_revision_tests {
+    use super::*;
+    #[test]
+    fn timeline_cas_rejects_stale_saves_and_has_one_concurrent_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Concurrent cut").unwrap();
+        let cut = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .unwrap();
+        assert_eq!(cut["revision"], 1);
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let run = || {
+                barrier.wait();
+                store.save_timeline(&project.id, cut.clone())
+            };
+            let first = scope.spawn(run);
+            let second = scope.spawn(run);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+        assert!(outcomes.iter().any(|r| matches!(
+            r,
+            Err(ProjectStoreError::TimelineConflict {
+                code: "timeline_revision_conflict",
+                ..
+            })
+        )));
+        let id = cut["id"].as_str().unwrap();
+        let file = store.timeline_file(&project.id, id).unwrap();
+        let bytes = fs::read(&file.path).unwrap();
+        assert!(store.save_timeline(&project.id, cut).is_err());
+        assert_eq!(bytes, fs::read(file.path).unwrap());
+    }
+    #[test]
+    fn legacy_revision_zero_migrates_once_and_export_snapshot_is_immutable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Legacy cut").unwrap();
+        let mut cut = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .unwrap();
+        let id = cut["id"].as_str().unwrap().to_owned();
+        cut.as_object_mut().unwrap().remove("revision");
+        let file = store.timeline_file(&project.id, &id).unwrap();
+        write_json(&file.path, &cut).unwrap();
+        let saved = store.save_timeline(&project.id, cut.clone()).unwrap();
+        assert_eq!(saved["revision"], 1);
+        assert!(store.save_timeline(&project.id, cut).is_err());
+        let snapshot = store.snapshot_timeline_export(&project.id, &id).unwrap();
+        let mut changed = saved;
+        changed["name"] = json!("Edited");
+        store.save_timeline(&project.id, changed).unwrap();
+        assert_eq!(read_json(&snapshot.file.path).unwrap()["name"], "Cut");
+        assert_eq!(snapshot.document["revision"], 1);
     }
 }

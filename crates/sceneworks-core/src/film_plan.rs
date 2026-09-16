@@ -3618,6 +3618,8 @@ pub struct TimelineTrackRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineRecord {
+    #[serde(default)]
+    pub revision: u64,
     pub timeline_id: String,
     pub name: String,
     /// The aspect ratio the timeline was CREATED at. The route admits only `16:9` / `9:16` /
@@ -3669,6 +3671,8 @@ pub struct TimelineEditRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_revision: Option<u64>,
     pub job_id: String,
     pub status: String,
     /// True once a selected take changed after this export ran: the MP4 no longer matches the

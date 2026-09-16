@@ -775,3 +775,75 @@ async fn move_asset_to_character_uses_the_shaped_json_error_contract() {
     assert_eq!(body["detail"][0]["type"], "json_invalid");
     assert_eq!(body["detail"][0]["loc"], json!(["body", 0]));
 }
+
+#[tokio::test]
+async fn timeline_revision_conflicts_are_typed_and_exports_freeze_the_saved_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Concurrent film"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, cut) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/timelines"),
+        json!({"name":"Film", "aspectRatio":"16:9","fps":24}),
+    )
+    .await;
+    let timeline_id = cut["id"].as_str().unwrap();
+    let path = format!("/api/v1/projects/{project_id}/timelines/{timeline_id}");
+    assert_eq!(cut["revision"], 1);
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        &path,
+        json!({"timeline":cut,"expectedRevision":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["revision"], 2);
+    let (status, conflict) = request(
+        app.clone(),
+        "PUT",
+        &path,
+        json!({"timeline":cut,"expectedRevision":1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], "timeline_revision_conflict");
+    assert_eq!(
+        conflict["context"],
+        json!({"timelineId":timeline_id,"expectedRevision":1,"currentRevision":2})
+    );
+    let (status, export) = request(
+        app.clone(),
+        "POST",
+        &format!("{path}/exports"),
+        json!({"resolution":720,"fps":24}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(export["payload"]["timelineRevision"], 2);
+    assert!(export["payload"]["timelinePath"]
+        .as_str()
+        .unwrap()
+        .starts_with("timeline-exports/"));
+    let mut edited = saved;
+    edited["name"] = json!("Edited after export");
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        &path,
+        json!({"timeline":edited,"expectedRevision":2}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, stored) = request(app, "GET", &path, Value::Null).await;
+    assert_eq!(stored["revision"], 3);
+    assert_ne!(stored["revision"], export["payload"]["timelineRevision"]);
+}

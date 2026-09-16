@@ -204,9 +204,18 @@ export function FilmWorkspace() {
       const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST" });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
       setNotice("Rendering the shot in this project.");
+      let shownTimelineId = null;
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
+        const readyTimelineId = run.record?.timeline?.timelineId;
+        if (readyTimelineId && readyTimelineId !== shownTimelineId) {
+          await refreshTimelines(activeProject.id);
+          setSelectedTimelineId(readyTimelineId);
+          shownTimelineId = readyTimelineId;
+        }
+        const shots = run.record?.shots ?? [];
+        if (shots.length) setNotice(shots.map((shot) => `${shot.shotId}: ${shot.outcome}`).join(" · "));
       }
       if (!run.record || run.record.state !== "finished") {
         setNotice("The film controller stopped before the shot finished. The run record remains in the project.");

@@ -1748,6 +1748,10 @@ fn create_app_with_state_mode(
             get(get_timeline).put(update_timeline),
         )
         .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/film-deliveries",
+            post(timelines::deliver_film_timeline),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id/exports",
             post(create_timeline_export),
         )

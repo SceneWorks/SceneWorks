@@ -3463,6 +3463,8 @@ impl Session<'_> {
             }
             self.work_shot(&shot).await?;
             self.persist()?;
+            // Delivery precedes the next dispatch and never starts an export.
+            self.assemble_timeline().await?;
         }
         Ok(())
     }
@@ -4175,9 +4177,10 @@ impl Session<'_> {
                 .encoded_duration_seconds
                 .filter(|seconds| *seconds > 0.0)
                 .unwrap_or(shot.target_duration_seconds);
-            let existing = items
-                .iter_mut()
-                .find(|item| harness_str(item, "shotId") == Some(shot_id.as_str()));
+            let existing = items.iter_mut().find(|item| {
+                harness_str(item, "shotId") == Some(shot_id.as_str())
+                    && harness_str(item, "runId") == Some(self.record.run_id.as_str())
+            });
             // "Did the SELECTION change since this item was last aligned with it?" — not "does
             // the item show the selected asset?". The two differ exactly when a person used
             // `swap-take` to point the item at a foreign asset (an imported clip): the selection
@@ -4342,12 +4345,6 @@ impl Session<'_> {
             }));
         }
 
-        // The ids of every picture item the merged sequence holds, kept before `items` is moved
-        // onto the track, so the save can be checked against them below.
-        let intended_item_ids: Vec<String> = items
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect();
         let mut picture = existing_tracks[track_index].clone();
         picture["items"] = Value::Array(items);
         let mut tracks = vec![
@@ -4397,40 +4394,46 @@ impl Session<'_> {
                 tracks.push(track.clone());
             }
         }
-        if timeline.get("revision").is_none() {
-            timeline["revision"] = json!(1);
-        }
-        timeline["filmAssembly"]["runs"][&self.record.run_id] = json!({
-            "shotOrder": self.plan.shots.iter().map(|shot| &shot.id).collect::<Vec<_>>()
-        });
         timeline["tracks"] = Value::Array(tracks);
 
         let planned_duration = relayout_timeline(&mut timeline, Some(&order))?;
         let saved = self
             .client
             .expect_ok(
-                "PUT",
-                &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
-                Some(json!({ "timeline": timeline })),
+                "POST",
+                &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/film-deliveries"),
+                Some(json!({"runId": self.record.run_id,
+                "shotOrder": self.plan.shots.iter().map(|shot| &shot.id).collect::<Vec<_>>(),
+                "timeline": timeline})),
             )
             .await?;
-        // Check the SAVED document before describing it, rather than trusting the harness's own
-        // intent: the record then cannot claim a sequence the project does not hold. The store may
-        // legitimately add or reshape keys, so what is checked is that every picture item this pass
-        // assembled came back — not that the document is byte-identical to what was sent.
-        persisted_picture_items(&saved, &track_id, &intended_item_ids).ok_or_else(|| {
-            HarnessError::Transport(format!(
-                "saved timeline {timeline_id} does not hold the {} picture items the run \
-                 assembled: {saved}",
-                intended_item_ids.len()
-            ))
-        })?;
+        for take in &takes {
+            let present = saved["tracks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|track| track["items"].as_array().into_iter().flatten())
+                .any(|item| {
+                    harness_str(item, "runId") == Some(self.record.run_id.as_str())
+                        && harness_str(item, "shotId") == Some(take.shot_id.as_str())
+                        && harness_str(item, "role") == Some(ROLE_PICTURE)
+                });
+            if !present
+                && saved["filmAssembly"]["runs"][&self.record.run_id]["deletedShots"][&take.shot_id]
+                    .is_null()
+            {
+                return Err(HarnessError::Transport(format!(
+                    "saved timeline {timeline_id} lost shot {} without a deletion tombstone",
+                    take.shot_id
+                )));
+            }
+        }
         // The store recomputes `duration` across every track on save, so read it back rather than
         // republishing the harness's own arithmetic.
         let duration = saved
             .get("duration")
             .and_then(Value::as_f64)
-            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
             .unwrap_or(planned_duration);
         // Edits a human applied to this sequence are HISTORY, not something a re-assembly erases: a
         // resume or a replacement re-lays the picture, but the record must still say the trim or
@@ -4455,6 +4458,10 @@ impl Session<'_> {
             self.plan.sound.generated_audio,
             prior_edits,
         ));
+        if let Some(export) = self.record.export.as_mut() {
+            export.stale =
+                export.timeline_revision != Some(sceneworks_core::film_timeline::revision(&saved));
+        }
         self.persist()?;
         Ok(true)
     }
@@ -4568,6 +4575,11 @@ impl Session<'_> {
             }
         };
         self.record.export = Some(ExportRecord {
+            timeline_revision: self
+                .client
+                .expect_ok("GET", &format!("/api/v1/jobs/{export_job_id}"), None)
+                .await?["payload"]["timelineRevision"]
+                .as_u64(),
             job_id: export_job_id.clone(),
             status: "running".to_owned(),
             stale: false,
@@ -4607,6 +4619,11 @@ impl Session<'_> {
         };
         let export_ok = status == "completed" && asset_id.is_some();
         self.record.export = Some(ExportRecord {
+            timeline_revision: self
+                .record
+                .export
+                .as_ref()
+                .and_then(|export| export.timeline_revision),
             job_id: export_job_id,
             status,
             stale: false,
@@ -5596,6 +5613,7 @@ pub async fn replace_take(
 /// tracks, so "the saved item count equals the intended count" is only a true statement about the
 /// track the shots live on. The guarantee is unchanged — the run record cannot describe a sequence
 /// the project does not hold.
+#[cfg(test)]
 fn persisted_picture_items<'a>(
     saved: &'a Value,
     track_id: &str,
@@ -7088,6 +7106,7 @@ fn timeline_record(
         });
     }
     TimelineRecord {
+        revision: sceneworks_core::film_timeline::revision(timeline),
         timeline_id: timeline_id.to_owned(),
         name: name.to_owned(),
         aspect_ratio: aspect_ratio.to_owned(),
@@ -7100,6 +7119,37 @@ fn timeline_record(
         tracks,
         generated_audio_default,
         edits,
+    }
+}
+
+/// The saved cut owns editing state; the run continues to own attempts and human decisions.
+pub(crate) fn reconcile_saved_cut(record: &mut RunRecord, saved: &Value) {
+    if let Some(prior) = record.timeline.take() {
+        let track_id = saved["tracks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["kind"] == "video")
+            .and_then(|t| t["id"].as_str())
+            .unwrap_or("track_main");
+        record.timeline = Some(timeline_record(
+            &prior.timeline_id,
+            &prior.name,
+            &prior.aspect_ratio,
+            prior.source_aspect_ratio,
+            prior.source_width,
+            prior.source_height,
+            prior.fps,
+            number(saved, "duration", 0.0),
+            saved,
+            track_id,
+            prior.generated_audio_default,
+            prior.edits,
+        ));
+    }
+    if let Some(export) = record.export.as_mut() {
+        export.stale =
+            export.timeline_revision != Some(sceneworks_core::film_timeline::revision(saved));
     }
 }
 
@@ -7152,6 +7202,7 @@ async fn export_timeline(
     let ok = status == "completed" && asset_id.is_some();
     Ok((
         ExportRecord {
+            timeline_revision: export_job["payload"]["timelineRevision"].as_u64(),
             job_id: export_job_id,
             status,
             // This export just ran against the timeline as it stands, so it matches the selected
@@ -7373,10 +7424,15 @@ pub async fn edit_timeline(
                 .unwrap_or_default()
                 .to_owned();
             let span = duration.unwrap_or_else(|| item_span(item));
+            let source_in = number(item, "sourceIn", 0.0);
+            let source_out = number(item, "sourceOut", source_in + span);
+            if duration.is_some_and(|length| source_out > length + 0.000001) {
+                return Err(HarnessError::Refused(format!(
+                    "timeline_replacement_trim_conflict: {shot_id} is trimmed to {source_in}..{source_out}, but the new take is {span}s. Keep the current take, or explicitly trim this item to a fitting range (0..{span} for a reset) and retry the swap."
+                )));
+            }
             item["assetId"] = json!(asset_id);
             item["currentVersionAssetId"] = json!(asset_id);
-            item["sourceIn"] = json!(0.0);
-            item["sourceOut"] = json!(ms(span.max(MIN_ITEM_SECONDS)));
             if let Some(attempt) = own_attempt {
                 item[HARNESS_KEY]["attempt"] = json!(attempt);
             }
@@ -7404,14 +7460,38 @@ pub async fn edit_timeline(
         }
     };
 
-    let duration = relayout_timeline(&mut timeline, order.as_deref())?;
-    let saved = client
-        .expect_ok(
+    let duration = if matches!(edit, TimelineEdit::SwapTake { .. }) {
+        number(&timeline, "duration", 0.0)
+    } else {
+        relayout_timeline(&mut timeline, order.as_deref())?
+    };
+    let path = format!("/api/v1/projects/{project_id}/timelines/{timeline_id}");
+    let expected_revision = sceneworks_core::film_timeline::revision(&timeline);
+    let response = client
+        .json(
             "PUT",
-            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
-            Some(json!({ "timeline": timeline })),
+            &path,
+            Some(json!({
+                "timeline": timeline, "expectedRevision": expected_revision,
+            })),
         )
         .await?;
+    if response.status == 409 && response.body["code"] == "timeline_revision_conflict" {
+        let latest = client.expect_ok("GET", &path, None).await?;
+        return Err(HarnessError::Refused(format!(
+            "timeline_revision_conflict: {} changed from revision {} to {} during {}. No edit was saved. Review the current cut and retry the command to apply it to that version.",
+            timeline_id, expected_revision, sceneworks_core::film_timeline::revision(&latest), edit.kind()
+        )));
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(HarnessError::Api {
+            method: "PUT",
+            path,
+            status: response.status,
+            detail: api_detail(&response.body),
+        });
+    }
+    let saved = response.body;
 
     let mut edits = existing.edits.clone();
     edits.push(TimelineEditRecord {
