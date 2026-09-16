@@ -800,6 +800,7 @@ impl HuggingFaceSnapshot {
 /// Obtain only the content digest of one pinned HF file for installed-receipt verification.
 /// LFS weights use their published SHA-256; small non-LFS metadata is streamed into a digest.
 /// No remote bytes or filesystem destination cross this boundary, and no model is installed.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) async fn huggingface_file_content_sha256(
     client: &reqwest::Client,
     settings: &Settings,
