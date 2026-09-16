@@ -797,6 +797,53 @@ impl HuggingFaceSnapshot {
     }
 }
 
+/// Obtain only the content digest of one pinned HF file for installed-receipt verification.
+/// LFS weights use their published SHA-256; small non-LFS metadata is streamed into a digest.
+/// No remote bytes or filesystem destination cross this boundary, and no model is installed.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) async fn huggingface_file_content_sha256(
+    client: &reqwest::Client,
+    settings: &Settings,
+    file: &SnapshotFile,
+) -> WorkerResult<String> {
+    if let Some(hash) = &file.sha256 {
+        return Ok(hash.clone());
+    }
+    let invalid = |message: &str| WorkerError::InvalidPayload(message.to_owned());
+    let size = file
+        .size
+        .ok_or_else(|| invalid("upstream file size missing"))?;
+    if size > 32 * 1024 * 1024 || file.path.ends_with(".safetensors") {
+        return Err(invalid(&format!(
+            "upstream content checksum missing: {}",
+            file.path
+        )));
+    }
+    let mut response = with_hf_auth(
+        settings,
+        client
+            .get(&file.download_url)
+            .timeout(Duration::from_secs(60)),
+    )
+    .await
+    .send()
+    .await?
+    .error_for_status()?;
+    let mut digest = Sha256::new();
+    let mut received = 0_u64;
+    while let Some(chunk) = response.chunk().await? {
+        received = received.saturating_add(chunk.len() as u64);
+        if received > size {
+            return Err(invalid("upstream file exceeds its declared size"));
+        }
+        digest.update(&chunk);
+    }
+    if received != size {
+        return Err(invalid("upstream file is incomplete"));
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 /// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
 /// paginates its `expand=1` listing this way — the header looks like
 /// `<https://…/tree/main?expand=true&recursive=true&limit=50&cursor=…>; rel="next"`. Returns the

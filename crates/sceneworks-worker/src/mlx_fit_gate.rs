@@ -19476,6 +19476,7 @@ mod tests {
                 "required snapshot missing: {}",
                 root.display()
             );
+            let root = std::fs::canonicalize(root).unwrap();
             let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
                 .with_resolved_route(id)
                 .with_quant(gen_core::Quant::Q4);
@@ -19507,35 +19508,54 @@ mod tests {
                 "{id}: production shape={:?}, declaration={:?}, offload={:?}",
                 spec.load_shape, spec.load_shape_declaration_result, spec.offload_policy
             );
-            // Resolve identity from the immutable cache coordinate, independently of quality rows.
-            let revision = root
-                .parent()
+            // Exercise the receipt and path resolution used by generation. Copy bookkeeping into
+            // a scratch data directory so this test never rewrites the operator's installed receipt.
+            let source_data =
+                PathBuf::from(std::env::var_os("SC23648_INSTALL_DATA").expect(
+                    "SC23648_INSTALL_DATA must name the installed SceneWorks data directory",
+                ));
+            let data = tempfile::tempdir().unwrap();
+            let repository = download["repo"].as_str().unwrap();
+            let marker_dir = PathBuf::from("models").join(repository.replace('/', "__"));
+            std::fs::create_dir_all(data.path().join(&marker_dir)).unwrap();
+            std::fs::copy(
+                source_data.join(&marker_dir).join(crate::INSTALL_MARKER),
+                data.path().join(&marker_dir).join(crate::INSTALL_MARKER),
+            )
+            .unwrap();
+            let settings =
+                crate::image_jobs::resolved_artifact_provenance_tests::settings(data.path());
+            let image_request = sceneworks_core::image_request::ImageRequest::from_payload(
+                serde_json::json!({"model":id,"advanced":{"mlxQuantize":4},
+                    "modelManifestEntry":model})
+                .as_object()
+                .unwrap(),
+            );
+            let resolved = crate::image_jobs::resolve_weights_dir(&image_request, &settings)
                 .unwrap()
-                .file_name()
+                .unwrap();
+            assert_eq!(resolved, root);
+            tokio::runtime::Runtime::new()
                 .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-            let repository = root
-                .ancestors()
-                .nth(3)
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .strip_prefix("models--")
-                .unwrap()
-                .replacen("--", "/", 1);
-            let provenance = ResolvedArtifactProvenance {
-                identity: crate::model_jobs::ResolvedArtifactIdentity {
-                    fingerprint: format!("{repository}@{revision}:q4"),
-                    repository,
-                    revision,
-                    variant: "q4".to_owned(),
-                },
-                fixed_artifact_tier: Some("q4".to_owned()),
-            };
+                .block_on(
+                    crate::model_jobs::receipt_verification::ensure_huggingface_receipt_provenance(
+                        &settings,
+                        repository,
+                        id,
+                        Some("q4"),
+                        &root,
+                    ),
+                )
+                .unwrap();
+            let provenance = crate::image_jobs::resolved_mlx_artifact_provenance(
+                &image_request,
+                &settings,
+                repository,
+                &root,
+                Some("q4"),
+            )
+            .unwrap()
+            .unwrap();
             let binding =
                 bind_decode_quality_policies_from_manifest(model, id, Some(&provenance)).unwrap();
             spec = attach_decode_quality_binding(spec, binding, id);
