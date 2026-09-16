@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6eda0ca17cd5ff533a36da7016d076e9b08f706ab1661fbee5abb489ac333f4b",
+    "sceneWorksRevision": "source-tree:e84b587ea83b704dd6a5c06fc98fcf8090140bb35594cbedd5593691b093d307",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "490b7dd602d99f5b91b779e087eaf4150e593575eb34bf86fce7b98cd7117513"
+        "sha256": "e85a0981d91623d7460f6d6e1e369c8e9043efeabf2d22d066193698928f6337"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "0af55dc4f159b351ddc6e47285e0365421933b32e9c6a1b533ed30ba6fb29476"
+        "sha256": "cd1a44b959ee96596c996adaea6eaedd6eaf8f55f24d877ebf7c569f40521e85"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
