@@ -163,4 +163,59 @@ describe("FilmWorkspace", () => {
     expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(true);
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/models/"))).toBe(false);
   });
+
+  it("authors generated dialogue and sound-bus controls without starting synthesis or export", async () => {
+    const film = draft();
+    let savedBody;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/films/film_1") && options.method === "PUT") {
+        savedBody = JSON.parse(options.body);
+        return Promise.resolve({ ...savedBody, revision: savedBody.revision + 1 });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    const addLine = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+    await act(async () => { addLine.click(); await Promise.resolve(); });
+    await act(async () => {
+      changeValue(container.querySelector('textarea[aria-label="Sound 1 dialogue text"]'), "The parcel is here.");
+      changeValue(container.querySelector('input[aria-label="Sound 1 voice"]'), "am_michael");
+      changeValue(container.querySelector('select[aria-label="Sound 1 speech model"]'), "chatterbox_tts");
+      changeValue(container.querySelector('select[aria-label="Generated picture audio"]'), "include");
+      changeValue(container.querySelector('select[aria-label="Shot SH010 generated audio"]'), "mute");
+      changeValue(container.querySelector('input[aria-label="Dialogue bus gain"]'), "0.75");
+      container.querySelector('input[aria-label="Mute dialogue bus"]').click();
+    });
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save draft");
+    await act(async () => { save.click(); await Promise.resolve(); });
+    expect(savedBody.referencePack.sound[0]).toMatchObject({ kind: "dialogue", text: "The parcel is here.", voice: "am_michael", model: "chatterbox_tts" });
+    expect(savedBody.productionPlan.sound).toMatchObject({ generatedAudio: "include", dialogue: { gain: 0.75, muted: true } });
+    expect(savedBody.productionPlan.shots[0].generatedAudio).toBe("mute");
+    expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/audio/jobs") || path.endsWith("/export"))).toBe(false);
+  });
+
+  it("places a staged SFX role as an editable sequence bed", async () => {
+    const film = draft();
+    film.referencePack.sound = [{ role: "door_close", kind: "sfx", file: "sound/door.wav", description: "Door close" }];
+    let savedBody;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/films/film_1") && options.method === "PUT") {
+        savedBody = JSON.parse(options.body);
+        return Promise.resolve({ ...savedBody, revision: 2 });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    const add = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add sound effect bed");
+    await act(async () => { add.click(); await Promise.resolve(); });
+    const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save draft");
+    await act(async () => { save.click(); await Promise.resolve(); });
+    expect(savedBody.productionPlan.sound.sfx).toEqual([{ role: "door_close", gain: 1, muted: false, startSeconds: 0, sourceInSeconds: 0, fadeInSeconds: 0, fadeOutSeconds: 0 }]);
+  });
 });

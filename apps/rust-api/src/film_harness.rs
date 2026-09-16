@@ -415,6 +415,15 @@ impl ResumeOptions {
     }
 }
 
+/// The exact export job an explicit Film workspace request started or adopted. Keeping this
+/// separate from the HTTP controller lets the route return as soon as the durable running record
+/// exists while a background task settles that same job by id.
+#[derive(Debug, Clone)]
+pub struct ExplicitExportTask {
+    pub job_id: String,
+    pub timeline_revision: Option<u64>,
+}
+
 /// Read the run record in `run_dir` without touching the API. What `film-harness status` prints and
 /// what `resume` / `replace-take` start from.
 pub fn read_run_record(run_dir: &Path) -> Result<RunRecord, HarnessError> {
@@ -2684,6 +2693,7 @@ impl Session<'_> {
             .ambience
             .iter()
             .chain(self.plan.sound.music.iter())
+            .chain(self.plan.sound.sfx.iter())
             .map(|bed| bed.role.clone())
             .chain(
                 self.plan
@@ -4479,6 +4489,23 @@ impl Session<'_> {
             tracks.push(merge_harness_audio_track(
                 &existing_tracks,
                 bed_track(bed_track_id, name, role, bed, asset, &self.record.run_id),
+            ));
+        }
+        for (index, bed) in self.plan.sound.sfx.iter().enumerate() {
+            let Some(asset) = self.sound_assets.get(&bed.role) else {
+                continue;
+            };
+            let track_id = format!("{SFX_TRACK_PREFIX}_{index}");
+            tracks.push(merge_harness_audio_track(
+                &existing_tracks,
+                bed_track(
+                    &track_id,
+                    "Sound effect",
+                    ROLE_SFX,
+                    bed,
+                    asset,
+                    &self.record.run_id,
+                ),
             ));
         }
         // Keep every track the API created that the harness does not own (the overlay lane and the
@@ -6726,6 +6753,7 @@ fn picture_track_index(timeline: &Value) -> Option<usize> {
 pub const DIALOGUE_TRACK_ID: &str = "track_dialogue";
 pub const AMBIENCE_TRACK_ID: &str = "track_ambience";
 pub const MUSIC_TRACK_ID: &str = "track_music";
+pub const SFX_TRACK_PREFIX: &str = "track_sfx";
 
 /// Where the harness's own annotation lives on a timeline item.
 const HARNESS_KEY: &str = "filmHarness";
@@ -6734,6 +6762,7 @@ const ROLE_PICTURE: &str = "picture";
 const ROLE_DIALOGUE: &str = "dialogue";
 const ROLE_AMBIENCE: &str = "ambience";
 const ROLE_MUSIC: &str = "music";
+const ROLE_SFX: &str = "sfx";
 
 /// Tag every harness-imported sound clip carries beside its role tag.
 const SOUND_TAG: &str = "film-harness-sound";
@@ -6927,7 +6956,7 @@ fn bed_track(
     let mut block = harness_block(role, run_id, None, 0.0);
     block["startSeconds"] = json!(bed.start_seconds);
     let item = json!({
-        "id": format!("item_{role}_{}", &run_id[4..12]),
+        "id": format!("item_{role}_{}_{}", bed.role, &run_id[4..12]),
         "trackId": track_id,
         "assetId": asset.asset_id,
         "type": "audio",
@@ -7042,7 +7071,7 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
         items.retain_mut(|item| {
             let role = harness_str(item, "role").unwrap_or_default().to_owned();
             match role.as_str() {
-                ROLE_DIALOGUE | ROLE_AMBIENCE | ROLE_MUSIC => {}
+                ROLE_DIALOGUE | ROLE_AMBIENCE | ROLE_MUSIC | ROLE_SFX => {}
                 // A clip the harness did not place — the editor's own — is NOT the harness's to
                 // delete. Dropping anything that merely lands near the new end (which the shared
                 // rule below does, for items the harness owns and can re-place from the plan)
@@ -7083,7 +7112,7 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
                     let start = shot_start + harness_f64(item, "offsetSeconds");
                     (start, start + item_span(item))
                 }
-                // ROLE_AMBIENCE | ROLE_MUSIC, the only other arm the match above admits.
+                // Sequence-level beds, the only other roles the match above admits.
                 _ => {
                     let start = harness_f64(item, "startSeconds");
                     (start, duration)
@@ -7095,7 +7124,7 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
             let end = end.min(duration).max(start + MIN_ITEM_SECONDS);
             item["timelineStart"] = json!(ms(start));
             item["timelineEnd"] = json!(ms(end));
-            if matches!(role.as_str(), ROLE_AMBIENCE | ROLE_MUSIC) {
+            if matches!(role.as_str(), ROLE_AMBIENCE | ROLE_MUSIC | ROLE_SFX) {
                 // A bed's source range follows its span, so the whole stretch of the file that
                 // plays under the sequence is asked for rather than a fixed four seconds.
                 let source_in = number(item, "sourceIn", 0.0).max(0.0);
@@ -7329,6 +7358,245 @@ async fn export_timeline(
         },
         poll_stop,
     ))
+}
+
+/// Start (or adopt) the explicit export for a Film workspace run and durably record its job id.
+///
+/// This operation never renders shots and never runs implicitly at the end of shot generation.
+/// It snapshots the currently saved timeline through the ordinary timeline-export route, marks
+/// an older export superseded, and returns once `run.json` names the exact in-flight job.
+pub async fn start_explicit_export(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+) -> Result<(RunRecord, ExplicitExportTask), HarnessError> {
+    let mut record = read_run_record(&options.out_dir)?;
+    let project_id = record
+        .project_id
+        .clone()
+        .ok_or_else(|| HarnessError::Refused("run record has no project id".to_owned()))?;
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .map(|timeline| timeline.timeline_id.clone())
+        .ok_or_else(|| {
+            HarnessError::Refused("run has no assembled timeline to export".to_owned())
+        })?;
+    let client = Client {
+        transport,
+        control: &options.control,
+    };
+    let saved = client
+        .expect_ok(
+            "GET",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            None,
+        )
+        .await?;
+    reconcile_saved_cut(&mut record, &saved);
+
+    if let Some(export) = record
+        .export
+        .as_ref()
+        .filter(|export| export.status == "running")
+    {
+        let task = ExplicitExportTask {
+            job_id: export.job_id.clone(),
+            timeline_revision: export.timeline_revision,
+        };
+        return Ok((record, task));
+    }
+
+    if record.export_pending.is_none() {
+        if let Some(previous) = record.export.take() {
+            if !record.superseded_export_job_ids.contains(&previous.job_id) {
+                record
+                    .superseded_export_job_ids
+                    .push(previous.job_id.clone());
+            }
+            record.export_pending = Some(ExportPending {
+                requested_at: utc_now(),
+                supersedes: Some(previous.job_id),
+            });
+        } else {
+            record.export_pending = Some(ExportPending {
+                requested_at: utc_now(),
+                supersedes: None,
+            });
+        }
+        persist_record(
+            &record,
+            &options.out_dir,
+            &options.out_dir.join("plan.json"),
+            &options.out_dir.join("references.json"),
+        )?;
+    }
+
+    let requested_at = record
+        .export_pending
+        .as_ref()
+        .map(|pending| pending.requested_at.as_str())
+        .unwrap_or_default();
+    let existing = client
+        .find_export_job(
+            &project_id,
+            &timeline_id,
+            &record.superseded_export_job_ids,
+            requested_at,
+        )
+        .await?;
+    let response = match existing {
+        Some(job_id) => {
+            client
+                .expect_ok("GET", &format!("/api/v1/jobs/{job_id}"), None)
+                .await?
+        }
+        None => {
+            let height = saved
+                .get("height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .or_else(|| {
+                    record
+                        .timeline
+                        .as_ref()
+                        .and_then(|timeline| timeline.source_height)
+                })
+                .unwrap_or(720);
+            let fps = saved
+                .get("fps")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .or_else(|| record.timeline.as_ref().map(|timeline| timeline.fps))
+                .unwrap_or(24);
+            client
+                .expect_ok(
+                    "POST",
+                    &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
+                    Some(json!({
+                        "resolution": export_resolution_for(height),
+                        "fps": fps,
+                        "requestedGpu": "auto",
+                    })),
+                )
+                .await?
+        }
+    };
+    let job_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HarnessError::Transport(format!("export response has no id: {response}")))?
+        .to_owned();
+    let timeline_revision = response
+        .get("payload")
+        .and_then(|payload| payload.get("timelineRevision"))
+        .and_then(Value::as_u64);
+    record.export = Some(ExportRecord {
+        timeline_revision,
+        job_id: job_id.clone(),
+        status: "running".to_owned(),
+        stale: false,
+        asset_id: None,
+        render_path: None,
+        error: None,
+        dropped_audio_layers: Vec::new(),
+    });
+    record.export_pending = None;
+    persist_record(
+        &record,
+        &options.out_dir,
+        &options.out_dir.join("plan.json"),
+        &options.out_dir.join("references.json"),
+    )?;
+    Ok((
+        record,
+        ExplicitExportTask {
+            job_id,
+            timeline_revision,
+        },
+    ))
+}
+
+/// Settle an explicit Film workspace export and copy its output, failure, and dropped-audio report
+/// into the durable run record. If a later request superseded this task, its result is left alone.
+pub async fn finish_explicit_export(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    task: &ExplicitExportTask,
+) -> Result<RunRecord, HarnessError> {
+    let client = Client {
+        transport,
+        control: &options.control,
+    };
+    let started = Instant::now();
+    let budget = Duration::from_secs(options_limit_seconds(&options.out_dir)?);
+    let settle_grace = ASSET_SETTLE_GRACE.min(budget);
+    let (view, poll_stop) = client
+        .wait_for_job(
+            &task.job_id,
+            PollBounds {
+                shot_deadline: started + budget,
+                run_deadline: None,
+                poll_interval: options.poll_interval,
+                cancel_grace: CANCEL_GRACE.min(budget),
+                settle_grace,
+            },
+        )
+        .await?;
+    let mut record = read_run_record(&options.out_dir)?;
+    if record.export.as_ref().map(|export| export.job_id.as_str()) != Some(task.job_id.as_str()) {
+        return Ok(record);
+    }
+    let asset_id = view
+        .result
+        .get("assetIds")
+        .and_then(Value::as_array)
+        .and_then(|ids| ids.first())
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let render_path = view
+        .result
+        .get("renderPath")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let status = match poll_stop {
+        PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+        PollStop::Operator => "canceled_by_operator".to_owned(),
+        PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+    };
+    let export_ok = status == "completed" && asset_id.is_some();
+    record.export = Some(ExportRecord {
+        timeline_revision: task.timeline_revision,
+        job_id: task.job_id.clone(),
+        status,
+        stale: false,
+        asset_id,
+        render_path,
+        dropped_audio_layers: dropped_audio_layers(&view.result),
+        error: (!export_ok).then(|| match poll_stop {
+            PollStop::Terminal => view.failure_text(),
+            PollStop::AssetsUnsettled => format!(
+                "the export job reached {} but its assets never settled within {:.0}s",
+                view.status,
+                settle_grace.as_secs_f64()
+            ),
+            PollStop::Operator => "canceled by operator during the export".to_owned(),
+            PollStop::ShotBudget | PollStop::RunBudget => format!(
+                "export exceeded the per-job budget of {}s",
+                budget.as_secs()
+            ),
+        }),
+    });
+    persist_record(
+        &record,
+        &options.out_dir,
+        &options.out_dir.join("plan.json"),
+        &options.out_dir.join("references.json"),
+    )?;
+    Ok(record)
+}
+
+fn options_limit_seconds(out_dir: &Path) -> Result<u64, HarnessError> {
+    Ok(read_run_record(out_dir)?.limits.max_shot_seconds)
 }
 
 /// One change to an assembled sequence.

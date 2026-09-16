@@ -50,3 +50,16 @@ export function preflightFilm(projectId, draftId, selectedShotIds, token) {
     body: JSON.stringify({ selectedShotIds }),
   });
 }
+
+export function addFilmSound(projectId, draftId, payload, token) {
+  return apiFetch(`${base(projectId, draftId)}/sound`, token, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function exportFilmRun(projectId, runId, token) {
+  return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs/${encodeURIComponent(runId)}/export`, token, {
+    method: "POST",
+  });
+}

@@ -407,3 +407,53 @@ describe("incremental film history (sc-23737)", () => {
     expect(appConfirmMock).not.toHaveBeenCalled();
   });
 });
+
+describe("timeline audio editing (sc-23739)", () => {
+  it("places library audio, auditions it, and persists trim, placement, gain, fades, and mute", () => {
+    const audio = { id: "asset_audio", type: "audio", displayName: "Recorded line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
+    let latest;
+    function Harness() {
+      const [timeline, setTimeline] = React.useState(makeTimeline("tl_1", "Film"));
+      latest = timeline;
+      return <AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio], assets: [audio], timelines: [timeline], selectedTimelineId: timeline.id,
+        setActiveTimeline: setTimeline, setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}>
+        <EditorScreen />
+      </AppContext.Provider>;
+    }
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    root = createRoot(container);
+    act(() => root.render(<Harness />));
+    act(() => container.querySelector(".ve-bin-item").click());
+    expect(latest.tracks.find((track) => track.kind === "audio").items[0]).toMatchObject({ assetId: "asset_audio", type: "audio", timelineStart: 0 });
+    act(() => container.querySelector(".ve-audio-clip").click());
+    expect(container.querySelector(".ve-program audio")).not.toBeNull();
+    act(() => container.querySelector(".ve-play").click());
+    expect(play).toHaveBeenCalled();
+    const form = container.querySelector('form[aria-label="Edit selected audio"]');
+    for (const [name, value] of [["timelineStart", "1.5"], ["sourceIn", "0.25"], ["sourceOut", "2.25"], ["volume", "0.7"], ["fadeInSeconds", "0.1"], ["fadeOutSeconds", "0.2"], ["trackGain", "0.8"]]) {
+      const input = form.elements.namedItem(name);
+      input.value = value;
+    }
+    form.elements.namedItem("muted").checked = true;
+    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    const track = latest.tracks.find((item) => item.kind === "audio");
+    expect(track).toMatchObject({ gain: 0.8, muted: true });
+    expect(track.items[0]).toMatchObject({ sourceIn: 0.25, sourceOut: 2.25, timelineStart: 1.5, timelineEnd: 3.5, volume: 0.7, fadeInSeconds: 0.1, fadeOutSeconds: 0.2 });
+  });
+
+  it("keeps linked dialogue placed and explicitly requests adjustment after a shorter picture trim", () => {
+    const video = { id: "v1", type: "video", displayName: "Shot", url: "/shot.mp4", file: { mimeType: "video/mp4", duration: 4 } };
+    const audio = { id: "a1", type: "audio", displayName: "Line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks[0].items = [{ id: "shot", trackId: "track_main", assetId: "v1", type: "video", displayName: "Shot", sourceIn: 0, sourceOut: 4, timelineStart: 0, timelineEnd: 4, speed: 1, volume: 1, filmHarness: { runId: "run_1", shotId: "SH010" } }];
+    timeline.tracks.push({ id: "track_dialogue", kind: "audio", role: "dialogue", gain: 1, muted: false, items: [{ id: "line", trackId: "track_dialogue", assetId: "a1", type: "audio", displayName: "Line", sourceIn: 0, sourceOut: 3, timelineStart: 1, timelineEnd: 4, speed: 1, volume: 1, filmHarness: { runId: "run_1", shotId: "SH010" } }] });
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [video, audio], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-clip").click());
+    const form = container.querySelector('form[aria-label="Edit selected clip"]');
+    form.elements.namedItem("sourceOut").value = "2";
+    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(container.textContent).toContain("Adjust the linked audio ending past the new picture cut");
+  });
+});

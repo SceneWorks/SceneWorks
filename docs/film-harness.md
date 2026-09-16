@@ -244,12 +244,15 @@ never conditioning. The plan's `sound` block then places them:
   "generatedAudio": "mute",                 // run-level policy for the takes' OWN audio
   "dialogue": { "gain": 1.0, "muted": false },
   "ambience": { "role": "workshop_room_tone", "gain": 0.35, "fadeInSeconds": 1.0 },
-  "music":    { "role": "main_theme", "gain": 0.2, "startSeconds": 0.0 }
+  "music":    { "role": "main_theme", "gain": 0.2, "startSeconds": 0.0 },
+  "sfx":      [{ "role": "door_close", "gain": 0.8, "startSeconds": 2.4 }]
 }
 ```
 
 and a shot places its own line with `"dialogueClip": { "role": ..., "offsetSeconds": ... }`, where
 the offset is measured **from the start of that shot** rather than from the head of the sequence.
+`sfx` is repeatable; each effect gets an independently editable audio track at its declared
+sequence start.
 A role placed on the wrong bus (an `ambience` slot pointing at a `dialogue` entry) is a finding
 before any job exists, because a plan like that renders, exports, and simply sounds wrong.
 

@@ -443,6 +443,17 @@ pub struct FilmReferenceInput {
     pub approved: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmSoundInput {
+    pub draft_revision: u32,
+    pub asset_id: String,
+    pub role: String,
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectFile {
     pub path: PathBuf,
@@ -946,6 +957,106 @@ impl ProjectStore {
         Ok(draft)
     }
 
+    /// Copy a project-library audio asset into a draft-owned sound pack and persist the new draft
+    /// revision. The immutable staged file is what a later run pins, even if the library asset is
+    /// renamed, replaced, or removed in the meantime.
+    pub fn add_film_sound(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        input: FilmSoundInput,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) || !is_safe_id(&input.asset_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or source asset ID".to_owned(),
+            ));
+        }
+        if !crate::film_plan::SOUND_KINDS.contains(&input.kind.as_str()) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Sound kind must be one of {}",
+                crate::film_plan::SOUND_KINDS.join(", ")
+            )));
+        }
+        let source = self.resolve_asset_media_path(project_id, &input.asset_id)?;
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "wav" | "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus"
+                )
+            })
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Film sound must use a WAV, MP3, M4A, AAC, FLAC, OGG, or Opus audio asset"
+                        .to_owned(),
+                )
+            })?;
+
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let mut draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if input.draft_revision != draft.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                draft.revision, input.draft_revision
+            )));
+        }
+
+        let relative_file = format!("sound/{}.{}", input.asset_id, extension);
+        draft
+            .reference_pack
+            .sound
+            .push(crate::film_plan::SoundEntry {
+                role: input.role,
+                kind: input.kind,
+                file: Some(relative_file.clone()),
+                description: input.description,
+                text: None,
+                voice: None,
+                model: None,
+            });
+        draft.reference_pack.version = draft.reference_pack.version.saturating_add(1);
+        let findings = validate_reference_pack(&draft.reference_pack);
+        if !findings.is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+
+        let destination = project_path
+            .join("films/draft-assets")
+            .join(draft_id)
+            .join(&relative_file);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&source, &destination)?;
+        draft.revision = draft.revision.saturating_add(1);
+        draft.production_plan.version = draft.revision;
+        draft.updated_at = utc_now();
+        write_json(&draft_path, &draft)?;
+        Ok(draft)
+    }
+
     pub fn create_film_run(
         &self,
         project_id: &str,
@@ -1003,6 +1114,33 @@ impl ProjectStore {
                     fs::create_dir_all(parent)?;
                 }
                 fs::copy(source, destination)?;
+            }
+            for sound in &draft.reference_pack.sound {
+                let Some(file) = sound.file.as_deref() else {
+                    continue;
+                };
+                if !is_safe_relative_path(file) {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "Film sound {:?} has an unsafe file path",
+                        sound.role
+                    )));
+                }
+                let source = draft_assets.join(file);
+                // A synthesized line may pin its eventual filename while carrying text. The run
+                // creates that file; every prerecorded clip must already be staged.
+                if !source.is_file() && sound.text.is_none() {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "Film sound {:?} is missing its staged audio {}",
+                        sound.role, file
+                    )));
+                }
+                if source.is_file() {
+                    let destination = run_dir.join(file);
+                    if let Some(parent) = destination.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(source, destination)?;
+                }
             }
             write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
             write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
