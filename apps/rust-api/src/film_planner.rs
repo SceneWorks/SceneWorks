@@ -22,12 +22,13 @@
 //! if the environment carries a hosted-LLM credential or endpoint, or if the API being driven is
 //! not on this machine or this private network.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use sceneworks_core::film_compile::{
     compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, PlannerExecutionRecord,
     COMPILED_PLAN_SCHEMA_VERSION,
@@ -173,6 +174,7 @@ pub struct SceneWorksLlm<'a> {
     on_job_created: Option<JobCreatedCallback>,
     on_job_progress: Option<JobProgressCallback>,
     cancel_requested: Option<CancelRequestedCallback>,
+    adopt_job_ids: Mutex<VecDeque<String>>,
 }
 
 impl<'a> SceneWorksLlm<'a> {
@@ -190,6 +192,7 @@ impl<'a> SceneWorksLlm<'a> {
             on_job_created: None,
             on_job_progress: None,
             cancel_requested: None,
+            adopt_job_ids: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -215,6 +218,15 @@ impl<'a> SceneWorksLlm<'a> {
 
     pub fn cancel_requested(mut self, callback: CancelRequestedCallback) -> Self {
         self.cancel_requested = Some(callback);
+        self
+    }
+
+    /// Replay durable planner jobs in original order before dispatching any new work. Each exact
+    /// job route remains readable after queue clearing, so a restarted planner reconstructs its
+    /// deterministic state from completed replies and adopts the one still running without ever
+    /// creating a duplicate decode.
+    pub fn adopt_jobs(self, job_ids: impl IntoIterator<Item = String>) -> Self {
+        self.adopt_job_ids.lock().extend(job_ids);
         self
     }
 }
@@ -251,23 +263,29 @@ impl PlannerLlm for SceneWorksLlm<'_> {
             {
                 body["guide"] = json!(guide);
             }
-            let created = crate::film_harness::expect_ok_on(
-                self.transport,
-                "POST",
-                "/api/v1/prompts/refine",
-                Some(body),
-            )
-            .await?;
-            let job_id = created
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    HarnessError::Transport(format!("refine job response has no id: {created}"))
-                })?
-                .to_owned();
-            if let Some(callback) = &self.on_job_created {
-                callback(&job_id);
-            }
+            let adopted_job_id = { self.adopt_job_ids.lock().pop_front() };
+            let (mut job_id, mut adopted) = if let Some(job_id) = adopted_job_id {
+                (job_id, true)
+            } else {
+                let created = crate::film_harness::expect_ok_on(
+                    self.transport,
+                    "POST",
+                    "/api/v1/prompts/refine",
+                    Some(body.clone()),
+                )
+                .await?;
+                let job_id = created
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!("refine job response has no id: {created}"))
+                    })?
+                    .to_owned();
+                if let Some(callback) = &self.on_job_created {
+                    callback(&job_id);
+                }
+                (job_id, false)
+            };
             let deadline = Instant::now() + self.job_timeout;
             loop {
                 if self.cancel_requested.as_ref().is_some_and(|check| check()) {
@@ -361,6 +379,31 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             elapsed_seconds: started.elapsed().as_secs_f64(),
                             peak_memory_bytes,
                         });
+                    }
+                    "interrupted" if adopted => {
+                        // API startup marks a formerly-running job interrupted. It is terminal, so
+                        // retrying the SAME deterministic request cannot duplicate live compute;
+                        // the old id remains in operation.jobIds as spent work.
+                        let created = crate::film_harness::expect_ok_on(
+                            self.transport,
+                            "POST",
+                            "/api/v1/prompts/refine",
+                            Some(body.clone()),
+                        )
+                        .await?;
+                        job_id = created
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                HarnessError::Transport(format!(
+                                    "refine retry response has no id: {created}"
+                                ))
+                            })?
+                            .to_owned();
+                        adopted = false;
+                        if let Some(callback) = &self.on_job_created {
+                            callback(&job_id);
+                        }
                     }
                     "failed" | "canceled" | "interrupted" => {
                         let detail = snapshot
@@ -1218,6 +1261,7 @@ pub fn read_compiled_file(path: &Path) -> Result<CompiledPlan, PlanDiagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     struct NoCallsTransport;
 
@@ -1231,6 +1275,47 @@ mod tests {
 
         fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
             Box::pin(async { panic!("a canceled planning request must not fetch files") })
+        }
+    }
+
+    struct AdoptTransport {
+        calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+        interrupted: bool,
+    }
+
+    impl ApiTransport for AdoptTransport {
+        fn call(
+            &self,
+            request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            let calls = self.calls.clone();
+            let interrupted = self.interrupted;
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .push((request.method.to_owned(), request.path.clone()));
+                let body = match (request.method, request.path.as_str()) {
+                    ("GET", "/api/v1/jobs/job_old") if interrupted => {
+                        json!({"id": "job_old", "status": "interrupted", "message": "API restarted"})
+                    }
+                    ("GET", "/api/v1/jobs/job_old") => json!({
+                        "id": "job_old", "status": "completed",
+                        "result": {"refinedPrompt": "adopted answer"}
+                    }),
+                    ("POST", "/api/v1/prompts/refine") => json!({"id": "job_new"}),
+                    ("GET", "/api/v1/jobs/job_new") => json!({
+                        "id": "job_new", "status": "completed",
+                        "result": {"refinedPrompt": "replacement answer"}
+                    }),
+                    ("GET", path) if path.ends_with("/metrics") => Value::Null,
+                    other => panic!("unexpected planner adoption request: {other:?}"),
+                };
+                Ok(crate::film_harness::ApiResponse { status: 200, body })
+            })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("planner adoption must not fetch files") })
         }
     }
 
@@ -1254,6 +1339,60 @@ mod tests {
             .await
             .expect_err("the cancellation is reported");
         assert!(format!("{error}").contains("canceled before"));
+    }
+
+    #[tokio::test]
+    async fn durable_completed_job_is_adopted_by_exact_id_without_redispatch() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = AdoptTransport {
+            calls: calls.clone(),
+            interrupted: false,
+        };
+        let llm = SceneWorksLlm::new(&transport, Duration::from_millis(1), Duration::from_secs(1))
+            .adopt_jobs(["job_old".to_owned()]);
+        let reply = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+            })
+            .await
+            .expect("completed durable job is replayed");
+        assert_eq!(reply.text, "adopted answer");
+        assert_eq!(reply.job_id.as_deref(), Some("job_old"));
+        assert!(calls.lock().iter().all(|(method, _)| method != "POST"));
+    }
+
+    #[tokio::test]
+    async fn startup_interrupted_job_is_spent_before_one_replacement_dispatch() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = AdoptTransport {
+            calls: calls.clone(),
+            interrupted: true,
+        };
+        let llm = SceneWorksLlm::new(&transport, Duration::from_millis(1), Duration::from_secs(1))
+            .adopt_jobs(["job_old".to_owned()]);
+        let reply = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+            })
+            .await
+            .expect("interrupted durable job is replaced once");
+        assert_eq!(reply.job_id.as_deref(), Some("job_new"));
+        assert_eq!(
+            calls
+                .lock()
+                .iter()
+                .filter(|(method, path)| method == "POST" && path == "/api/v1/prompts/refine")
+                .count(),
+            1
+        );
     }
 
     #[test]

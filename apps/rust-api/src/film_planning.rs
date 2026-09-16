@@ -50,6 +50,10 @@ pub(crate) struct FilmPlanningOperation {
     planner_model: String,
     video_model_id: String,
     thinking_mode: String,
+    #[serde(default = "default_max_repair_rounds")]
+    max_repair_rounds: u32,
+    #[serde(default)]
+    refine_prompts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_job_id: Option<String>,
     #[serde(default)]
@@ -224,6 +228,8 @@ pub(crate) async fn start_film_planning(
         planner_model: planner_model.to_owned(),
         video_model_id: draft.production_plan.model.id.clone(),
         thinking_mode: draft.planning.thinking_mode.clone(),
+        max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
+        refine_prompts: draft.planning.refine_prompts,
         active_job_id: None,
         job_ids: Vec::new(),
         findings: Vec::new(),
@@ -295,8 +301,8 @@ pub(crate) async fn start_film_planning(
         brief_path: operation_dir.join("brief.json"),
         reference_pack_path: operation_dir.join("references.json"),
         out_dir: operation_dir,
-        max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
-        refine_prompts: draft.planning.refine_prompts,
+        max_repair_rounds: operation.max_repair_rounds,
+        refine_prompts: operation.refine_prompts,
         prompt_guide_path: None,
         require_installed: true,
         api_url: base_url.clone(),
@@ -317,39 +323,7 @@ pub(crate) async fn start_film_planning(
             crate::film_planner::generate(&transport, &llm, &options).await
         }
         .await;
-        let canceled = root
-            .join(crate::film_harness::CANCEL_SENTINEL_FILE)
-            .exists();
-        let _ = update_operation(&latest_path, &operation_id, |operation| match result {
-            Ok(artifacts) => {
-                operation.status = "ready".to_owned();
-                operation.stage = "review".to_owned();
-                operation.progress = Some(1.0);
-                operation.active_job_id = None;
-                operation.executions = artifacts
-                    .compiled
-                    .planner
-                    .as_ref()
-                    .map(|planner| planner.executions.clone())
-                    .unwrap_or_default();
-                operation.candidate_plan = Some(artifacts.plan);
-                operation.compiled = Some(artifacts.compiled);
-                operation.detail = Some(
-                    "Candidate ready. Review it, then explicitly replace the current edited plan."
-                        .to_owned(),
-                );
-            }
-            Err(error) => {
-                operation.status = if canceled { "canceled" } else { "failed" }.to_owned();
-                operation.stage = if canceled { "canceled" } else { "failed" }.to_owned();
-                operation.active_job_id = None;
-                operation.findings = findings_from_error(error);
-                operation.detail = Some(
-                    "The draft and current shot plan were preserved. You can edit them manually or retry."
-                        .to_owned(),
-                );
-            }
-        });
+        finish_planning_operation(&root, &latest_path, &operation_id, result);
         drop(lease);
     });
 
@@ -477,6 +451,249 @@ fn production_brief(
             .clamp(1, sceneworks_core::film_planner::MAX_PLANNER_SHOTS),
         prefer_quality: false,
     }
+}
+
+fn default_max_repair_rounds() -> u32 {
+    crate::film_planner::DEFAULT_MAX_REPAIR_ROUNDS
+}
+
+fn finish_planning_operation(
+    root: &FsPath,
+    latest_path: &FsPath,
+    operation_id: &str,
+    result: Result<crate::film_planner::PlannerArtifacts, HarnessError>,
+) {
+    let canceled = root
+        .join(crate::film_harness::CANCEL_SENTINEL_FILE)
+        .exists();
+    let _ = update_operation(latest_path, operation_id, |operation| match result {
+        Ok(artifacts) => {
+            operation.status = "ready".to_owned();
+            operation.stage = "review".to_owned();
+            operation.progress = Some(1.0);
+            operation.active_job_id = None;
+            operation.executions = artifacts
+                .compiled
+                .planner
+                .as_ref()
+                .map(|planner| planner.executions.clone())
+                .unwrap_or_default();
+            operation.candidate_plan = Some(artifacts.plan);
+            operation.compiled = Some(artifacts.compiled);
+            operation.detail = Some(
+                "Candidate ready. Review it, then explicitly replace the current edited plan."
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            operation.status = if canceled { "canceled" } else { "failed" }.to_owned();
+            operation.stage = if canceled { "canceled" } else { "failed" }.to_owned();
+            operation.active_job_id = None;
+            operation.findings = findings_from_error(error);
+            operation.detail = Some(
+                "The draft and current shot plan were preserved. You can edit them manually or retry."
+                    .to_owned(),
+            );
+        }
+    });
+}
+
+/// Reacquire crashed planning controllers and replay their exact durable job ids. Completed jobs
+/// rebuild deterministic planner state, queued/running jobs are polled in place, and jobs marked
+/// interrupted by API startup are terminal before one replacement request is dispatched.
+pub(crate) fn spawn_film_planning_startup_reconciliation(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let projects = match project_call(state.clone(), |store| store.list_projects()).await {
+            Ok(projects) => projects,
+            Err(error) => {
+                tracing::warn!(?error, "film planning recovery could not list projects");
+                return;
+            }
+        };
+        for project in projects {
+            let drafts = match project_call(state.clone(), {
+                let project_id = project.id.clone();
+                move |store| store.list_film_drafts(&project_id)
+            })
+            .await
+            {
+                Ok(drafts) => drafts,
+                Err(error) => {
+                    tracing::warn!(project_id = %project.id, ?error, "film planning recovery could not list drafts");
+                    continue;
+                }
+            };
+            for draft in drafts {
+                let root = PathBuf::from(&project.path)
+                    .join("films/planning")
+                    .join(&draft.id);
+                let latest_path = root.join("latest.json");
+                let operation = match read_operation(&latest_path) {
+                    Ok(operation)
+                        if matches!(operation.status.as_str(), "running" | "canceling") =>
+                    {
+                        operation
+                    }
+                    _ => continue,
+                };
+                let lease = match ControllerLease::acquire(
+                    &root,
+                    format!("startup-adopt:planning:{}", draft.id),
+                ) {
+                    Ok(lease) => lease,
+                    Err(HarnessError::Refused(_)) => continue,
+                    Err(error) => {
+                        tracing::warn!(draft_id = %draft.id, %error, "film planning recovery lease failed");
+                        continue;
+                    }
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if operation.status == "canceling"
+                        || root
+                            .join(crate::film_harness::CANCEL_SENTINEL_FILE)
+                            .exists()
+                    {
+                        reconcile_canceled_planning(&state, &root, &latest_path, &operation).await;
+                        drop(lease);
+                        return;
+                    }
+                    let operation_dir = root.join("operations").join(&operation.id);
+                    let options = PlannerOptions {
+                        brief_path: operation_dir.join("brief.json"),
+                        reference_pack_path: operation_dir.join("references.json"),
+                        out_dir: operation_dir,
+                        max_repair_rounds: operation.max_repair_rounds,
+                        refine_prompts: operation.refine_prompts,
+                        prompt_guide_path: None,
+                        require_installed: true,
+                        api_url: state.settings.mcp_api_url.clone(),
+                        force: false,
+                        poll_interval: Duration::from_millis(350),
+                        job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
+                    };
+                    let callback_path = latest_path.clone();
+                    let callback_operation_id = operation.id.clone();
+                    let on_job_created = std::sync::Arc::new(move |job_id: &str| {
+                        let _ = update_operation(
+                            &callback_path,
+                            &callback_operation_id,
+                            |current| {
+                                if current.status != "running" {
+                                    return;
+                                }
+                                current.stage = "generating".to_owned();
+                                current.active_job_id = Some(job_id.to_owned());
+                                if !current.job_ids.iter().any(|known| known == job_id) {
+                                    current.job_ids.push(job_id.to_owned());
+                                }
+                                current.detail = Some(
+                                    "Recovered planning dispatched a replacement for an interrupted local job."
+                                        .to_owned(),
+                                );
+                            },
+                        );
+                    });
+                    let progress_path = latest_path.clone();
+                    let progress_operation_id = operation.id.clone();
+                    let on_job_progress =
+                        std::sync::Arc::new(move |job_id: &str, progress: f64| {
+                            let _ = update_operation(
+                                &progress_path,
+                                &progress_operation_id,
+                                |current| {
+                                    if current.status == "running"
+                                        && current.active_job_id.as_deref() == Some(job_id)
+                                    {
+                                        current.progress = Some(progress);
+                                    }
+                                },
+                            );
+                        });
+                    let cancel_path = root.join(crate::film_harness::CANCEL_SENTINEL_FILE);
+                    let cancel_requested = std::sync::Arc::new(move || cancel_path.exists());
+                    let result = async {
+                        let transport = HttpTransport::new(
+                            &state.settings.mcp_api_url,
+                            Some(state.settings.access_token.clone()),
+                        )?;
+                        let model_override = (operation.provider == "native")
+                            .then(|| operation.planner_model.clone());
+                        let llm = SceneWorksLlm::new(
+                            &transport,
+                            options.poll_interval,
+                            options.job_timeout,
+                        )
+                        .with_planner_model(model_override, operation.thinking_mode.clone())
+                        .on_job_created(on_job_created)
+                        .on_job_progress(on_job_progress)
+                        .cancel_requested(cancel_requested)
+                        .adopt_jobs(operation.job_ids.clone());
+                        crate::film_planner::generate(&transport, &llm, &options).await
+                    }
+                    .await;
+                    finish_planning_operation(&root, &latest_path, &operation.id, result);
+                    drop(lease);
+                });
+            }
+        }
+    })
+}
+
+async fn reconcile_canceled_planning(
+    state: &AppState,
+    root: &FsPath,
+    latest_path: &FsPath,
+    operation: &FilmPlanningOperation,
+) {
+    if let (Some(job_id), Ok(transport)) = (
+        operation.active_job_id.as_deref(),
+        HttpTransport::new(
+            &state.settings.mcp_api_url,
+            Some(state.settings.access_token.clone()),
+        ),
+    ) {
+        let _ = crate::film_harness::expect_ok_on(
+            &transport,
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/cancel"),
+            None,
+        )
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            match crate::film_harness::expect_ok_on(
+                &transport,
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                None,
+            )
+            .await
+            {
+                Ok(snapshot)
+                    if matches!(
+                        snapshot.get("status").and_then(Value::as_str),
+                        Some("completed" | "failed" | "canceled" | "interrupted")
+                    ) =>
+                {
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    }
+    let _ = update_operation(latest_path, &operation.id, |current| {
+        current.status = "canceled".to_owned();
+        current.stage = "canceled".to_owned();
+        current.active_job_id = None;
+        current.detail = Some(
+            "Planning canceled after bounded reconciliation; completed jobs and artifacts were preserved."
+                .to_owned(),
+        );
+    });
+    let _ = std::fs::remove_file(root.join(crate::film_harness::CANCEL_SENTINEL_FILE));
 }
 
 async fn planning_root(
