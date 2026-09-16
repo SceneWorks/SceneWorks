@@ -31,9 +31,9 @@
 //!    model/backend/hardware) beside copies of the two source documents — on every path past
 //!    step 1, refusals and mid-run failures included.
 //!
-//! **One controller per new run directory.** New-run entry points take an atomic filesystem lease
-//! before dispatch, so API and CLI callers cannot drive the same run concurrently. The later
-//! lifecycle slice widens that shared lease across resume, review, repair, and editing.
+//! **One controller per run directory.** Every mutating library entry point takes the same OS-held
+//! filesystem lease, so API and CLI callers cannot drive, resume, review, repair, decide, or edit
+//! the same run concurrently, and a crashed process releases ownership without an age guess.
 
 pub mod references;
 pub mod review;
@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::film_compile::{
     compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
     ResolvedConditioning,
@@ -118,6 +119,7 @@ pub const CONTROLLER_LOCK_FILE: &str = "controller.lock";
 pub struct ControllerLease {
     path: PathBuf,
     owner: String,
+    _lock: FileLock,
 }
 
 impl ControllerLease {
@@ -125,35 +127,82 @@ impl ControllerLease {
         std::fs::create_dir_all(run_dir)?;
         let owner = owner.into();
         let path = run_dir.join(CONTROLLER_LOCK_FILE);
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    HarnessError::Refused(format!(
-                        "run mutation refused: another controller holds {}",
-                        path.display()
-                    ))
-                } else {
-                    HarnessError::Io(error.to_string())
-                }
-            })?;
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        let lock = FileLock::try_exclusive(file).map_err(|error| {
+            let contention = fs2::lock_contended_error().raw_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || contention.is_some() && error.raw_os_error() == contention
+            {
+                HarnessError::Refused(format!(
+                    "run mutation refused: another controller holds {}",
+                    path.display()
+                ))
+            } else {
+                HarnessError::Io(error.to_string())
+            }
+        })?;
+        lock.file().set_len(0)?;
         use std::io::Write as _;
-        file.write_all(format!("{owner}\n").as_bytes())?;
-        file.sync_all()?;
-        Ok(Self { path, owner })
+        let mut locked_file = lock.file();
+        locked_file.write_all(
+            format!(
+                "owner={owner}\npid={}\nacquiredAt={}\n",
+                std::process::id(),
+                utc_now()
+            )
+            .as_bytes(),
+        )?;
+        locked_file.sync_all()?;
+        Ok(Self {
+            path,
+            owner,
+            _lock: lock,
+        })
+    }
+
+    /// Whether another process currently owns the run. The advisory lock, rather than the age or
+    /// mere presence of its metadata file, is authoritative: the OS releases it after a crash.
+    pub fn is_active(run_dir: &Path) -> Result<bool, HarnessError> {
+        std::fs::create_dir_all(run_dir)?;
+        let path = run_dir.join(CONTROLLER_LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        match FileLock::try_exclusive(file) {
+            Ok(probe) => {
+                drop(probe);
+                Ok(false)
+            }
+            Err(error) => {
+                let contention = fs2::lock_contended_error().raw_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || contention.is_some() && error.raw_os_error() == contention
+                {
+                    Ok(true)
+                } else {
+                    Err(HarnessError::Io(error.to_string()))
+                }
+            }
+        }
     }
 }
 
 impl Drop for ControllerLease {
     fn drop(&mut self) {
-        let owned = std::fs::read_to_string(&self.path)
-            .ok()
-            .is_some_and(|value| value.trim() == self.owner);
-        if owned {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        tracing::debug!(path = %self.path.display(), owner = %self.owner, "releasing film controller lease");
+        // A clean release erases its diagnostic owner while the advisory lock is still held. If
+        // the process crashes this Drop never runs, so the surviving owner identifies which
+        // operation startup found interrupted without being mistaken for live ownership.
+        let _ = self._lock.file().set_len(0);
+        let _ = self._lock.file().sync_all();
     }
 }
 
@@ -5312,6 +5361,18 @@ pub async fn resume(
     transport: &dyn ApiTransport,
     options: &ResumeOptions,
 ) -> Result<RunRecord, HarnessError> {
+    let lease = ControllerLease::acquire(
+        &options.out_dir,
+        format!("resume_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    resume_with_lease(transport, options, lease).await
+}
+
+pub(crate) async fn resume_with_lease(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    _lease: ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
     if !continued.record.is_resumable() {
@@ -5373,6 +5434,20 @@ pub async fn replace_take(
     options: &ResumeOptions,
     shot_id: &str,
     reason: &str,
+) -> Result<RunRecord, HarnessError> {
+    let lease = ControllerLease::acquire(
+        &options.out_dir,
+        format!("replace_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    replace_take_with_lease(transport, options, shot_id, reason, lease).await
+}
+
+pub(crate) async fn replace_take_with_lease(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+    _lease: ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
@@ -7285,6 +7360,22 @@ pub async fn edit_timeline(
     transport: &dyn ApiTransport,
     options: &EditOptions,
     edit: TimelineEdit,
+) -> Result<RunRecord, HarnessError> {
+    let out_dir = options
+        .run_record_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let lease =
+        ControllerLease::acquire(&out_dir, format!("edit_{}", uuid::Uuid::new_v4().simple()))?;
+    edit_timeline_with_lease(transport, options, edit, lease).await
+}
+
+async fn edit_timeline_with_lease(
+    transport: &dyn ApiTransport,
+    options: &EditOptions,
+    edit: TimelineEdit,
+    _lease: ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
     // An edit re-exports at most one job and is interruptible through the same control a run uses;
     // nothing here dispatches a render, so the default (never canceled) is the whole contract.

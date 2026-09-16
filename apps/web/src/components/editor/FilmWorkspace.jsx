@@ -12,6 +12,7 @@ import {
 import { useAppStatic } from "../../context/AppContext.js";
 import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
+import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
 
 export function FilmWorkspace() {
@@ -278,6 +279,12 @@ export function FilmWorkspace() {
             onInstall={installPlanner}
             onStart={generatePlan}
             operation={planningOperation}
+          />
+          <FilmLifecycle
+            draftId={draft.id}
+            projectId={activeProject.id}
+            setNotice={setNotice}
+            token={token}
           />
           <section aria-labelledby="film-manual-shot-heading" className="ve-film-section">
             <h3 id="film-manual-shot-heading">Current shot plan</h3>

@@ -10885,6 +10885,10 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-file-button input { max-width: 220px; }
 .ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
 .ve-film-bindings li span { min-width: 140px; }
+.ve-film-lifecycle { grid-column: 1 / -1; display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-lifecycle-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--surface-2); border-radius: 6px; font-size: 12px; }
+.ve-film-lifecycle-row > span:nth-child(2) { color: var(--text-muted); flex: 1; }
+.ve-film-operation-actions { display: flex; gap: 6px; }
 .ve-film-section {
   margin-top: 12px;
   padding: 12px;

@@ -51,6 +51,73 @@ fn a_second_new_run_controller_is_refused_while_the_first_holds_the_directory() 
         .expect("the lease releases when its owner finishes");
 }
 
+#[test]
+fn an_unlocked_crash_metadata_file_is_recovered_without_an_age_guess() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(film_harness::CONTROLLER_LOCK_FILE),
+        "owner=dead-process\npid=999999\nacquiredAt=2000-01-01T00:00:00Z\n",
+    )
+    .unwrap();
+    assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+    let lease = film_harness::ControllerLease::acquire(&directory, "startup-adopt")
+        .expect("the OS-released lock is recoverable regardless of metadata age");
+    assert!(film_harness::ControllerLease::is_active(&directory).unwrap());
+    drop(lease);
+    assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+}
+
+#[tokio::test]
+async fn every_run_mutation_refuses_a_competing_api_or_cli_controller() {
+    use crate::film_harness::review::{self, Decision, ReviewOptions, ScriptedVision};
+    use crate::film_harness::{EditOptions, TimelineEdit};
+
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let out_dir = temporary.path().join("run");
+    let held = film_harness::ControllerLease::acquire(&out_dir, "api:active").unwrap();
+    let (app, _) = create_app_with_state(test_settings(&temporary)).expect("app creates");
+    let transport = RouterTransport { app };
+    let options = ResumeOptions::new(out_dir.clone());
+    let edit = EditOptions {
+        run_record_path: out_dir.join(film_harness::RUN_RECORD_FILE),
+        export: false,
+        poll_interval: Duration::from_millis(1),
+    };
+
+    let errors = [
+        film_harness::resume(&transport, &options)
+            .await
+            .unwrap_err(),
+        film_harness::replace_take(&transport, &options, "SH010", "replace")
+            .await
+            .unwrap_err(),
+        film_harness::edit_timeline(
+            &transport,
+            &edit,
+            TimelineEdit::Reorder { shot_ids: vec![] },
+        )
+        .await
+        .unwrap_err(),
+        review::review(
+            &transport,
+            &ReviewOptions::new(out_dir.clone()),
+            &ScriptedVision::new(),
+        )
+        .await
+        .unwrap_err(),
+        review::request_repair(&transport, &options, "SH010", "repair")
+            .await
+            .unwrap_err(),
+        review::decide_take(&out_dir, "SH010", Decision::Accept, "accept").unwrap_err(),
+    ];
+    for error in errors {
+        assert!(error.to_string().contains("another controller"), "{error}");
+    }
+    drop(held);
+}
+
 #[tokio::test]
 async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     let harness = Harness::start(true, vec![]).await;
@@ -3519,6 +3586,23 @@ async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
     )
     .await;
     assert_eq!(job["status"], "canceled", "{job}");
+    let (status, _) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (_, visible_jobs) = request(harness.app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        visible_jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|job| job["id"] != job_id),
+        "the canceled attempt is hidden from the queue UI before resume"
+    );
     assert_eq!(record.shots[1].outcome, ShotOutcome::NotDispatched);
     let on_disk = harness.run_record();
     assert_eq!(on_disk["outcome"], "canceled");
@@ -4115,8 +4199,8 @@ async fn a_cancel_stops_dispatch_keeps_finished_takes_and_the_run_resumes() {
     assert!(record.export.is_none(), "a cancel dispatches no export");
     assert_eq!(harness.run_record()["outcome"], "canceled");
 
-    // Resuming finishes the job: SH020 gets its remaining attempt, SH030 is dispatched, and SH010's
-    // take is reused rather than re-rendered.
+    // Resuming reads the hidden job back by exact id, finishes the run, and never duplicates the
+    // completed take: SH020 gets its remaining attempt, SH030 is dispatched, and SH010 is reused.
     harness
         .script
         .lock()

@@ -52,7 +52,7 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     assert_eq!(reopened["title"], "Workshop delivery");
 
     let (status, run) = request(
-        restarted,
+        restarted.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/films/{draft_id}/runs"),
         Value::Null,
@@ -66,6 +66,39 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     let root = std::path::Path::new(project["path"].as_str().unwrap());
     assert!(root.join(relative).join("plan.json").exists());
     assert!(root.join(relative).join("references.json").exists());
+
+    let (status, runs) = request(
+        restarted.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{runs}");
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["locator"]["id"], run["locator"]["id"]);
+    assert_eq!(runs[0]["controllerActive"], false);
+    let run_id = run["locator"]["id"].as_str().unwrap();
+    let (status, progress) = request(
+        restarted.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs/{run_id}/progress"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{progress}");
+    assert!(progress["record"].is_null());
+    for action in ["resume", "cancel"] {
+        let (status, error) = request(
+            restarted.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/film-runs/{run_id}/{action}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{action}: {error}");
+        assert!(error["detail"].as_str().unwrap().contains("not started"));
+    }
 }
 
 #[tokio::test]

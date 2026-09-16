@@ -1022,6 +1022,34 @@ impl ProjectStore {
         Ok(locator)
     }
 
+    pub fn list_film_runs(&self, project_id: &str) -> ProjectStoreResult<Vec<FilmRunLocator>> {
+        let project_path = self.find_project_path(project_id)?;
+        let runs_dir = project_path.join("films/runs");
+        if !runs_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut runs = Vec::new();
+        for directory in read_dir_paths(&runs_dir)? {
+            let locator_path = directory.join("locator.json");
+            if !locator_path.is_file() {
+                continue;
+            }
+            let locator: FilmRunLocator = serde_json::from_value(read_json(&locator_path)?)?;
+            if locator.project_id != project_id
+                || directory.file_name().and_then(|value| value.to_str())
+                    != Some(locator.id.as_str())
+            {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film run identity does not match {}",
+                    locator_path.display()
+                )));
+            }
+            runs.push(locator);
+        }
+        runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(runs)
+    }
+
     pub fn film_run_files(
         &self,
         project_id: &str,

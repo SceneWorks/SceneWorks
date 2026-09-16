@@ -28,6 +28,9 @@ pub(crate) struct FilmRunView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record: Option<RunRecord>,
     pub controller_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_owner: Option<String>,
+    pub controller_interrupted: bool,
 }
 
 pub(crate) async fn list_film_drafts(
@@ -192,6 +195,8 @@ pub(crate) async fn create_film_run(
             locator,
             record: None,
             controller_active: false,
+            controller_owner: None,
+            controller_interrupted: false,
         }),
     ))
 }
@@ -258,7 +263,7 @@ pub(crate) async fn start_film_run(
     Ok((StatusCode::ACCEPTED, Json(view)))
 }
 
-async fn load_run_view(
+pub(crate) async fn load_run_view(
     state: AppState,
     project_id: String,
     run_id: String,
@@ -285,13 +290,25 @@ async fn load_run_view(
             crate::film_harness::reconcile_saved_cut(record, &saved);
         }
     }
+    let controller_active = ControllerLease::is_active(&files.directory)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let controller_owner = std::fs::read_to_string(
+        files
+            .directory
+            .join(crate::film_harness::CONTROLLER_LOCK_FILE),
+    )
+    .ok()
+    .and_then(|metadata| {
+        metadata
+            .lines()
+            .find_map(|line| line.strip_prefix("owner=").map(str::to_owned))
+    });
     Ok(FilmRunView {
         locator,
         record,
-        controller_active: files
-            .directory
-            .join(crate::film_harness::CONTROLLER_LOCK_FILE)
-            .exists(),
+        controller_active,
+        controller_interrupted: !controller_active && controller_owner.is_some(),
+        controller_owner,
     })
 }
 

@@ -91,6 +91,7 @@ describe("FilmWorkspace", () => {
     const saved = draft({ revision: 2, title: "Workshop delivery" });
     let lists = 0;
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films" && options.method === "POST") return Promise.resolve(created);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve(lists++ === 0 ? [] : [saved]);
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
@@ -138,6 +139,7 @@ describe("FilmWorkspace", () => {
       dialogue: [{ id: "D001", beatId: "B001", speaker: "MARA", text: "Put it down." }],
     };
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([screenplay]);
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [
         { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },

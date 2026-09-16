@@ -282,10 +282,12 @@ use logs::list_logs;
 mod error;
 // Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
 pub mod film_harness;
+mod film_lifecycle;
 pub mod film_planner;
 mod film_planning;
 mod films;
 pub(crate) use error::ApiError;
+use film_lifecycle::{cancel_film_run, get_film_run_progress, list_film_runs, resume_film_run};
 use film_planning::{
     apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
     get_film_planning_operation, parse_film_draft_script, start_film_planning,
@@ -1740,8 +1742,24 @@ fn create_app_with_state_mode(
             get(get_film_run),
         )
         .route(
+            "/api/v1/projects/:project_id/film-runs",
+            get(list_film_runs),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/progress",
+            get(get_film_run_progress),
+        )
+        .route(
             "/api/v1/projects/:project_id/film-runs/:run_id/start",
             post(start_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/resume",
+            post(resume_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/cancel",
+            post(cancel_film_run),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",
