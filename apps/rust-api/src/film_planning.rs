@@ -560,6 +560,11 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         drop(lease);
                         return;
                     }
+                    if operation.provider == "openai_compatible" {
+                        interrupt_external_planning(&latest_path, &operation);
+                        drop(lease);
+                        return;
+                    }
                     let operation_dir = root.join("operations").join(&operation.id);
                     let options = PlannerOptions {
                         brief_path: operation_dir.join("brief.json"),
@@ -640,6 +645,27 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
             }
         }
     })
+}
+
+fn interrupt_external_planning(latest_path: &FsPath, operation: &FilmPlanningOperation) {
+    let _ = update_operation(latest_path, &operation.id, |current| {
+        current.status = "interrupted".to_owned();
+        current.stage = "interrupted".to_owned();
+        current.active_job_id = None;
+        if !current.findings.iter().any(|finding| {
+            finding.field == "planning.operation"
+                && finding.message.contains("durable remote job retrieval")
+        }) {
+            current.findings.push(PlanDiagnostic::plan(
+                "planning.operation",
+                "The external Chat Completions request was interrupted by API restart. This provider has no durable remote job retrieval, so SceneWorks did not resend the paid request. Review the preserved operation and explicitly retry planning.",
+            ));
+        }
+        current.detail = Some(
+            "External planning was interrupted. Draft inputs, job history, findings, and any candidate artifacts were preserved; retry is explicit."
+                .to_owned(),
+        );
+    });
 }
 
 async fn reconcile_canceled_planning(
@@ -780,6 +806,66 @@ fn update_operation(
 mod tests {
     use super::*;
     use sceneworks_core::film_workspace::FilmDraft;
+
+    #[test]
+    fn external_orphan_is_preserved_and_interrupted_without_constructing_a_transport() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        let original_finding = PlanDiagnostic::plan("planning.input", "Keep this finding");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_1".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "generating".to_owned(),
+            progress: Some(0.4),
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: None,
+            planner_model: "external-model".to_owned(),
+            video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "disabled".to_owned(),
+            max_repair_rounds: 2,
+            refine_prompts: false,
+            active_job_id: Some("remote_request_1".to_owned()),
+            job_ids: vec!["remote_request_1".to_owned()],
+            findings: vec![original_finding.clone()],
+            executions: Vec::new(),
+            candidate_plan: Some(draft.production_plan.clone()),
+            compiled: None,
+            detail: Some("Remote request was in flight".to_owned()),
+            created_at: "2026-09-16T00:00:00Z".to_owned(),
+            updated_at: "2026-09-16T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+        let latest_path = temp.path().join("latest.json");
+
+        // This recovery branch has no transport or planner parameter: an external orphan can only
+        // be made terminal and actionable, never silently re-dispatched as a paid request.
+        interrupt_external_planning(&latest_path, &operation);
+        interrupt_external_planning(&latest_path, &operation);
+
+        let recovered = read_operation(&latest_path).expect("read recovered operation");
+        assert_eq!(recovered.status, "interrupted");
+        assert_eq!(recovered.stage, "interrupted");
+        assert_eq!(recovered.active_job_id, None);
+        assert_eq!(recovered.job_ids, operation.job_ids);
+        assert_eq!(recovered.candidate_plan, operation.candidate_plan);
+        assert!(recovered.findings.contains(&original_finding));
+        let recovery_findings = recovered
+            .findings
+            .iter()
+            .filter(|finding| finding.field == "planning.operation")
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_findings.len(), 1);
+        assert!(recovery_findings[0].message.contains("explicitly retry"));
+        assert!(recovered
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("retry is explicit"));
+    }
 
     #[test]
     fn structured_dialogue_is_part_of_shared_planner_brief_without_changing_video_identity() {
