@@ -1767,7 +1767,7 @@ fn checkpoint_plan_raw_settings(
 /// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0)` produces
 /// for the same request, and the two lanes price the same geometry.
 #[cfg(target_os = "macos")]
-fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate::MlxRequestInputs {
+fn checkpoint_plan_memory_inputs(request: &ImageRequest, engine_id: &str, spec: &gen_core::LoadSpec) -> crate::mlx_fit_gate::MlxRequestInputs {
     crate::mlx_fit_gate::MlxRequestInputs {
         width: request.width,
         height: request.height,
@@ -1779,6 +1779,10 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate:
         reference_count: 0,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: Some(crate::mlx_fit_gate::clip_windows_for_spec(
+            engine_id, spec, &request.prompt,
+            &request.negative_prompt,
+        )),
     }
 }
 
@@ -1849,7 +1853,7 @@ async fn generate_checkpoint_plan_stream(
         None,
     )?;
     #[cfg(target_os = "macos")]
-    let memory_inputs = checkpoint_plan_memory_inputs(request);
+    let memory_inputs = checkpoint_plan_memory_inputs(request, engine_id, &spec);
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
         let companions = checkpoint_plan_candle_companion_dirs(&sources, &spec)?;

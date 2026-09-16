@@ -4387,7 +4387,7 @@ fn installed_tier_keys(request: &ImageRequest, settings: &Settings) -> Vec<&'sta
 /// A per-tier capability-fit result for the downtier chooser (sc-10733) — the lane-agnostic reduction
 /// of each lane's richer fit decision (candle's resident/offload/reject, MLX's resident/sequential/
 /// reject) to "does this tier run at all on this machine."
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TierFit {
     /// Runs — resident or (where the provider stages components) sequentially.
@@ -4397,7 +4397,7 @@ enum TierFit {
 }
 
 /// The capability-downtier decision (sc-10733).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DowntierPick {
     /// The resolved default tier fits — load it unchanged.
@@ -4424,7 +4424,7 @@ enum DowntierPick {
 /// `installed`), so the quality floor always wins over the downtier — a floor-q8 model's candidates
 /// never include q4, so it rejects rather than silently rendering q4 (acceptance #5). An explicit user
 /// pick never reaches here (the caller skips the downtier for it, honoring the pick — acceptance #7).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
 // Scoring a candle tier is a manifest arithmetic lookup, so that lane keeps the eager form and its
 // straight-line read. On macOS the only callers left are the ordering tests — the MLX gate scores
 // lazily now, because there scoring a tier hashes an encoder.
@@ -4458,7 +4458,7 @@ fn choose_downtier(default_tier: &str, candidates: &[(&'static str, TierFit)]) -
 /// `Ok(None)` from `fit` SKIPS a tier rather than scoring it, preserving the caller's pre-existing
 /// filter for a candidate whose directory does not resolve: such a tier was absent from the eager
 /// slice entirely, so it must not become the named rejection either.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
 fn choose_downtier_lazy<F, E>(
     default_tier: &str,
     tiers: &[&'static str],
@@ -5615,6 +5615,83 @@ mod candle_image_load_shape_tests {
             );
         }
     }
+}
+
+/// Finalize the manifest/provider load-shape intersection before pricing or loading a tier.
+/// Shared by production and real-artifact admission tests so neither can force an unshipped strategy.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_mlx_load_policy(
+    engine_id: &str,
+    effective_tier: Option<&str>,
+    declaration_mode: Option<crate::memory_route_registry::MemoryRouteMode>,
+    manifest: &serde_json::Map<String, serde_json::Value>,
+    mut spec: LoadSpec,
+    declaration_context: crate::memory_route_registry::MemoryRouteRequestContext,
+    plain_text_to_image: bool,
+    supports_sequential_offload: bool,
+) -> WorkerResult<LoadSpec> {
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        manifest,
+        spec,
+        declaration_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        manifest,
+        spec,
+        declaration_context,
+    );
+    if let Some(warning) =
+        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+    {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager load path"
+        );
+    }
+    if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::NotEvaluated
+    {
+        spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    }
+    if spec.offload_policy != gen_core::OffloadPolicy::Sequential {
+        let outcome = crate::mlx_fit_gate::decide_residency_for_spec(engine_id, &spec);
+        let deferred_can_stage = spec.load_shape_declaration_result
+            == gen_core::LoadShapeDeclarationResult::Applied
+            && spec.load_shape == gen_core::LoadShape::DeferredMaterialization
+            && supports_sequential_offload;
+        if deferred_can_stage
+            && !matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Resident)
+        {
+            spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+            spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                engine_id,
+                effective_tier,
+                declaration_mode,
+                manifest,
+                spec,
+                declaration_context,
+            );
+            spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+                engine_id,
+                effective_tier,
+                declaration_mode,
+                manifest,
+                spec,
+                declaration_context,
+            );
+        } else if matches!(outcome, crate::mlx_fit_gate::ResidencyOutcome::Sequential) {
+            spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
+        }
+    }
+    Ok(spec)
 }
 
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
@@ -8361,13 +8438,9 @@ fn resolve_generic_lane_conditioning(
     }
 }
 
-/// MLX per-tier capability fit for the downtier chooser (sc-10733): fold the MLX residency decision
-/// (resident-fits / staged-fits / won't-fit-even-staged) for a candidate tier's probe [`LoadSpec`]
-/// down to [`TierFit`]. `Resident`/`Sequential` ⇒ `Fits`; `Reject` ⇒ `TooBig` (carrying the resident
-/// need + the machine budget for the message). Uses the SAME `mlx_fit_gate` budget + footprint math
-/// the cold-load `apply_residency_policy` runs, so the seam's downtier and the cache's admission
-/// never disagree — which is why it takes the spec [`tier_probe_spec`] builds rather than a bare dir.
-#[cfg(target_os = "macos")]
+/// Historical whole-component fit, retained as a regression witness. Production tier selection
+/// now evaluates the complete request ladder through `choose_mlx_request_tier`.
+#[cfg(all(target_os = "macos", test))]
 fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
     match crate::mlx_fit_gate::decide_residency_for_spec(engine_id, spec) {
         crate::mlx_fit_gate::ResidencyOutcome::Resident
@@ -8383,38 +8456,140 @@ fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
     }
 }
 
-/// The [`LoadSpec`] a candidate tier would be loaded with, for fit probing only — the tier's weights
-/// dir **plus whatever caller-provisioned components that tier stages** (sc-15154). Never loaded.
-///
-/// A bare `Dir` spec is right for every model whose components sit under its weights dir, but
-/// Mage-Flow's per-tier dir holds the DiT alone: its text encoder and VAE are bit-identical across
-/// the six variants and staged from a shared mirror. Probing the bare dir therefore scored a q4 edit
-/// install at 2.33 GB instead of 7.00 GB, which both under-quoted the over-budget message and let the
-/// permissive weights-fit floor admit budgets the tier does not fit.
-///
-/// Required-component staging remains best-effort: the real load reports its actionable error. An
-/// explicitly selected decoder is different: it must never disappear from the probe, because doing
-/// so would under-price the request and silently evaluate the native-decoder composition instead.
+/// Complete immutable input to both pre-load tier selection and the eventual cached generation.
 #[cfg(target_os = "macos")]
-fn tier_probe_spec(
-    engine_id: &str,
-    weights_dir: &Path,
+struct PreparedMlxImageTier {
+    weights_dir: PathBuf,
+    spec: LoadSpec,
+    plan: crate::mlx_fit_gate::MlxRequestPlan,
+    inputs: crate::mlx_fit_gate::MlxRequestInputs,
+}
+
+#[cfg(any(target_os = "macos", test))]
+enum MlxTierFit<T> {
+    Fits(T),
+    TooBig(WorkerError),
+}
+
+/// Stop at the highest-fidelity fitting tier. Contract/source failures propagate; only an actual
+/// memory refusal can try the next installed tier. Preserve the last evaluated diagnostic.
+#[cfg(any(target_os = "macos", test))]
+fn choose_mlx_request_tier<T>(
+    directories: Vec<PathBuf>,
+    mut probe: impl FnMut(PathBuf) -> WorkerResult<MlxTierFit<T>>,
+) -> WorkerResult<T> {
+    let mut last_rejection = None;
+    for dir in directories {
+        let tier = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        match probe(dir)? {
+            MlxTierFit::Fits(prepared) => return Ok(prepared),
+            MlxTierFit::TooBig(error) => {
+                last_rejection = Some(WorkerError::InvalidPayload(format!(
+                    "{} tier: {error}",
+                    tier.as_deref().unwrap_or("resolved"),
+                )));
+            }
+        }
+    }
+    Err(last_rejection.unwrap_or_else(|| {
+        WorkerError::InvalidPayload("no installed MLX tier could be resolved".to_owned())
+    }))
+}
+
+#[cfg(test)]
+mod mlx_request_tier_tests {
+    use super::*;
+
+    #[test]
+    fn request_tiers_preserve_the_first_fitting_prepared_candidate() {
+        let mut seen = Vec::new();
+        let selected =
+            choose_mlx_request_tier(["bf16", "q8", "q4"].map(PathBuf::from).to_vec(), |dir| {
+                seen.push(dir.clone());
+                Ok(if dir == Path::new("bf16") {
+                    MlxTierFit::TooBig(WorkerError::InvalidPayload("request exceeds budget".into()))
+                } else {
+                    MlxTierFit::Fits((dir, "prepared exact adapter/decoder composition"))
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            selected,
+            (
+                PathBuf::from("q8"),
+                "prepared exact adapter/decoder composition"
+            )
+        );
+        assert_eq!(seen, [PathBuf::from("bf16"), PathBuf::from("q8")]);
+    }
+
+    #[test]
+    fn request_tiers_never_downtier_a_contract_or_source_failure() {
+        let mut calls = 0;
+        let error = choose_mlx_request_tier::<()>(["q8", "q4"].map(PathBuf::from).to_vec(), |_| {
+            calls += 1;
+            Err(WorkerError::InvalidPayload(
+                "artifact changed during contract query".into(),
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(error.to_string().contains("artifact changed"));
+    }
+
+    #[test]
+    fn request_tiers_report_the_last_evaluated_constraint_and_honor_a_single_explicit_tier() {
+        for directories in [
+            vec![PathBuf::from("q8")],
+            vec![PathBuf::from("q8"), PathBuf::from("q4")],
+        ] {
+            let expected = directories.last().unwrap().display().to_string();
+            let mut seen = Vec::new();
+            let error = choose_mlx_request_tier::<()>(directories.clone(), |dir| {
+                seen.push(dir.clone());
+                Ok(MlxTierFit::TooBig(WorkerError::InvalidPayload(format!(
+                    "{} request needs 7.25 GiB but only 6.00 GiB is safely available",
+                    dir.display(),
+                ))))
+            })
+            .unwrap_err()
+            .to_string();
+            assert_eq!(seen, directories);
+            assert!(error.contains(&format!("{expected} tier:")), "{error}");
+            assert!(error.contains("7.25 GiB"), "{error}");
+            assert!(!error.contains("30 GB"));
+            assert!(!error.contains("Lower the output resolution"));
+        }
+    }
+}
+
+/// Reconcile a probe silently; only the winning tier emits the generation recipe/tier event.
+#[cfg(target_os = "macos")]
+fn mlx_candidate_quant(
     request: &ImageRequest,
-    settings: &Settings,
-    adapters: &[AdapterSpec],
-) -> WorkerResult<LoadSpec> {
-    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    let spec = attach_required_components(
-        spec.clone(),
-        engine_id,
-        &request.model_manifest_entry,
-        settings,
-    )
-    .unwrap_or(spec);
-    Ok(attach_selected_decoder(
-        spec, engine_id, request, settings,
-    )?
-    .with_adapters(adapters.to_vec()))
+    model: &ResolvedModel,
+    dir: &Path,
+) -> (Option<Quant>, Option<i64>) {
+    if let Some(fixed) = fixed_mlx_artifact_quant(&request.model) {
+        return fixed;
+    }
+    if !model.supports_quant() {
+        return (None, None);
+    }
+    let requested = resolve_quant(request, Some(dir));
+    match tier_quant_from_resolved_dir(dir) {
+        Some((actual, bits)) => (
+            if is_dense_te_tier(request) {
+                requested.0
+            } else {
+                actual
+            },
+            bits,
+        ),
+        None => requested,
+    }
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -8444,92 +8619,9 @@ async fn generate_stream(
     // tier (the catalog ships only q4) — was a documented follow-up, now wired on both lanes.
     ensure_boogu_tier_present(api, settings, job, request).await?;
     ensure_ideogram_tier_present(api, settings, job, request).await?;
-    // `mut` for the sc-10733 capability downtier below: a DEFAULT job whose resolved tier won't fit this
-    // machine's unified memory is re-pointed at the highest installed tier that does, BEFORE the quant
-    // reconcile + spec build (so both the recorded precision and the load follow the downtiered tier).
-    let mut weights_dir = resolve_weights_dir(request, settings)?
+    let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
-    // Capability downtier probes must carry the exact adapter stack the eventual load sees. Resolving
-    // here lets a lower adapted tier win instead of keeping a base-only fit that the final gate rejects.
     let adapters = resolve_adapters(request, settings)?;
-    // sc-10733 capability downtier (MLX): for a DEFAULT job (no explicit per-(screen,model) pick), if the
-    // resolved tier won't fit this machine's unified memory even under sequential residency, step DOWN to
-    // the highest installed tier that does — floored at the per-model quality floor — rejecting only when
-    // nothing >= floor fits. An explicit pick (`mlxQuantizeExplicit`) is HONORED: it skips the downtier
-    // (the cold-load `apply_residency_policy` still reject-before-OOMs an unfittable explicit pick). The
-    // `reconcile_resolved_tier_quant` below then corrects the recorded quant to the (possibly downtiered)
-    // `weights_dir`, so telemetry never lies about the tier that actually ran.
-    let explicit_pick = request
-        .advanced
-        .get("mlxQuantizeExplicit")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !explicit_pick {
-        if let Some(default_tier) = tier_key_from_resolved_dir(&weights_dir) {
-            let floor = min_quality_floor(request);
-            let tiers = downtier_candidate_tiers(request, settings, default_tier, floor);
-            // Scored lazily (see `choose_downtier_lazy`): each `mlx_tier_fit` seals that tier's text
-            // encoder with a full SHA-256, so collecting the whole ladder up front charged every job
-            // for tiers the default tier had already ruled out. The candidates are in descending
-            // fidelity, so the ordinary "it fits" outcome now scores exactly one.
-            let pick = choose_downtier_lazy(default_tier, &tiers, |cand| -> WorkerResult<_> {
-                let Some(dir) = resolve_tier_dir(request, settings, cand) else {
-                    return Ok(None);
-                };
-                let probe = tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
-                Ok(Some(mlx_tier_fit(engine_id, &probe)))
-            })?;
-            match pick {
-                DowntierPick::Keep => {}
-                DowntierPick::Downtier(chosen) => {
-                    if let Some(dir) = resolve_tier_dir(request, settings, chosen) {
-                        tracing::warn!(
-                            model = %request.model,
-                            from = %default_tier,
-                            to = %chosen,
-                            "MLX fit-gate: default tier won't fit unified memory — downtiering to the \
-                             highest installed tier that does (capability clamp, sc-10733)"
-                        );
-                        weights_dir = dir;
-                    }
-                }
-                DowntierPick::Reject {
-                    tier,
-                    needed_gb,
-                    available_gb,
-                } => {
-                    // Name the REJECTED TIER's own weight bytes next to the peak (sc-15154). The
-                    // peak is `Σweights + HEADROOM_GB`, and on a small budget the flat headroom
-                    // dominates it — a q4 install of 7 GB refused with a bare "~25 GB" reads like
-                    // the figure belongs to some other tier. Recomputed from the same probe spec
-                    // `mlx_tier_fit` scored, so the two numbers cannot drift apart.
-                    let weights_note = if let Some(dir) = resolve_tier_dir(request, settings, tier) {
-                        let probe =
-                            tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
-                        let gb = crate::mlx_fit_gate::spec_weights_gb(engine_id, &probe);
-                        if gb > 0.0 {
-                            format!(
-                                " — ~{} GB of weights plus headroom for activations and the OS",
-                                gb.round() as i64
-                            )
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "{model} needs ~{needed} GB of unified memory even at the smallest installed \
-                         tier it can run ({tier}{weights_note}) but this machine has ~{available} GB. \
-                         Lower the output resolution or run on a Mac with more memory.",
-                        model = request.model,
-                        needed = needed_gb.round() as i64,
-                        available = available_gb.round() as i64,
-                    )));
-                }
-            }
-        }
-    }
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
     // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
     // passed-in label only if a descriptor ever advertised an empty backend (never today).
@@ -8537,64 +8629,6 @@ async fn generate_stream(
         backend
     } else {
         model.backend()
-    };
-    // Descriptor-gated quant (mirrors the candle lane below): the MLX families advertise Q4/Q8
-    // (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on an
-    // already-packed turnkey). SANA joined this set in mlx-gen #654 (sc-8489): its descriptor now
-    // advertises Q4/Q8 and its `load` ACCEPTS an advisory `spec.quantize` (the pre-quantized tier is
-    // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
-    // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
-    // quant — such a model loads dense.
-    // True-V2's converter consumes the sole BF16 source and writes a dense BF16 transformer. It
-    // has no packed tier matrix: fixing the pair before reconciliation means neither the historical
-    // catalog default nor a crafted advanced preference can emit a false tier-change event or
-    // relabel the declaration, fit, recipe, and provider identities.
-    let fixed_artifact_quant = fixed_mlx_artifact_quant(&request.model);
-    let (quant, quant_bits) = if let Some(fixed) = fixed_artifact_quant {
-        fixed
-    } else if model.supports_quant() {
-        // `weights_dir` is the resolved tier subdir (sc-11042). NVFP4 is unreachable on this lane
-        // regardless (`nvfp4_host_eligible()` is hard-`false` on macOS — Metal has no FP4 hardware), so
-        // this is the same `(quant, bits)` it has always produced; passing the dir keeps the resolver's
-        // one contract — the tier is read off what resolved — uniform across both lanes.
-        resolve_quant(request, Some(&weights_dir))
-    } else {
-        (None, None)
-    };
-    // sc-8820: the tier resolvers ([`standard_tier_subdir`] & friends) silently fall through
-    // q4→q8→bf16 when the preferred tier isn't downloaded, but the quant above is derived from the
-    // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
-    // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
-    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. SANA
-    // (sc-8489) now ships standard q4/q8/bf16 turnkey tiers and advertises Q4/Q8, so it reconciles here
-    // exactly like the other matrix models.
-    //
-    // sc-9362 (F-018 follow-up): dense-TE turnkeys (FLUX.2-klein) always derive `(None, None)` from
-    // `resolve_quant` (the load quant must stay `None` so the dense bf16 TE is never re-quantized),
-    // but their transformer is packed at q4/q8. Reconciling against that always-bf16 value made every
-    // straight dense-TE job read as a bf16→qN "downgrade" — a spurious event, and pre-8820 the recipe
-    // recorded bf16 for a q4/q8 transformer. Feed reconcile the transformer tier the request ACTUALLY
-    // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
-    // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
-    // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
-    let (quant, quant_bits) = if fixed_artifact_quant.is_some() {
-        (quant, quant_bits)
-    } else if model.supports_quant() {
-        let requested_for_reconcile = if is_dense_te_tier(request) {
-            (None, dense_te_requested_tier_bits(request))
-        } else {
-            (quant, quant_bits)
-        };
-        reconcile_resolved_tier_quant(
-            requested_for_reconcile,
-            &weights_dir,
-            !is_dense_te_tier(request),
-            &request.model,
-            &job.id,
-            backend,
-        )
-    } else {
-        (quant, quant_bits)
     };
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
@@ -8648,13 +8682,6 @@ async fn generate_stream(
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
     let repo = model_repo(request, &model);
-    let raw_settings = mlx_raw_settings(
-        request,
-        &repo,
-        steps,
-        quant_bits,
-        guidance.or(model_true_cfg),
-    );
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
     let seeds: Vec<i64> = (0..count)
@@ -8740,185 +8767,306 @@ async fn generate_stream(
     let quality_opt_in = crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     );
-    let effective_tier =
-        resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
-    let resolved_artifact = if calibration_opt_in || quality_opt_in {
-        resolved_mlx_artifact_provenance(
-            request,
-            settings,
-            &repo,
-            &weights_dir,
-            effective_tier,
-        )?
-    } else {
-        None
-    };
-    #[cfg(target_os = "macos")]
-    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
-    #[cfg(not(target_os = "macos"))]
-    let load_quant = quant;
-    let mut spec = load_spec(weights_dir, load_quant, adapters, flux_ip_dir);
-    if let Some(pid) = pid_weights {
-        spec = spec.with_pid(pid.checkpoint, pid.gemma);
-    }
-    // Named model components (epic 13657, sc-13682): stage a provider's caller-staged components (SDXL's
-    // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
-    // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
-    // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
-    // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
-    spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
-    // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
-    // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
-    spec = attach_selected_decoder(spec, engine_id, request, settings)?;
-    // P9: a shared engine such as `sdxl` serves several independently pinned catalog routes. Bind
-    // the exact resolved model id, independently resolved artifact tree, and running inference
-    // implementation before any semantic quality row reaches the provider contract.
-    spec = spec.with_resolved_route(request.model.clone());
-    let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
-        && identity_init.is_none()
-        && edit_refs.is_empty()
-        && ideogram_edit_mask.is_none()
-        && hires_fix.is_none();
-    // Finalize caller-selected text-encoder state before asking the provider about the real
-    // candidate. Chroma must see and reject an external encoder rather than being admitted against
-    // an incomplete LoadSpec which is mutated afterward.
-    let unattached_spec = spec;
-    let attached_spec =
-        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
-    let mut spec = attached_spec.into_load_spec();
-    // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
-    // the decision: the typed registry enforces mode/overlay/source semantics and the linked
-    // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
-    // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
-    // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
-    let declaration_reference_count = if hires_fix.is_some() {
-        hires_fix_reference_count()
-    } else {
-        lane_reference_count(
-            identity_init.is_some(),
-            edit_refs.len(),
-            ideogram_edit_mask.is_some(),
-        )
-    };
-    let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_mlx_request(
-        engine_id,
-        &request.mode,
-    );
-    let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
-        mode: declaration_mode
-            .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
-        reference_count: declaration_reference_count,
-        use_pid,
-        has_phases: false,
-    };
-    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
-        engine_id,
-        effective_tier,
-        declaration_mode,
-        &request.model_manifest_entry,
-        spec,
-        declaration_context,
-    );
-    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
-        engine_id,
-        effective_tier,
-        declaration_mode,
-        &request.model_manifest_entry,
-        spec,
-        declaration_context,
-    );
-    if let Some(warning) =
-        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
-    {
-        tracing::warn!(
-            event = "mlx_load_shape_declaration_warning",
-            provider = engine_id,
-            ?warning,
-            "provider refused deferred materialization; retaining the safe eager load path"
+    let memory_budget = crate::generator_cache::mlx_tier_budget(engine_id).await?;
+    // Resolve every tier through the exact production composition BEFORE scoring it. No candidate
+    // loads tensors, and the winning spec/plan are retained rather than rebuilt after selection.
+    let prepare = |weights_dir: PathBuf| -> WorkerResult<PreparedMlxImageTier> {
+        let (quant, quant_bits) = mlx_candidate_quant(request, &model, &weights_dir);
+        let effective_tier =
+            resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
+        let resolved_artifact = if calibration_opt_in || quality_opt_in {
+            resolved_mlx_artifact_provenance(
+                request,
+                settings,
+                &repo,
+                &weights_dir,
+                effective_tier,
+            )?
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+        #[cfg(not(target_os = "macos"))]
+        let load_quant = quant;
+        let mut spec = load_spec(
+            weights_dir.clone(),
+            load_quant,
+            adapters.clone(),
+            flux_ip_dir.clone(),
         );
-    }
-    if spec.load_shape_declaration_result
-        == gen_core::LoadShapeDeclarationResult::NotEvaluated
-    {
-        spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
-    }
-    let decode_quality_binding = crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
-        &request.model_manifest_entry,
-        &request.model,
-        resolved_artifact.as_ref(),
-    )?;
-    spec = crate::mlx_fit_gate::attach_decode_quality_binding(
-        spec,
-        decode_quality_binding,
-        &request.model,
-    );
-    let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
-        engine_id,
-        &request.model,
-        &spec,
-        Some(&request.model_manifest_entry),
-        resolved_artifact,
-    );
-    let mlx_request_plan = if matches!(
-        engine_id,
-        "krea_2_raw"
-            | "krea_2_turbo"
-            | "krea_2_edit"
-            | "krea_2_turbo_edit"
-            | "flux1_schnell"
-            | "flux1_dev"
-            | "flux2_klein_9b"
-    ) {
-        mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
+        if let Some(pid) = &pid_weights {
+            spec = spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+        }
+        // Named model components (epic 13657, sc-13682): stage a provider's caller-staged components (SDXL's
+        // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
+        // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
+        // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
+        // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
+        spec =
+            attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+        // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
+        // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
+        spec = attach_selected_decoder(spec, engine_id, request, settings)?;
+        // P9: a shared engine such as `sdxl` serves several independently pinned catalog routes. Bind
+        // the exact resolved model id, independently resolved artifact tree, and running inference
+        // implementation before any semantic quality row reaches the provider contract.
+        spec = spec.with_resolved_route(request.model.clone());
+        let plain_text_to_image =
+            matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+                && identity_init.is_none()
+                && edit_refs.is_empty()
+                && ideogram_edit_mask.is_none()
+                && hires_fix.is_none();
+        // Finalize caller-selected text-encoder state before asking the provider about the real
+        // candidate. Chroma must see and reject an external encoder rather than being admitted against
+        // an incomplete LoadSpec which is mutated afterward.
+        let unattached_spec = spec;
+        let attached_spec =
+            attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
+        let mut spec = attached_spec.into_load_spec();
+        // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
+        // the decision: the typed registry enforces mode/overlay/source semantics and the linked
+        // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
+        // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
+        // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
+        let declaration_reference_count = if hires_fix.is_some() {
+            hires_fix_reference_count()
+        } else {
+            lane_reference_count(
+                identity_init.is_some(),
+                edit_refs.len(),
+                ideogram_edit_mask.is_some(),
+            )
+        };
+        let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_mlx_request(
+            engine_id,
+            &request.mode,
+        );
+        let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
+            mode: declaration_mode
+                .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+            reference_count: declaration_reference_count,
+            use_pid,
+            has_phases: false,
+        };
+        spec = prepare_mlx_load_policy(
+            engine_id,
+            effective_tier,
+            declaration_mode,
+            &request.model_manifest_entry,
+            spec,
+            declaration_context,
+            plain_text_to_image,
+            model.descriptor.capabilities.supports_sequential_offload,
+        )?;
+        let decode_quality_binding =
+            crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
+                &request.model_manifest_entry,
+                &request.model,
+                resolved_artifact.as_ref(),
+            )?;
+        spec = crate::mlx_fit_gate::attach_decode_quality_binding(
+            spec,
+            decode_quality_binding,
+            &request.model,
+        );
+        let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+            engine_id,
+            &request.model,
+            &spec,
+            Some(&request.model_manifest_entry),
+            resolved_artifact,
+        );
+        let mlx_request_plan = if matches!(
+            engine_id,
+            "krea_2_raw"
+                | "krea_2_turbo"
+                | "krea_2_edit"
+                | "krea_2_turbo_edit"
+                | "flux1_schnell"
+                | "flux1_dev"
+                | "flux2_klein_9b"
+        ) {
+            mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
+        } else {
+            mlx_request_plan
+        };
+        let has_request_reference =
+            identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
+        // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
+        // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
+        // first hires pass renders at the base size with the caller's own conditioning and gets its own
+        // request-scope identity inside `generate_one_with_hires`.
+        let reference_count = declaration_reference_count;
+        let mut memory_overlays = Vec::new();
+        if has_request_reference {
+            memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
+        }
+        if ideogram_edit_mask.is_some() {
+            memory_overlays.push("mask".to_owned());
+        }
+        if spec.control.is_some() || !spec.extra_controls.is_empty() {
+            memory_overlays.push(format!(
+                "control:{}",
+                usize::from(spec.control.is_some()) + spec.extra_controls.len()
+            ));
+        }
+        if spec.ip_adapter.is_some() {
+            memory_overlays.push("ip_adapter".to_owned());
+        }
+        if adapter_count > 0 {
+            memory_overlays.push(format!("adapters:{adapter_count}"));
+        }
+        if use_pid {
+            memory_overlays.push("pid".to_owned());
+        }
+        let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
+            engine_id,
+            &spec,
+            (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+        );
+        let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+            width: memory_width,
+            height: memory_height,
+            count: request.count,
+            mode: request.mode.clone(),
+            overlay: provider_overlay,
+            adapter_count,
+            has_reference: reference_count > 0,
+            reference_count,
+            use_pid,
+            has_phases: false,
+            conditioning_windows: Some(crate::mlx_fit_gate::clip_windows_for_spec(
+                engine_id, &spec, &request.prompt,
+                &request.negative_prompt,
+            )),
+        };
+        Ok(PreparedMlxImageTier {
+            weights_dir,
+            spec,
+            plan: mlx_request_plan,
+            inputs: mlx_request_inputs,
+        })
+    };
+    let default_tier = tier_key_from_resolved_dir(&weights_dir);
+    let explicit_pick = request
+        .advanced
+        .get("mlxQuantizeExplicit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tiers = default_tier
+        .filter(|_| !explicit_pick)
+        .map(|tier| downtier_candidate_tiers(request, settings, tier, min_quality_floor(request)))
+        .unwrap_or_default();
+    let directories = if tiers.is_empty() {
+        vec![weights_dir.clone()]
     } else {
-        mlx_request_plan
+        tiers
+            .iter()
+            .filter_map(|tier| resolve_tier_dir(request, settings, tier))
+            .collect()
     };
-    let has_request_reference =
-        identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
-    // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
-    // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
-    // first hires pass renders at the base size with the caller's own conditioning and gets its own
-    // request-scope identity inside `generate_one_with_hires`.
-    let reference_count = declaration_reference_count;
-    let mut memory_overlays = Vec::new();
-    if has_request_reference {
-        memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
+    let selected = choose_mlx_request_tier(directories, |dir| {
+        let prepared = prepare(dir)?;
+        // Query/validate the provider before considering a legacy load refusal, so malformed
+        // artifacts are never mistaken for a reason to silently select another tier.
+        let admission = crate::mlx_fit_gate::preflight_request(
+            &prepared.spec,
+            &prepared.plan,
+            &prepared.inputs,
+            memory_budget,
+        )?;
+        let admission = match admission {
+            crate::mlx_fit_gate::MlxRequestAdmission::Admitted(evaluation) => {
+                match crate::mlx_fit_gate::preflight_load_rejection(engine_id, &prepared.spec) {
+                    Some(error) => crate::mlx_fit_gate::MlxRequestAdmission::Rejected(error),
+                    None => crate::mlx_fit_gate::MlxRequestAdmission::Admitted(evaluation),
+                }
+            }
+            rejected => rejected,
+        };
+        Ok(match admission {
+            crate::mlx_fit_gate::MlxRequestAdmission::Admitted(_) => MlxTierFit::Fits(prepared),
+            crate::mlx_fit_gate::MlxRequestAdmission::Rejected(error) => MlxTierFit::TooBig(error),
+        })
+    })?;
+    if selected.weights_dir != weights_dir {
+        tracing::warn!(model = %request.model, from = ?default_tier,
+            to = ?tier_key_from_resolved_dir(&selected.weights_dir),
+            "MLX request ladder selected a lower installed tier");
     }
-    if ideogram_edit_mask.is_some() {
-        memory_overlays.push("mask".to_owned());
-    }
-    if spec.control.is_some() || !spec.extra_controls.is_empty() {
-        memory_overlays.push(format!(
-            "control:{}",
-            usize::from(spec.control.is_some()) + spec.extra_controls.len()
-        ));
-    }
-    if spec.ip_adapter.is_some() {
-        memory_overlays.push("ip_adapter".to_owned());
-    }
-    if adapter_count > 0 {
-        memory_overlays.push(format!("adapters:{adapter_count}"));
-    }
-    if use_pid {
-        memory_overlays.push("pid".to_owned());
-    }
-    let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
-        engine_id,
-        &spec,
-        (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+    let PreparedMlxImageTier {
+        weights_dir,
+        spec,
+        plan: mlx_request_plan,
+        inputs: mlx_request_inputs,
+    } = selected;
+    // Descriptor-gated quant (mirrors the candle lane below): the MLX families advertise Q4/Q8
+    // (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on an
+    // already-packed turnkey). SANA joined this set in mlx-gen #654 (sc-8489): its descriptor now
+    // advertises Q4/Q8 and its `load` ACCEPTS an advisory `spec.quantize` (the pre-quantized tier is
+    // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
+    // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
+    // quant — such a model loads dense.
+    // True-V2's converter consumes the sole BF16 source and writes a dense BF16 transformer. It
+    // has no packed tier matrix: fixing the pair before reconciliation means neither the historical
+    // catalog default nor a crafted advanced preference can emit a false tier-change event or
+    // relabel the declaration, fit, recipe, and provider identities.
+    let fixed_artifact_quant = fixed_mlx_artifact_quant(&request.model);
+    let (quant, quant_bits) = if let Some(fixed) = fixed_artifact_quant {
+        fixed
+    } else if model.supports_quant() {
+        // `weights_dir` is the resolved tier subdir (sc-11042). NVFP4 is unreachable on this lane
+        // regardless (`nvfp4_host_eligible()` is hard-`false` on macOS — Metal has no FP4 hardware), so
+        // this is the same `(quant, bits)` it has always produced; passing the dir keeps the resolver's
+        // one contract — the tier is read off what resolved — uniform across both lanes.
+        resolve_quant(request, Some(&weights_dir))
+    } else {
+        (None, None)
+    };
+    // sc-8820: the tier resolvers ([`standard_tier_subdir`] & friends) silently fall through
+    // q4→q8→bf16 when the preferred tier isn't downloaded, but the quant above is derived from the
+    // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
+    // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
+    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. SANA
+    // (sc-8489) now ships standard q4/q8/bf16 turnkey tiers and advertises Q4/Q8, so it reconciles here
+    // exactly like the other matrix models.
+    //
+    // sc-9362 (F-018 follow-up): dense-TE turnkeys (FLUX.2-klein) always derive `(None, None)` from
+    // `resolve_quant` (the load quant must stay `None` so the dense bf16 TE is never re-quantized),
+    // but their transformer is packed at q4/q8. Reconciling against that always-bf16 value made every
+    // straight dense-TE job read as a bf16→qN "downgrade" — a spurious event, and pre-8820 the recipe
+    // recorded bf16 for a q4/q8 transformer. Feed reconcile the transformer tier the request ACTUALLY
+    // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
+    // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
+    // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
+    let (_, quant_bits) = if fixed_artifact_quant.is_some() {
+        (quant, quant_bits)
+    } else if model.supports_quant() {
+        let requested_for_reconcile = if is_dense_te_tier(request) {
+            (None, dense_te_requested_tier_bits(request))
+        } else {
+            (quant, quant_bits)
+        };
+        reconcile_resolved_tier_quant(
+            requested_for_reconcile,
+            &weights_dir,
+            !is_dense_te_tier(request),
+            &request.model,
+            &job.id,
+            backend,
+        )
+    } else {
+        (quant, quant_bits)
+    };
+    let raw_settings = mlx_raw_settings(
+        request,
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(model_true_cfg),
     );
-    let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
-        width: memory_width,
-        height: memory_height,
-        count: request.count,
-        mode: request.mode.clone(),
-        overlay: provider_overlay,
-        adapter_count,
-        has_reference: reference_count > 0,
-        reference_count,
-        use_pid,
-        has_phases: false,
-    };
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
     // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒
@@ -8994,82 +9142,82 @@ async fn generate_stream(
                 tx,
                 seeds,
                 move |_index, seed, preview, prompt_enhancement, on_progress| {
-                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    generator,
-                    &mlx_request_plan,
-                    &mlx_request_inputs,
-                    cache_state,
-                    loaded_policy.offload_policy,
-                    warm_policy.take(),
-                    request_external_committed_bytes,
-                )?;
-                // Exact promoted MLX evidence may tighten the soft process limit for this request.
-                // The RAII guard restores the process-global/user limit after all retries and never
-                // touches the wired limit (#1947).
-                let _request_memory_limit = memory_evaluation
-                    .process_limit_bytes
-                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                    generate_one_with_hires(
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                         generator,
-                        &prompt,
-                        width,
-                        height,
+                        &mlx_request_plan,
+                        &mlx_request_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        request_external_committed_bytes,
+                    )?;
+                    // Exact promoted MLX evidence may tighten the soft process limit for this request.
+                    // The RAII guard restores the process-global/user limit after all retries and never
+                    // touches the wired limit (#1947).
+                    let _request_memory_limit = memory_evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
+                        generate_one_with_hires(
+                            generator,
+                            &prompt,
+                            width,
+                            height,
+                            seed,
+                            steps,
+                            guidance,
+                            negative_prompt.clone(),
+                            identity_init.as_ref(),
+                            &edit_refs,
+                            ideogram_edit_mask.as_ref(),
+                            true_cfg,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            Some(memory_evaluation.memory),
+                            Some(memory_evaluation.memory),
+                            Some(&memory_evaluation.context),
+                            None,
+                            &enhance,
+                            hires_fix,
+                            preview.clone(),
+                            prompt_enhancement.for_prompt(&prompt),
+                            &cancel,
+                            on_progress,
+                        )
+                    };
+                    // Detect-and-recover safety net (sc-6501): the caption guard makes the placeholder
+                    // rare, but a residual one can still occur even with a caption. Detect it via the
+                    // baked-text heuristic (NOT a std/flatness check — the text lifts std to ~10) and
+                    // reseed transparently, keeping the first clean render. Gated to Ideogram 4; a no-op
+                    // elsewhere (and on turbo, which is CFG-free and cannot produce the placeholder).
+                    let initial = render(seed, on_progress)?;
+                    let (final_seed, out_w, out_h, pixels) = recover_ideogram_placeholder(
+                        is_ideogram,
                         seed,
-                        steps,
-                        guidance,
-                        negative_prompt.clone(),
-                        identity_init.as_ref(),
-                        &edit_refs,
-                        ideogram_edit_mask.as_ref(),
-                        true_cfg,
-                        sampler.as_deref(),
-                        scheduler.as_deref(),
-                        scheduler_shift,
-                        guidance_method.as_deref(),
-                        use_pid,
-                        text_style_gain,
-                        Some(memory_evaluation.memory),
-                        Some(memory_evaluation.memory),
-                        Some(&memory_evaluation.context),
-                        None,
-                        &enhance,
-                        hires_fix,
-                        preview.clone(),
-                        prompt_enhancement.for_prompt(&prompt),
                         &cancel,
-                        on_progress,
-                    )
-                };
-                // Detect-and-recover safety net (sc-6501): the caption guard makes the placeholder
-                // rare, but a residual one can still occur even with a caption. Detect it via the
-                // baked-text heuristic (NOT a std/flatness check — the text lifts std to ~10) and
-                // reseed transparently, keeping the first clean render. Gated to Ideogram 4; a no-op
-                // elsewhere (and on turbo, which is CFG-free and cannot produce the placeholder).
-                let initial = render(seed, on_progress)?;
-                let (final_seed, out_w, out_h, pixels) = recover_ideogram_placeholder(
-                    is_ideogram,
-                    seed,
-                    &cancel,
-                    initial,
-                    |retry_seed| render(retry_seed, on_progress),
-                )?;
-                // Score this finished image against the cached source embedding (sc-4411). Image build +
-                // pixel clone is paid ONLY when a scorer exists (a With-Character generation) — a plain
-                // t2i / edit job has no scorer, so this is a no-op with no clone. Non-frontal → honest
-                // detected:false N/A; `None` scorer ⇒ field omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
+                        initial,
+                        |retry_seed| render(retry_seed, on_progress),
+                    )?;
+                    // Score this finished image against the cached source embedding (sc-4411). Image build +
+                    // pixel clone is paid ONLY when a scorer exists (a With-Character generation) — a plain
+                    // t2i / edit job has no scorer, so this is a no-op with no clone. Non-frontal → honest
+                    // detected:false N/A; `None` scorer ⇒ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
         },

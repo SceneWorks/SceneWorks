@@ -22684,7 +22684,11 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
     // The legacy lane's inputs for a plain txt2img job: no conditioning, no hires, no adapters —
     // which is the only shape `prepare_checkpoint_plan_sources` lets onto this route.
     let legacy = krea_imported_memory_inputs(&request, &[], None, 0);
-    let plan = checkpoint_plan_memory_inputs(&request);
+    let plan = checkpoint_plan_memory_inputs(
+        &request,
+        "krea_2_raw",
+        &LoadSpec::new(WeightsSource::Dir("fixture".into())),
+    );
     assert_eq!((plan.width, plan.height), (legacy.width, legacy.height));
     assert_eq!(plan.count, legacy.count);
     assert_eq!(plan.mode, legacy.mode);
@@ -25397,9 +25401,9 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
     .await;
     let (plan_image, plan_sha) = render(
         "plan_driven_route",
-        plan_spec,
+        plan_spec.clone(),
         plan_request.clone(),
-        checkpoint_plan_memory_inputs(&plan_request),
+        checkpoint_plan_memory_inputs(&plan_request, "krea_2_raw", &plan_spec),
     )
     .await;
     let byte_delta = legacy_image

@@ -1509,6 +1509,11 @@ pub const fn decode_tiled_bound_bytes(voxels: i128) -> i128 {
 /// transitions), observed at up to 15.84% over the binding active phase across the retained corpus.
 /// Coefficient uncertainty is NOT covered here — it is priced inside the coefficients above, each
 /// of which is set at or above the highest measured within-cell slope.
+/// Retained MLX same-cell active-peak recapture spread. Estimated video peaks include this
+/// uncertainty once; reclaimable cache is excluded. The worker's policy audits the same value
+/// against the retained evidence corpus and asserts equality with this shared derivation input.
+pub const MLX_ACTIVE_RECAPTURE_SPREAD: f64 = 0.1260183508475594;
+
 pub const ANCHOR_ALLOCATOR_ENVELOPE_MARGIN: f64 = 0.17;
 
 /// Validation-only tightness budget: the corpus validation test refuses a derived bound more than
@@ -1584,12 +1589,8 @@ pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 // the others enter the domain the same way, one re-capture each.
 //
 // The measured phase level the law subtracts from is [`MemoryAnchor::phase_active_peak_bytes`],
-// the store's byte-bound decomposition. On the candle lane the allocator level equals it in every
-// retained record. On MLX the allocator retains cache above the active peak; that envelope is a
-// LANE admission term, not an activation residue, and [`MemoryAnchor::derive_mlx_image_phase_peaks`]
-// carries it on top of this law rather than folding it in — a proportionally scaled allocator
-// level under-brackets the retained 768x768 flux2 denoise levels by 1.5%, exactly the class of
-// error a fitted margin used to paper over.
+// the store's byte-bound decomposition. MLX allocator cache is reclaimable and is not added
+// to the active-memory prediction. The admission caller carries recapture uncertainty separately.
 //
 // The identity guards the earlier laws carried (backend lane, LTX pipeline axes, a single-frame
 // measured geometry) stay, and so does the anchor-vs-request regime guard: a phase the anchor
@@ -1812,24 +1813,11 @@ impl ImageDeriveRequest {
 // `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta`.
 // ---------------------------------------------------------------------------------------------
 
-/// Validation-only tightness budget for the sibling+delta fall-through, WIDER than
-/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`] by design: the delta rule adds the FULL shipped file
-/// size of every crossed component to every phase (the conservative direction — see the section
-/// comment), so a derived off-anchor bound legitimately over-estimates by up to the component's
-/// whole size where the true peak holds only part of it. The budget keeps the bound falsifiable
-/// (the leave-one-out validation refuses a runaway estimate) without demanding a tightness the
-/// conservative rule cannot deliver.
-///
-/// RE-DERIVED at the feature-end fix round, after the variant deltas were re-keyed onto what each
-/// variant actually materializes (the earlier 0.35 was sized by a binding case that inherited a
-/// misattributed 8.9 GB distillation-LoRA add on the distilled row — a component the distilled
-/// target never loads). With the corrected table the binding retained case is the bf16
-/// distilled/conv 1280x704 capture `imc-4e1b3a02a6ced3434824`, derived from its dev/diffvae
-/// sibling across a zero variant crossing plus the 0.81 GB conv-decoder crossing, landing 21.83%
-/// over its measured envelope. The budget is that figure rounded up to the next whole point.
-/// `the_delta_tightness_budget_is_the_binding_leave_one_out_overshoot_rounded_up` recomputes it
-/// and refuses more than a point of slack, so this cannot drift back into a number nothing binds.
-pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.22;
+/// Validation-only tightness of sibling+delta active estimates, including recapture uncertainty.
+/// The retained leave-one-out bound is 23.88% above its active peak (bf16 distilled/conv
+/// 1280x704, imc-4e1b3a02a6ced3434824). Round up to the next percentage point. This constrains
+/// the estimate in tests; it is never an additional admission allowance.
+pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.24;
 
 /// Shipped weights file inventories the component deltas cite, compiled in for the same reason
 /// the retained corpora are: a delta's byte value must be recomputable from bytes this build
@@ -3372,12 +3360,9 @@ pub struct AnchorDeriveRequest {
     pub deferred_materialization: bool,
 }
 
-/// Per-phase peak estimates. The admission peak is the max over phases. The VIDEO derivation
-/// ([`MemoryAnchor::derive_video_phase_peaks`]) widens each phase by
-/// [`ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`] before returning it; the IMAGE law
-/// ([`MemoryAnchor::derive_phase_peaks`]) widens nothing — it prices measured peaks, component
-/// bytes and architecture ratios only — and the worker's `ladder_margin_policy` charges an
-/// image-lane anchor derivation the lane's same-cell recapture spread instead.
+/// Per-phase working-set estimates; admission uses their maximum. MLX image estimates return
+/// active bytes and receive recapture uncertainty in the worker; MLX video estimates already
+/// include it here. Candle retains its existing lane accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorDerivedPhases {
     pub conditioning: u64,
@@ -3449,6 +3434,16 @@ fn widened(bytes: i128) -> Option<u64> {
     widened_by(bytes, ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)
 }
 
+/// MLX admission uses active allocations. Its cache is elastic, so a historical cache
+/// high-water is not mandatory RAM. Preserve the other backend's existing accounting.
+fn video_admission_bytes(bytes: i128, backend: AnchorBackend) -> Option<u64> {
+    if backend == AnchorBackend::Mlx {
+        widened_by(bytes, MLX_ACTIVE_RECAPTURE_SPREAD)
+    } else {
+        widened(bytes)
+    }
+}
+
 fn widened_by(bytes: i128, margin: f64) -> Option<u64> {
     if bytes <= 0 {
         return None;
@@ -3498,9 +3493,9 @@ impl MemoryAnchor {
     ) -> Option<AnchorDerivedPhases> {
         let raw = self.derive_video_phase_estimates_raw(request)?;
         Some(AnchorDerivedPhases {
-            conditioning: widened(raw.conditioning.bytes)?,
-            denoise: widened(raw.denoise.bytes)?,
-            decode: widened(raw.decode.bytes)?,
+            conditioning: video_admission_bytes(raw.conditioning.bytes, self.backend)?,
+            denoise: video_admission_bytes(raw.denoise.bytes, self.backend)?,
+            decode: video_admission_bytes(raw.decode.bytes, self.backend)?,
         })
     }
 
@@ -3983,28 +3978,73 @@ impl MemoryAnchor {
         )
     }
 
-    /// The MLX image lane's entry point onto [`Self::derive_phase_peaks`] — the feature-end
-    /// signature the worker's MLX ladder still calls until the lane's own story rewires it.
+    /// Recover each usable resident MLX phase independently. A cached conditioning capture may
+    /// omit its encoder weights; that phase remains unknown without discarding a valid denoise
+    /// or decode observation. These are activation residues, not complete optimized measurements.
+    pub fn derive_mlx_image_activation_residues(
+        &self,
+        request: AnchorMlxImageDeriveRequest,
+        components: ComponentBytes,
+    ) -> [Option<u64>; 3] {
+        if self.underived_reason.is_some()
+            || self.backend != AnchorBackend::Mlx
+            || self.load_shape != AnchorLoadShape::EagerMaterialization
+            || self.measured_regime.staged
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+            || self.transformer_variant.is_some()
+            || self.decoder.is_some()
+            || self.geometry.frames != 1
+            || self.geometry.width == 0
+            || self.geometry.height == 0
+            || request.width == 0
+            || request.height == 0
+        {
+            return [None; 3];
+        }
+        let resident = components
+            .conditioning
+            .saturating_add(components.transformer)
+            .saturating_add(components.decoder);
+        let pixels = u128::from(request.width) * u128::from(request.height);
+        let anchor_pixels = u128::from(self.geometry.width) * u128::from(self.geometry.height);
+        let scale = |residue: u64, quadratic: bool| {
+            let ratio = |numerator: u128, denominator: u128| {
+                u128::from(residue)
+                    .checked_mul(numerator)
+                    .map(|n| n.div_ceil(denominator))
+            };
+            let linear = ratio(pixels, anchor_pixels)?;
+            let scaled = if quadratic {
+                linear.max(ratio(pixels * pixels, anchor_pixels * anchor_pixels)?)
+            } else {
+                linear
+            };
+            // Retain observations below their capture geometry; the fixed/workspace split is unknown.
+            u64::try_from(scaled.max(u128::from(residue))).ok()
+        };
+        [
+            self.phase_active_peak_bytes
+                .conditioning
+                .checked_sub(resident),
+            self.phase_active_peak_bytes
+                .denoise
+                .checked_sub(resident)
+                .and_then(|r| scale(r, true)),
+            self.phase_active_peak_bytes
+                .decode
+                .checked_sub(resident)
+                .and_then(|r| scale(r, false)),
+        ]
+    }
+
+    /// Derive the MLX image lane's non-reclaimable active working set.
     ///
-    /// Pins the lane and keeps its guards: the anchor must be the eager, unbounded, resident
-    /// composition (the widest the lane executes, so the resident derivation upper-bounds every
-    /// optimized composition of the cell), must report a per-phase allocator decomposition, and
-    /// must not carry [`MemoryAnchor::underived_reason`].
-    ///
-    /// Returns per-phase ALLOCATOR levels, the quantity MLX admission covers: the law's active
-    /// estimate plus the anchor's measured allocator envelope above its active peak, phase by
-    /// phase. The envelope is retained cache, which the allocator keeps at smaller geometries and
-    /// grows at larger ones, so it is carried unscaled for a request at or below the anchor
-    /// geometry and scaled by the pixel ratio above it. It is a lane term, not a residue of the
-    /// law — see the *Image derivation law* section comment.
-    ///
-    /// DOMAIN, at this pin: five packaged MLX image anchors report a conditioning-phase active
-    /// peak far below the eager resident set their tier's component bytes state (the adapter
-    /// opened their window on a cold first request that was still materializing its weights), so
-    /// the law refuses each of them and this entry point returns `None` for those cells — the
-    /// lane keeps its floor there until each is re-captured
-    /// (`the_packaged_mlx_anchors_are_outside_the_laws_domain`). The re-captured `z_image_turbo`
-    /// q4 anchor prices (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`).
+    /// Reclaimable cache is retained as capture provenance only. Adding it to a physical-memory
+    /// requirement contradicts `memory_calibration::Phase::non_reclaimable_bytes`: cache shrinks
+    /// under pressure and its boundary reading is not simultaneous with the active high-water mark.
+    /// This resident entry point preserves the source regime and materialization guards.
     pub fn derive_mlx_image_phase_peaks(
         &self,
         request: AnchorMlxImageDeriveRequest,
@@ -4021,35 +4061,11 @@ impl MemoryAnchor {
         {
             return None;
         }
-        let allocators = self.phase_allocator_envelope_bytes?;
-        let active = self.derive_phase_peaks(
+        self.derive_phase_peaks(
             &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
             components,
             ArchitectureFacts::default(),
-        )?;
-        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
-        let request_pixels = i128::from(request.width) * i128::from(request.height);
-        let envelope = |allocator: u64, active_peak: u64| {
-            let envelope = i128::from(allocator.saturating_sub(active_peak));
-            if request_pixels > anchor_pixels {
-                scale_up(envelope, request_pixels, anchor_pixels)
-            } else {
-                envelope
-            }
-        };
-        let peaks = self.phase_active_peak_bytes;
-        Some(AnchorDerivedPhases {
-            conditioning: positive(
-                i128::from(active.conditioning)
-                    + envelope(allocators.conditioning, peaks.conditioning),
-            )?,
-            denoise: positive(
-                i128::from(active.denoise) + envelope(allocators.denoise, peaks.denoise),
-            )?,
-            decode: positive(
-                i128::from(active.decode) + envelope(allocators.decode, peaks.decode),
-            )?,
-        })
+        )
     }
 }
 
@@ -4362,9 +4378,9 @@ impl MemoryAnchorStore {
             };
             let Some(phases) = (|| {
                 Some(AnchorDerivedPhases {
-                    conditioning: widened(priced(raw.conditioning))?,
-                    denoise: widened(priced(raw.denoise))?,
-                    decode: widened(priced(raw.decode))?,
+                    conditioning: video_admission_bytes(priced(raw.conditioning), backend)?,
+                    denoise: video_admission_bytes(priced(raw.denoise), backend)?,
+                    decode: video_admission_bytes(priced(raw.decode), backend)?,
                 })
             })() else {
                 continue;
@@ -4463,7 +4479,6 @@ mod tests {
         conditioning_active: u64,
         denoise_active: u64,
         decode_active: u64,
-        overall_envelope: u64,
     }
 
     /// Every retained, runtime-complete LTX-2.5 MLX measured record — the validation corpus.
@@ -4515,9 +4530,6 @@ mod tests {
                     conditioning_active: measured["conditioningActivePeak"],
                     denoise_active: measured["denoiseActivePeak"],
                     decode_active: measured["decodeActivePeak"],
-                    overall_envelope: record["observedMemory"]["overall"]["allocatorBytes"]
-                        .as_u64()
-                        .expect("overall envelope"),
                 }
             })
             .collect()
@@ -5585,7 +5597,7 @@ mod tests {
     }
 
     #[test]
-    fn derivation_at_the_anchor_geometry_reproduces_the_anchor_peaks_plus_margin() {
+    fn derivation_at_the_anchor_geometry_reproduces_active_peaks() {
         let anchor = store()
             .anchor_for(
                 "ltx_2_5",
@@ -5602,9 +5614,8 @@ mod tests {
                 anchor.geometry.frames,
             ))
             .expect("derivable at the anchor's own geometry");
-        let expect = |measured: u64| {
-            ((measured as f64) * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil() as u64
-        };
+        let expect =
+            |measured: u64| widened_by(i128::from(measured), MLX_ACTIVE_RECAPTURE_SPREAD).unwrap();
         assert_eq!(
             derived.conditioning,
             expect(anchor.phase_active_peak_bytes.conditioning)
@@ -5806,7 +5817,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("record {} is derivable", record.id));
 
-            // Per-phase safety: the margin-widened derived phase covers the measured active peak.
+            // Per-phase safety: the derived active phase covers the measured active peak.
             for (phase, derived_bytes, measured_bytes) in [
                 (
                     "conditioning",
@@ -5824,17 +5835,27 @@ mod tests {
                 );
             }
 
-            // Overall bracket: at or above the measured allocator envelope, and within the
+            // Overall bracket: at or above the measured active peak, and within the
             // validation tightness budget so the margins stay falsifiable.
             let upper = derived.peak_bytes();
             assert!(
-                upper >= record.overall_envelope,
-                "record {}: derived admission bound {upper} under the measured allocator \
-                 envelope {}",
+                upper
+                    >= record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active),
+                "record {}: derived admission bound {upper} under the measured active \
+                 peak {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
-            let tight_cap = ((record.overall_envelope as f64)
+            let tight_cap = ((record
+                .conditioning_active
+                .max(record.denoise_active)
+                .max(record.decode_active) as f64)
                 * (1.0 + ANCHOR_VALIDATION_TIGHTNESS_BUDGET))
                 .ceil() as u64;
             assert!(
@@ -5842,7 +5863,10 @@ mod tests {
                 "record {}: derived admission bound {upper} exceeds the tightness cap \
                  {tight_cap} over envelope {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
         }
 
@@ -6486,6 +6510,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cached_conditioning_preserves_other_resident_mlx_phase_residues() {
+        let mut anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .unwrap()
+            .clone();
+        let components = ComponentBytes {
+            conditioning: 1,
+            transformer: 1,
+            decoder: 1,
+        };
+        let request = AnchorMlxImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+        };
+        let complete = anchor.derive_mlx_image_activation_residues(request, components);
+        assert!(complete.iter().all(Option::is_some));
+        anchor.phase_active_peak_bytes.conditioning = 0;
+        let partial = anchor.derive_mlx_image_activation_residues(request, components);
+        assert_eq!(partial, [None, complete[1], complete[2]]);
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, components)
+                .is_none(),
+            "whole-pipeline authority remains strict"
+        );
+        anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        anchor.measured_regime.decode_tiled = false;
+        anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+    }
+
     /// sc-22667 (epic 22657 D3, E6 "one MLX tier"): the packaged `z_image_turbo` q4 MLX anchor was
     /// re-captured on the nax runner with the adapter's phase window opened ABOVE its
     /// materialized resident set (`memory-mlx-adapter`, `open_resident_phase_window`), so every
@@ -6539,7 +6602,7 @@ mod tests {
             "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
         );
         assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
-        // …and the lane entry point prices it too, allocator envelope included.
+        // The physical-memory gate must use active bytes, not add reclaimable cache.
         let lane = anchor
             .derive_mlx_image_phase_peaks(
                 AnchorMlxImageDeriveRequest {
@@ -6549,9 +6612,26 @@ mod tests {
                 components,
             )
             .expect("the MLX lane entry point prices the re-captured anchor");
-        assert!(lane.conditioning >= resident.conditioning);
-        assert!(lane.denoise >= resident.denoise);
-        assert!(lane.decode >= resident.decode);
+        assert_eq!(lane.conditioning, resident.conditioning);
+        assert_eq!(lane.denoise, resident.denoise);
+        assert_eq!(lane.decode, resident.decode);
+        let mut inflated_cache = anchor.clone();
+        inflated_cache.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+            conditioning: u64::MAX,
+            denoise: u64::MAX,
+            decode: u64::MAX,
+        });
+        assert_eq!(
+            inflated_cache.derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768
+                },
+                components,
+            ),
+            Some(lane),
+            "elastic cache is not mandatory residency"
+        );
     }
 
     /// The Z-Image-Turbo q4 MLX resident set a text-to-image render holds, as tensor bytes summed
@@ -8113,12 +8193,6 @@ mod tests {
                 Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.decode_tiled = true),
             ),
             (
-                "no phase allocator decomposition",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.phase_allocator_envelope_bytes = None;
-                }),
-            ),
-            (
                 "a stated underived reason",
                 Box::new(|anchor: &mut MemoryAnchor| {
                     anchor.underived_reason = Some("validation-only".to_owned());
@@ -8178,8 +8252,12 @@ mod tests {
         assert!(at(1024, 1024).peak_bytes() < at(1536, 1536).peak_bytes());
         assert_eq!(
             at(1024, 1024).peak_bytes(),
-            anchor.overall_allocator_envelope_bytes,
-            "at the anchor geometry the entry point reproduces the anchor's envelope"
+            anchor
+                .phase_active_peak_bytes
+                .conditioning
+                .max(anchor.phase_active_peak_bytes.denoise)
+                .max(anchor.phase_active_peak_bytes.decode),
+            "at the anchor geometry the entry point reproduces the active working set"
         );
         assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
         assert!(anchor
@@ -8587,9 +8665,10 @@ mod tests {
             .expect("the sibling prices the request");
         let expect = |estimate: RawPhaseEstimate| {
             if estimate.anchored {
-                widened(estimate.bytes + i128::from(delta.bytes)).expect("widens")
+                video_admission_bytes(estimate.bytes + i128::from(delta.bytes), AnchorBackend::Mlx)
+                    .expect("active estimate")
             } else {
-                widened(estimate.bytes).expect("widens")
+                video_admission_bytes(estimate.bytes, AnchorBackend::Mlx).expect("active estimate")
             }
         };
         assert_eq!(derived.phases.conditioning, expect(raw.conditioning));
@@ -8885,7 +8964,8 @@ mod tests {
                 ),
             ] {
                 if anchored {
-                    let undelta = widened(sibling_raw).expect("widens");
+                    let undelta = video_admission_bytes(sibling_raw, AnchorBackend::Mlx)
+                        .expect("active estimate");
                     if derived.delta_bytes > 0 {
                         assert!(
                             derived_bytes > undelta,
@@ -8921,12 +9001,22 @@ mod tests {
             }
             let upper = derived.phases.peak_bytes();
             assert!(
-                upper >= record.overall_envelope,
+                upper
+                    >= record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active),
                 "{}: derived bound {upper} under the measured envelope {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
-            let cap = ((record.overall_envelope as f64)
+            let cap = ((record
+                .conditioning_active
+                .max(record.denoise_active)
+                .max(record.decode_active) as f64)
                 * (1.0 + ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET))
                 .ceil() as u64;
             assert!(
@@ -8934,8 +9024,16 @@ mod tests {
                 "{}: derived bound {upper} exceeds the delta tightness cap {cap} over envelope {} \
                  (overshoot {:.4})",
                 record.id,
-                record.overall_envelope,
-                (upper as f64) / (record.overall_envelope as f64) - 1.0
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active),
+                (upper as f64)
+                    / (record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active) as f64)
+                    - 1.0
             );
         }
         // The budget is a claim about DELTA-priced bounds, so the leave-one-out set has to carry
@@ -8982,8 +9080,12 @@ mod tests {
             ) else {
                 continue;
             };
-            let overshoot =
-                (derived.phases.peak_bytes() as f64) / (record.overall_envelope as f64) - 1.0;
+            let overshoot = (derived.phases.peak_bytes() as f64)
+                / (record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active) as f64)
+                - 1.0;
             if overshoot > worst {
                 worst = overshoot;
                 worst_id = record.id.clone();
