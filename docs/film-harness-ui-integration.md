@@ -244,7 +244,9 @@ What the record *does* imply:
   leave every finished take in the project, skip the timeline and export, record `outcome: canceled`
   with a **resumable** stop. Attempts already spent are not re-spent: a cancel is not a retry. A
   cancel the worker does not honour within the grace (30 s, capped at `maxShotSeconds`) stops the run
-  rather than dispatching a second render beside one still on the GPU (runbook § *Cancellation*).
+  rather than dispatching a second render beside one still on the GPU (runbook § *Validation before
+  dispatch*; the constant is `CANCEL_GRACE`, `apps/rust-api/src/film_harness.rs:76`, and the cap is
+  applied at `:659`–`:661`).
 - **Resume after a server restart** is the crash path, and it already works: the record is left
   `running` with the job named in it, and `resume` adopts that job at whatever state it reached. On
   the sc-22715 evaluation the resumed controller found the render 32 % through and simply polled it
@@ -264,7 +266,10 @@ against 137–140 at 2048, with no rubric loss on the two shots measured
 user to accept a 4.4x bill silently.
 
 **`model.loras` and `advanced.steps`, as plan-level declarations.** The Studio already has a LoRA
-selector (`apps/web/src/components/generationStudio.jsx:797` posts `loras: [{ id, weight }]`) and the
+selector (`apps/web/src/components/generationStudio.jsx:508`–`:522`); the `{ id, weight }` shape is
+what its **preset-save** payload carries, not a generation job body
+(`apps/web/src/components/generationStudio.jsx:797` feeding `buildStudioPresetPayload`,
+`apps/web/src/presetUtils.js:777`–`:786`). The
 editor rail has a steps override (`apps/web/src/components/editor/GenerationRail.jsx:292`), so these
 are not missing from the product. What is missing is the *shape a film needs*: declared **once on the
 family** and resolved **per shot** against the partition that shot resolved to

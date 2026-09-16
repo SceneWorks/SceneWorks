@@ -148,9 +148,15 @@ the **family once** and the compiler resolves the partition per shot
 | non-empty | `minimax_h3_ref`, with `referenceAssetIds` in the plan's role order |
 | empty | `minimax_h3`, its declared mode, and no reference field at all |
 
-**References are optional, and a user who supplies none gets the base path.** A shot that binds none
-is never refused for it; a shot that declares `reference_to_video` and binds nothing is the
-contradiction, and is refused by name (runbook § *Partition resolution*). The compiled request's
+**What is optional is image conditioning, not the pack.** A reference pack document is always
+required: `--references` is a required argument (`apps/rust-api/src/bin/film-harness.rs:467`), and
+every shot must bind at least one **approved** pack role, through `continuityRoles` or through a
+conditioning slot, or it is refused (`crates/sceneworks-core/src/film_plan.rs:1741`–`:1758`; the
+anchor rule stated above, runbook § *Editing the assembled sequence*). What is optional is
+`conditioning.referenceRoles`, and it is optional **per shot**: a shot that names none compiles to
+the base `minimax_h3` with its declared mode and no reference field at all. A shot that declares
+`reference_to_video` and binds nothing is the contradiction, and is refused by name (runbook
+§ *Partition resolution*). The compiled request's
 `model`, the dispatched body's `model` and the attempt record's `resolvedModelId` are one string read
 three times, so they cannot disagree about which checkpoint produced a take
 (`crates/sceneworks-core/src/film_plan.rs:3426`).
@@ -225,8 +231,11 @@ not change; what changed is that a repair became something a copy-only model can
 
 `film-harness compile` writes `compiled.json`: one request per shot with mode, prompt, duration,
 fps, geometry, seed and reference bindings exactly as they will be dispatched.
-`COMPILED_PLAN_SCHEMA_VERSION` is 3 (`crates/sceneworks-core/src/film_compile.rs:42`); a v1 document
-is refused by version and the remedy is to recompile.
+`COMPILED_PLAN_SCHEMA_VERSION` is 3 (`crates/sceneworks-core/src/film_compile.rs:42`); a document at
+any earlier schema version — v1 or v2 — is refused by version rather than read
+(`crates/sceneworks-core/src/film_compile.rs:626`), because a stale document read under this build
+would have its derived fields defaulted and then be blamed as hand-edited (`:37`–`:41`). The remedy
+either way is to recompile.
 
 Per shot it carries the resolved partition and its `partitionReason`
 (`crates/sceneworks-core/src/film_compile.rs:381`, `:387`); `referenceAssetIds` in the plan's role
@@ -465,7 +474,8 @@ Apple M5 Max, 128 GB unified, macOS 26.6.2, one native MLX worker, MiniMax-H3 q4
 
 Add a per-shot cold load on top: roughly 5–10 min for the reference DiT in cell (a), about 45 min
 spread over the six shots because the checkpoint is re-selected per job
-(`docs/film-harness-evaluation-phase-2.md:64`).
+(`docs/film-harness-evaluation-phase-2.md:64`, with the per-job re-selection and the 5–10 min load
+figure at `:103`–`:105`).
 
 **The caveats the phase-2 report states, and they are not small**
 (`docs/film-harness-evaluation-phase-2.md:430`–`:459`):
@@ -499,8 +509,15 @@ spread over the six shots because the checkpoint is re-selected per job
 - **The reviewer decides nothing.** Only `accept-take`, `reject-take`, `request-repair`,
   `replace-take` and the edit verbs change anything.
 - **No automatic regeneration of a flagged shot.** A `needsReview` flag is raised once per
-  `(sourceShotId, dependency)`, nothing clears it, and only a human decision retires one
-  (`crates/sceneworks-core/src/film_plan.rs:3114`, `ReviewFlag`).
+  `(sourceShotId, dependency)` (`crates/sceneworks-core/src/film_plan.rs:3114`, `ReviewFlag`).
+  Nothing automatic clears it; `accept-take` retires that shot's flags
+  (`apps/rust-api/src/film_harness/review.rs:1659`–`:1660`, matching the `accept-take` row above),
+  and the next upstream change raises the flag again
+  (`apps/rust-api/src/film_harness.rs:5553`–`:5556`) — which is the point of resolving it.
+- **The reference pack is required at the document level.** The epic's E1 wording, "the reference
+  pack is never required", holds at the **shot** level and for **image conditioning**: a shot may
+  name no `referenceRoles` and still compile. It does not hold at the document level — the harness
+  today always requires a pack file with approved roles, and every shot must anchor to one of them.
 - **Nothing chains a shot on the previous shot's last frame.** `chainFromShotId` records that a shot
   continues an earlier one and rides into provenance; it is never an anchor by itself, and a chained
   shot naming no canonical role is refused (runbook § *Editing the assembled sequence*).
