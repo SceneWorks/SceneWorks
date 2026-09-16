@@ -315,3 +315,53 @@ All fourteen entries were extended (`attestedRevision` → `e11fd9f0`, the readi
 extension is required rather than optional: `a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to`
 (`sceneworks-core`) asserts `is_current == (attestedRevision == pin)`, so an attestation left at the
 previous pin would red on a row that is in fact still current.
+
+## Extension to inference `e497db468` (sc-23402, epic 23401 film-harness phase 2, 2026-09-15)
+
+The epic 23401 feature pin moved `fff98b05b31e24423c517f05553d1379bf24fc3a` →
+`e497db468073752568e4d3b83afbc79b0aaa9466`, which staled all four attested anchors — the bound the
+*What the attestation mechanically is* section states, and the reason
+`a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to` and the parity-scaffold
+subtest *"a current-by-attestation anchor publishes its attestation everywhere it is cited
+(sc-22667)"* go red on a pin bump until each entry is re-read and re-keyed. The four entries are
+`krea_2_turbo:candle:q4` (`witnessed-unchanged`) and `z_image_turbo:candle` bf16 / q4 / q8
+(`accounting-only`).
+
+**The range read.** `fff98b05..e497db468` changes 28 inference files. Intersected against each
+attested anchor's `closureFiles` in `config/anchor-loader-closures.json`, the intersection is
+**exactly two files for all four anchors** (`krea_2_turbo:candle` 143 closure files,
+`z_image_turbo:candle` 109):
+
+| File | Change in `fff98b05..e497db468` | Reading |
+| --- | --- | --- |
+| `crates/contracts/gen-core/src/generator.rs` | adds the inert `reference_image_short_edge: Option<u32>` request field, its `Default` = `None` entry, a `_` arm in the float-floor destructuring, three consts (MIN 1024 / MAX 2048 / DEFAULT 2048), the `effective_reference_image_short_edge` resolver, the `validate_reference_image_short_edge` range refusal, and two unit tests | request-contract surface only. The field's own doc comment states it is read on exactly one path — MiniMax-H3's `reference_to_video` — and is inert everywhere else; neither of these closures reads it. It allocates nothing, reads no weight, and moves no load or device path → **accounting-only** |
+| `crates/contracts/gen-core/src/lib.rs` | the matching re-exports of the two sc-23402 functions and three consts | re-export lines, the case the *Method* section already classifies as accounting-only |
+
+Everything else in the range is the StarVector `contracts/llm` crates, the MiniMax-H3 media crates,
+and `release/` + `scripts/` files — **none of which either closure reaches**. Both intersecting
+files are accounting-only under the two-gated doctrine, so **no hardware witness is required for
+this leg** and none was taken; each entry keeps its original `class`, and the two files are
+classified individually in `filesChangedSinceMeasurement` (the `krea_2_turbo:candle:q4` entry
+already carried `generator.rs` from an earlier range, so its leg was appended rather than added).
+No GPU, no re-capture, no calibration run was involved in this extension.
+
+**Who wrote it.** The extension was scripted and reviewed rather than hand-edited: the review above
+is the header of the one-shot script that performed the write, and **Michael ran that script by
+hand on 2026-09-15 after the agent's review**, which is why
+`config/anchor-currency-attestations.json` arrived in this story's branch as a pre-existing working
+change. This story then ran the two derived-document steps that must follow it —
+`node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors` (re-derives the
+four anchors' currency keys at `e497db468` and copies the justification into
+`config/memory-anchors.json`) and `node scripts/generate-memory-matrix.mjs`.
+
+**Result.** `--stamp-anchors --check` and the closure `--check` both pass at `e497db468`. Matrix
+after regeneration: `247 anchors, 243 stale, 4 current by attestation` (up from
+`247 stale, 0 current by attestation` while the bump was unattested), and the `krea_2_turbo` /
+`z_image_turbo` candle rollups return to `Anchored` from `Anchored (stale)`. The set of attested
+anchors is unchanged — nothing is newly attested and nothing is dropped.
+
+> Documentation gap, pre-existing: this document's sections stop at `e11fd9f0` (2026-09-09), while
+> `config/anchor-currency-attestations.json` was extended through several later pins
+> (`290fa1f3` → `fff98b05`, sc-23026 / sc-23053 / sc-23108 / sc-23187 / sc-23207 / sc-23234) with
+> the reading recorded only in each entry's `why` chain and `story` list. Those legs are not
+> sectioned here; read the JSON `why` fields for them.
