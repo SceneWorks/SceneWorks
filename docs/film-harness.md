@@ -44,7 +44,11 @@ dialogue (`plan.v2.jsonc` + the sc-23403 plates, 66/72 against the phase-1 basel
 cut in one room), one shot at 1344x768 (admitted; 3.3x the step cost, 28.8 GB), the reference short
 edge at 1024 against 2048 (4.4x cheaper per step, no rubric loss on two shots), and the 4-step turbo
 recipe (`plan.v2.turbo.jsonc`, the film in 1 h 19 m instead of 14 h at −2 rubric points, with the
-texture and motion-smear cost the stills show); no harness defect found; the reviewer measured on a
+texture and motion-smear cost the stills show); no defect on the render, record or assembly paths, but
+one open defect on the expected user path — the default brief yielded no valid plan in 2 or 5 repair
+rounds, so every plan run was hand-authored (being fixed on
+`story/sc-23406-epic-23401-film-harness-phase-2-planner`; that result is not part of the evaluation's
+evidence); the reviewer measured on a
 third labeled set (`config/film-harness/review-eval/evaluation-phase-2-cell-a-takes.jsonc`); and a
 **continue** recommendation with its reasoning and the follow-up candidates it does not authorize.
 

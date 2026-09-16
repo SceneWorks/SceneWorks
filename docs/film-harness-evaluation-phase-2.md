@@ -50,8 +50,18 @@ bounded repair only if the rubric rejected a take; 1344x768 unmeasured, estimate
 3–4.5x the step cost with a peak of 70–110 GB against the plan's 96 GB cap and a refusal or memory
 stop accepted as the cell's result; edge 1024 estimated 35–60 min per shot at 0.3–0.5x; the whole
 pass 18–25 h of the GPU loan. Time Machine local snapshots pruned every 2 h by the stack
-(`snapshots.log`: 49 → 164 GB free after the first prune). Actual GPU time: **≈ 24.4 h** of renders
-(50 733 + 23 977 + 3 408 + 4 765 s + the 1344x768 turbo shot) plus 762 s of review / review-eval.
+(`snapshots.log`: 49 → 164 GB free after the first prune). Actual GPU time: **84 706 s = 23.5 h** of
+renders — the five run records' `elapsedSeconds` in `manual/metrics.json`, 50 733.0 (a) + 23 977.5 (c)
++ 3 407.7 (d) + 4 765.5 (e, six shots) + 1 822.3 (e, 1344x768 turbo) = 84 706.0 s — plus 762 s of
+review / review-eval.
+
+**Cell (a) overran its declared budget.** 50 733 s (14 h 05 m) against `BUDGETS.md`:33's **9–12.5 h**,
+and per-shot walls of 7 127–10 474 s (119–175 min) against :32's **90–125 min** — two shots inside
+that range, four above it (`manual/metrics.json`). Two causes, both in the evidence and neither a
+harness fault: the host's load average of 16–20 during SH050 and part of SH060 (`README.md`), which
+by itself puts those two shots ~5 200 s above the four clean shots' 7 577 s mean — more than the
+5 733 s by which the run exceeded the top of the budget — and the per-job checkpoint re-selection,
+about 45 min of cold load spread over the six shots rather than paid once (§3.1).
 
 ## 3. Engineering correctness — did the harness do what its documents say?
 
@@ -99,14 +109,27 @@ and is noted, not explained, here.
 
 ### 3.2 Defects hit during the pass
 
-**None in the harness.** No crash, no wrong record field, no missing provenance value, no engine
+**One open defect, on the expected user path — the planner (§3.6).** Nothing in the render, record or
+assembly path: no crash, no wrong record field, no missing provenance value, no engine
 refusal, no memory stop, no coherence-guard retry (`grep` of the worker log for `IncoherentLoad`,
 "visibility recovered", `degenerate`, `SubmissionsIgnored` and `"level":"error"` over the whole
 pass: 0, 0, 0, 0, 0 — `manual/metrics.json` `workerLogSignatures`; the guard is silent on the happy
 path, as the S1 rerun also saw). One record-shape observation: an in-flight `run.json` reads
 `outcome: "failed"` beside `state: "running"`; that is documented (`RunState::Running`: "`outcome`
-is not meaningful yet") and every record flipped to `completed` on finish. Nothing was fixed in this
-branch; `FIXED_EXTRA` is empty.
+is not meaningful yet") and every record flipped to `completed` on finish.
+
+**The defect: the default brief does not yield a valid plan.** With `brief.jsonc` unmodified — the
+expected user path, and the one where the accelerators are the default offer (§3.6) — the real
+Anubis-Mini-8B planner produced **no valid plan in 2 repair rounds, nor in 5** (exit 2;
+`cell-e/plan-check/plan-default.log`, `plan-default-rounds5.log`,
+`planned-default*/planner-rejected.txt`). Every finding was about content — `continuityRoles` coverage
+for beats naming `workbench_table`, one off-menu `targetDurationSeconds` — and none named `loras`, so
+this is phase 1's "poor continuity author" finding carried into phase 2, not a fault in the turbo
+plumbing. It is a defect on the expected path all the same: today the turbo default is reachable only
+by a hand-authored plan. A fix is in progress on branch
+`story/sc-23406-epic-23401-film-harness-phase-2-planner` (no PR open at the time of writing); **being
+fixed in `story/sc-23406-epic-23401-film-harness-phase-2-planner`; result not part of this
+evaluation's evidence.** Nothing was fixed in this branch; `FIXED_EXTRA` is empty.
 
 One document-consistency finding, not a harness defect: `plan.v2.jsonc`'s SH050/SH060 prompts say
 "she"/"her" and the phase-1 rubric names the recipient "a woman", while the approved `recipient`
@@ -117,13 +140,15 @@ prose against plates; a person supplying references would notice.
 
 Every process of the pass ran with `HF_HUB_OFFLINE=1`, `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` =
 `http://127.0.0.1:9` (a closed port), `NO_PROXY=127.0.0.1,localhost`, no hosted-LLM variable
-(`stack.env`). `lsof +c 0 -i -P -n` was sampled every 60 s (`lsof/sockets.log`): **1 406 samples over
-25.5 h, 23 964 socket lines for the API, the worker and every `film-harness` process, all
-`127.0.0.1`.** The sampler also caught, for three minutes at 04:02Z on 15 Sep, a *different*
-`sceneworks-rust-api` process (pid 57030, not in `stack.pids`, not started by this pass) holding
-five TLS connections to `3.166.152.110:443` from the host's LAN address — another SceneWorks
-instance on the shared Mac; it is recorded because the sampler matched it by name, and it is not
-evidence about this stack. The API and worker logs carry no proxy, DNS or download error. What this
+(`stack.env`). `lsof +c 0 -i -P -n` was sampled every 60 s (`lsof/sockets.log`). Recounted from that file:
+**1 457 samples** (`grep -c '^### '`) spanning `2026-09-15T03:49:55Z` → `2026-09-16T04:10:31Z` =
+**24 h 20 m (24.3 h)**, and **13 171 socket lines** (every line that is not a sample header; the file is
+14 628 lines). **13 147 of them are `127.0.0.1`**; the remaining **24 are all pid 57030** — a
+*different* `sceneworks-rust-api` process, not in `stack.pids` and not started by this pass, holding
+**8 distinct file descriptors** (22u, 24u, 26u–31u) to `3.166.152.110:443` from the host's LAN address,
+seen in exactly **three samples, at 04:01:56Z, 04:02:56Z and 04:03:56Z on 15 Sep** (8 × 3 = 24). Every
+socket belonging to this stack's API, worker and `film-harness` processes is loopback. The foreign
+process is recorded because the sampler matched it by name; it is not evidence about this stack. The API and worker logs carry no proxy, DNS or download error. What this
 proves and does not prove is as in phase 1 §3.4.
 
 ### 3.4 Assisted review and the human loop
@@ -168,7 +193,9 @@ repair rounds, nor within 5 (`planned-default*/planner-rejected.txt`, 21 min of 
 every finding was about **content** — beats about `workbench_table` with no shot binding it in
 `continuityRoles`, and one off-menu `targetDurationSeconds` (6.8333 s); none named `loras`. That is
 the phase-1 planner weakness (it does not honour the continuity contract) surfacing again, not the
-turbo plumbing; the default is proven by the draft, the 50-step opt-out by a valid plan.
+turbo plumbing; the default is proven by the draft, the 50-step opt-out by a valid plan. The failure
+to reach a valid default plan is recorded as an **open defect** in §3.2, a limitation in §5.2 and a
+candidate in §5.4.
 
 ## 4. Research quality — did the takes tell the story?
 
@@ -236,11 +263,18 @@ SH010, references bound as in (a), edge 2048, installed tier q4 — `cell-c/run/
 | rubric | 12/12 | **12/12** | — |
 
 Neither refused nor stopped: the peak sat 67 GB under the plan's cap and 35 GB under the estimate's
-own raw floor, against BUDGETS.md's 70–110 GB expectation. The take is the same staging as (a)'s
-SH010 at the same seed with the plate's room now resolved tool by tool and the courier's face
-legible (`frames/cell-c/`). Tokens ~202k per step against ~96k at 576x320; 3.3x sits between the
-linear (2.1x) and quadratic (4.4x) scalings. Export `exports/cell-c-sh010-1344x768.mp4` (1822x1024
-letterboxed).
+own raw floor, and **2.4–3.8x below `BUDGETS.md`:24's 70–110 GB expectation — which is an unexplained
+miss, not a win.** That expectation was extrapolated from sc-23402's 55.06 GB for this partition at
+576x320, and that baseline no longer reproduces: cell (a) peaked at 24.3 GB at the same geometry on
+the current pin (§3.1). The same inference-side shift therefore explains both numbers, and it is
+unexplained here; until someone reads the inference diff for it (§5.4's last candidate) the 28.8 GB
+should be treated as a figure whose cause is unknown, not as evidence that full resolution is cheap in
+memory. The take is the same staging as (a)'s SH010 at the same seed with the plate's room now resolved
+tool by tool and the courier's face legible (`frames/cell-c/`). Tokens ~202k per step against ~96k at
+576x320 — **`BUDGETS.md`:23's pre-dispatch arithmetic, not a measurement from this pass** (the
+reference share is extrapolated from the 36.6k rows sc-23402 measured for two refs at edge 2048); the
+measured 3.3x per step sits between the linear (2.1x) and quadratic (4.4x) scalings those token counts
+imply. Export `exports/cell-c-sh010-1344x768.mp4` (1822x1024 letterboxed).
 
 ### 4.4 Cell (d) — reference short edge 1024 vs 2048 (Michael's fourth cell)
 
@@ -255,8 +289,9 @@ SH010 and SH050 of `plan.d.edge1024.jsonc` (576x320, same seeds) against the sam
 | SH050 | **1024** | **1635** | ~1 min | **30** | **16.30 GB** | **12** |
 
 Per step 1024 is **4.4x cheaper** on SH010 (32 vs 140 s), the attempt 4.4x cheaper, and peak memory
-8 GB lower; the reference tokens fall to about a quarter (~18k vs ~73k for four plates), the whole
-sequence from ~96k to ~41k, and the measured 4.4x sits near the quadratic ratio (5.5x) — at 2048 the
+8 GB lower; on `BUDGETS.md`:23's arithmetic (again derived, not measured here) the reference tokens fall
+to about a quarter (~18k vs ~73k for four plates) and the whole sequence from ~96k to ~41k, and the
+measured 4.4x sits near the quadratic ratio (5.5x) those counts imply — at 2048 the
 reference tokens dominate the step. **Identity, costume and location fidelity: no difference the
 rubric can score on either shot** (2/2/2 both ways; the plate's room, person and box in both). The
 +2 on SH050 comes from parcel and action, two criteria that were out of frame / unobservable in the
@@ -278,9 +313,14 @@ The same six shots, same seeds, same pack, `plan.v2.turbo.jsonc` — `cell-e/run
 | SH050 | 740 | 144 | 24.30 GB | 1 | 2 | 2 | 1 | 1 | 2 | 9 | 10 |
 | SH060 | 720 | 135 | 24.30 GB | 2 | 2 | 2 | 2 | 1 | 2 | 11 | 11 |
 
-Run `completed` in **4 765 s** (1 h 19 m) against cell (a)'s 50 733 s — **10.6x** for the film;
-per-step cost unchanged (135–167 s), the whole saving is 4 steps instead of 50, and the 5–7 min
-per-shot load is now the larger share of each attempt. Peaks identical. Picture **64/72** against
+Run `completed` in **4 765 s** (1 h 19 m) against cell (a)'s 50 733 s — **10.6x** for the film; the
+saving is 4 steps instead of 50. The `s/step` column is the **median of ~5 progress-POST gaps per
+attempt** (`manual/metrics.json` `stepCadence`), a much thinner sample than the 50-step cells' ~56.
+Those gaps also settle what load costs here: SH010's are 194 / 180 / 136 / 138 / 136 s (`api.log`), so
+the pre-stepping load is ≈ **194 s** against ≈ 590 s of stepping — the **smaller** share of the 810 s
+attempt, not the larger one. Per step the turbo is close to the 50-step cost at this geometry: 136–180 s
+here against 137–140 s across cell (a)'s four uncontaminated shots, i.e. no large per-step change that
+these gaps can show, in either direction. Peaks identical. Picture **64/72** against
 66/72 (per shot 0, −1, 0, 0, −1, 0), sound 2/2 (`exports/cell-e-turbo-v1-31s-export-probe.json`):
 **66/74**. The same rooms, people and props; the two points lost are SH020's set-down starting a shot
 early and SH050's face never leaving the frame edge. What the rubric does **not** score and the
@@ -294,12 +334,20 @@ edge 2048 — on the turbo recipe (`plans/plan.e.turbo.1344x768.jsonc`, `cell-e/
 
 | item | (c) 50-step | (e) turbo 4-step | ratio |
 | --- | --- | --- | --- |
-| load | 13 min | ~9.5 min | 0.7x |
-| s/step | 457 | 371 | 0.8x (the turbo shot ran on an idle host; part of cell (c) did not) |
+| load (first pre-stepping progress gap, `api.log`) ‡ | 269 s (4.5 min) | **155 s (2.6 min)** | 0.6x |
+| s/step | 457 (median of ~56 gaps) | 371 (median of ~5 gaps: 402 / 371 / 407 / 389) | 0.8x |
 | wall | 23 961 s (6 h 39 m) | **1 811 s (30 min)** | **13.2x** |
 | peak | 28.83 GB | **30.96 GB** | +2.1 GB (the adapter) |
 | rubric | 12/12 | **12/12** | — |
 | provenance | `effectiveSteps` absent (50), no `loras` | `loras: [minimax_h3_ref2v_turbo_4step]`, `effectiveSteps: 4`, `turboSchedulerShift: 12.0` | — |
+
+‡ Both load figures are the first gap between progress POSTs, before stepping begins, counted from
+`api.log`; that is a narrower quantity than the dispatch-to-step-1 figure quoted for cell (c) in §4.3's
+table (13 min), and the only one derivable from the logs kept here for both jobs. The earlier "~9.5 min"
+turbo load cannot be right: four step gaps of 371–407 s plus 9.5 min exceed the job's 1 811 s wall.
+The 1 811 s and 23 961 s walls, the two peaks and the rubric scores are unaffected by which load
+definition is used. No host-load sample was taken for cell (c)'s window, so no idle-versus-loaded claim
+is made for this pair; `README.md` flags host load only for cell (a)'s SH050 and SH060.
 
 Same room, same beat, same person and box (`frames/cell-e-1344/` against `frames/cell-c/`); a
 slightly different camera (the door fully in frame, two windows), the satchel not visible in the
@@ -320,21 +368,31 @@ jacket. On stills the rubric cannot separate them; a person watching the two exp
 
 Accepted duration is the sum of the selected takes' spans in the final timeline (31.0 s for the
 six-shot cells, no trims); every attempt counts in the wall, and there were no rejected or failed
-attempts in phase 2. Hands-on: **10.2 min** of agent wall clock over 16 timed scoring/decision steps
-(`manual/TIMING.log`, `manual/metrics.json`), against 12.5 min in phase 1 with its two repairs.
+attempts in phase 2. Hands-on: **722 s = 12.0 min** of agent wall clock over **17** timed
+scoring/decision phases (`manual/metrics.json` `handsOn`: `phasesSeconds` has 17 entries summing to 722,
+the largest being `E.score.SH010-1344` at 111 s; `manual/TIMING.log` is the raw marks). Phase 1 recorded
+12.5 min, but over a different set of phases — six shots plus two repairs, no turbo or 1344x768 cells —
+so the two are not a like-for-like comparison and no trend should be read into the 0.5 min: what phase 2
+shows is that scoring sixteen takes across five configurations (plus cell (a)'s decisions) cost about a quarter of an hour of
+human-equivalent attention.
 
 ## 5. Decision
 
 ### 5.1 Supported conclusions (and confidence)
 
-1. **Engineering: the phase-2 harness did everything its documents say, on the first pass, with no
-   defect found.** Six reference shots with spoken dialogue rendered, assembled and exported
+1. **Engineering: the render, record and assembly paths did everything their documents say on the first
+   pass; the planner did not.** Six reference shots with spoken dialogue rendered, assembled and exported
    offline; every attempt record carries the resolved partition, the reason, the effective short
    edge, the reference ids in role order, the metrics-route peak and (on de5eba32a) the LoRA ids,
    effective steps and shift; the knob's range is refused by name at `validate`; the review, the
    human decisions and `review-eval` ran through the real routes. Confidence **high** — every claim
    is read off a record, a job table, a document or a decoded file in the evidence directory. Unlike
-   phase 1, nothing had to be fixed to get here.
+   phase 1, nothing on those paths had to be fixed to get here. **The exception is the expected user
+   path into them**: with the default brief the planner yielded no valid plan in 2 or 5 repair rounds
+   (§3.2, §3.6), so every plan run in this pass was hand-authored or hand-derived. That is one open
+   defect, carried from phase 1's continuity-author weakness, being fixed in
+   `story/sc-23406-epic-23401-film-harness-phase-2-planner`; result not part of this evaluation's
+   evidence.
 2. **Research: reference conditioning fixes the thing phase 1 said was broken.** With real plates
    bound on every shot the room, the people and the parcel held across all six shots and five cuts
    (66/72 against 58/72, cuts 2-2-2-2-1 against 0-1-1-0-1, no rejection), on the first attempt, with
@@ -345,16 +403,23 @@ attempts in phase 2. Hands-on: **10.2 min** of agent wall clock over 16 timed sc
    dominates. This is a positive finding about the tested configuration and says nothing about hosted
    systems; **no Seedance-equivalence is claimed**.
 3. **Cost is the problem the references introduce.** The reference partition at 50 steps costs
-   ~2 h per 5-second shot on this Mac (1 634 s of GPU per accepted second, 6.4x phase 1's 255 s),
-   because the four references at short edge 2048 contribute ~73k of the ~96k tokens per step. The
+   ~2 h per 5-second shot on this Mac (1 634 s of GPU per accepted second, 6.4x phase 1's 255 s).
+   The token account for *why* — four references at short edge 2048 contributing ~73k of the ~96k
+   tokens per step — is `BUDGETS.md`:23's pre-dispatch arithmetic, extrapolated from the 36.6k rows
+   sc-23402 measured for two references; **it was not measured in this pass**, and the measured
+   quantities are the walls, the per-step gaps, the peaks and the rubric scores. The
    two knobs measured here both cut it without a fidelity loss the rubric can see: **edge 1024 is
    4.4x cheaper per step** (and 8 GB lighter) on two shots, and the **4-step turbo is 10.6x cheaper
    for the film** at a cost of two rubric points, a harder look and motion smear on the walking
-   shots. Confidence **high** on the numbers, **medium** on "no fidelity loss" (stills, two shots for
+   shots. Confidence **high** on the *measured* numbers — walls, per-step gaps, peaks — **low** on the
+   token counts, which are derived arithmetic, **medium** on "no fidelity loss" (stills, two shots for
    edge 1024, one evaluator).
 4. **1344x768 is admitted and works, at 3.3x the step cost and 1.2x the memory** — 6 h 39 m for one
    50-step shot, 28.8 GB peak, rubric 12/12, no refusal, no memory stop; the admission estimate did
-   not move with geometry and the observed peak sat far under every cap. On the turbo recipe the same shot took 30 min at 31.0 GB for the same rubric — 13.2x — so full resolution is affordable on this Mac only through the accelerator, and a 50-step 1344x768 six-shot film would be ~40 h.
+   not move with geometry and the observed peak sat far under every cap — **and far under the 70–110 GB
+   the budget expected, for reasons nobody has established** (the sc-23402 baseline it was derived from
+   no longer reproduces; §3.1, §4.3, §5.4), so the memory headroom is an unexplained observation rather
+   than a demonstrated property. On the turbo recipe the same shot took 30 min at 31.0 GB for the same rubric — 13.2x — so full resolution is affordable on this Mac only through the accelerator, and a 50-step 1344x768 six-shot film would be ~40 h.
    Confidence **high** for the numbers on this hardware, **low** for anything about quality at this
    resolution beyond one shot.
 5. **Assisted review is unchanged in character**: useful on identity and custody, unreliable on
@@ -370,6 +435,16 @@ attempts in phase 2. Hands-on: **10.2 min** of agent wall clock over 16 timed sc
 - One film, one brief, one seed set, one generated pack, one Mac; the 1344x768 cells are one shot
   each; the edge-1024 cell is two shots; the 1024 takes are different draws from the 2048 takes at
   the same seed, so their per-shot deltas mix sampling with fidelity.
+- **The turbo default was not reached through the planner in this evaluation**:
+  `plan.v2.turbo.jsonc` and its 1344x768 derivative were authored by hand, because the default brief
+  produced no valid plan in 2 or 5 repair rounds (§3.2, §3.6). Everything cell (e) shows is therefore
+  about the recipe, not about a user getting to that recipe. Being fixed in
+  `story/sc-23406-epic-23401-film-harness-phase-2-planner`; result not part of this evaluation's evidence.
+- The per-step figures for the turbo cells are medians over ~5 progress gaps per attempt, against ~56
+  for the 50-step cells; the token counts quoted throughout are `BUDGETS.md`:23 arithmetic, not
+  measurements from this pass.
+- Cell (c)'s 28.8 GB peak against a 70–110 GB expectation is unexplained, and shares its cause with the
+  24.3 GB-versus-55.06 GB shift in §3.1; no conclusion about memory at full resolution should rest on it.
 - Cell (b) was not re-rendered; its comparability rests on a code reading of the inference diff and
   on the determinism phase 1 measured, not on a fresh render.
 - Cell (e) ran on a different commit than (a)–(d) because the plan schema could not carry LoRAs
@@ -386,8 +461,9 @@ attempts in phase 2. Hands-on: **10.2 min** of agent wall clock over 16 timed sc
 ### 5.3 Recommendation — **continue** (confidence medium-high)
 
 Not *revise*: the experiment phase 1 asked for was run — real plates, a checkpoint with reference
-conditioning — and it answered the question in the affirmative on the first attempt, with the
-harness needing no fix. Not *stop*: the negative finding is cost, and two measured knobs already
+conditioning — and it answered the question in the affirmative on the first attempt, with the render,
+record and assembly paths needing no fix (the one open defect is the planner, §3.2, already being fixed
+on its own branch). Not *stop*: the negative finding is cost, and two measured knobs already
 bring a six-shot film from 14 h to 1 h 19 m (turbo) or would bring a 50-step film to roughly 3 h
 (edge 1024) on this Mac. Continue, on the understanding that the next questions are about cost and
 motion quality, which need Michael's eyes on the exports and more than one seed.
@@ -398,10 +474,11 @@ motion quality, which need Michael's eyes on the exports and more than one seed.
 | --- | --- | --- |
 | Make edge 1024 the plan default for 576x320 work and measure it once at 1344x768 | §4.4: 4.4x per step, 8 GB lighter, no rubric loss on two shots; unmeasured at full resolution | one 1344x768 shot (~2 h at 50 steps); whether the default belongs in the plan or the catalog |
 | A human viewing of the turbo vs 50-step exports before choosing a default recipe | §4.5: −2 rubric points, motion smear on walking shots, harder texture; the glow rendered only on turbo | Michael's time; possibly the 8-step file (`minimax_h3_turbo_8step`) as a middle point — not measured here |
-| Keep the checkpoint resident across a run's jobs on one partition | §3.1: 5–10 min re-selected per job, ~45 min of a 14 h run and the larger share of a turbo attempt | worker-side; whether the hot-cache work (epic 19703) already covers the reference partition |
+| Keep the checkpoint resident across a run's jobs on one partition | §3.1: the checkpoint is re-selected per job, ~45 min of load across cell (a)'s 14 h; on a turbo attempt it is ~194 s of an 810 s shot (§4.5) — a visible share, though still smaller than the stepping | worker-side; whether the hot-cache work (epic 19703) already covers the reference partition |
+| Make the default brief yield a valid plan (the planner's continuity contract) | §3.2, §3.6: no valid plan in 2 or 5 repair rounds on the default brief (exit 2, `cell-e/plan-check/plan-default*.log`); phase 1's same finding | **already in progress** on `story/sc-23406-epic-23401-film-harness-phase-2-planner` (no PR at the time of writing); its result is not part of this evaluation's evidence, so this row records the defect, not an unstarted idea |
 | Reconcile the prompt/rubric gender with the approved plate (or regenerate the recipient plate) | §3.2, §4.1: the reference won every time | a one-line plan/rubric edit or one Krea plate; Michael's call on which is the intended recipient |
 | A review question that abstains when the neighbour is a close-up, and a sleeve question that accepts "bare" | §3.4: the same two false-alarm classes as phase 1 | small review-plan change; re-measure on the two labeled sets |
-| Explain the 24.3 GB vs 55.1 GB peak between inference f215cd22 and e497db468 on the reference partition | §3.1 | inference-side reading; matters for the memory ladder, not for this decision |
+| Explain the 24.3 GB vs 55.1 GB peak between inference f215cd22 and e497db468 on the reference partition — the same shift that put cell (c) at 28.8 GB against a 70–110 GB expectation | §3.1, §4.3 | inference-side reading; matters for the memory ladder and for any future budget derived from the sc-23402 baseline, not for this decision |
 
 ### 5.5 Reproducible artifacts
 
