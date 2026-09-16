@@ -5,10 +5,11 @@ use sceneworks_core::film_plan::{
     self, validate_reference_pack, PlanDiagnostic, ReferencePack, RunRecord,
 };
 use sceneworks_core::film_workspace::{FilmDraft, FilmRunLocator};
+use sceneworks_core::project_store::FilmSoundInput;
 
 use crate::film_harness::{
-    preflight_documents, ControllerLease, FilmDocumentPreflight, HarnessError, HttpTransport,
-    RunControl, RunOptions,
+    finish_explicit_export, preflight_documents, start_explicit_export, ControllerLease,
+    FilmDocumentPreflight, HarnessError, HttpTransport, ResumeOptions, RunControl, RunOptions,
 };
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +135,18 @@ pub(crate) async fn add_film_reference(
 ) -> Result<(StatusCode, Json<FilmDraft>), ApiError> {
     let draft = project_call(state, move |store| {
         store.add_film_reference(&project_id, &draft_id, payload)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(draft)))
+}
+
+pub(crate) async fn add_film_sound(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<FilmSoundInput>,
+) -> Result<(StatusCode, Json<FilmDraft>), ApiError> {
+    let draft = project_call(state, move |store| {
+        store.add_film_sound(&project_id, &draft_id, payload)
     })
     .await?;
     Ok((StatusCode::CREATED, Json(draft)))
@@ -283,11 +296,10 @@ async fn run_preflight(
     draft: &FilmDraft,
     selected: &[String],
 ) -> Result<FilmDocumentPreflight, ApiError> {
-    let transport = HttpTransport::new(
-        &state.settings.mcp_api_url,
-        Some(state.settings.access_token.clone()),
-    )
-    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let base_url = state.settings.mcp_api_url.clone();
+    let token = state.settings.access_token.clone();
+    let transport = HttpTransport::new(&base_url, Some(token.clone()))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     preflight_documents(
         &transport,
         &draft.production_plan,
@@ -364,6 +376,55 @@ pub(crate) async fn start_film_run(
     });
 
     Ok((StatusCode::ACCEPTED, Json(view)))
+}
+
+pub(crate) async fn export_film_run(
+    State(state): State<AppState>,
+    Path((project_id, run_id)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<FilmRunView>), ApiError> {
+    let files = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let run_id = run_id.clone();
+        move |store| store.film_run_files(&project_id, &run_id)
+    })
+    .await?;
+    let lease = ControllerLease::acquire(&files.directory, format!("api-export:{run_id}"))
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let base_url = state.settings.mcp_api_url.clone();
+    let token = state.settings.access_token.clone();
+    let transport = HttpTransport::new(&base_url, Some(token.clone()))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut options = ResumeOptions::new(files.directory.clone());
+    options.poll_interval = Duration::from_secs(2);
+    let (record, task) = start_explicit_export(&transport, &options)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let controller_owner = format!("api-export:{run_id}");
+    let locator =
+        project_call(state, move |store| store.get_film_run(&project_id, &run_id)).await?;
+    tokio::spawn(async move {
+        let _lease = lease;
+        let transport = match HttpTransport::new(&base_url, Some(token)) {
+            Ok(transport) => transport,
+            Err(error) => {
+                tracing::error!(%error, "film export transport failed");
+                return;
+            }
+        };
+        if let Err(error) = finish_explicit_export(&transport, &options, &task).await {
+            tracing::error!(job_id = task.job_id, %error, "film export stopped");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(FilmRunView {
+            locator,
+            record: Some(record),
+            controller_active: true,
+            controller_owner: Some(controller_owner),
+            controller_interrupted: false,
+        }),
+    ))
 }
 
 pub(crate) async fn load_run_view(

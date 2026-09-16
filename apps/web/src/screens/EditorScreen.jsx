@@ -1,6 +1,6 @@
 import { timelineEdit, applyTimelineEdit, invertTimelineEdit } from "../timelineEdits.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
+import { assetCanRenderAsAudio, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { formatTimecode } from "../formatting.js";
 import {
   ensureItemVersionFields,
@@ -58,7 +58,6 @@ export function EditorScreen() {
   const [history, setHistory] = useState([]);
   const [future, setFuture] = useState([]);
   const [trackVisible, setTrackVisible] = useState({});
-  const [trackMuted, setTrackMuted] = useState({});
   const [trackSoloed, setTrackSoloed] = useState({});
   const [markers] = useState([]); // Local UI markers only — no persisted marker model yet (audit).
   const [timelineNotice, setTimelineNotice] = useState("");
@@ -78,6 +77,7 @@ export function EditorScreen() {
     return activeTimeline.tracks.flatMap((track) => track.items).find((item) => item.id === selectedItemId) ?? null;
   }, [activeTimeline, selectedItemId]);
   const selectedAsset = assetsById.get(selectedItem?.assetId) ?? null;
+  const selectedTrack = activeTimeline?.tracks?.find((track) => track.items.some((item) => item.id === selectedItemId)) ?? null;
   const duration = activeTimeline ? timelineDuration(activeTimeline) : 0;
   const mainTrack = activeTimeline?.tracks?.find((track) => track.id === MAIN_TRACK_ID || track.kind === "video") ?? null;
   const mainClips = mainTrack ? trackItems(mainTrack) : [];
@@ -94,17 +94,17 @@ export function EditorScreen() {
     setPlayheadSeconds(0);
   }, [activeTimeline?.id]);
 
-  // Preview playback: drive the selected clip's <video> only while foregrounded (sc-11961).
+  // Preview playback: drive the selected video or audio element only while foregrounded.
   useEffect(() => {
-    const video = previewVideoRef.current;
-    if (!assetCanRenderAsVideo(selectedAsset) || !video) {
+    const media = previewVideoRef.current;
+    if ((!assetCanRenderAsVideo(selectedAsset) && !assetCanRenderAsAudio(selectedAsset)) || !media) {
       return;
     }
     if (isPlaying && screenActive) {
-      video.play().catch(() => setIsPlaying(false));
+      media.play().catch(() => setIsPlaying(false));
       return;
     }
-    video.pause();
+    media.pause();
     // Re-run only when the selected clip changes (by id), not on every asset-object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, selectedAsset?.id, screenActive]);
@@ -236,7 +236,55 @@ export function EditorScreen() {
       items: track.items.map((item) => item.id === selectedItemId ? { ...item, sourceIn, sourceOut,
         timelineEnd: item.timelineStart + (sourceOut - sourceIn) / (item.speed || 1) } : item),
     })) });
-    setTimelineNotice("Trim applied. Other clips keep their positions.");
+    const pictureEnd = selectedItem.timelineStart + (sourceOut - sourceIn) / (selectedItem.speed || 1);
+    const runId = selectedItem.filmHarness?.runId;
+    const shotId = selectedItem.filmHarness?.shotId;
+    const linkedAudioNeedsAdjustment = Boolean(runId && shotId) && activeTimeline.tracks.some((track) => track.kind === "audio" && track.items.some((item) =>
+      item.filmHarness?.runId === runId && item.filmHarness?.shotId === shotId && Number(item.timelineEnd) > pictureEnd));
+    setTimelineNotice(linkedAudioNeedsAdjustment
+      ? "Trim applied and linked audio kept its placement. Adjust the linked audio ending past the new picture cut."
+      : "Trim applied. Other clips and audio keep their positions.");
+  }
+
+  function editSelectedAudio(event) {
+    event.preventDefault();
+    if (!selectedItem || selectedTrack?.kind !== "audio") return;
+    const form = new FormData(event.currentTarget);
+    const sourceIn = Number(form.get("sourceIn"));
+    const sourceOut = Number(form.get("sourceOut"));
+    const timelineStart = Number(form.get("timelineStart"));
+    const volume = Number(form.get("volume"));
+    const trackGain = Number(form.get("trackGain"));
+    const fadeInSeconds = Number(form.get("fadeInSeconds"));
+    const fadeOutSeconds = Number(form.get("fadeOutSeconds"));
+    const measured = Number(selectedAsset?.file?.duration);
+    if (![sourceIn, sourceOut, timelineStart, volume, trackGain, fadeInSeconds, fadeOutSeconds].every(Number.isFinite)
+      || sourceIn < 0 || sourceOut - sourceIn < 0.1 || timelineStart < 0 || volume < 0 || volume > 2
+      || trackGain < 0 || trackGain > 4 || fadeInSeconds < 0 || fadeOutSeconds < 0
+      || (measured > 0 && sourceOut > measured)) {
+      setTimelineNotice("Choose valid audio placement, trim, fades, clip gain from 0 to 2, and track gain from 0 to 4.");
+      return;
+    }
+    const span = sourceOut - sourceIn;
+    commit({
+      ...activeTimeline,
+      tracks: activeTimeline.tracks.map((track) => track.id === selectedTrack.id ? {
+        ...track,
+        gain: trackGain,
+        muted: form.get("muted") === "on",
+        items: track.items.map((item) => item.id === selectedItem.id ? {
+          ...item,
+          sourceIn,
+          sourceOut,
+          timelineStart,
+          timelineEnd: timelineStart + span,
+          volume,
+          fadeInSeconds: Math.min(fadeInSeconds, span),
+          fadeOutSeconds: Math.min(fadeOutSeconds, span),
+        } : item),
+      } : track),
+    });
+    setTimelineNotice("Audio placement and mix controls applied. Save before exporting.");
   }
 
   function moveSelected(direction) {
@@ -266,16 +314,24 @@ export function EditorScreen() {
     if (!activeTimeline) {
       return;
     }
-    const isStill = asset.type !== "video" && assetCanRenderAsImage(asset);
-    const track = activeTimeline.tracks.find((item) => item.id === trackId) ?? activeTimeline.tracks[0];
-    const start = Math.max(0, ...track.items.map((item) => item.timelineEnd));
+    const isAudio = assetCanRenderAsAudio(asset);
+    const isStill = !isAudio && asset.type !== "video" && assetCanRenderAsImage(asset);
+    let tracks = activeTimeline.tracks;
+    let track = isAudio
+      ? tracks.find((item) => item.id === trackId && item.kind === "audio") ?? tracks.find((item) => item.kind === "audio")
+      : tracks.find((item) => item.id === trackId) ?? tracks[0];
+    if (isAudio && !track) {
+      track = { id: `track_audio_${crypto.randomUUID().replaceAll("-", "")}`, name: "Audio 1", kind: "audio", role: "sound", gain: 1, locked: false, muted: false, items: [] };
+      tracks = [...tracks, track];
+    }
+    const start = isAudio ? Math.max(0, playheadSeconds) : Math.max(0, ...track.items.map((item) => item.timelineEnd));
     const sourceDuration = Number(asset.file?.duration) || 4;
     const durationSeconds = isStill ? 4 : sourceDuration;
     const item = normalizeTimelineItem({
       id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
       trackId: track.id,
       assetId: asset.id,
-      type: isStill ? "image" : "video",
+      type: isAudio ? "audio" : isStill ? "image" : "video",
       displayName: asset.displayName,
       sourceIn: 0,
       sourceOut: Math.max(0.1, sourceDuration),
@@ -284,6 +340,8 @@ export function EditorScreen() {
       speed: 1,
       fit: "fit",
       volume: 1,
+      fadeInSeconds: 0,
+      fadeOutSeconds: 0,
       versionAssetIds: [asset.id],
       currentVersionAssetId: asset.id,
       versionHistory: [{ assetId: asset.id, createdAt: null, source: "original", jobId: null, note: null }],
@@ -292,7 +350,7 @@ export function EditorScreen() {
     });
     commit({
       ...activeTimeline,
-      tracks: activeTimeline.tracks.map((current) =>
+      tracks: tracks.map((current) =>
         current.id === track.id ? { ...current, items: [...current.items, item] } : current,
       ),
     });
@@ -619,6 +677,11 @@ export function EditorScreen() {
     setter((current) => ({ ...current, [key]: !current[key] }));
   }
 
+  function toggleTrackMute(trackId) {
+    if (!trackId) return;
+    commit({ ...activeTimeline, tracks: activeTimeline.tracks.map((track) => track.id === trackId ? { ...track, muted: !track.muted } : track) });
+  }
+
   if (!activeProject) {
     return (
       <section className="ve-editor ve-editor-empty">
@@ -728,6 +791,19 @@ export function EditorScreen() {
         <button type="button" onClick={() => moveSelected(1)}>Move clip later</button>
       </form> : null}
 
+      {selectedItem?.type === "audio" && selectedTrack ? <form className="ve-notice ve-audio-inspector" onSubmit={editSelectedAudio} key={`${selectedItem.id}:${selectedItem.sourceIn}:${selectedItem.sourceOut}:${selectedItem.timelineStart}`} aria-label="Edit selected audio">
+        <label>Timeline start <input name="timelineStart" type="number" min="0" step="0.01" defaultValue={selectedItem.timelineStart} required /></label>
+        <label>Source in <input name="sourceIn" type="number" min="0" step="0.01" defaultValue={selectedItem.sourceIn} required /></label>
+        <label>Source out <input name="sourceOut" type="number" min="0.1" step="0.01" defaultValue={selectedItem.sourceOut} required /></label>
+        <label>Clip gain <input name="volume" type="number" min="0" max="2" step="0.01" defaultValue={selectedItem.volume ?? 1} required /></label>
+        <label>Fade in <input name="fadeInSeconds" type="number" min="0" step="0.01" defaultValue={selectedItem.fadeInSeconds ?? 0} required /></label>
+        <label>Fade out <input name="fadeOutSeconds" type="number" min="0" step="0.01" defaultValue={selectedItem.fadeOutSeconds ?? 0} required /></label>
+        <label>Track gain <input name="trackGain" type="number" min="0" max="4" step="0.01" defaultValue={selectedTrack.gain ?? 1} required /></label>
+        <label><input name="muted" type="checkbox" defaultChecked={Boolean(selectedTrack.muted)} /> Mute track</label>
+        <button type="submit">Apply audio edit</button>
+        <button type="button" onClick={removeSelectedItem}>Remove audio</button>
+      </form> : null}
+
       <StoryboardStrip
         assetsById={assetsById}
         clips={mainClips}
@@ -750,7 +826,7 @@ export function EditorScreen() {
         onSelectItem={selectItem}
         onSelectKey={(item) => selectKeyframe(item)}
         onSelectMarker={selectMarker}
-        onToggleMute={(id) => toggleMap(setTrackMuted, id)}
+        onToggleMute={toggleTrackMute}
         onToggleSnap={() => setSnap((value) => !value)}
         onToggleSolo={(id) => toggleMap(setTrackSoloed, id)}
         onToggleVisible={(id) => toggleMap(setTrackVisible, id)}
@@ -761,7 +837,7 @@ export function EditorScreen() {
         selectedItemId={selectedItemId}
         snap={snap}
         timeline={activeTimeline}
-        trackMuted={trackMuted}
+        trackMuted={Object.fromEntries((activeTimeline.tracks ?? []).filter((track) => track.kind === "audio").map((track) => [track.id, Boolean(track.muted)]))}
         trackSoloed={trackSoloed}
         trackVisible={trackVisible}
         zoom={zoom}

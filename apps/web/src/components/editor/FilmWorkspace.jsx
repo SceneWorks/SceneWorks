@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, lazy, useEffect, useState } from "react";
 import { apiFetch } from "../../api.js";
 import {
   applyFilmPlanning,
@@ -9,6 +9,7 @@ import {
   parseFilmScript,
   preflightFilm,
   startFilmPlanning,
+  exportFilmRun,
 } from "../../api/films.js";
 import { useAppStatic } from "../../context/AppContext.js";
 import { FilmReferences } from "./FilmReferences.jsx";
@@ -17,8 +18,10 @@ import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
 import { FilmShots } from "./FilmShots.jsx";
 
+const FilmSound = lazy(() => import("./FilmSound.jsx").then((module) => ({ default: module.FilmSound })));
+
 export function FilmWorkspace() {
-  const { activeProject, assets = [], importAsset, models = [], token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
+  const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState(null);
@@ -28,6 +31,7 @@ export function FilmWorkspace() {
   const [planningOperation, setPlanningOperation] = useState(null);
   const [selectedShotIds, setSelectedShotIds] = useState([]);
   const [preflight, setPreflight] = useState(null);
+  const [lastRun, setLastRun] = useState(null);
 
   useEffect(() => {
     let canceled = false;
@@ -39,6 +43,7 @@ export function FilmWorkspace() {
     setPlanningOperation(null);
     setSelectedShotIds([]);
     setPreflight(null);
+    setLastRun(null);
     if (!activeProject?.id) return undefined;
     apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
       .then((items) => {
@@ -93,6 +98,7 @@ export function FilmWorkspace() {
       setSelectedShotIds(created.productionPlan.shots.map((shot) => shot.id));
       setPreflight(null);
       setPlanningOperation(null);
+      setLastRun(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -116,6 +122,7 @@ export function FilmWorkspace() {
       setSelectedShotIds(loaded.productionPlan.shots.map((shot) => shot.id));
       setPreflight(null);
       setPlanningOperation(null);
+      setLastRun(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -229,11 +236,13 @@ export function FilmWorkspace() {
       }
       const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds }) });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
+      setLastRun(run);
       setNotice(`Rendering ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"} in this project.`);
       let shownTimelineId = null;
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
+        setLastRun(run);
         const readyTimelineId = run.record?.timeline?.timelineId;
         if (readyTimelineId && readyTimelineId !== shownTimelineId) {
           await refreshTimelines(activeProject.id);
@@ -255,6 +264,38 @@ export function FilmWorkspace() {
       } else {
         const detail = run.record?.diagnostics?.map((item) => item.message).join(" ");
         setNotice(detail || run.record?.stop?.detail || "The run finished without a clip.");
+      }
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportCurrentCut() {
+    const runId = lastRun?.locator?.id;
+    const timelineId = lastRun?.record?.timeline?.timelineId;
+    if (!runId || !timelineId) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeTimeline?.id === timelineId && saveTimeline) {
+        const saved = await saveTimeline(activeTimeline);
+        if (!saved) throw new Error("Save the current timeline before exporting.");
+      }
+      let run = await exportFilmRun(activeProject.id, runId, token);
+      setLastRun(run);
+      setNotice("Export started from the current saved cut.");
+      while (run.controllerActive) {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${runId}`, token);
+        setLastRun(run);
+      }
+      const exported = run.record?.export;
+      if (exported?.status === "completed") {
+        setNotice(exported.droppedAudioLayers?.length ? `Export completed with ${exported.droppedAudioLayers.length} dropped audio layer${exported.droppedAudioLayers.length === 1 ? "" : "s"}.` : "Export completed with every placed audio layer.");
+      } else {
+        setNotice(exported?.error || `Export ${exported?.status ?? "did not complete"}.`);
       }
     } catch (error) {
       setNotice(error.message);
@@ -328,6 +369,19 @@ export function FilmWorkspace() {
             setNotice={setNotice}
             token={token}
           />
+          <Suspense fallback={<p className="ve-film-help">Loading sound controls…</p>}>
+            <FilmSound
+              activeProject={activeProject}
+              assets={assets}
+              disabled={busy}
+              draft={draft}
+              onChange={updateDraft}
+              onReplaceDraft={replaceDraft}
+              saveDraft={saveDraft}
+              setNotice={setNotice}
+              token={token}
+            />
+          </Suspense>
           <FilmShots
             capabilities={preflight?.capabilities}
             compiled={preflight?.compiled}
@@ -344,7 +398,15 @@ export function FilmWorkspace() {
             <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>
             <button disabled={busy || !selectedShotIds.length} onClick={inspectPreflight} type="button">Run preflight</button>
             <button className="ve-generate" disabled={busy || !selectedShotIds.length} onClick={startRun} type="button">Render selected shots</button>
+            <button disabled={busy || !lastRun?.record?.timeline?.timelineId} onClick={exportCurrentCut} type="button">Export current cut</button>
           </div>
+          {lastRun?.record?.export ? <div className="ve-film-export" aria-label="Film export status">
+            <strong>Export {lastRun.record.export.status}</strong>
+            <span>{lastRun.record.export.stale ? "Older export is stale" : `Timeline revision ${lastRun.record.export.timelineRevision ?? "unknown"}`}</span>
+            {lastRun.record.export.assetId ? <span>Asset {lastRun.record.export.assetId}</span> : null}
+            {lastRun.record.export.error ? <span role="alert">{lastRun.record.export.error}</span> : null}
+            {(lastRun.record.export.droppedAudioLayers ?? []).map((layer, index) => <span key={`${layer.itemId ?? "layer"}:${index}`}>Dropped audio: {layer.displayName ?? layer.itemId ?? JSON.stringify(layer)}</span>)}
+          </div> : null}
         </div>
       ) : null}
       {notice ? <p aria-live="polite" className="ve-notice">{notice}</p> : null}

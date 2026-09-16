@@ -338,6 +338,85 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
 }
 
 #[tokio::test]
+async fn film_sound_route_stages_prerecorded_audio_and_pins_it_with_the_run() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Film sound"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let wav = crate::film_harness::fixture_sound_wav(1.0, 440, 4_000);
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "line.wav",
+        "audio/wav",
+        &wav,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let (_, draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Recorded line"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap();
+    let (status, mut staged) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/sound"),
+        json!({
+            "draftRevision": 1,
+            "assetId": asset["id"],
+            "role": "courier_line",
+            "kind": "dialogue",
+            "description": "Courier's recorded line"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{staged}");
+    assert_eq!(staged["referencePack"]["sound"][0]["role"], "courier_line");
+    let staged_file = staged["referencePack"]["sound"][0]["file"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    staged["productionPlan"]["shots"][0]["prompt"] = json!("A courier speaks.");
+    staged["productionPlan"]["shots"][0]["dialogue"] = json!("The parcel is here.");
+    staged["productionPlan"]["shots"][0]["dialogueClip"] = json!({
+        "role": "courier_line", "offsetSeconds": 0.25, "sourceInSeconds": 0,
+        "durationSeconds": 0.7, "gain": 0.8, "fadeInSeconds": 0.05, "fadeOutSeconds": 0.05
+    });
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        staged,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, run) = request(
+        app,
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/runs"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{run}");
+    let run_dir = std::path::Path::new(project["path"].as_str().unwrap())
+        .join(run["locator"]["recordDirectory"].as_str().unwrap());
+    assert_eq!(std::fs::read(run_dir.join(&staged_file)).unwrap(), wav);
+    let pinned: Value =
+        serde_json::from_slice(&std::fs::read(run_dir.join("references.json")).unwrap()).unwrap();
+    assert_eq!(pinned["sound"][0]["role"], "courier_line");
+}
+
+#[tokio::test]
 async fn unapproved_reference_binding_is_a_named_finding() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");

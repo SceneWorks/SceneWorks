@@ -1,5 +1,5 @@
 import React from "react";
-import { AssetMedia, assetCanRenderAsVideo } from "../assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 
 // The center program monitor (design 2a, epic 12798): the 16:9/9:16/1:1 preview of the
@@ -21,7 +21,8 @@ export function ProgramMonitor({
   onPause,
   onEnded,
 }) {
-  const canPlay = assetCanRenderAsVideo(selectedAsset);
+  const isAudio = assetCanRenderAsAudio(selectedAsset);
+  const canPlay = assetCanRenderAsVideo(selectedAsset) || isAudio;
 
   return (
     <div className="ve-monitor">
@@ -38,7 +39,7 @@ export function ProgramMonitor({
               // the transport silently stopped working when sc-17161 made `muted` an opt-in prop.
               // Passing it explicitly is the contract assetMedia.jsx documents for script-driven
               // surfaces, and restores the always-muted element this monitor rendered before.
-              muted
+              muted={!isAudio}
               onEnded={onEnded}
               onPause={onPause}
               onPlay={onPlay}

@@ -234,6 +234,9 @@ pub struct PlanSound {
     pub ambience: Option<SoundBed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music: Option<SoundBed>,
+    /// Sound-effect beds, each placed once at its own sequence start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sfx: Vec<SoundBed>,
 }
 
 /// Gain and mute for one audio bus.
@@ -1002,6 +1005,9 @@ fn validate_plan_sound(sound: &PlanSound) -> Vec<PlanDiagnostic> {
     }
     if let Some(bed) = &sound.music {
         validate_sound_bed(&mut findings, "sound.music", bed);
+    }
+    for (index, bed) in sound.sfx.iter().enumerate() {
+        validate_sound_bed(&mut findings, &format!("sound.sfx[{index}]"), bed);
     }
     findings
 }
@@ -1797,6 +1803,9 @@ fn validate_sound_against_pack(plan: &ProductionPlan, pack: &ReferencePack) -> V
     }
     if let Some(bed) = &plan.sound.music {
         check(None, "sound.music.role", &bed.role, "music");
+    }
+    for (index, bed) in plan.sound.sfx.iter().enumerate() {
+        check(None, &format!("sound.sfx[{index}].role"), &bed.role, "sfx");
     }
     for shot in &plan.shots {
         if let Some(clip) = &shot.dialogue_clip {

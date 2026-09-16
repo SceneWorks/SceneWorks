@@ -10980,6 +10980,16 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
 .ve-film-preflight dt { color: var(--text-muted); }
 .ve-film-preflight dd { margin: 0; overflow-wrap: anywhere; }
+.ve-film-help { margin: 6px 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-sound-list,
+.ve-film-sound-beds { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+.ve-film-sound-list fieldset,
+.ve-film-sound-beds fieldset,
+.ve-film-section > fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-audio-preview { width: 100%; height: 34px; }
+.ve-film-export { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
+.ve-audio-inspector { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+.ve-audio-inspector label { display: grid; gap: 4px; font-size: 12px; }
 @media (max-width: 760px) {
   .ve-film-shot-layout { grid-template-columns: 1fr; }
   .ve-film-dependency { grid-template-columns: 1fr; }
