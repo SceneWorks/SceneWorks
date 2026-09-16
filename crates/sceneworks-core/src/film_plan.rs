@@ -2951,12 +2951,37 @@ pub fn validate_plan_against_model(
                 .iter()
                 .any(|candidate| (candidate - duration).abs() <= DURATION_MENU_TOLERANCE)
         {
+            // The nearest legal values on either side are named as the correction, because a
+            // planner told only that a value is off the menu re-derives the "right" one — the
+            // real local planner wrote 6.8333 between 6.5833 and 7.2917 (sc-23406) — while a value
+            // it is shown, it copies.
+            let below = duration_menu
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate < duration)
+                .fold(None, |best: Option<f64>, candidate| {
+                    Some(best.map_or(candidate, |best| best.max(candidate)))
+                });
+            let above = duration_menu
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate > duration)
+                .fold(None, |best: Option<f64>, candidate| {
+                    Some(best.map_or(candidate, |best| best.min(candidate)))
+                });
+            let nearest: Vec<String> = [below, above]
+                .into_iter()
+                .flatten()
+                .map(|value| format!("{value}"))
+                .collect();
             findings.push(PlanDiagnostic::shot(
                 id,
                 "targetDurationSeconds",
                 format!(
                     "{duration}s is not on {model_id}'s duration menu {duration_menu:?}; the \
-                     engine would render a different length than the plan intends"
+                     engine would render a different length than the plan intends — write {} \
+                     instead",
+                    nearest.join(" or ")
                 ),
             ));
         }
