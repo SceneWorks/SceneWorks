@@ -369,9 +369,12 @@ pub(crate) async fn apply_film_planning_candidate(
             "That planning candidate is no longer ready to apply",
         ));
     }
-    let candidate = operation
+    let mut candidate = operation
         .candidate_plan
         .ok_or_else(|| ApiError::internal("Ready planning operation has no candidate plan"))?;
+    let mut compiled = operation
+        .compiled
+        .ok_or_else(|| ApiError::internal("Ready planning operation has no compiled plan"))?;
     let saved = project_call(state, move |store| {
         let mut draft = store.get_film_draft(&project_id, &draft_id)?;
         if draft.revision != operation.draft_revision {
@@ -380,7 +383,16 @@ pub(crate) async fn apply_film_planning_candidate(
                 operation.draft_revision, draft.revision
             )));
         }
+        // The store owns the next revision. Make the candidate and its compile current before the
+        // normal save so it can preserve the refined prompts across that revision bump.
+        candidate.id = draft.id.clone();
+        candidate.title = draft.title.clone();
+        candidate.version = draft.revision;
+        compiled.plan_id = candidate.id.clone();
+        compiled.plan_version = candidate.version;
+        compiled.plan_sha256 = sceneworks_core::film_compile::production_plan_sha256(&candidate)?;
         draft.production_plan = candidate;
+        draft.compiled_plan = Some(compiled);
         store.save_film_draft(&project_id, &draft_id, draft)
     })
     .await?;

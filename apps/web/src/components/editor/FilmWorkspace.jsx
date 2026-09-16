@@ -7,6 +7,7 @@ import {
   getFilmPlanning,
   installFilmPlanner,
   parseFilmScript,
+  preflightFilm,
   startFilmPlanning,
 } from "../../api/films.js";
 import { useAppStatic } from "../../context/AppContext.js";
@@ -14,9 +15,10 @@ import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
+import { FilmShots } from "./FilmShots.jsx";
 
 export function FilmWorkspace() {
-  const { activeProject, assets, importAsset, token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
+  const { activeProject, assets = [], importAsset, models = [], token, refreshTimelines, setSelectedTimelineId } = useAppStatic();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState(null);
@@ -24,6 +26,8 @@ export function FilmWorkspace() {
   const [notice, setNotice] = useState("");
   const [plannerAvailability, setPlannerAvailability] = useState(null);
   const [planningOperation, setPlanningOperation] = useState(null);
+  const [selectedShotIds, setSelectedShotIds] = useState([]);
+  const [preflight, setPreflight] = useState(null);
 
   useEffect(() => {
     let canceled = false;
@@ -33,6 +37,8 @@ export function FilmWorkspace() {
     setNotice("");
     setPlannerAvailability(null);
     setPlanningOperation(null);
+    setSelectedShotIds([]);
+    setPreflight(null);
     if (!activeProject?.id) return undefined;
     apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
       .then((items) => {
@@ -41,6 +47,7 @@ export function FilmWorkspace() {
         if (items[0]) {
           setSelectedId(items[0].id);
           setDraft(items[0]);
+          setSelectedShotIds(items[0].productionPlan.shots.map((shot) => shot.id));
         }
       })
       .catch((error) => !canceled && setNotice(error.message));
@@ -83,6 +90,8 @@ export function FilmWorkspace() {
       setDrafts((items) => [created, ...items]);
       setSelectedId(created.id);
       setDraft(created);
+      setSelectedShotIds(created.productionPlan.shots.map((shot) => shot.id));
+      setPreflight(null);
       setPlanningOperation(null);
     } catch (error) {
       setNotice(error.message);
@@ -96,11 +105,16 @@ export function FilmWorkspace() {
     setNotice("");
     if (!id) {
       setDraft(null);
+      setSelectedShotIds([]);
+      setPreflight(null);
       return;
     }
     setBusy(true);
     try {
-      setDraft(await apiFetch(`/api/v1/projects/${activeProject.id}/films/${id}`, token));
+      const loaded = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${id}`, token);
+      setDraft(loaded);
+      setSelectedShotIds(loaded.productionPlan.shots.map((shot) => shot.id));
+      setPreflight(null);
       setPlanningOperation(null);
     } catch (error) {
       setNotice(error.message);
@@ -110,6 +124,7 @@ export function FilmWorkspace() {
   }
 
   function updateDraft(mutator) {
+    setPreflight(null);
     setDraft((current) => {
       const next = structuredClone(current);
       mutator(next);
@@ -130,6 +145,8 @@ export function FilmWorkspace() {
 
   function replaceDraft(next) {
     setDraft(next);
+    setSelectedShotIds(next.productionPlan.shots.map((shot) => shot.id));
+    setPreflight(null);
     setDrafts((items) => [next, ...items.filter((item) => item.id !== next.id)]);
   }
 
@@ -178,6 +195,8 @@ export function FilmWorkspace() {
       setDraft(saved);
       setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
       setNotice("Generated candidate replaced the previous edited plan. Review or edit every shot before rendering.");
+      setSelectedShotIds(saved.productionPlan.shots.map((shot) => shot.id));
+      setPreflight(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -202,9 +221,15 @@ export function FilmWorkspace() {
     setNotice("");
     try {
       const saved = await saveDraft();
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST" });
+      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token);
+      setPreflight(inspected);
+      if (!inspected.valid) {
+        setNotice("Preflight found fields that must be corrected before rendering.");
+        return;
+      }
+      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds }) });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
-      setNotice("Rendering the shot in this project.");
+      setNotice(`Rendering ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"} in this project.`);
       let shownTimelineId = null;
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
@@ -238,7 +263,22 @@ export function FilmWorkspace() {
     }
   }
 
-  const shot = draft?.productionPlan?.shots?.[0];
+  async function inspectPreflight() {
+    if (!draft) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const saved = await saveDraft();
+      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token);
+      setPreflight(inspected);
+      setNotice(inspected.valid ? "Preflight passed. Review the effective requests before rendering." : "Preflight found fields that need attention.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <details className="ve-film" open>
       <summary>Film workspace</summary>
@@ -252,7 +292,7 @@ export function FilmWorkspace() {
         </label>
         <button disabled={busy} onClick={createDraft} type="button">New film draft</button>
       </div>
-      {draft && shot ? (
+      {draft ? (
         <div>
           <div className="ve-film-form">
             <label>Film title<input value={draft.title} onChange={(event) => updateDraft((next) => { next.title = event.target.value; })} /></label>
@@ -286,29 +326,22 @@ export function FilmWorkspace() {
             setNotice={setNotice}
             token={token}
           />
-          <section aria-labelledby="film-manual-shot-heading" className="ve-film-section">
-            <h3 id="film-manual-shot-heading">Current shot plan</h3>
-            {draft.productionPlan.shots.map((currentShot, index) => (
-              <article className="ve-film-shot-editor" key={currentShot.id}>
-                <h4>{currentShot.id}</h4>
-                <div className="ve-film-form">
-                  <label className="ve-film-prompt">Shot prompt<textarea aria-label={`Shot ${currentShot.id} prompt`} rows="3" value={currentShot.prompt} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].prompt = event.target.value; })} /></label>
-                  <label>Beat<input aria-label={`Shot ${currentShot.id} beat`} value={currentShot.beat} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].beat = event.target.value; })} /></label>
-                  <label>Framing<input aria-label={`Shot ${currentShot.id} framing`} value={currentShot.framing} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].framing = event.target.value; })} /></label>
-                  <label>Duration (seconds)<input aria-label={`Shot ${currentShot.id} duration`} min="0.1" step="0.0001" type="number" value={currentShot.targetDurationSeconds} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].targetDurationSeconds = Number(event.target.value); })} /></label>
-                  <label>Start state<input aria-label={`Shot ${currentShot.id} start state`} value={currentShot.startState} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].startState = event.target.value; })} /></label>
-                  <label>End state<input aria-label={`Shot ${currentShot.id} end state`} value={currentShot.endState} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].endState = event.target.value; })} /></label>
-                  <label className="ve-film-prompt">Dialogue<textarea aria-label={`Shot ${currentShot.id} dialogue`} rows="2" value={currentShot.dialogue ?? ""} onChange={(event) => updateDraft((next) => { next.productionPlan.shots[index].dialogue = event.target.value || undefined; })} /></label>
-                </div>
-              </article>
-            ))}
-            <div className="ve-film-form">
-              <label>Video model<input value={draft.productionPlan.model.id} onChange={(event) => updateDraft((next) => { next.productionPlan.model.id = event.target.value; })} /></label>
-            </div>
-          </section>
+          <FilmShots
+            capabilities={preflight?.capabilities}
+            compiled={preflight?.compiled}
+            disabled={busy}
+            draft={draft}
+            findings={preflight?.findings}
+            models={models}
+            onChange={updateDraft}
+            onImportError={setNotice}
+            selectedShotIds={selectedShotIds}
+            setSelectedShotIds={setSelectedShotIds}
+          />
           <div className="ve-film-actions">
             <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>
-            <button className="ve-generate" disabled={busy} onClick={startRun} type="button">Render shot</button>
+            <button disabled={busy || !selectedShotIds.length} onClick={inspectPreflight} type="button">Run preflight</button>
+            <button className="ve-generate" disabled={busy || !selectedShotIds.length} onClick={startRun} type="button">Render selected shots</button>
           </div>
         </div>
       ) : null}

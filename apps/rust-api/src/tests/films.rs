@@ -55,11 +55,12 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
         restarted.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/films/{draft_id}/runs"),
-        Value::Null,
+        json!({"selectedShotIds": ["SH010"]}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{run}");
     assert_eq!(run["locator"]["draftRevision"], 2);
+    assert_eq!(run["locator"]["selectedShotIds"], json!(["SH010"]));
     assert!(run["record"].is_null());
     let relative = run["locator"]["recordDirectory"].as_str().unwrap();
     assert!(!relative.starts_with('/'));
@@ -491,6 +492,23 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
         .join("planning")
         .join(draft_id);
     std::fs::create_dir_all(&planning_root).unwrap();
+    let compiled = json!({
+        "schemaVersion": 3,
+        "planId": draft_id,
+        "planVersion": 1,
+        "planSha256": "synthetic-candidate-fixture",
+        "referencePackId": format!("{draft_id}-references"),
+        "referencePackVersion": 1,
+        "compiledAt": "2026-09-16T00:00:00Z",
+        "model": {"id": "minimax_h3", "tier": "q4", "fps": 24, "lane": "mlx"},
+        "requests": [{
+            "shotId": "SH010", "beat": "Opening shot", "mode": "text_to_video",
+            "model": "minimax_h3", "partitionReason": "base conditioning",
+            "prompt": "Generated candidate prompt.", "promptSource": "refined",
+            "authoredPrompt": "", "durationSeconds": 5.1667, "fps": 24,
+            "width": 576, "height": 320, "referenceRoles": [], "continuityRoles": []
+        }]
+    });
     std::fs::write(
         planning_root.join("latest.json"),
         serde_json::to_vec_pretty(&json!({
@@ -509,6 +527,7 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
             "findings": [],
             "executions": [],
             "candidatePlan": candidate,
+            "compiled": compiled,
             "createdAt": "2026-09-16T00:00:00Z",
             "updatedAt": "2026-09-16T00:00:00Z"
         }))
@@ -539,6 +558,17 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     assert_eq!(
         applied["productionPlan"]["shots"][0]["prompt"],
         "Generated candidate prompt."
+    );
+    assert_eq!(
+        applied["compiledPlan"]["planVersion"],
+        applied["productionPlan"]["version"]
+    );
+    assert_eq!(
+        applied["compiledPlan"]["planSha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
     );
 
     let (status, stale) = request(
