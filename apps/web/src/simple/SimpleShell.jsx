@@ -82,6 +82,7 @@ const TOAST_MS = 1900;
 const PERSIST_DEBOUNCE_MS = 400;
 
 export function SimpleShell({
+  appVersion,
   accent,
   onAccentChange,
   embedWorkflow = true,
@@ -306,44 +307,47 @@ export function SimpleShell({
         style={{ "--su-content-max": contentMaxWidth(breakpoint) }}
       >
         {!phone || drawer ? (
-          <nav aria-label="Primary" className="su-nav su-scroll">
-            <div className="su-brand">
-              <Logo size={30} />
-              <div>
-                <div className="su-brand-name">SceneWorks</div>
-                <div className="su-brand-sub">Simple</div>
-              </div>
-            </div>
-            {SIMPLE_SCREENS.map((group) => (
-              <React.Fragment key={group.group}>
-                <div className="su-nav-group-title">{group.group}</div>
-                <div
-                  className={
-                    group.group === "Studios" ? "su-nav-group su-nav-group--studios" : "su-nav-group"
-                  }
-                >
-                  {group.items.map((item) => {
-                    const IconComponent = item.icon;
-                    return (
-                      <button
-                        aria-current={screen === item.id ? "page" : undefined}
-                        className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
-                        key={item.id}
-                        onClick={() => goTo(item.id)}
-                        type="button"
-                      >
-                        <IconComponent size={group.group === "Studios" ? 19 : 18} />
-                        <span className="su-nav-label">{item.label}</span>
-                        {item.id === "queue" && queueCount ? (
-                          <span className="su-nav-badge">{queueCount}</span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+          <nav aria-label="Primary" className="su-nav">
+            <div className="su-nav-scroll su-scroll">
+              <div className="su-brand">
+                <Logo size={30} />
+                <div>
+                  <div className="su-brand-name">SceneWorks</div>
+                  <div className="su-brand-sub">Simple</div>
                 </div>
-              </React.Fragment>
-            ))}
+              </div>
+              {SIMPLE_SCREENS.map((group) => (
+                <React.Fragment key={group.group}>
+                  <div className="su-nav-group-title">{group.group}</div>
+                  <div
+                    className={
+                      group.group === "Studios" ? "su-nav-group su-nav-group--studios" : "su-nav-group"
+                    }
+                  >
+                    {group.items.map((item) => {
+                      const IconComponent = item.icon;
+                      return (
+                        <button
+                          aria-current={screen === item.id ? "page" : undefined}
+                          className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
+                          key={item.id}
+                          onClick={() => goTo(item.id)}
+                          type="button"
+                        >
+                          <IconComponent size={group.group === "Studios" ? 19 : 18} />
+                          <span className="su-nav-label">{item.label}</span>
+                          {item.id === "queue" && queueCount ? (
+                            <span className="su-nav-badge">{queueCount}</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </React.Fragment>
+              ))}
+            </div>
             <div className="su-nav-footer">
+              {appVersion}
               <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
             </div>
           </nav>

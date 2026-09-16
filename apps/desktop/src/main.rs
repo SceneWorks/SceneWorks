@@ -72,7 +72,12 @@ fn main() {
             Ok(())
         })
         .manage(setup::Managed::default())
+        .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
+            update::get_update_status,
+            update::download_app_update,
+            update::install_app_update,
+            update::discard_app_update,
             setup::start_setup,
             setup::get_session_logs,
             settings::get_app_settings,

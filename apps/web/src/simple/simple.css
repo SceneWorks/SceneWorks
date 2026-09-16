@@ -122,9 +122,11 @@
   padding: 14px 12px;
   background: var(--bg-2);
   border-right: 1px solid var(--border);
-  overflow-y: auto;
+  overflow: hidden;
   z-index: 5;
 }
+
+.su-nav-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 
 /* Phone: the sidebar becomes an overlay drawer above the scrim. */
 .su-root[data-bp="phone"] .su-nav {
@@ -307,17 +309,11 @@
   color: var(--text-faint);
 }
 
-/* The switch also lives in the FULL workspace's sidebar footer, which previously held
-   only the version string. These two rules are the whole footprint the Simple UI has in
-   the existing shell's styling: stack the version under the switch. */
+/* Match the mode switch to the Advanced sidebar surface. */
 .sidebar-footer .su-switch {
   background: var(--surface);
 }
 
-.sidebar-footer .app-version {
-  display: block;
-  margin-top: 8px;
-}
 
 /* ---------- Main column ---------- */
 
