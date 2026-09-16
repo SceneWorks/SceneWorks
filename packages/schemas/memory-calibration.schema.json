@@ -6,7 +6,7 @@
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
     "schemaVersion": { "const": 6 },
-    "harnessVersion": { "const": "sceneworks-memory-v5" },
+    "harnessVersion": { "type": "string", "pattern": "^sceneworks-memory-v[1-9][0-9]*$" },
     "sourceSessions": { "type": "array", "items": { "$ref": "#/$defs/sourceSession" } },
     "records": { "type": "array", "items": { "$ref": "#/$defs/record" } },
     "exceededBounds": { "type": "array", "items": { "$ref": "#/$defs/exceededBound" } }
@@ -530,7 +530,7 @@
         },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
-        "harnessVersion": { "const": "sceneworks-memory-v5" }
+        "harnessVersion": { "type": "string", "pattern": "^sceneworks-memory-v[1-9][0-9]*$" }
       }
     },
     "record": {
@@ -772,7 +772,7 @@
         "sourceProvenance": { "enum": ["physical_mlx_v1"] },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
-        "harnessVersion": { "const": "sceneworks-memory-v5" }
+        "harnessVersion": { "type": "string", "pattern": "^sceneworks-memory-v[1-9][0-9]*$" }
       },
       "allOf": [
         {
