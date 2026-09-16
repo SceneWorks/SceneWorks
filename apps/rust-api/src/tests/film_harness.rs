@@ -182,6 +182,52 @@ impl ApiTransport for RouterTransport {
     }
 }
 
+#[tokio::test]
+async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_compile() {
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = FilmDraft::manual_one_shot("project-film", "film-preflight", "Preflight");
+    draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+    let selected = vec!["SH010".to_owned()];
+
+    let ready = film_harness::preflight_documents(
+        &harness.transport,
+        &draft.production_plan,
+        &draft.reference_pack,
+        None,
+        Some(&selected),
+        true,
+    )
+    .await
+    .expect("preflight resolves through the live route contract");
+    assert!(ready.valid, "{:?}", ready.findings);
+    assert_eq!(ready.compiled.as_ref().unwrap().requests.len(), 1);
+    assert!(ready
+        .capabilities
+        .as_ref()
+        .unwrap()
+        .modes
+        .contains(&"text_to_video".to_owned()));
+
+    let compiled = ready.compiled.unwrap();
+    draft.production_plan.shots[0].prompt =
+        "The edited prompt must invalidate the compile.".to_owned();
+    let stale = film_harness::preflight_documents(
+        &harness.transport,
+        &draft.production_plan,
+        &draft.reference_pack,
+        Some(compiled),
+        Some(&selected),
+        true,
+    )
+    .await
+    .expect("staleness is a finding, not a transport failure");
+    assert!(!stale.valid);
+    assert!(stale
+        .findings
+        .iter()
+        .any(|finding| finding.field == "compiled.planSha256"));
+}
+
 /// An [`ApiTransport`] over the in-process router that logs every file DOWNLOAD, and can answer
 /// `GET /api/v1/projects…` with the project's `path` relocated to a directory this process cannot
 /// read.

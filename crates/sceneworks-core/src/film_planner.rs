@@ -251,7 +251,8 @@ pub fn validate_brief(brief: &ProductionBrief) -> Vec<PlanDiagnostic> {
 /// only this — never a capability from a model card, an upstream repo or a hosted API — so a draft
 /// that is inside the envelope is dispatchable and one that is not is refused with the same
 /// diagnostics `film-harness validate` would produce.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerCapabilities {
     pub model_id: String,
     /// Conditioning modes the entry declares AND this schema can express.
@@ -290,7 +291,8 @@ pub struct PlannerCapabilities {
 }
 
 /// One installed accelerator the planner may declare, as the envelope states it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerTurboLora {
     /// The catalog id — the exact string the draft must write.
     pub id: String,

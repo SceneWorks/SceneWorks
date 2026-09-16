@@ -10919,6 +10919,67 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
 .ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-candidate article p { margin: 5px 0; }
+.ve-film-section-heading,
+.ve-film-shot-inspector > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ve-film-section-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-plan-controls,
+.ve-film-inspector-fields {
+  min-width: 0;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-plan-controls > .ve-film-form { margin-top: 0; }
+.ve-film-capability-summary { color: var(--text-muted); font-size: 12px; }
+.ve-film-shot-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, .32fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+.ve-film-shot-list { display: grid; align-content: start; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ve-film-shot-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-shot-list li.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, transparent); }
+.ve-film-shot-list li > label { display: flex; align-items: center; gap: 4px; }
+.ve-film-shot-list li > button { display: grid; gap: 2px; min-width: 0; border: 0; background: transparent; color: var(--text); text-align: left; }
+.ve-film-shot-list li > button span { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ve-film-shot-inspector { min-width: 0; }
+.ve-film-shot-inspector > header .ve-film-actions { margin-top: 0; }
+.ve-film-inspector-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px;
+}
+.ve-film-inspector-fields .ve-film-prompt,
+.ve-film-dependencies,
+.ve-film-findings { grid-column: 1 / -1; }
+.ve-film-dependencies { display: grid; gap: 7px; }
+.ve-film-dependency { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(110px, .8fr) minmax(160px, 1.5fr) auto; gap: 7px; }
+.ve-film-findings { margin: 0; padding-left: 20px; color: var(--danger); font-size: 12px; }
+.ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-preflight dt { color: var(--text-muted); }
+.ve-film-preflight dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .ve-film-shot-layout { grid-template-columns: 1fr; }
+  .ve-film-dependency { grid-template-columns: 1fr; }
+}
 .workspace > section.ve-editor {
   flex: 1 1 auto;
   min-height: 0;

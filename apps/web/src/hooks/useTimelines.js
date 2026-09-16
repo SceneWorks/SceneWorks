@@ -16,6 +16,11 @@ function serializeTimeline(timeline) {
 // target the dirty working copy has removed). A dedicated kind so it neither clobbers nor is
 // clobbered by the "general" error notice, and can be cleared once the conflict is resolved.
 const TIMELINE_GENERATION_CONFLICT_NOTICE = "timelineGenerationConflict";
+let timelineGenerationModulePromise = null;
+function loadTimelineGeneration() {
+  timelineGenerationModulePromise ??= import("../timelineGeneration.js");
+  return timelineGenerationModulePromise;
+}
 
 // sc-12018: whether the generation's target still exists in `timeline`. A replace rewrites a
 // specific item (context.itemId) inside its track; an extend/bridge only appends a new item to
@@ -291,7 +296,7 @@ export function useTimelines({
     if (!saved) return;
     if (!runId) {
       try {
-        const { resolveGenerationTrim } = await import("../timelineGeneration.js");
+        const { resolveGenerationTrim } = await loadTimelineGeneration();
         const next = resolveGenerationTrim(saved, shotId, resolution);
         if (next) await saveTimeline(next);
       } catch (error) { setError(error.message); }
@@ -368,6 +373,9 @@ export function useTimelines({
   });
   const enqueueTimelineGenerationApply = useCallback(
     (job) => {
+      // Start the lazy chunk fetch in the caller's turn. The queued callback stays identity-stable,
+      // while short-lived SSE/test callers do not need an extra event-loop turn before the GET.
+      loadTimelineGeneration();
       timelineApplyQueueRef.current = timelineApplyQueueRef.current
         .then(() => applyCompletedTimelineGenerationRef.current?.(job))
         .catch((err) => setError(err.message));
@@ -382,11 +390,12 @@ export function useTimelines({
       return;
     }
     try {
-      const { applyTimelineGenerationResult } = await import("../timelineGeneration.js");
       const path = `/api/v1/projects/${projectId}/timelines/${timelineId}`;
       let saved;
+      let applyTimelineGenerationResult;
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const timeline = await apiFetch(path, token);
+        ({ applyTimelineGenerationResult } = await loadTimelineGeneration());
         const updated = applyTimelineGenerationResult(timeline, job);
         if (serializeTimeline(updated) === serializeTimeline(timeline)) { saved = timeline; break; }
         try {

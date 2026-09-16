@@ -58,6 +58,7 @@ use sceneworks_core::film_plan::{
     SourceDocument, TakeRecord, TakeRejection, TimelineEditRecord, TimelineItemRecord,
     TimelineRecord, TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
 };
+use sceneworks_core::film_planner::{capabilities_for, PlannerCapabilities};
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
 use sha2::{Digest, Sha256};
@@ -1449,6 +1450,103 @@ fn compiled_for_run(
             },
         )
         .map_err(HarnessError::Validation),
+    }
+}
+
+/// Shared in-memory preflight for the Film workspace and the file-oriented harness. It resolves
+/// the same live catalog, host lane, worker reachability, LoRA inventory and compiler used by an
+/// actual run, so the browser cannot present a second, approximate render contract.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FilmDocumentPreflight {
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<PlannerCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<CompiledPlan>,
+    pub findings: Vec<PlanDiagnostic>,
+}
+
+pub(crate) async fn preflight_documents(
+    transport: &dyn ApiTransport,
+    plan: &ProductionPlan,
+    pack: &ReferencePack,
+    supplied: Option<CompiledPlan>,
+    selection: Option<&[String]>,
+    require_installed: bool,
+) -> Result<FilmDocumentPreflight, HarnessError> {
+    let mut findings = film_plan::validate_all(plan, pack, None, None);
+    findings.extend(selection_findings(plan, selection));
+    if !findings.is_empty() {
+        return Ok(FilmDocumentPreflight {
+            valid: false,
+            capabilities: None,
+            compiled: None,
+            findings,
+        });
+    }
+
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    let facts = discover_host(&client).await?;
+    let catalog = resolve_plan_catalog(&client, plan).await?;
+    findings.extend(model_findings(
+        plan,
+        &catalog,
+        require_installed,
+        &facts,
+        selection,
+    ));
+    if findings.is_empty() {
+        findings.extend(host_findings(plan, &facts, false));
+    }
+
+    let lane = facts
+        .platform
+        .as_deref()
+        .map(ModelLane::for_platform)
+        .unwrap_or_else(ModelLane::for_current_platform);
+    let installed = installed_lora_ids(transport).await?;
+    let capabilities = catalog.base_entry().map(|base| {
+        let mut capabilities = capabilities_for(&plan.model, base, lane);
+        if let Some((_, reference)) = catalog.reference_entry() {
+            capabilities = capabilities.with_reference_partition(reference);
+        }
+        capabilities
+            .narrowed_to_pack(pack)
+            .with_installed_turbo_loras(&installed)
+    });
+    if !findings.is_empty() {
+        return Ok(FilmDocumentPreflight {
+            valid: false,
+            capabilities,
+            compiled: None,
+            findings,
+        });
+    }
+
+    let plan_sha256 = sceneworks_core::film_compile::production_plan_sha256(plan)
+        .map_err(|error| HarnessError::Io(error.to_string()))?;
+    let entries = catalog
+        .entries()
+        .expect("model findings are empty only with a catalog entry");
+    match compiled_for_run(plan, pack, &entries, lane, &plan_sha256, supplied) {
+        Ok(compiled) => Ok(FilmDocumentPreflight {
+            valid: true,
+            capabilities,
+            compiled: Some(compiled),
+            findings: Vec::new(),
+        }),
+        Err(HarnessError::Validation(findings)) => Ok(FilmDocumentPreflight {
+            valid: false,
+            capabilities,
+            compiled: None,
+            findings,
+        }),
+        Err(error) => Err(error),
     }
 }
 

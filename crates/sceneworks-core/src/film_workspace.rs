@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::film_compile::CompiledPlan;
 use crate::film_plan::{
     PlanLimits, PlanModel, PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning,
     PLAN_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION,
@@ -103,6 +104,11 @@ pub struct FilmDraft {
     #[serde(default)]
     pub planning: FilmPlanningSelection,
     pub production_plan: ProductionPlan,
+    /// Last explicitly imported or planner-produced compile. Edits intentionally leave this in
+    /// place so preflight can explain that it is stale instead of silently replacing refined
+    /// prompts. A manual draft may omit it and compile authored prompts at preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_plan: Option<CompiledPlan>,
     pub reference_pack: ReferencePack,
     /// Reserved, versioned authoring document for the later review slice. Persisting the empty
     /// shape now keeps a draft self-contained without implementing review behavior in S1.
@@ -179,6 +185,7 @@ impl FilmDraft {
                     depends_on: Vec::new(),
                 }],
             },
+            compiled_plan: None,
             reference_pack: ReferencePack {
                 schema_version: REFERENCE_PACK_SCHEMA_VERSION,
                 id: format!("{draft_id}-references"),
@@ -301,6 +308,9 @@ pub struct FilmRunLocator {
     pub project_id: String,
     pub draft_id: String,
     pub draft_revision: u32,
+    /// Empty on legacy locators means all shots. New locators always pin the effective selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_shot_ids: Vec<String>,
     /// Project-relative directory containing pinned inputs and canonical `run.json`.
     pub record_directory: String,
     pub created_at: String,

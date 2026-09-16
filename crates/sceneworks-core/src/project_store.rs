@@ -34,6 +34,7 @@ use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
+use crate::film_compile::{production_plan_sha256, CompiledPlan};
 use crate::film_plan::{validate_reference_pack, ReferenceEntry, REFERENCE_KINDS};
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
@@ -234,6 +235,7 @@ pub struct FilmRunFiles {
     pub directory: PathBuf,
     pub plan: PathBuf,
     pub reference_pack: PathBuf,
+    pub compiled: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -824,12 +826,30 @@ impl ProjectStore {
                 current.revision, draft.revision
             )));
         }
+        // A production+compiled import is one document transaction. If the supplied compile
+        // exactly matches the supplied plan, carry it across the store-owned revision bump by
+        // updating only its identity hash. If the plan was edited independently, preserve the old
+        // identity so preflight reports it stale and rendering cannot silently use old prompts.
+        let supplied_plan_sha = production_plan_sha256(&draft.production_plan)?;
+        let compiled_was_current = draft.compiled_plan.as_ref().is_some_and(|compiled| {
+            compiled
+                .staleness_findings(&draft.production_plan, &supplied_plan_sha)
+                .is_empty()
+        });
         draft.revision = current.revision.saturating_add(1);
         draft.created_at = current.created_at;
         draft.updated_at = utc_now();
         draft.production_plan.id = draft.id.clone();
         draft.production_plan.version = draft.revision;
         draft.production_plan.title = draft.title.clone();
+        if compiled_was_current {
+            let normalized_sha = production_plan_sha256(&draft.production_plan)?;
+            if let Some(compiled) = draft.compiled_plan.as_mut() {
+                compiled.plan_id = draft.production_plan.id.clone();
+                compiled.plan_version = draft.production_plan.version;
+                compiled.plan_sha256 = normalized_sha;
+            }
+        }
         write_json(&path, &draft)?;
         Ok(draft)
     }
@@ -931,6 +951,8 @@ impl ProjectStore {
         project_id: &str,
         run_locator_id: &str,
         draft_id: &str,
+        selected_shot_ids: Vec<String>,
+        compiled: Option<CompiledPlan>,
     ) -> ProjectStoreResult<FilmRunLocator> {
         if !is_safe_id(run_locator_id) || !is_safe_id(draft_id) {
             return Err(ProjectStoreError::BadRequest(
@@ -984,6 +1006,9 @@ impl ProjectStore {
             }
             write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
             write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+            if let Some(compiled) = compiled.as_ref() {
+                write_json(&run_dir.join("compiled.json"), compiled)?;
+            }
             Ok(())
         })();
         if let Err(error) = pin_result {
@@ -996,6 +1021,7 @@ impl ProjectStore {
             project_id: project_id.to_owned(),
             draft_id: draft_id.to_owned(),
             draft_revision: draft.revision,
+            selected_shot_ids,
             record_directory: relative_dir,
             created_at: utc_now(),
         };
@@ -1037,6 +1063,7 @@ impl ProjectStore {
         Ok(FilmRunFiles {
             plan: directory.join("plan.json"),
             reference_pack: directory.join("references.json"),
+            compiled: directory.join("compiled.json"),
             directory,
         })
     }
