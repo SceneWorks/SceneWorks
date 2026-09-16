@@ -2218,52 +2218,44 @@ test("the measured load shape is a receipt field, never copied from the plan", a
   assert.equal(result.records[0].loadShape, "eager_materialization");
 });
 
-// SC-16211. The `harnessVersion` const is asserted twice in the schema and embedded in every emitted
-// record. Adding the required engaged-composition identity bumps it and MUST invalidate every v3
-// record rather than treating a missing load-shape identity as shape-agnostic.
-const PRIOR_HARNESS_VERSION = "sceneworks-memory-v4";
+// Harness version is capture provenance. Record shape, not instrument age, decides validity.
+test("historical harness versions retain valid measurements without restamping", () => {
+  const historical = complete();
+  historical.harnessVersion = "sceneworks-memory-v4";
+  historical.logicalCaseId = logicalCaseId(historical);
+  assert.notEqual(historical.logicalCaseId, complete().logicalCaseId);
+  historical.id = recordId(historical);
+  const before = structuredClone(historical);
+  assert.equal(validateRecord(historical), historical);
+  for (const harnessVersion of [historical.harnessVersion, HARNESS_VERSION]) {
+    validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion, records: [historical] });
+  }
+  assert.deepEqual(historical, before, "validation preserves capture provenance and identity");
 
-test("pre-composition evidence is rejected as stale by the schema and harness gates", () => {
-  assert.equal(HARNESS_VERSION, "sceneworks-memory-v5");
-  assert.notEqual(HARNESS_VERSION, PRIOR_HARNESS_VERSION);
-
-  // A genuine prior-vintage record: every field populated, and its deterministic id recomputed over
-  // the old version exactly as the v2 harness would have emitted it, so identity is NOT what fails.
-  const stale = complete();
-  stale.harnessVersion = PRIOR_HARNESS_VERSION;
-  stale.id = recordId(stale);
-  assert.equal(stale.id, recordId(stale));
-
-  // 1. the runtime record gate rejects it, and names the version rather than an incidental field.
-  assert.throws(() => validateRecord(stale), /invalid harnessVersion/);
-
-  // 2. the schema const rejects both the envelope and the record it carries.
-  assert.throws(
-    () => validateBundle({ schemaVersion: 2, harnessVersion: PRIOR_HARNESS_VERSION, records: [stale] }),
-    (error) =>
-      /schema validation failed/.test(error.message) &&
-      error.message.includes("$.harnessVersion: value does not equal const") &&
-      error.message.includes("$.records[0].harnessVersion: value does not equal const"),
-  );
-
-  // 3. a stale record cannot be smuggled in under a current envelope either.
-  assert.throws(
-    () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [stale] }),
-    /schema validation failed/,
-  );
-
-  // 4. control: the identical record at the current version passes both gates, so the rejections
-  //    above are caused by the version bump and by nothing else.
-  const current = complete();
-  assert.equal(validateRecord(current), current);
-  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [current] });
+  const missingShape = structuredClone(historical);
+  delete missingShape.loadShape;
+  missingShape.id = recordId(missingShape);
+  assert.throws(() => validateRecord(missingShape), /loadShape/);
+  assert.throws(() => validateBundle({
+    schemaVersion: SCHEMA_VERSION, harnessVersion: historical.harnessVersion, records: [missingShape],
+  }), /loadShape/);
+  for (const harnessVersion of ["", "invalid", "sceneworks-memory-v0"]) {
+    const malformed = { ...historical, harnessVersion };
+    malformed.id = recordId(malformed);
+    assert.throws(() => validateRecord(malformed), /invalid harnessVersion/);
+    assert.throws(() => validateBundle({
+      schemaVersion: SCHEMA_VERSION, harnessVersion, records: [historical],
+    }), /schema validation failed/);
+    assert.throws(() => validateBundle({
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [malformed],
+    }), /schema validation failed/);
+  }
 });
 
-test("the promoted evidence bundle carries the current harnessVersion", async () => {
+test("the promoted evidence bundle satisfies the record contract regardless of harness age", async () => {
   const bundle = JSON.parse(
     await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url)),
   );
-  assert.equal(bundle.harnessVersion, HARNESS_VERSION);
   validateBundle(bundle);
 });
 
