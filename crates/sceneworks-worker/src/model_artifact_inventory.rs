@@ -448,6 +448,10 @@ mod tests {
             "shared resolver implementation",
         ),
         (
+            "crates/sceneworks-worker/src/model_jobs/receipt_verification.rs",
+            "shared receipt provenance verification and migration, not a model loader",
+        ),
+        (
             "crates/sceneworks-worker/src/paths.rs",
             "shared path/confinement implementation",
         ),
