@@ -33,9 +33,11 @@ tauri-plugin-shell = "2"
 # Cross-platform in-app auto-updater (sc-1355). Checks the GitHub "latest release"
 # pointer (plugins.updater.endpoints in tauri.conf.json), verifies the minisign
 # signature against plugins.updater.pubkey, and installs/restarts on user accept.
-# Driven from the Rust shell (update.rs) — no JS/ACL surface since the UI is the
-# loopback-served React app at a remote origin.
+# Installation stays in the Rust shell; the loopback UI uses app commands.
 tauri-plugin-updater = "2"
+
+# Hourly update checks and bounded CUDA preflight, using Tauri's existing runtime.
+tokio = { version = "1.40", default-features = false, features = ["time"] }
 
 [dev-dependencies]
 # Test fixtures that own their scratch directory and remove it on Drop (sc-17707).
@@ -69,12 +71,7 @@ sha2 = "0.10"
 # buffered whole in RAM (F-129, sc-8931). Already in the workspace lock (0.3.x), so no
 # new locked version is pulled; `alloc` is needed for the stream combinators.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-# Bound the one-shot CUDA device preflight (sc-16247): `cuInit` on a wedged NVIDIA driver can
-# block indefinitely rather than returning an error, and that probe gates `run_startup` — an
-# unbounded wait would leave the setup screen spinning forever with no message and no Retry.
-# Only `time` is needed; Tauri already runs on tokio, so this adds no runtime and no new locked
-# version (the workspace pins 1.40 for the API/worker).
-tokio = { version = "1.40", default-features = false, features = ["time"] }
+
 
 [target.'cfg(windows)'.dependencies]
 # Confine the API sidecar (and any child processes it spawns) to a kill-on-close Job
