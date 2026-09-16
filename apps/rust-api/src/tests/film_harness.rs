@@ -6605,6 +6605,8 @@ pub(crate) fn planner_options(harness: &Harness, out: &str) -> film_planner::Pla
         refine_prompts: false,
         prompt_guide_path: None,
         require_installed: false,
+        require_local_planner: true,
+        send_reference_pixels: false,
         // Empty: the in-process transport has no URL. The local-only rule is exercised as a unit
         // test in `film_planner` and end to end below.
         api_url: String::new(),

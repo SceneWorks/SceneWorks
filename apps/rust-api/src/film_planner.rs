@@ -99,6 +99,16 @@ pub struct LlmRequest {
     /// it. The worker appends it to the rewrite's system turn under `# Model prompt guide`; with
     /// none, the rewrite runs on the guide-less system prompt.
     pub guide: Option<String>,
+    /// Approved reference images available to an external, image-capable planner. Local planners
+    /// ignore these; the external adapter sends them only after both user opt-in and connection
+    /// capability checks.
+    pub reference_images: Vec<PlannerReferenceImage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannerReferenceImage {
+    pub role: String,
+    pub path: PathBuf,
 }
 
 /// One completed LLM request: the text, and what it cost (sc-22715). `job_id` and
@@ -352,6 +362,7 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                                 .unwrap_or(&self.thinking_mode)
                                 .to_owned(),
                             thinking: thinking.clone(),
+                            usage: None,
                         });
                         return Ok(LlmReply {
                             text,
@@ -458,7 +469,7 @@ fn non_local_api_reason(api_url: &str) -> Option<String> {
 
 /// Whether `host` is loopback, a private/link-local address, an `.local` name, or a single-label
 /// hostname — the addresses a SceneWorks API on the user's own hardware answers on.
-fn is_local_host(host: &str) -> bool {
+pub(crate) fn is_local_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
         return true;
@@ -500,6 +511,13 @@ pub struct PlannerOptions {
     pub prompt_guide_path: Option<PathBuf>,
     /// Refuse a model the catalog does not report installed.
     pub require_installed: bool,
+    /// Run local planner availability and host-memory admission. External adapters still use the
+    /// same plan validation/repair/compile path, but their decode does not require a local
+    /// `prompt_refine` worker and must not be blocked by hosted-provider environment variables.
+    pub require_local_planner: bool,
+    /// Make approved reference files available to the selected planner adapter. The OpenAI
+    /// adapter performs the second capability gate before reading or sending any bytes.
+    pub send_reference_pixels: bool,
     /// The API base URL, for the local-only check. Empty skips it (in-process tests).
     pub api_url: String,
     /// Overwrite an existing `plan.json` whose content differs — off by default so a generated plan
@@ -690,7 +708,7 @@ async fn prepare(
     let pack = film_plan::read_reference_pack_file(&options.reference_pack_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let mut findings = Vec::new();
-    if !options.api_url.trim().is_empty() {
+    if options.require_local_planner && !options.api_url.trim().is_empty() {
         findings.extend(local_only_findings(&options.api_url, &|name| {
             std::env::var(name).ok()
         }));
@@ -722,13 +740,15 @@ async fn prepare(
     }
     // The refiner first, then its memory: with no worker at all the answer is "nothing can plan",
     // not "nothing reports memory" — the second is a consequence of the first.
-    let findings = refiner_findings(transport).await?;
-    if !findings.is_empty() {
-        return Err(HarnessError::Validation(findings));
-    }
-    let findings = planner_memory_findings(&brief, &facts);
-    if !findings.is_empty() {
-        return Err(HarnessError::Validation(findings));
+    if options.require_local_planner {
+        let findings = refiner_findings(transport).await?;
+        if !findings.is_empty() {
+            return Err(HarnessError::Validation(findings));
+        }
+        let findings = planner_memory_findings(&brief, &facts);
+        if !findings.is_empty() {
+            return Err(HarnessError::Validation(findings));
+        }
     }
     Ok((brief, pack, catalog, caps, facts))
 }
@@ -788,6 +808,18 @@ pub async fn generate(
         .expect("prepare refuses without a catalog entry");
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
+    let reference_images = if options.send_reference_pixels {
+        pack.references
+            .iter()
+            .filter(|entry| entry.approved)
+            .map(|entry| PlannerReferenceImage {
+                role: entry.role.clone(),
+                path: pack_dir(&options.reference_pack_path).join(&entry.file),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut last_reply;
     let mut round = 0_u32;
     let mut cost = PlannerCost::default();
@@ -802,6 +834,7 @@ pub async fn generate(
                 // model's prompt-writing guide, and the whole capability envelope is already in
                 // the request the planner composes.
                 guide: None,
+                reference_images: reference_images.clone(),
             })
             .await?;
         cost.record(&reply);
@@ -1106,6 +1139,7 @@ async fn compile_and_write(
                     model_id: Some(plan.model.id.clone()),
                     workflow: "video".to_owned(),
                     guide: guide.clone(),
+                    reference_images: Vec::new(),
                 })
                 .await?;
             cost.record(&reply);
@@ -1127,7 +1161,7 @@ async fn compile_and_write(
     // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
     // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
     // would read as a measured cost.
-    if !cost.job_ids.is_empty() || repair_rounds > 0 {
+    if !cost.executions.is_empty() || repair_rounds > 0 {
         compiled.planner = Some(cost.into_record(repair_rounds, plan.limits.planner_max_memory_gb));
     }
     let compiled_path = options.compiled_path();
@@ -1250,6 +1284,7 @@ mod tests {
                 model_id: Some("minimax_h3".to_owned()),
                 workflow: "text-to-video".to_owned(),
                 guide: None,
+                reference_images: Vec::new(),
             })
             .await
             .expect_err("the cancellation is reported");
@@ -1342,6 +1377,8 @@ mod tests {
             refine_prompts: true,
             prompt_guide_path: None,
             require_installed: true,
+            require_local_planner: true,
+            send_reference_pixels: false,
             api_url: String::new(),
             force: false,
             poll_interval: Duration::from_secs(1),

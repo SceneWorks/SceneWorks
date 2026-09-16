@@ -5,8 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppContext } from "../../context/AppContext.js";
 
-const { apiFetchMock } = vi.hoisted(() => ({ apiFetchMock: vi.fn() }));
+const { apiFetchMock, loadCredentialsMock, saveCredentialMock } = vi.hoisted(() => ({
+  apiFetchMock: vi.fn(),
+  loadCredentialsMock: vi.fn(),
+  saveCredentialMock: vi.fn(),
+}));
 vi.mock("../../api.js", () => ({ apiFetch: apiFetchMock }));
+vi.mock("../../credentials.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadCredentials: loadCredentialsMock,
+  saveCredential: saveCredentialMock,
+}));
 
 import { FilmWorkspace } from "./FilmWorkspace.jsx";
 
@@ -52,6 +61,10 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   apiFetchMock.mockReset();
+  loadCredentialsMock.mockReset();
+  loadCredentialsMock.mockResolvedValue([]);
+  saveCredentialMock.mockReset();
+  saveCredentialMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -162,5 +175,77 @@ describe("FilmWorkspace", () => {
     expect(container.textContent).toContain("no download starts automatically");
     expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(true);
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/models/"))).toBe(false);
+  });
+
+  it("saves, tests, and selects an OpenAI-compatible planner with explicit disclosure", async () => {
+    const external = draft({
+      originalScript: "A courier enters a workshop.",
+      planning: {
+        provider: "openai_compatible",
+        connectionId: "fixture",
+        modelId: "manual-model",
+        thinkingMode: "disabled",
+        refinePrompts: false,
+        sendReferencePixels: false,
+      },
+    });
+    const connection = {
+      schemaVersion: 1,
+      id: "fixture",
+      label: "LAN planner",
+      baseUrl: "http://planner.local:8080/v1",
+      credentialHost: "planner.local:8080",
+      supportsModelListing: true,
+      supportsImageInput: true,
+      timeoutSeconds: 60,
+      maxOutputTokens: 8192,
+    };
+    loadCredentialsMock.mockResolvedValue([{ host: "planner.local:8080", present: true }]);
+    saveCredentialMock.mockResolvedValue([{ host: "planner.local:8080", present: true }]);
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([external]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path === "/api/v1/film-planner-connections") return Promise.resolve([connection]);
+      if (path === "/api/v1/film-planner-connections/fixture/test") {
+        return Promise.resolve({ ok: true, detail: "Connection succeeded.", models: ["listed-model"] });
+      }
+      if (path === "/api/v1/film-planner-connections/fixture" && options.method === "PUT") {
+        return Promise.resolve({ ...connection, ...JSON.parse(options.body) });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+
+    await renderWorkspace();
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("openai_compatible");
+    expect(container.textContent).toContain("Destination: http://planner.local:8080/v1");
+    expect(container.textContent).toContain("script, edited brief, beats and dialogue");
+    expect(container.querySelector('input[aria-label="Planning target video model"]').value).toBe("minimax_h3");
+    expect(container.querySelector('input[aria-label="External planner model ID"]').value).toBe("manual-model");
+
+    const testButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Test and list models");
+    await act(async () => { testButton.click(); await Promise.resolve(); await Promise.resolve(); });
+    const listed = container.querySelector('select[aria-label="Listed planner model"]');
+    expect(listed).not.toBeNull();
+    await act(async () => { changeValue(listed, "listed-model"); });
+    expect(container.querySelector('input[aria-label="External planner model ID"]').value).toBe("listed-model");
+
+    await act(async () => {
+      changeValue(container.querySelector('input[aria-label="Planning connection credential"]'), "new-secret");
+      const pixelToggle = [...container.querySelectorAll('input[type="checkbox"]')]
+        .find((input) => input.parentElement.textContent.includes("Send approved reference"));
+      pixelToggle.click();
+    });
+    const saveConnection = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save connection");
+    await act(async () => { saveConnection.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(saveCredentialMock).toHaveBeenCalledWith(expect.objectContaining({ token: "new-secret" }));
+    const saveCall = apiFetchMock.mock.calls.find(([path, , options]) => path.endsWith("/fixture") && options?.method === "PUT");
+    expect(saveCall).toBeTruthy();
+    expect(saveCall[2].body).not.toContain("new-secret");
+    expect(container.querySelector('input[aria-label="Planning target video model"]').value).toBe("minimax_h3");
   });
 });

@@ -213,6 +213,153 @@ async fn native_planner_checkpoint_is_routed_separately_from_the_video_model() {
 }
 
 #[tokio::test]
+async fn saved_external_connection_keeps_credentials_out_of_projects_and_fails_closed_when_missing()
+{
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temporary);
+    let app = create_app(settings.clone()).expect("app creates");
+
+    let secret = "planner-secret-must-stay-in-secret-store";
+    let (status, credentials) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/credentials",
+        json!({
+            "host": "planner.fixture.test",
+            "label": "Planner fixture",
+            "scheme": "bearer",
+            "token": secret
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{credentials}");
+    assert!(!credentials.to_string().contains(secret));
+
+    let (status, mismatch) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/film-planner-connections/mismatched-secret",
+        json!({
+            "label": "Mismatched",
+            "baseUrl": "https://different.fixture.test/v1",
+            "credentialHost": "planner.fixture.test",
+            "supportsModelListing": false,
+            "supportsImageInput": false,
+            "timeoutSeconds": 30,
+            "maxOutputTokens": 4096
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{mismatch}");
+    assert!(mismatch["detail"]
+        .as_str()
+        .unwrap()
+        .contains("base URL host"));
+
+    let (status, saved_connection) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/film-planner-connections/fixture",
+        json!({
+            "label": "Fixture",
+            "baseUrl": "https://planner.fixture.test/v1",
+            "credentialHost": "planner.fixture.test",
+            "supportsModelListing": false,
+            "supportsImageInput": false,
+            "timeoutSeconds": 30,
+            "maxOutputTokens": 4096
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved_connection}");
+    assert!(!saved_connection.to_string().contains(secret));
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "External planning boundary"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "External planning"}),
+    )
+    .await;
+    assert_eq!(draft["planning"]["provider"], "prompt_refiner");
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["originalScript"] = json!("A courier crosses a quiet room.");
+    draft["planning"] = json!({
+        "provider": "openai_compatible",
+        "connectionId": "fixture",
+        "modelId": "fixture-model",
+        "thinkingMode": "disabled",
+        "refinePrompts": false,
+        "sendReferencePixels": false
+    });
+    let (status, saved_draft) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved_draft}");
+    assert_eq!(saved_draft["planning"]["connectionId"], "fixture");
+    assert_eq!(saved_draft["productionPlan"]["model"]["id"], "minimax_h3");
+    assert!(!saved_draft.to_string().contains(secret));
+
+    fn tree_contains(root: &std::path::Path, needle: &[u8]) -> bool {
+        std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    tree_contains(&path, needle)
+                } else {
+                    std::fs::read(path).ok().is_some_and(|bytes| {
+                        bytes.windows(needle.len()).any(|window| window == needle)
+                    })
+                }
+            })
+    }
+    assert!(!tree_contains(
+        std::path::Path::new(project["path"].as_str().unwrap()),
+        secret.as_bytes()
+    ));
+    let connection_bytes = std::fs::read(settings.config_dir.join("film-planner-connections.json"))
+        .expect("connection settings saved");
+    assert!(!String::from_utf8_lossy(&connection_bytes).contains(secret));
+    assert!(
+        std::fs::read(settings.credentials_dir.join("credentials.json"))
+            .unwrap()
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+    );
+
+    std::fs::remove_file(settings.credentials_dir.join("credentials.json")).unwrap();
+    let (status, operation) = request(
+        app,
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/planning"),
+        json!({"maxRepairRounds": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{operation}");
+    assert_eq!(operation["status"], "failed");
+    assert_eq!(operation["stage"], "authentication");
+    assert!(operation["findings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("missing"));
+}
+
+#[tokio::test]
 async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");

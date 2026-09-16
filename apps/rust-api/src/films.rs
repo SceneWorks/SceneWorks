@@ -89,9 +89,31 @@ fn validate_planning_selection(draft: &FilmDraft) -> Result<(), ApiError> {
                 ));
             }
         }
+        "openai_compatible" => {
+            if draft
+                .planning
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            {
+                return Err(ApiError::bad_request(
+                    "OpenAI-compatible film planning requires a saved connectionId",
+                ));
+            }
+            if draft
+                .planning
+                .model_id
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                return Err(ApiError::bad_request(
+                    "OpenAI-compatible film planning requires a planner modelId",
+                ));
+            }
+        }
         _ => {
             return Err(ApiError::bad_request(
-                "planning.provider must be prompt_refiner or native",
+                "planning.provider must be prompt_refiner, native, or openai_compatible",
             ));
         }
     }

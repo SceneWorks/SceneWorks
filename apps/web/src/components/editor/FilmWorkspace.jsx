@@ -250,8 +250,10 @@ export function FilmWorkspace() {
             onCancel={cancelPlan}
             onChange={updateDraft}
             onInstall={installPlanner}
+            onNotice={setNotice}
             onStart={generatePlan}
             operation={planningOperation}
+            token={token}
           />
           <section aria-labelledby="film-manual-shot-heading" className="ve-film-section">
             <h3 id="film-manual-shot-heading">Current shot plan</h3>

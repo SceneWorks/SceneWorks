@@ -26,6 +26,11 @@ pub struct FilmPlanningSelection {
     /// empty and therefore continues to use the small prompt-refiner checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Saved OpenAI-compatible connection selected for external planning. This is a non-secret
+    /// settings identity; credentials remain in the host secret facility and never enter a film
+    /// draft or its exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     /// `disabled`, `enabled`, or `auto`. Thinking is an LLM control and never changes the target
     /// video model stored in `productionPlan.model.id`.
     #[serde(default = "default_planning_thinking_mode")]
@@ -34,6 +39,11 @@ pub struct FilmPlanningSelection {
     /// of selecting a more capable planning LLM.
     #[serde(default)]
     pub refine_prompts: bool,
+    /// Include approved reference image bytes in external planner requests. The backend also
+    /// requires the selected connection to declare image-input support, so a stale or edited
+    /// project document cannot enable pixel egress by itself.
+    #[serde(default)]
+    pub send_reference_pixels: bool,
 }
 
 fn default_planning_thinking_mode() -> String {
@@ -45,8 +55,10 @@ impl Default for FilmPlanningSelection {
         Self {
             provider: DEFAULT_FILM_PLANNING_PROVIDER.to_owned(),
             model_id: None,
+            connection_id: None,
             thinking_mode: default_planning_thinking_mode(),
             refine_prompts: false,
+            send_reference_pixels: false,
         }
     }
 }

@@ -93,10 +93,10 @@ pub struct Managed {
     /// (those children are owned by the supervisor, not tracked here). Only populated
     /// on the Windows or Linux candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
-    /// On-demand keychain credential socket served to the MLX worker (sc-5891).
-    /// Started once before the worker spawns; the worker pulls a host's secret from
-    /// it the first time a download needs auth, so the keychain is read lazily
-    /// instead of eagerly at launch. macOS-only.
+    /// On-demand keychain credential socket served to the API sidecar and MLX worker (sc-5891).
+    /// Started once before the API spawns; either process pulls a host's secret only when an
+    /// operation needs auth, so the keychain is read lazily instead of eagerly at launch.
+    /// macOS-only.
     #[cfg(target_os = "macos")]
     pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
@@ -1407,6 +1407,27 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // they must match the worker's download root or every model reads "missing".
     command = inject_huggingface_cache_env(command, &hf_home);
     command = inject_resolved_cache_env(command, &settings.resolved_cache)?;
+    // External film planning resolves credentials inside the API sidecar. Reuse the same desktop
+    // secret bridge as model downloads: macOS receives only the lazy keychain IPC handle, while
+    // Windows/Linux receive the existing keychain-backed credential map. No token is written to
+    // project/config files or exposed to the webview.
+    #[cfg(target_os = "macos")]
+    {
+        let managed = app.state::<Managed>();
+        let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
+        if let Some(ipc) = guard.as_ref() {
+            command = command
+                .env(
+                    "SCENEWORKS_CRED_IPC_SOCKET",
+                    ipc.socket.to_string_lossy().to_string(),
+                )
+                .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(credentials) = crate::settings::credentials_env_json()? {
+        command = command.env("SCENEWORKS_CREDENTIALS", credentials);
+    }
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -1745,11 +1766,10 @@ fn gate_window(app: AppHandle) {
 }
 
 /// Start the on-demand credential socket (sc-5891) once and stash it in `Managed`.
-/// The MLX worker is handed its socket path + token at spawn and pulls a recorded
-/// keychain secret from it the first time a download needs auth — so the keychain is
-/// read lazily, not eagerly at launch. Idempotent; a start failure is logged and the
-/// worker simply gets no credentials (a gated download then fails with an auth error
-/// rather than the app prompting at launch).
+/// The API and MLX worker are handed its socket path + token at spawn and pull a recorded
+/// keychain secret only when an operation needs auth, so the keychain is read lazily rather than
+/// eagerly at launch. Idempotent; a start failure is logged and the processes simply get no
+/// credentials (a gated operation then fails with an auth error rather than prompting at launch).
 #[cfg(target_os = "macos")]
 fn ensure_cred_ipc(app: &AppHandle) {
     let managed = app.state::<Managed>();
@@ -3798,6 +3818,12 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     emit(&app, "starting", "Starting the local engine…", false);
+    // The API sidecar resolves saved external-planner credentials through the same lazy keychain
+    // bridge as the MLX worker. Start the bridge before constructing the API command so the
+    // sidecar receives its socket handle on the first launch; this opens no keychain item until a
+    // planning request asks for a credential.
+    #[cfg(target_os = "macos")]
+    ensure_cred_ipc(&app);
     if let Err(error) = spawn_api(&app) {
         emit(&app, "error", error, true);
         return;
