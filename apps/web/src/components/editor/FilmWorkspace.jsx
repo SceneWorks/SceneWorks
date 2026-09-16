@@ -317,8 +317,10 @@ export function FilmWorkspace() {
             onCancel={cancelPlan}
             onChange={updateDraft}
             onInstall={installPlanner}
+            onNotice={setNotice}
             onStart={generatePlan}
             operation={planningOperation}
+            token={token}
           />
           <FilmLifecycle
             draftId={draft.id}

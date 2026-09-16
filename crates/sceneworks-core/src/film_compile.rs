@@ -227,6 +227,21 @@ pub struct PlannerExecutionRecord {
     pub thinking_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Provider-reported token counts. Optional because OpenAI-compatible servers are allowed to
+    /// omit usage, but when present the sanitized counts travel with the plan provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<PlannerUsageRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannerUsageRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 /// The model-evaluation count a catalog entry declares as its default (`defaults.steps`) — what

@@ -9,6 +9,8 @@ use sceneworks_core::film_workspace::{
 
 use crate::film_harness::{ControllerLease, HarnessError, HttpTransport};
 use crate::film_planner::{PlannerOptions, SceneWorksLlm, DEFAULT_LLM_JOB_TIMEOUT};
+use crate::film_planner_connections::{find_connection, resolve_connection_credential};
+use crate::openai_planner::{OpenAiPlannerLlm, OpenAiPlannerOptions};
 
 const OPERATION_SCHEMA_VERSION: u32 = 1;
 
@@ -154,6 +156,16 @@ pub(crate) async fn film_planner_availability(
                 QWEN36_FILM_PLANNER_MODEL_ID,
                 "Optional large native planner. Select and install it explicitly before use.",
             ),
+            FilmPlannerProviderAvailability {
+                provider: "openai_compatible",
+                label: "Saved OpenAI-compatible connection",
+                model_id: "",
+                available: true,
+                install_path: None,
+                auto_download: false,
+                install_state: "configured_separately".to_owned(),
+                detail: "Uses Chat Completions through a saved backend connection. The video model remains separate.".to_owned(),
+            },
         ],
     }))
 }
@@ -199,7 +211,29 @@ pub(crate) async fn start_film_planning(
             "The script produced no editable beats; add a beat before planning",
         ));
     }
-    let (planner_model_id, planner_model) = planner_identity(&draft.planning.provider)?;
+    let external_connection = if draft.planning.provider == "openai_compatible" {
+        Some(find_connection(
+            &state,
+            draft.planning.connection_id.as_deref().ok_or_else(|| {
+                ApiError::bad_request("Choose a saved OpenAI-compatible connection")
+            })?,
+        )?)
+    } else {
+        None
+    };
+    let (planner_model_id, planner_model) = if external_connection.is_some() {
+        let model = draft
+            .planning
+            .model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| ApiError::bad_request("Choose or enter an external planner model ID"))?;
+        (Some(model.to_owned()), model.to_owned())
+    } else {
+        let (id, model) = planner_identity(&draft.planning.provider)?;
+        (id.map(str::to_owned), model.to_owned())
+    };
     if draft.planning.provider == "native" {
         let selected = draft.planning.model_id.as_deref().unwrap_or_default();
         if selected != QWEN36_FILM_PLANNER_MODEL_ID {
@@ -224,8 +258,8 @@ pub(crate) async fn start_film_planning(
         stage: "preflight".to_owned(),
         progress: None,
         provider: draft.planning.provider.clone(),
-        planner_model_id: planner_model_id.map(str::to_owned),
-        planner_model: planner_model.to_owned(),
+        planner_model_id,
+        planner_model: planner_model.clone(),
         video_model_id: draft.production_plan.model.id.clone(),
         thinking_mode: draft.planning.thinking_mode.clone(),
         max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
@@ -236,7 +270,11 @@ pub(crate) async fn start_film_planning(
         executions: Vec::new(),
         candidate_plan: None,
         compiled: None,
-        detail: Some("Checking the selected local planner and video model.".to_owned()),
+        detail: Some(if external_connection.is_some() {
+            "Checking the selected external connection and target video model.".to_owned()
+        } else {
+            "Checking the selected local planner and video model.".to_owned()
+        }),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -260,6 +298,28 @@ pub(crate) async fn start_film_planning(
             return Ok((StatusCode::ACCEPTED, Json(operation)));
         }
     }
+
+    let external_credential = if let Some(connection) = external_connection.as_ref() {
+        let credential = resolve_connection_credential(&state, connection).await?;
+        if connection.credential_host.is_some() && credential.is_none() {
+            operation.status = "failed".to_owned();
+            operation.stage = "authentication".to_owned();
+            operation.findings.push(PlanDiagnostic::plan(
+                "planning.connection",
+                "The selected connection names a credential, but that credential is missing from the host secret facility.",
+            ));
+            operation.detail = Some(
+                "The draft and current shot plan were preserved; no provider request was sent."
+                    .to_owned(),
+            );
+            write_latest_operation(&root, &operation)?;
+            drop(lease);
+            return Ok((StatusCode::ACCEPTED, Json(operation)));
+        }
+        credential
+    } else {
+        None
+    };
 
     let brief = production_brief(&draft, &structured);
     write_json_file(&operation_dir.join("brief.json"), &brief)?;
@@ -305,22 +365,46 @@ pub(crate) async fn start_film_planning(
         refine_prompts: operation.refine_prompts,
         prompt_guide_path: None,
         require_installed: true,
+        require_local_planner: external_connection.is_none(),
+        send_reference_pixels: external_connection.is_some()
+            && draft.planning.send_reference_pixels,
         api_url: base_url.clone(),
         force: false,
         poll_interval: Duration::from_millis(350),
         job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
     };
-    let model_override = (draft.planning.provider == "native").then(|| planner_model.to_owned());
+    let model_override = (draft.planning.provider == "native").then(|| planner_model.clone());
     let thinking_mode = draft.planning.thinking_mode.clone();
+    let source_script = draft.original_script.clone();
+    let external_model = planner_model;
+    let external_send_reference_pixels = draft.planning.send_reference_pixels;
+    let external_client = state.http_client.clone();
     tokio::spawn(async move {
         let result = async {
             let transport = HttpTransport::new(&base_url, Some(token))?;
-            let llm = SceneWorksLlm::new(&transport, options.poll_interval, options.job_timeout)
-                .with_planner_model(model_override, thinking_mode)
-                .on_job_created(on_job_created)
-                .on_job_progress(on_job_progress)
-                .cancel_requested(cancel_requested);
-            crate::film_planner::generate(&transport, &llm, &options).await
+            if let Some(connection) = external_connection {
+                let llm = OpenAiPlannerLlm::new(
+                    external_client,
+                    connection,
+                    external_credential,
+                    OpenAiPlannerOptions {
+                        model: external_model,
+                        thinking_mode,
+                        source_script,
+                        send_reference_pixels: external_send_reference_pixels,
+                    },
+                    cancel_requested,
+                )?;
+                crate::film_planner::generate(&transport, &llm, &options).await
+            } else {
+                let llm =
+                    SceneWorksLlm::new(&transport, options.poll_interval, options.job_timeout)
+                        .with_planner_model(model_override, thinking_mode)
+                        .on_job_created(on_job_created)
+                        .on_job_progress(on_job_progress)
+                        .cancel_requested(cancel_requested);
+                crate::film_planner::generate(&transport, &llm, &options).await
+            }
         }
         .await;
         finish_planning_operation(&root, &latest_path, &operation_id, result);
@@ -351,7 +435,7 @@ pub(crate) async fn cancel_film_planning(
     operation.status = "canceling".to_owned();
     operation.stage = "canceling".to_owned();
     operation.detail =
-        Some("Cancellation requested; waiting for the native decode to stop.".to_owned());
+        Some("Cancellation requested; waiting for the planning request to stop.".to_owned());
     operation.updated_at = sceneworks_core::time::utc_now();
     write_latest_operation(&root, &operation)?;
     Ok(Json(operation))
@@ -586,6 +670,8 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         refine_prompts: operation.refine_prompts,
                         prompt_guide_path: None,
                         require_installed: true,
+                        require_local_planner: true,
+                        send_reference_pixels: false,
                         api_url: state.settings.mcp_api_url.clone(),
                         force: false,
                         poll_interval: Duration::from_millis(350),

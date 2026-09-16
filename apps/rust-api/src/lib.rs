@@ -284,10 +284,15 @@ mod error;
 pub mod film_harness;
 mod film_lifecycle;
 pub mod film_planner;
+mod film_planner_connections;
 mod film_planning;
 mod films;
+mod openai_planner;
 pub(crate) use error::ApiError;
 use film_lifecycle::{cancel_film_run, get_film_run_progress, list_film_runs, resume_film_run};
+use film_planner_connections::{
+    list_film_planner_connections, save_film_planner_connection, test_film_planner_connection,
+};
 use film_planning::{
     apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
     get_film_planning_operation, parse_film_draft_script, start_film_planning,
@@ -1741,6 +1746,18 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
             post(apply_film_planning_candidate),
+        )
+        .route(
+            "/api/v1/film-planner-connections",
+            get(list_film_planner_connections),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id",
+            put(save_film_planner_connection),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id/test",
+            post(test_film_planner_connection),
         )
         .route(
             "/api/v1/projects/:project_id/film-runs/:run_id",

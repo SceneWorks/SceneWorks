@@ -1,8 +1,9 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
+const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
-export function FilmPlanning({ draft, availability, operation, disabled, onChange, onStart, onCancel, onApply, onInstall }) {
+export function FilmPlanning({ draft, availability, operation, disabled, onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
@@ -13,7 +14,9 @@ export function FilmPlanning({ draft, availability, operation, disabled, onChang
         ...next.planning,
         provider,
         modelId: provider === "native" ? QWEN_MODEL_ID : undefined,
+        connectionId: provider === "openai_compatible" ? next.planning?.connectionId : undefined,
         thinkingMode: provider === "native" ? "enabled" : "disabled",
+        sendReferencePixels: provider === "openai_compatible" ? Boolean(next.planning?.sendReferencePixels) : false,
       };
     });
   }
@@ -25,10 +28,11 @@ export function FilmPlanning({ draft, availability, operation, disabled, onChang
           <select aria-label="Planning provider" disabled={disabled || active} value={planning.provider} onChange={(event) => setProvider(event.target.value)}>
             <option value="prompt_refiner">Built-in prompt refiner (default)</option>
             <option value="native">Native Qwen3.6-27B (optional)</option>
+            <option value="openai_compatible">Saved OpenAI-compatible connection</option>
           </select>
         </label>
         <label>Video model<input aria-label="Planning target video model" disabled value={draft.productionPlan.model.id} /></label>
-        {planning.provider === "native" ? (
+        {planning.provider !== "prompt_refiner" ? (
           <label>Thinking
             <select aria-label="Planner thinking mode" disabled={disabled || active} value={planning.thinkingMode ?? "enabled"} onChange={(event) => onChange((next) => { next.planning.thinkingMode = event.target.value; })}>
               <option value="enabled">Enabled (stored separately)</option>
@@ -38,16 +42,23 @@ export function FilmPlanning({ draft, availability, operation, disabled, onChang
           </label>
         ) : null}
       </div>
+      {planning.provider === "openai_compatible" ? (
+        <Suspense fallback={<p>Loading connection settings…</p>}>
+          <FilmPlannerConnection active={active} disabled={disabled} onChange={onChange} onNotice={onNotice} planning={planning} token={token} />
+        </Suspense>
+      ) : null}
       <p className="ve-film-provider-state">
         {planning.provider === "native"
           ? (qwen?.available ? "Qwen3.6-27B is installed and available." : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
+          : planning.provider === "openai_compatible"
+            ? "External planning runs only when explicitly selected. Configured credentials never change the local planner route."
           : "New drafts use the built-in prompt refiner. Qwen3.6-27B is not required."}
       </p>
       {planning.provider === "native" && !qwen?.available ? (
         <button disabled={disabled} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
       ) : null}
       <div className="ve-film-actions">
-        <button className="ve-generate" disabled={disabled || active || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available)} onClick={onStart} type="button">Generate candidate plan</button>
+        <button className="ve-generate" disabled={disabled || active || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={onStart} type="button">Generate candidate plan</button>
         {active ? <button disabled={operation.status === "canceling"} onClick={onCancel} type="button">Cancel planning</button> : null}
       </div>
       {operation ? (
