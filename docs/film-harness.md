@@ -501,6 +501,29 @@ draft that drops a beat is refused, never accepted as a shorter film.
 - **The contract's worked example is on the envelope.** The one filled shot the planner is shown
   copies its `targetDurationSeconds` from the model's first allowed duration (sc-22715) — it used to
   hard-code MiniMax-H3's `5.1667`, a value the same contract forbids on any other model.
+- **Required roles are handed over as the array to copy (sc-23406).** With the turbo accelerators
+  offered by default the real local planner (Anubis-Mini-8B) twice failed the courier brief on
+  `continuityRoles`: told in prose that a beat "MUST show courier, red_parcel, workbench_table" it
+  wrote one character, one prop and one place — the location standing in for the second prop — in
+  both role lists, and never repaired it within the round budget, while it reproduced the literal
+  `loras` array byte for byte in every run. So every place the planner reads a required-role list
+  now states it as the JSON array to write and where (`write ["courier", "red_parcel",
+  "workbench_table"] into the covering shot's continuityRoles AND its referenceRoles, copied whole`
+  — `referenceRoles` named only on an envelope that offers references); the one-of-each-kind
+  phrasing is gone from the envelope, the contract and the system turn; the accelerator rule sits
+  with the other top-level-field rules so the role rules are the last thing read before the worked
+  example, whose `referenceRoles` now bind exactly what its `continuityRoles` depict; and a
+  `continuityRoles` finding hands back the corrected array for the named shot, built against the
+  reference pack: the beat's list plus the **pack-approved** roles the shot already binds, and
+  whenever the message names `referenceRoles` the array is filtered to the bindable subject kinds.
+  So an invented role, an approved `style` or an approved `plate` is never handed back as a binding
+  `validate_plan_against_pack` would then refuse, and a copy-only repairer converges; a beat that
+  itself requires a `style` or `plate` role is told about `continuityRoles` alone. The envelope and
+  the contract also state outright that a `style` or `plate` role is never listed in
+  `referenceRoles` — a style belongs in the prose, a plate in a keyframe slot. An off-menu
+  `targetDurationSeconds` finding likewise names the two legal values on either side of the value
+  written. Validation is unchanged: what changed is that a repair is now something the planner can
+  copy rather than something it has to re-derive.
 - **Bounded repair.** Each round hands the validator's findings back verbatim and asks for the whole
   plan again. `--max-repair-rounds` (default 2, ceiling 5) bounds the loop; on exhaustion the run
   fails with the outstanding findings and writes the refused answer to `planner-rejected.txt`. No

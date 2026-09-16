@@ -52,9 +52,11 @@ Rules:
 - beat, framing, prompt, startState and endState are plain strings, one piece of prose each. Never
   an object, never a list, never a role-by-role breakdown. An optional field you have nothing to
   say for is OMITTED, not written as "" or null.
-- Name every approved role that is on screen in a shot in that shot's continuityRoles — the people,
-  the prop the beat turns on, the location — and describe them in the prompt too. A beat the brief
-  says must show something is not covered by a shot that leaves it out.
+- Name every approved role that is on screen in a shot in that shot's continuityRoles — the array
+  the brief's beat says it MUST show, copied whole, plus any other approved role in frame — and
+  describe them in the prompt too. A beat the brief says must show something is not covered by a
+  shot that leaves it out, and a beat's list is not a template of one character, one prop and one
+  place: it names exactly the roles it names.
 - Use the mode the user turn's envelope names as its default; where it names none, reach for
   text_to_video. Use a keyframe mode only when a specific approved plate belongs in a specific
   frame, and never put the same role in both the first and the last slot. (The default is a

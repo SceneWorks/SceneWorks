@@ -2112,7 +2112,7 @@ async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_c
     // asserting them here says which rule holds rather than only that compiling succeeded.
     let brief = sceneworks_core::film_planner::read_brief_file(Path::new(BRIEF_FIXTURE))
         .expect("the shipped brief reads");
-    let coverage = sceneworks_core::film_planner::plan_coverage_findings(&brief, &plan);
+    let coverage = sceneworks_core::film_planner::plan_coverage_findings(&brief, &plan, &pack);
     assert!(
         coverage.is_empty(),
         "{:?}",

@@ -844,7 +844,7 @@ pub async fn compile_existing(
     if let Some(brief) =
         sibling_brief(plan_path, &options.brief_path).map_err(HarnessError::Validation)?
     {
-        let coverage = plan_coverage_findings(&brief, &plan);
+        let coverage = plan_coverage_findings(&brief, &plan, &pack);
         if !coverage.is_empty() {
             return Err(HarnessError::Validation(coverage));
         }
@@ -1239,7 +1239,18 @@ mod tests {
             }]
         }))
         .unwrap();
-        let findings = plan_coverage_findings(&brief, &plan);
+        // No beat here declares `requiredRoles`, so the pack only has to exist.
+        let pack: sceneworks_core::film_plan::ReferencePack =
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "id": "courier-refs",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "Blue jacket." }
+                ]
+            }))
+            .unwrap();
+        let findings = plan_coverage_findings(&brief, &plan, &pack);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings[0].message.contains("\"discovery\""),
@@ -1249,6 +1260,6 @@ mod tests {
         // A hand-authored plan carries no beat ids and answers to no brief.
         let mut hand_authored = plan.clone();
         hand_authored.shots[0].beat_id = None;
-        assert!(plan_coverage_findings(&brief, &hand_authored).is_empty());
+        assert!(plan_coverage_findings(&brief, &hand_authored, &pack).is_empty());
     }
 }
