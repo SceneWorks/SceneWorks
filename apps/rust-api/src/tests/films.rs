@@ -243,6 +243,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
         .as_array_mut()
         .unwrap()
         .push(plain_shot);
+    referenced["originalScript"] = json!("A courier crosses the workshop carrying a parcel.");
     let (status, saved) = request(
         app.clone(),
         "PUT",
@@ -252,6 +253,48 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
+    let (status, planning) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/planning"),
+        json!({"maxRepairRounds": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{planning}");
+    let root = std::path::Path::new(project["path"].as_str().unwrap());
+    let operation_id = planning["id"].as_str().unwrap();
+    let operation_dir = root
+        .join("films/planning")
+        .join(draft_id)
+        .join("operations")
+        .join(operation_id);
+    let planning_pack: Value = serde_json::from_slice(
+        &std::fs::read(operation_dir.join("references.json"))
+            .expect("planning reference pack reads"),
+    )
+    .expect("planning reference pack parses");
+    let planning_file = planning_pack["references"][0]["file"].as_str().unwrap();
+    let staged_image = operation_dir.join(planning_file);
+    assert_eq!(std::fs::read(&staged_image).unwrap(), PNG_32X32);
+    assert!(
+        staged_image
+            .canonicalize()
+            .unwrap()
+            .starts_with(operation_dir.canonicalize().unwrap()),
+        "planning reference bytes must remain inside the operation"
+    );
+    let draft_image = root
+        .join("films/draft-assets")
+        .join(draft_id)
+        .join(planning_file);
+    std::fs::write(&draft_image, b"later draft mutation").unwrap();
+    assert_eq!(
+        std::fs::read(&staged_image).unwrap(),
+        PNG_32X32,
+        "planning keeps an immutable byte snapshot"
+    );
+    std::fs::write(&draft_image, PNG_32X32).unwrap();
+
     let (status, run) = request(
         app.clone(),
         "POST",
@@ -260,7 +303,6 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{run}");
-    let root = std::path::Path::new(project["path"].as_str().unwrap());
     let run_dir = root.join(run["locator"]["recordDirectory"].as_str().unwrap());
     let pinned_pack: Value = serde_json::from_slice(
         &std::fs::read(run_dir.join("references.json")).expect("pinned pack reads"),

@@ -35,7 +35,7 @@ use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
 use crate::film_compile::{production_plan_sha256, CompiledPlan};
-use crate::film_plan::{validate_reference_pack, ReferenceEntry, REFERENCE_KINDS};
+use crate::film_plan::{validate_reference_pack, ReferenceEntry, ReferencePack, REFERENCE_KINDS};
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
@@ -630,6 +630,78 @@ pub struct TrainingDatasetUpload {
     pub source_path: PathBuf,
 }
 
+fn copy_film_reference_files(
+    project_path: &Path,
+    draft_id: &str,
+    pack: &ReferencePack,
+    destination_root: &Path,
+) -> ProjectStoreResult<()> {
+    if pack.references.is_empty() {
+        return Ok(());
+    }
+    let destination_relative = destination_root.strip_prefix(project_path).map_err(|_| {
+        ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        )
+    })?;
+    if destination_relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        ));
+    }
+
+    let canonical_project = fs::canonicalize(project_path)?;
+    fs::create_dir_all(destination_root)?;
+    let canonical_destination = fs::canonicalize(destination_root)?;
+    if !canonical_destination.starts_with(&canonical_project) {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        ));
+    }
+
+    let draft_assets = project_path.join("films/draft-assets").join(draft_id);
+    let canonical_assets = fs::canonicalize(&draft_assets).map_err(|_| {
+        ProjectStoreError::BadRequest(format!(
+            "Film draft {draft_id:?} is missing its immutable reference directory"
+        ))
+    })?;
+    if !canonical_assets.starts_with(&canonical_project) {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference source must remain inside its project".to_owned(),
+        ));
+    }
+    for reference in &pack.references {
+        if !is_safe_relative_path(&reference.file) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} has an unsafe file path",
+                reference.role
+            )));
+        }
+        let source = draft_assets.join(&reference.file);
+        let canonical_source = fs::canonicalize(&source).map_err(|_| {
+            ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} is missing its staged image {}",
+                reference.role, reference.file
+            ))
+        })?;
+        if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} resolves outside its immutable draft input",
+                reference.role
+            )));
+        }
+        let destination = canonical_destination.join(&reference.file);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(canonical_source, destination)?;
+    }
+    Ok(())
+}
+
 impl ProjectStore {
     pub fn new(data_dir: impl Into<PathBuf>, app_version: impl Into<String>) -> Self {
         Self {
@@ -946,6 +1018,56 @@ impl ProjectStore {
         Ok(draft)
     }
 
+    /// Pin a draft revision's immutable reference bytes beside one planning operation. The caller
+    /// writes the matching `references.json`; this method guarantees every file named by that
+    /// document is copied from the draft-owned store into the contained operation directory.
+    pub fn stage_film_planning_references(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        draft_revision: u32,
+        operation_id: &str,
+    ) -> ProjectStoreResult<()> {
+        if !is_safe_id(draft_id) || !is_safe_id(operation_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or planning operation ID".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if draft.revision != draft_revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {draft_revision}",
+                draft.revision
+            )));
+        }
+        let operation_dir = project_path
+            .join("films/planning")
+            .join(draft_id)
+            .join("operations")
+            .join(operation_id);
+        fs::create_dir_all(&operation_dir)?;
+        copy_film_reference_files(
+            &project_path,
+            draft_id,
+            &draft.reference_pack,
+            &operation_dir,
+        )
+    }
+
     pub fn create_film_run(
         &self,
         project_id: &str,
@@ -983,27 +1105,7 @@ impl ProjectStore {
         }
         fs::create_dir_all(&run_dir)?;
         let pin_result = (|| -> ProjectStoreResult<()> {
-            let draft_assets = project_path.join("films/draft-assets").join(draft_id);
-            for reference in &draft.reference_pack.references {
-                if !is_safe_relative_path(&reference.file) {
-                    return Err(ProjectStoreError::BadRequest(format!(
-                        "Film reference {:?} has an unsafe file path",
-                        reference.role
-                    )));
-                }
-                let source = draft_assets.join(&reference.file);
-                if !source.is_file() {
-                    return Err(ProjectStoreError::BadRequest(format!(
-                        "Film reference {:?} is missing its staged image {}",
-                        reference.role, reference.file
-                    )));
-                }
-                let destination = run_dir.join(&reference.file);
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(source, destination)?;
-            }
+            copy_film_reference_files(&project_path, draft_id, &draft.reference_pack, &run_dir)?;
             write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
             write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
             if let Some(compiled) = compiled.as_ref() {

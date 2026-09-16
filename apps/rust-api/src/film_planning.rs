@@ -321,6 +321,25 @@ pub(crate) async fn start_film_planning(
         None
     };
 
+    let stage_result = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let draft_id = draft_id.clone();
+        let operation_id = operation_id.clone();
+        let draft_revision = draft.revision;
+        move |store| {
+            store.stage_film_planning_references(
+                &project_id,
+                &draft_id,
+                draft_revision,
+                &operation_id,
+            )
+        }
+    })
+    .await;
+    if let Err(error) = stage_result {
+        let _ = std::fs::remove_dir_all(&operation_dir);
+        return Err(error);
+    }
     let brief = production_brief(&draft, &structured);
     write_json_file(&operation_dir.join("brief.json"), &brief)?;
     write_json_file(
