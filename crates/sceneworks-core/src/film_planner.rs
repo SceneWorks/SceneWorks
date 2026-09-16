@@ -609,9 +609,11 @@ impl PlannerCapabilities {
                  its beat says it MUST show (copy that list whole — a beat may name two props and \
                  no location, so never swap one of its roles for a different kind) and add any \
                  other approved role in frame. That is what makes the same character, the same \
-                 object and the same place appear in every shot instead of a new one each time. A \
-                 shot never mixes keyframe roles with reference roles — they are different \
-                 conditioning tasks.",
+                 object and the same place appear in every shot instead of a new one each time. \
+                 ONLY character, prop and location roles are bound this way: a style role or a \
+                 plate role is NEVER listed in referenceRoles — a style belongs in the prose and a \
+                 plate goes in a keyframe slot. A shot never mixes keyframe roles with reference \
+                 roles — they are different conditioning tasks.",
                 self.max_reference_images
             )
         });
@@ -1060,6 +1062,9 @@ pub fn coverage_findings(brief: &ProductionBrief, draft: &PlannerDraft) -> Vec<P
 pub fn plan_coverage_findings(
     brief: &ProductionBrief,
     plan: &ProductionPlan,
+    // The pack the roles are read against, so the repair hint cannot name a role the pack-aware
+    // validator would then refuse (sc-23406).
+    pack: &ReferencePack,
 ) -> Vec<PlanDiagnostic> {
     let claimed: BTreeSet<&str> = plan
         .shots
@@ -1106,7 +1111,7 @@ pub fn plan_coverage_findings(
     }
     // A hand edit can also hollow a beat out without deleting it — the shot stays, the subject
     // stops being named — so the roles are re-checked on the same pass as the beats.
-    findings.extend(role_coverage_findings(brief, plan));
+    findings.extend(role_coverage_findings(brief, plan, pack));
     findings
 }
 
@@ -1131,10 +1136,31 @@ fn bound_roles(shot: &Shot) -> BTreeSet<&str> {
 /// an empty workbench, which is exactly what the first real-LLM draft produced: the parcel bound on
 /// two of six shots, the courier absent from their own departure (sc-22713). The brief is where
 /// "this beat is ABOUT the parcel" belongs, because only the brief knows the story.
+///
+/// The repair hint is built against the PACK, not against whatever the draft happened to name: a
+/// role the draft hallucinated, or an approved `style`/`plate` role that is legal in
+/// `continuityRoles` but refused as a `reference_to_video` subject, would otherwise be handed back
+/// as "write [...]" while [`crate::film_plan::validate_plan_against_pack`] refuses the very array
+/// it named — a copy-only repairer can never converge on that (sc-23406).
 pub fn role_coverage_findings(
     brief: &ProductionBrief,
     plan: &ProductionPlan,
+    pack: &ReferencePack,
 ) -> Vec<PlanDiagnostic> {
+    let approved: BTreeSet<&str> = pack
+        .references
+        .iter()
+        .filter(|entry| entry.approved)
+        .map(|entry| entry.role.as_str())
+        .collect();
+    // A role the pack approves AND whose kind may be BOUND as a reference_to_video subject.
+    let bindable = |role: &str| {
+        pack.references.iter().any(|entry| {
+            entry.approved
+                && entry.role == role
+                && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str())
+        })
+    };
     let mut findings = Vec::new();
     for beat in &brief.required_beats {
         if beat.required_roles.is_empty() {
@@ -1164,9 +1190,23 @@ pub fn role_coverage_findings(
             let shot = covering[0];
             let mut corrected: Vec<String> = beat.required_roles.clone();
             for role in bound_roles(shot) {
-                if !corrected.iter().any(|known| known == role) {
+                // Only what the pack approves: a role the draft invented is not a binding the
+                // validator would accept, so it is not a binding the hint may ask for.
+                if approved.contains(role) && !corrected.iter().any(|known| known == role) {
                     corrected.push(role.to_owned());
                 }
+            }
+            // One array is written to both lists, so `referenceRoles` may be named only when every
+            // role in it is bindable there. A beat that itself requires a style or a plate is an
+            // unsatisfiable binding, never a droppable one: that case is told about
+            // `continuityRoles` alone, which is where the coverage is read back.
+            let names_reference_roles = shot.conditioning.mode == "reference_to_video"
+                && beat
+                    .required_roles
+                    .iter()
+                    .all(|role| bindable(role.as_str()));
+            if names_reference_roles {
+                corrected.retain(|role| bindable(role.as_str()));
             }
             let bound_now = bound_roles(shot);
             findings.push(PlanDiagnostic::shot(
@@ -1189,7 +1229,7 @@ pub fn role_coverage_findings(
                     missing.join(", "),
                     roles_json_array(&corrected),
                     shot.id,
-                    if shot.conditioning.mode == "reference_to_video" {
+                    if names_reference_roles {
                         " AND its referenceRoles"
                     } else {
                         ""
@@ -1351,7 +1391,7 @@ pub fn validate_generated_plan(
     caps: Option<&PlannerCapabilities>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = coverage_findings(brief, draft);
-    findings.extend(role_coverage_findings(brief, plan));
+    findings.extend(role_coverage_findings(brief, plan, pack));
     findings.extend(shape_findings(brief, plan));
     if let Some(caps) = caps {
         findings.extend(lora_offer_findings(caps, brief, plan));
@@ -1562,7 +1602,11 @@ that shows an approved character, prop or location uses \"mode\": \"reference_to
 those roles in referenceRoles — the beat's MUST-show list first, copied whole, then any other \
 approved role in frame. A shot that binds nothing renders a stranger in a room nobody approved. \
 referenceRoles and continuityRoles are not alternatives: a bound role is still named in \
-continuityRoles, so on a reference_to_video shot the two lists are normally identical.";
+continuityRoles, so on a reference_to_video shot the two lists are normally identical.
+- A style role and a plate role are NEVER listed in referenceRoles: only character, prop and \
+location roles are bound as reference subjects. A style is a look — say it in the prompt. A plate \
+is a literal frame — put it in firstFrameRole or lastFrameRole. Either one may still be named in \
+continuityRoles.";
 
 /// The contract with its worked example on THIS model's envelope: the first allowed duration when
 /// the model declares a menu, else a plain round number the "any positive value" rule admits, and
@@ -1723,7 +1767,10 @@ mod tests {
             "references": [
                 { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "Blue jacket." },
                 { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png", "description": "Red box." },
+                { "role": "workbench_table", "kind": "prop", "file": "references/workbench_table.png", "description": "Scarred bench." },
+                { "role": "workshop_location", "kind": "location", "file": "references/workshop_location.png", "description": "The workshop." },
                 { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png", "description": "Wide plate." },
+                { "role": "house_style", "kind": "style", "file": "references/house_style.png", "description": "House look." },
                 { "role": "draft_look", "kind": "style", "file": "references/draft.png", "description": "Not approved.", "approved": false }
             ]
         }))
@@ -2423,7 +2470,7 @@ mod tests {
         let mut plan = draft_to_plan(&brief, &draft);
         // The shot for the beat is present and names one of the two roles.
         plan.shots[1].continuity_roles = vec!["courier".to_owned()];
-        let findings = messages(&role_coverage_findings(&brief, &plan));
+        let findings = messages(&role_coverage_findings(&brief, &plan, &pack()));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings[0].contains("beat \"delivery\"") && findings[0].contains("red_parcel"),
@@ -2437,13 +2484,13 @@ mod tests {
         // Bound in a conditioning slot rather than continuityRoles still counts as on screen.
         plan.shots[1].conditioning.mode = "image_to_video".to_owned();
         plan.shots[1].conditioning.first_frame_role = Some("red_parcel".to_owned());
-        assert!(role_coverage_findings(&brief, &plan).is_empty());
+        assert!(role_coverage_findings(&brief, &plan, &pack()).is_empty());
 
         // A beat with no declared roles makes no claim, which is what every pre-sc-22713 brief is.
         brief.required_beats[1].required_roles.clear();
         plan.shots[1].conditioning.first_frame_role = None;
         plan.shots[1].conditioning.mode = "text_to_video".to_owned();
-        assert!(role_coverage_findings(&brief, &plan).is_empty());
+        assert!(role_coverage_findings(&brief, &plan, &pack()).is_empty());
     }
 
     #[test]
@@ -2861,14 +2908,14 @@ mod tests {
         // Bound ONLY as conditioning: covered.
         let plan = bound(json!(["courier", "red_parcel"]), json!(["courier"]));
         assert!(
-            role_coverage_findings(&brief, &plan).is_empty(),
+            role_coverage_findings(&brief, &plan, &pack()).is_empty(),
             "{:?}",
-            messages(&role_coverage_findings(&brief, &plan))
+            messages(&role_coverage_findings(&brief, &plan, &pack()))
         );
 
         // The parcel bound nowhere at all: a finding that names it.
         let plan = bound(json!(["courier"]), json!(["courier"]));
-        let findings = messages(&role_coverage_findings(&brief, &plan));
+        let findings = messages(&role_coverage_findings(&brief, &plan, &pack()));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings[0].contains("[SH010]") && findings[0].contains("red_parcel"),
@@ -2940,7 +2987,7 @@ mod tests {
         .expect("draft parses");
 
         let plan = draft_to_plan(&brief, &draft);
-        let findings = role_coverage_findings(&brief, &plan);
+        let findings = role_coverage_findings(&brief, &plan, &pack());
         let texts = messages(&findings);
         assert_eq!(texts.len(), 1, "{texts:?}");
 
@@ -2954,9 +3001,9 @@ mod tests {
         );
         let repaired = draft_to_plan(&brief, &repaired_draft);
         assert!(
-            role_coverage_findings(&brief, &repaired).is_empty(),
+            role_coverage_findings(&brief, &repaired, &pack()).is_empty(),
             "{:?}",
-            messages(&role_coverage_findings(&brief, &repaired))
+            messages(&role_coverage_findings(&brief, &repaired, &pack()))
         );
         assert_eq!(
             repaired_draft.shots[1].conditioning.reference_roles,
@@ -2989,6 +3036,7 @@ mod tests {
         let texts = messages(&role_coverage_findings(
             &brief,
             &draft_to_plan(&brief, &draft),
+            &pack(),
         ));
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert!(
@@ -2998,6 +3046,190 @@ mod tests {
             ) && !texts[0].contains("referenceRoles"),
             "{}",
             texts[0]
+        );
+    }
+
+    /// 🔴 sc-23406 review. The repair hint is built against the PACK, so it can never instruct a
+    /// binding the pack-aware validator then refuses:
+    ///
+    /// (a) a role the draft HALLUCINATED into `continuityRoles` is not echoed back into the array
+    ///     to write — `validate_plan_against_pack` reports it "not in reference pack", so a
+    ///     copy-only repairer handed it back could never converge;
+    /// (b) an APPROVED `style` or `plate` role — legal in `continuityRoles`, refused as a
+    ///     `reference_to_video` subject — is dropped from the array whenever the message names
+    ///     `referenceRoles`.
+    ///
+    /// In both cases the copy-only repairer comes back clean in ONE round, on the role check AND on
+    /// the pack validator.
+    #[test]
+    fn the_repair_hint_never_names_a_role_the_pack_validator_would_refuse() {
+        let mut brief = brief();
+        brief.required_beats[1].required_roles =
+            vec!["courier".to_owned(), "red_parcel".to_owned()];
+        // A delivery shot that shows only the courier, with `extra` declared in continuityRoles.
+        let drafted = |conditioning: Value, extra: Value| -> PlannerDraft {
+            let mut delivery = draft_shot("SH020", "delivery");
+            delivery["conditioning"] = conditioning;
+            delivery["continuityRoles"] = extra;
+            serde_json::from_value(json!({
+                "shots": [draft_shot("SH010", "arrival"), delivery, draft_shot("SH030", "discovery")]
+            }))
+            .expect("draft parses")
+        };
+        // Every role finding the pack validator raises about a role name or a bound kind.
+        let pack_role_faults = |plan: &ProductionPlan| -> Vec<String> {
+            messages(&crate::film_plan::validate_plan_against_pack(plan, &pack()))
+                .into_iter()
+                .filter(|message| {
+                    message.contains("is not in reference pack")
+                        || message.contains("may be BOUND")
+                        || message.contains("is not approved for conditioning")
+                })
+                .collect()
+        };
+
+        let reference_to_video =
+            json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+        let text_to_video = json!({ "mode": "text_to_video" });
+        for (case, conditioning, extra, tail) in [
+            // (a) The hallucinated role, on a shot whose hint names continuityRoles ALONE — the
+            // only place the pack-approval filter is the thing doing the work.
+            (
+                "a hallucinated role, continuity only",
+                text_to_video.clone(),
+                json!(["courier", "wolf"]),
+                "into SH020's continuityRoles and describe",
+            ),
+            (
+                "a hallucinated role, bound shot",
+                reference_to_video.clone(),
+                json!(["courier", "wolf"]),
+                "into SH020's continuityRoles AND its referenceRoles",
+            ),
+            // (b) The approved style and plate, legal in continuityRoles and refused as subjects.
+            (
+                "an approved style and plate",
+                reference_to_video.clone(),
+                json!(["courier", "house_style", "workshop_plate"]),
+                "into SH020's continuityRoles AND its referenceRoles",
+            ),
+        ] {
+            let draft = drafted(conditioning, extra);
+            let findings = role_coverage_findings(&brief, &draft_to_plan(&brief, &draft), &pack());
+            let texts = messages(&findings);
+            assert_eq!(texts.len(), 1, "{case}: {texts:?}");
+            // The array to write is the beat's two roles and nothing else: `wolf` is not in the
+            // pack, and a style or a plate is not a reference subject.
+            assert!(
+                texts[0].contains(&format!("write [\"courier\", \"red_parcel\"] {tail}")),
+                "{case}: {}",
+                texts[0]
+            );
+            // Only the ARRAY is an instruction; "binds only courier, wolf" is the description of
+            // what is wrong and may still name it.
+            let start = texts[0].find("write [").expect("the hint carries an array");
+            let array = &texts[0][start..texts[0][start..].find(']').expect("closed") + start + 1];
+            for refused in ["wolf", "house_style", "workshop_plate"] {
+                assert!(
+                    !array.contains(refused),
+                    "{case}: the array to write names {refused:?}: {array}"
+                );
+            }
+
+            // One round of a repairer that does nothing but copy the array clears both checks.
+            let mut repaired_draft = draft.clone();
+            assert_eq!(
+                copy_arrays_from_findings(&mut repaired_draft, &findings),
+                1,
+                "{case}: the finding carries no array to copy: {}",
+                texts[0]
+            );
+            let repaired = draft_to_plan(&brief, &repaired_draft);
+            assert!(
+                role_coverage_findings(&brief, &repaired, &pack()).is_empty(),
+                "{case}: {:?}",
+                messages(&role_coverage_findings(&brief, &repaired, &pack()))
+            );
+            assert!(
+                pack_role_faults(&repaired).is_empty(),
+                "{case}: {:?}",
+                pack_role_faults(&repaired)
+            );
+        }
+
+        // A beat that itself REQUIRES a style role is a different case: the role cannot be dropped
+        // (coverage would never be satisfied) and cannot be bound, so the hint names
+        // `continuityRoles` alone — which is where the coverage is read back — and converges there.
+        let mut style_brief = brief.clone();
+        style_brief.required_beats[1].required_roles =
+            vec!["courier".to_owned(), "house_style".to_owned()];
+        let draft = drafted(reference_to_video, json!(["courier"]));
+        let findings =
+            role_coverage_findings(&style_brief, &draft_to_plan(&style_brief, &draft), &pack());
+        let texts = messages(&findings);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains(
+                "write [\"courier\", \"house_style\"] into SH020's continuityRoles and describe"
+            ) && !texts[0].contains("referenceRoles"),
+            "{}",
+            texts[0]
+        );
+        let mut repaired_draft = draft.clone();
+        assert_eq!(
+            copy_arrays_from_findings(&mut repaired_draft, &findings),
+            1,
+            "{}",
+            texts[0]
+        );
+        let repaired = draft_to_plan(&style_brief, &repaired_draft);
+        assert!(
+            role_coverage_findings(&style_brief, &repaired, &pack()).is_empty(),
+            "{:?}",
+            messages(&role_coverage_findings(&style_brief, &repaired, &pack()))
+        );
+        assert!(
+            pack_role_faults(&repaired).is_empty(),
+            "{:?}",
+            pack_role_faults(&repaired)
+        );
+    }
+
+    /// 🔴 sc-23406 review. The reference rule now tells the planner to bind "any other approved
+    /// role in frame", and an approved `style` or `plate` is such a role — so both the envelope
+    /// section and the output contract (the request AND every repair round) must say that a style
+    /// or a plate is never bound in `referenceRoles`.
+    #[test]
+    fn the_prompts_say_a_style_or_plate_role_is_never_bound_in_reference_roles() {
+        let brief = brief();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack());
+        let envelope = caps.as_prompt_section();
+        assert!(
+            envelope.contains(
+                "ONLY character, prop and location roles are bound this way: a style role or a \
+                 plate role is NEVER listed in referenceRoles"
+            ),
+            "{envelope}"
+        );
+        let request = build_planner_request(&brief, &pack(), &caps);
+        let repair = build_repair_request(&brief, &caps, "{}", &[], 1, 2);
+        for (name, text) in [("request", &request), ("repair", &repair)] {
+            assert!(
+                text.contains(
+                    "- A style role and a plate role are NEVER listed in referenceRoles: only \
+                     character, prop and location roles are bound as reference subjects."
+                ),
+                "the {name} prompt drops the style/plate clause: {text}"
+            );
+        }
+        // An envelope with no reference conditioning is told nothing about binding at all.
+        let bare = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        assert!(
+            !plan_json_contract(&bare).contains("NEVER listed in referenceRoles"),
+            "{}",
+            plan_json_contract(&bare)
         );
     }
 

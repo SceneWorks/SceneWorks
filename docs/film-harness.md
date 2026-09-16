@@ -513,8 +513,14 @@ draft that drops a beat is refused, never accepted as a shorter film.
   phrasing is gone from the envelope, the contract and the system turn; the accelerator rule sits
   with the other top-level-field rules so the role rules are the last thing read before the worked
   example, whose `referenceRoles` now bind exactly what its `continuityRoles` depict; and a
-  `continuityRoles` finding hands back the corrected array for the named shot (the beat's list plus
-  what the shot already binds, for both lists on a `reference_to_video` shot). An off-menu
+  `continuityRoles` finding hands back the corrected array for the named shot, built against the
+  reference pack: the beat's list plus the **pack-approved** roles the shot already binds, and
+  whenever the message names `referenceRoles` the array is filtered to the bindable subject kinds.
+  So an invented role, an approved `style` or an approved `plate` is never handed back as a binding
+  `validate_plan_against_pack` would then refuse, and a copy-only repairer converges; a beat that
+  itself requires a `style` or `plate` role is told about `continuityRoles` alone. The envelope and
+  the contract also state outright that a `style` or `plate` role is never listed in
+  `referenceRoles` — a style belongs in the prose, a plate in a keyframe slot. An off-menu
   `targetDurationSeconds` finding likewise names the two legal values on either side of the value
   written. Validation is unchanged: what changed is that a repair is now something the planner can
   copy rather than something it has to re-derive.
