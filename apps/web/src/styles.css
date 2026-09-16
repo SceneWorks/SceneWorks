@@ -10978,6 +10978,24 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-review { display: grid; gap: 12px; }
+.ve-film-review > details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.ve-film-review > details > summary { cursor: pointer; font-weight: 650; }
+.ve-film-review-plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+.ve-film-review-questions { display: grid; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ve-film-review-questions > header, .ve-film-review-shot > header, .ve-film-take > header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ve-film-review-questions fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.ve-film-review-runs, .ve-film-review-shot { display: grid; gap: 10px; }
+.ve-film-review-shot { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-take-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.ve-film-take { display: grid; gap: 8px; min-width: 0; padding: 10px; background: var(--bg-2); border-radius: 7px; }
+.ve-film-take video { width: 100%; max-height: 240px; background: #000; }
+.ve-film-take dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 8px; margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ve-film-take dl dt { color: var(--muted); }
+.ve-film-take-missing { display: grid; place-items: center; min-height: 120px; padding: 12px; background: var(--bg); color: var(--muted); text-align: center; }
+.ve-film-selection-state { padding: 3px 7px; border-radius: 999px; background: var(--bg-2); font-size: 12px; }
+.ve-film-selection-state.trim_conflict, .ve-film-selection-state.rejected_take_in_saved_cut, .ve-film-warning { color: var(--warning, #c56b00); }
+.ve-film-review-findings { padding: 9px; border-left: 3px solid var(--accent); background: var(--bg-2); }
 .ve-film-preflight dt { color: var(--text-muted); }
 .ve-film-preflight dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 760px) {

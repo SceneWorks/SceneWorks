@@ -110,8 +110,7 @@ pub struct FilmDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compiled_plan: Option<CompiledPlan>,
     pub reference_pack: ReferencePack,
-    /// Reserved, versioned authoring document for the later review slice. Persisting the empty
-    /// shape now keeps a draft self-contained without implementing review behavior in S1.
+    /// Versioned authoring document for advisory take review, pinned independently into each run.
     pub review_plan: Value,
     pub created_at: String,
     pub updated_at: String,
@@ -126,6 +125,33 @@ impl FilmDraft {
         } else {
             title
         };
+        let shot = Shot {
+            id: "SH010".to_owned(),
+            beat_id: None,
+            beat: "Opening shot".to_owned(),
+            framing: "wide".to_owned(),
+            prompt: String::new(),
+            negative_prompt: None,
+            target_duration_seconds: 5.1667,
+            resolution: None,
+            start_state: "Opening state".to_owned(),
+            end_state: "Closing state".to_owned(),
+            dialogue: None,
+            sound: None,
+            generated_audio: None,
+            dialogue_clip: None,
+            conditioning: ShotConditioning {
+                mode: "text_to_video".to_owned(),
+                first_frame_role: None,
+                last_frame_role: None,
+                reference_roles: Vec::new(),
+                chain_from_shot_id: None,
+            },
+            seed: None,
+            continuity_roles: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let review_plan = default_review_plan(draft_id, std::slice::from_ref(&shot));
         Self {
             schema_version: FILM_DRAFT_SCHEMA_VERSION,
             id: draft_id.to_owned(),
@@ -158,32 +184,7 @@ impl FilmDraft {
                     planner_max_memory_gb: None,
                 },
                 sound: PlanSound::default(),
-                shots: vec![Shot {
-                    id: "SH010".to_owned(),
-                    beat_id: None,
-                    beat: "Opening shot".to_owned(),
-                    framing: "wide".to_owned(),
-                    prompt: String::new(),
-                    negative_prompt: None,
-                    target_duration_seconds: 5.1667,
-                    resolution: None,
-                    start_state: "Opening state".to_owned(),
-                    end_state: "Closing state".to_owned(),
-                    dialogue: None,
-                    sound: None,
-                    generated_audio: None,
-                    dialogue_clip: None,
-                    conditioning: ShotConditioning {
-                        mode: "text_to_video".to_owned(),
-                        first_frame_role: None,
-                        last_frame_role: None,
-                        reference_roles: Vec::new(),
-                        chain_from_shot_id: None,
-                    },
-                    seed: None,
-                    continuity_roles: Vec::new(),
-                    depends_on: Vec::new(),
-                }],
+                shots: vec![shot],
             },
             compiled_plan: None,
             reference_pack: ReferencePack {
@@ -194,11 +195,67 @@ impl FilmDraft {
                 references: Vec::new(),
                 sound: Vec::new(),
             },
-            review_plan: json!({"schemaVersion": 1, "questions": []}),
+            review_plan,
             created_at: now.clone(),
             updated_at: now,
         }
     }
+
+    /// The review document pinned into a run. Early film drafts carried the placeholder
+    /// `{schemaVersion, questions}` shape; turn only that known legacy seam into the typed plan so
+    /// reopening an old draft does not make review unavailable. Authored modern documents remain
+    /// byte-for-byte inputs, including invalid ones that review should report by field.
+    pub fn review_plan_for_run(&self) -> Value {
+        if self.review_plan.is_null()
+            || (self.review_plan.get("questions").is_some()
+                && self.review_plan.get("sampling").is_none()
+                && self.review_plan.get("shots").is_none())
+        {
+            default_review_plan(&self.id, &self.production_plan.shots)
+        } else {
+            self.review_plan.clone()
+        }
+    }
+}
+
+fn default_review_plan(draft_id: &str, shots: &[Shot]) -> Value {
+    let questions = shots
+        .iter()
+        .map(|shot| {
+            (
+                shot.id.clone(),
+                json!({
+                    "questions": [{
+                        "id": format!("{}_action", shot.id),
+                        "topic": "action_completion",
+                        "intended": shot.end_state,
+                        "ask": "Does the final frame show the authored action completed? Answer yes or no.",
+                        "expect": ["yes"],
+                        "contradict": ["no"],
+                        "frames": "last",
+                        "mustObserve": true
+                    }]
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+                "schemaVersion": 1,
+                "id": format!("{draft_id}-review"),
+                "version": 1,
+                "description": "Advisory review questions for generated takes",
+                "sampling": { "positions": [0.1, 0.5, 0.9] },
+                "limits": {
+                    "maxSeconds": 120,
+                    "maxFramesPerShot": 3,
+                    "maxQuestionsPerShot": 8,
+                    "maxAnswerSeconds": 30,
+                    "maxNewTokens": 192,
+                    "maxMemoryGb": 16.0
+                },
+                "shots": questions,
+                "uncertainBelow": 0.5
+    })
 }
 
 /// Convert pasted prose or screenplay text into an editable starting document. This is deliberately

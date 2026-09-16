@@ -236,6 +236,7 @@ pub struct FilmRunFiles {
     pub plan: PathBuf,
     pub reference_pack: PathBuf,
     pub compiled: PathBuf,
+    pub review_plan: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1006,6 +1007,7 @@ impl ProjectStore {
             }
             write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
             write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+            write_json(&run_dir.join("review.jsonc"), &draft.review_plan_for_run())?;
             if let Some(compiled) = compiled.as_ref() {
                 write_json(&run_dir.join("compiled.json"), compiled)?;
             }
@@ -1092,6 +1094,7 @@ impl ProjectStore {
             plan: directory.join("plan.json"),
             reference_pack: directory.join("references.json"),
             compiled: directory.join("compiled.json"),
+            review_plan: directory.join("review.jsonc"),
             directory,
         })
     }
@@ -14008,6 +14011,69 @@ mod tests {
         assert_eq!(
             guess_mime_from_filename("reference.avif").as_deref(),
             Some("image/avif")
+        );
+    }
+
+    #[test]
+    fn film_run_pins_review_plan_independently_of_later_draft_edits() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Pinned review")
+            .expect("project creates");
+        let mut draft = store
+            .create_film_draft(&project.id, "film_review", "Review")
+            .expect("draft creates");
+        draft.review_plan["description"] = json!("Pinned first version");
+        let draft = store
+            .save_film_draft(&project.id, "film_review", draft)
+            .expect("draft saves");
+        store
+            .create_film_run(
+                &project.id,
+                "run_review",
+                "film_review",
+                vec!["SH010".to_owned()],
+                None,
+            )
+            .expect("run creates");
+        let files = store
+            .film_run_files(&project.id, "run_review")
+            .expect("run files");
+        let pinned = read_json(&files.review_plan).expect("pinned review reads");
+        assert_eq!(pinned["description"], "Pinned first version");
+
+        let mut edited = draft;
+        edited.review_plan["description"] = json!("Future version");
+        let edited = store
+            .save_film_draft(&project.id, "film_review", edited)
+            .expect("later draft saves");
+        assert_eq!(
+            read_json(&files.review_plan).expect("pinned review still reads"),
+            pinned
+        );
+
+        let mut legacy = edited;
+        legacy.review_plan = json!({"schemaVersion": 1, "questions": []});
+        store
+            .save_film_draft(&project.id, "film_review", legacy)
+            .expect("legacy draft saves");
+        store
+            .create_film_run(
+                &project.id,
+                "run_legacy_review",
+                "film_review",
+                vec!["SH010".to_owned()],
+                None,
+            )
+            .expect("legacy run creates");
+        let legacy_files = store
+            .film_run_files(&project.id, "run_legacy_review")
+            .expect("legacy files");
+        let legacy_pin = read_json(&legacy_files.review_plan).expect("legacy pin reads");
+        assert_eq!(
+            legacy_pin["shots"]["SH010"]["questions"][0]["frames"],
+            "last"
         );
     }
 
