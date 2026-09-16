@@ -10848,7 +10848,11 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-prompt { grid-column: span 2; }
 .ve-film-form input,
 .ve-film-form textarea,
-.ve-film-toolbar select {
+.ve-film-form select,
+.ve-film-toolbar select,
+.ve-film-section input,
+.ve-film-section textarea,
+.ve-film-section select {
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -10881,6 +10885,40 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-file-button input { max-width: 220px; }
 .ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
 .ve-film-bindings li span { min-width: 140px; }
+.ve-film-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ve-film-section h3,
+.ve-film-section h4 { margin: 0 0 8px; }
+.ve-film-section label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ve-film-wide { display: grid; grid-column: 1 / -1; gap: 4px; }
+.ve-film-document-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.ve-film-document-columns > div { display: grid; align-content: start; gap: 8px; }
+.ve-film-dialogue { display: grid; grid-template-columns: minmax(90px, .35fr) 1fr; gap: 8px; }
+.ve-film-empty,
+.ve-film-provider-state { color: var(--muted); font-size: 12px; }
+.ve-film-operation { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-operation.is-failed,
+.ve-film-operation.is-canceled { border-left-color: var(--danger); }
+.ve-film-finding { margin: 2px 0; color: var(--danger); }
+.ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
+.ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-candidate article p { margin: 5px 0; }
 .workspace > section.ve-editor {
   flex: 1 1 auto;
   min-height: 0;

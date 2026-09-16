@@ -19,7 +19,8 @@ function draft(overrides = {}) {
     title: "First film",
     originalScript: "",
     brief: "",
-    planning: { provider: "prompt_refiner" },
+    structuredBrief: { synopsis: "", styleNotes: "", targetTotalSeconds: 30, beats: [], dialogue: [] },
+    planning: { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false },
     productionPlan: {
       schemaVersion: 2,
       id: "film_1",
@@ -76,7 +77,9 @@ async function renderWorkspace() {
 function changeValue(element, value) {
   const prototype = element.tagName === "TEXTAREA"
     ? window.HTMLTextAreaElement.prototype
-    : window.HTMLInputElement.prototype;
+    : element.tagName === "SELECT"
+      ? window.HTMLSelectElement.prototype
+      : window.HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, value);
   element.dispatchEvent(new Event("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
@@ -86,11 +89,15 @@ describe("FilmWorkspace", () => {
   it("creates, edits, saves, and reopens a project film draft without JSON authoring", async () => {
     const created = draft();
     const saved = draft({ revision: 2, title: "Workshop delivery" });
-    apiFetchMock
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(created)
-      .mockResolvedValueOnce(saved)
-      .mockResolvedValueOnce([saved]);
+    let lists = 0;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films" && options.method === "POST") return Promise.resolve(created);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve(lists++ === 0 ? [] : [saved]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/films/film_1") && options.method === "PUT") return Promise.resolve(saved);
+      throw new Error(`Unexpected request ${path}`);
+    });
 
     await renderWorkspace();
     const newButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "New film draft");
@@ -99,7 +106,7 @@ describe("FilmWorkspace", () => {
     const title = container.querySelector('input[value="First film"]');
     await act(async () => {
       changeValue(title, "Workshop delivery");
-      const prompt = container.querySelector('textarea[aria-label="Shot prompt"]');
+      const prompt = container.querySelector('textarea[aria-label="Shot SH010 prompt"]');
       changeValue(prompt, "A courier enters a workshop carrying a red parcel.");
     });
     const save = [...container.querySelectorAll("button")].find((button) => button.textContent === "Save draft");
@@ -109,7 +116,8 @@ describe("FilmWorkspace", () => {
       "",
       expect.objectContaining({ method: "PUT" }),
     );
-    const body = JSON.parse(apiFetchMock.mock.calls[2][2].body);
+    const saveCall = apiFetchMock.mock.calls.find(([path, , options]) => path.endsWith("/films/film_1") && options?.method === "PUT");
+    const body = JSON.parse(saveCall[2].body);
     expect(body.title).toBe("Workshop delivery");
     expect(body.productionPlan.shots[0].prompt).toContain("red parcel");
 
@@ -118,5 +126,41 @@ describe("FilmWorkspace", () => {
     await renderWorkspace();
     expect(container.querySelector('select[aria-label="Film draft"]').value).toBe("film_1");
     expect(container.querySelector('input[value="Workshop delivery"]')).not.toBeNull();
+  });
+
+  it("authors a screenplay brief and keeps Qwen optional and separate from the video model", async () => {
+    const screenplay = draft({ originalScript: "INT. SHOP - NIGHT\nMARA\nPut it down." });
+    const parsed = {
+      synopsis: "INT. SHOP - NIGHT",
+      styleNotes: "",
+      targetTotalSeconds: 10,
+      beats: [{ id: "B001", summary: "INT. SHOP - NIGHT" }],
+      dialogue: [{ id: "D001", beatId: "B001", speaker: "MARA", text: "Put it down." }],
+    };
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([screenplay]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [
+        { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },
+        { provider: "native", modelId: "film_planner_qwen3_6_27b", available: false },
+      ] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/brief/parse") && options.method === "POST") return Promise.resolve(parsed);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("prompt_refiner");
+    expect(container.querySelector('input[aria-label="Planning target video model"]').value).toBe("minimax_h3");
+    expect(container.textContent).toContain("Qwen3.6-27B is not required");
+
+    const extract = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Extract editable"));
+    await act(async () => { extract.click(); await Promise.resolve(); });
+    expect(container.querySelector('textarea[aria-label="Beat B001"]').value).toBe("INT. SHOP - NIGHT");
+    expect(container.querySelector('textarea[aria-label="Dialogue D001 text"]').value).toBe("Put it down.");
+
+    const provider = container.querySelector('select[aria-label="Planning provider"]');
+    await act(async () => { changeValue(provider, "native"); });
+    expect(container.textContent).toContain("no download starts automatically");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(true);
+    expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/models/"))).toBe(false);
   });
 });
