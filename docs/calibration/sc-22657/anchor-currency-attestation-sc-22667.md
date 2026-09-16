@@ -1,4 +1,4 @@
-# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` / `8a65db2a` / `563c44e1` (sc-22667 / sc-22765 / sc-22723 / sc-22738, epic sc-22657)
+# Anchor currency attestations at inference `c6d6a4db`, extended to `1cd0e393` / `8a65db2a` / `563c44e1` / … / `8e2d9671` (sc-22667 / sc-22765 / sc-22723 / sc-22738 / sc-23402 / epic sc-23401 main sync, epic sc-22657)
 
 Terminal-story close-out of the memory-anchor currency question the sc-22667 review raised as a
 blocker: at the landed pin `c6d6a4dbd61ab09c26ff5526632cae2cefea60ed`, none of the five anchors the
@@ -365,3 +365,47 @@ anchors is unchanged — nothing is newly attested and nothing is dropped.
 > (`290fa1f3` → `fff98b05`, sc-23026 / sc-23053 / sc-23108 / sc-23187 / sc-23207 / sc-23234) with
 > the reading recorded only in each entry's `why` chain and `story` list. Those legs are not
 > sectioned here; read the JSON `why` fields for them.
+
+## Extension to inference `8e2d9671` (epic 23401 main sync, 2026-09-16)
+
+**Why it was needed.** Syncing `origin/main` into `feature/sc-23401-film-harness-phase-2` collided
+two pins. The epic branch pinned `e497db468` (inference `main`, the epic's own rev); SceneWorks
+`main` pinned `ebc97be15`, which is **not on inference `main`** — it sits on `release/next` /
+`release/0.8.11` and does not contain the epic's inference work. The merged branch is pinned to
+inference `main` head `8e2d9671f`, which contains **both** `e497db468` and the forward-ports of the
+`sc-23584` and `sc-23648` fixes `ebc97be15` carried (inference PRs #988 and #990; their file sets
+are byte-identical between the two lineages). The four attestations therefore extend along
+`e497db468..8e2d9671f`, not along anything on the release side; the merge kept the epic's side of
+`config/anchor-currency-attestations.json` for exactly that reason.
+
+**The range read.** `e497db468..8e2d9671f` changes 66 inference files. Intersected against each
+attested anchor's `closureFiles` (`krea_2_turbo:candle` 144, `z_image_turbo:candle` 110):
+
+| File | In which closure | Change in `e497db468..8e2d9671f` | Reading |
+| --- | --- | --- | --- |
+| `crates/contracts/gen-core/src/lib.rs` | both | `pub mod memory_phases;` plus the six matching re-exports | routing table only → **accounting-only** |
+| `crates/contracts/gen-core/src/memory_phases.rs` | both | NEW module (sc-23584, +5 lines sc-23648): the fact TYPES `StagedWeightSchedule`, `StreamedWeightFacts`, `DecoderTilingRealization`, `DecoderWorkspaceFacts`, `ImagePipelineArchitecture`, `MemoryPhaseFacts`, and one pure arithmetic helper `StreamedWeightFacts::peak_bytes` | its own module doc says it describes execution and loaded tensor bytes and carries no fitted coefficients; nothing in it loads a weight, touches a device or allocates. Reached by these closures only through gen-core's routing table → **accounting-only** |
+| `crates/contracts/gen-core/src/memory_strategy.rs` | both | `MemoryStrategyParameters.stage_residency: Option<bool>` (the struct derives `Default`, so every existing construction is `None`), `MemoryProviderContract.phase_facts: Option<MemoryPhaseFacts>`, an `engages_selection` early return guarded on `Some(true)`, three `validate_selection` refusals that fire only when the field is set, and an `evidence_key_json` writer that emits the key only when `Some` | inert at `None`, which is what these anchors' selections carry. The range adds a dedicated test, `optional_staging_keeps_legacy_key_bytes_and_names_the_new_composition`, asserting the serialized legacy evidence key is **byte-identical** while the field is `None` → **accounting-only** |
+| `crates/media/candle-gen/candle-gen-krea/src/lib.rs` | krea only | one `phase_facts: None` initializer in `build_krea_turbo_memory_strategy_contract`; one `stage_residency: None` inside `#[cfg(test)]` | the pre-existing `GenerationMemory::stage_residency` runtime flag this crate already read is a **different** field and is untouched; `loader.rs`, `pipeline.rs`, `transformer/` and `control*.rs` are byte-identical across the range → **accounting-only** |
+| `crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs` | krea only | one `phase_facts: None` initializer in `build_provider_contract` | **accounting-only** |
+| `crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs` | z_image only | one `phase_facts: None` initializer in `provider_contract` | **accounting-only** |
+
+Everything else in the range is the StarVector `contracts/llm` crates (sc-22261), the other
+providers' `memory_strategy.rs` files, `mlx-gen/src/asset_facts.rs`, the MLX SANA / SDXL / Z-Image
+crates, and CI + release scripts — **none of which either closure reaches**. Every intersecting
+file is accounting-only under the two-gated doctrine, so **no hardware witness is required for this
+leg** and none was taken; each entry keeps its original `class`, and each intersecting file is
+classified individually in `filesChangedSinceMeasurement`. No GPU, no re-capture and no calibration
+run was involved — the sync ran on a CPU-only lane.
+
+**Who wrote it.** Scripted and reviewed rather than hand-edited, as before: the review above is the
+header of the one-shot script that performed the write
+(`<scratchpad>/extend-attestations-2.mjs`, modelled on the `e497db468` extension's script). The two
+derived-document steps that must follow it were then run —
+`node scripts/anchor-loader-closure.mjs --repo <inference clone> --stamp-anchors` and
+`node scripts/generate-memory-matrix.mjs`.
+
+**Result.** Matrix after regeneration: `247 anchors, 243 stale, 4 current by attestation` — the same
+shape as at `e497db468`. Nothing is newly attested and nothing is dropped. The parity-scaffold
+suite (`INFERENCE_REPO=<clone at the pin> npm run check`) passes 937/937 + 2/2 with zero skips, and
+`tests/test_memory_matrix.py` passes 11/11.
