@@ -5673,6 +5673,9 @@ pub(crate) async fn replace_take_with_lease(
         }
     }
     session.record.shots[index].selected_attempt = None;
+    // The standing decision was about the take we just rejected. Keep the append-only decision
+    // entry, but do not let an acceptance of attempt N read as acceptance of replacement N+1.
+    session.record.shots[index].human_decision = None;
     let previous_asset = rejected
         .and_then(|number| {
             session.record.shots[index]
@@ -7757,6 +7760,25 @@ async fn edit_timeline_with_lease(
             options.run_record_path.display()
         ))
     })?;
+    let out_dir = options
+        .run_record_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let (_, plan_bytes) = read_source(
+        Path::new(&record.plan.path),
+        &out_dir.join("plan.json"),
+        "plan",
+    )?;
+    let plan_sha256 = sha256_hex(&plan_bytes);
+    if plan_sha256 != record.plan.sha256 {
+        return Err(HarnessError::Refused(format!(
+            "the plan changed since run {} started (recorded {}, found {}); refusing to change a take against different dependencies",
+            record.run_id, record.plan.sha256, plan_sha256
+        )));
+    }
+    let pinned_plan = film_plan::parse_plan(std::str::from_utf8(&plan_bytes).unwrap_or_default())
+        .map_err(|error| HarnessError::Refused(format!("plan: {error}")))?;
     let project_id = record
         .project_id
         .clone()
@@ -7860,9 +7882,10 @@ async fn edit_timeline_with_lease(
             // The attempt this asset belongs to, when it is one of the shot's OWN takes. The
             // selection follows it below, and so does the item's aligned-attempt stamp — a later
             // merge then reads "selection N, item aligned with N" and leaves the swap alone. A
-            // swap onto a FOREIGN asset moves no selection and leaves the stamp as it is, for the
-            // same reason: the selection did not change, so the merge must not touch the item
-            // (sc-22715).
+            // swap onto a FOREIGN asset has no generation attempt to select and leaves the stamp
+            // as it is. The saved timeline owns that cut choice while selectedAttempt continues
+            // to name generation provenance; a later generated replacement has a new attempt and
+            // can therefore be merged without erasing the edit (sc-22715).
             let own_attempt = record.shot(shot_id).and_then(|shot| {
                 shot.attempts
                     .iter()
@@ -7972,14 +7995,35 @@ async fn edit_timeline_with_lease(
         },
         detail,
     });
-    // A swap to an asset this shot ALREADY rendered is a change of selection, so the record's
-    // selected attempt has to follow it. Leaving it behind would point `status`, a later
-    // `replace-take` and the dependency flags at an attempt the sequence no longer shows. A swap to
-    // a foreign asset (an imported clip, not a take of this run) selects no attempt: there is none
-    // to select, and the timeline item is then the only thing that says what is in the cut.
-    if let (TimelineEdit::SwapTake { shot_id, .. }, Some(attempt)) = (&edit, swapped_attempt) {
+    // The saved cut owns what is on screen. A swap therefore moves the generation selection only
+    // when the chosen asset is one of this shot's attempts; a foreign asset has no generation
+    // attempt, so selectedAttempt continues to record generation provenance. Either way an earlier
+    // accept/reject no longer describes the take in the cut, so its standing
+    // `humanDecision` is cleared while the append-only decision log keeps the provenance. A person
+    // may explicitly reinstate an earlier rejected take; the old rejection remains in the decision
+    // log, while the attempt becomes a live candidate again and still requires a fresh acceptance.
+    if let TimelineEdit::SwapTake { shot_id, .. } = &edit {
+        let previous = record.shot(shot_id).and_then(|shot| shot.selected_attempt);
         if let Some(shot) = record.shot_mut(shot_id) {
-            shot.selected_attempt = Some(attempt);
+            shot.human_decision = None;
+            if let Some(attempt) = swapped_attempt {
+                shot.selected_attempt = Some(attempt);
+                if let Some(chosen) = shot
+                    .attempts
+                    .iter_mut()
+                    .find(|candidate| candidate.attempt == attempt)
+                {
+                    chosen.rejection = None;
+                }
+            }
+        }
+        if swapped_attempt.is_none() || previous != swapped_attempt {
+            flag_dependents(
+                &mut record,
+                &pinned_plan,
+                shot_id,
+                "its take selection was changed by hand",
+            );
         }
     }
     let picture_track_id = picture_track_index(&saved)
@@ -8070,11 +8114,6 @@ async fn edit_timeline_with_lease(
     // The same write every controller makes (sc-22715): atomic, and mirrored to
     // `<project>/film-harness/<run_id>/run.json` — an edit rewrote the record with a plain
     // `fs::write` and left the project's copy describing a sequence that no longer existed.
-    let out_dir = options
-        .run_record_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
     persist_record(
         &record,
         &out_dir,

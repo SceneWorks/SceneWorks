@@ -778,7 +778,7 @@ pub async fn review(
     review_with_lease(transport, options, vision, lease).await
 }
 
-async fn review_with_lease(
+pub(crate) async fn review_with_lease(
     transport: &dyn ApiTransport,
     options: &ReviewOptions,
     vision: &dyn ReviewVision,
@@ -1790,6 +1790,16 @@ pub async fn request_repair(
         &options.out_dir,
         format!("repair_{}", uuid::Uuid::new_v4().simple()),
     )?;
+    request_repair_with_lease(transport, options, shot_id, reason, lease).await
+}
+
+pub(crate) async fn request_repair_with_lease(
+    transport: &dyn ApiTransport,
+    options: &super::ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+    lease: super::ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     let mut context = ReviewContext::open(&options.out_dir, None, false)?;
     let Some(shot) = context.record.shot(shot_id).cloned() else {
         return Err(HarnessError::Refused(format!(

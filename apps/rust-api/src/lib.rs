@@ -286,6 +286,7 @@ mod film_lifecycle;
 pub mod film_planner;
 mod film_planner_connections;
 mod film_planning;
+mod film_review;
 mod films;
 mod openai_planner;
 pub(crate) use error::ApiError;
@@ -296,6 +297,10 @@ use film_planner_connections::{
 use film_planning::{
     apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
     get_film_planning_operation, parse_film_draft_script, start_film_planning,
+};
+use film_review::{
+    analyze_film_take, decide_film_take, get_film_review, repair_film_take, replace_film_take,
+    swap_film_take,
 };
 use films::{
     add_film_reference, add_film_sound, create_film_draft, create_film_run, export_film_run,
@@ -1790,6 +1795,26 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/film-runs/:run_id/export",
             post(export_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review",
+            get(get_film_review).post(analyze_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/decision",
+            post(decide_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/swap",
+            post(swap_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/replace",
+            post(replace_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/repair",
+            post(repair_film_take),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",

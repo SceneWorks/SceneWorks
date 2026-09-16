@@ -16,6 +16,7 @@ import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
+import { FilmReview } from "./FilmReview.jsx";
 import { FilmShots } from "./FilmShots.jsx";
 
 const FilmSound = lazy(() => import("./FilmSound.jsx").then((module) => ({ default: module.FilmSound })));
@@ -393,6 +394,15 @@ export function FilmWorkspace() {
             onImportError={setNotice}
             selectedShotIds={selectedShotIds}
             setSelectedShotIds={setSelectedShotIds}
+          />
+          <FilmReview
+            draft={draft}
+            onChange={updateDraft}
+            projectId={activeProject.id}
+            refreshTimelines={refreshTimelines}
+            setNotice={setNotice}
+            setSelectedTimelineId={setSelectedTimelineId}
+            token={token}
           />
           <div className="ve-film-actions">
             <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>

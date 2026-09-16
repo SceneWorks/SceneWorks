@@ -1493,6 +1493,7 @@ pub(crate) struct Harness {
     /// The fake worker's task, when one runs. Behind a lock so a test that started WITHOUT a
     /// worker can script the fake first and spawn it afterwards (`spawn_worker`).
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    server: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
@@ -1530,6 +1531,57 @@ impl Harness {
             temp_dir,
             script,
             worker: Mutex::new(worker),
+            server: None,
+        }
+    }
+
+    /// Start the same in-process fixture with an ephemeral loopback listener. API handlers that
+    /// call back through the configured MCP URL (review/repair) then exercise their real HTTP
+    /// transport while the fake worker remains deterministic and CPU-only.
+    pub(crate) async fn start_http(
+        with_worker: bool,
+        behaviors: Vec<(&str, VideoBehavior)>,
+    ) -> Self {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let manifests_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&manifests_dir).expect("manifest dir creates");
+        std::fs::write(
+            manifests_dir.join("builtin.models.jsonc"),
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        )
+        .expect("builtin models writes");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("loopback address");
+        let mut settings = test_settings(&temp_dir);
+        settings.mcp_api_url = format!("http://{address}");
+        let (app, state) = create_app_with_state(settings).expect("app and state create");
+        *state.video_platform_override.lock() = Some("macos");
+        let server_app = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_app)
+                .await
+                .expect("loopback API serves");
+        });
+        let script = Arc::new(Mutex::new(WorkerScript {
+            behaviors: behaviors
+                .into_iter()
+                .map(|(id, behavior)| (id.to_owned(), behavior))
+                .collect(),
+            ..WorkerScript::default()
+        }));
+        let worker = with_worker.then(|| spawn_fake_worker(app.clone(), script.clone()));
+        if with_worker {
+            wait_for_fake_worker(&app).await;
+        }
+        Self {
+            transport: RouterTransport { app: app.clone() },
+            app,
+            temp_dir,
+            script,
+            worker: Mutex::new(worker),
+            server: Some(server),
         }
     }
 
@@ -1966,6 +2018,9 @@ impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.get_mut().take() {
             worker.abort();
+        }
+        if let Some(server) = self.server.take() {
+            server.abort();
         }
     }
 }
@@ -6211,8 +6266,8 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
         "an edited sequence leaves the existing export stale: {on_disk}"
     );
 
-    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so there is
-    //    no attempt to select and the shot's selection stays exactly where it was. (The other
+    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so the saved
+    //    cut changes while selectedAttempt continues to record the last generation selection. (The other
     //    branch — a swap onto an asset that IS one of the shot's takes — moves the selection, and
     //    is proved in `swapping_onto_an_existing_take_moves_the_shots_selected_attempt`.)
     let sh010 = on_disk["shots"]
@@ -6224,7 +6279,7 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
     assert_eq!(
         sh010["selectedAttempt"],
         json!(1),
-        "a swap onto a foreign asset selects no attempt: {sh010}"
+        "a foreign cut asset does not invent or erase generation provenance: {sh010}"
     );
 
     // A reorder that does not name the whole sequence is refused rather than silently dropping a
