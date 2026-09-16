@@ -1,10 +1,12 @@
 # How a UI calls the film harness
 
-A design note for a future Video Editor front end. **This does not design the UI.** It describes the
-seams that already exist, what shape each operation is, what the single state document holds, and
-what the epic still has to decide. What the harness does and why is
-[film-harness-overview.md](film-harness-overview.md); the operating manual is
-[film-harness.md](film-harness.md).
+An implementation note for the Film workspace now present in the Video Editor. It describes the
+shared library/CLI/route layering and the durable state documents. Operator behavior belongs in
+[film-editor.md](film-editor.md); the harness architecture and CLI manual remain in
+[film-harness-overview.md](film-harness-overview.md) and [film-harness.md](film-harness.md).
+
+Some line references below describe the original harness commit and are retained as historical
+navigation. Use the current source and router as the authority for the product routes.
 
 ## The layering today
 
@@ -13,7 +15,9 @@ apps/rust-api/src/bin/film-harness.rs      arg parsing, signal handling, printin
         │  calls
 apps/rust-api/src/{film_harness,film_planner}.rs   the ORCHESTRATION, a rust-api library module
         │  drives, through ApiTransport
-existing SceneWorks HTTP routes            projects, assets, timelines, jobs (nothing harness-specific)
+project-scoped film routes                 drafts, planning, runs, review, explicit export
+        │  call
+existing SceneWorks HTTP routes              projects, assets, timelines, jobs
 ```
 
 - The orchestration lives in the **library**: `pub mod film_harness; pub mod film_planner;`
@@ -30,8 +34,10 @@ existing SceneWorks HTTP routes            projects, assets, timelines, jobs (no
   (`apps/rust-api/src/film_harness.rs:176`), a two-method trait (`call` and `get_bytes`, `:190`),
   whose shipped implementation is `HttpTransport` (`:5897`). There is no privileged in-process
   backdoor; a UI-hosted run would use the same trait.
-- **No HTTP route exposes the harness today.** `film_harness` is referenced only by `lib.rs`, the
-  binary, `film_planner.rs` and the test modules; no route module imports it.
+- Project-scoped routes expose drafts, references, sound, preflight, planning, run lifecycle, and
+  explicit export. The review routes call the same decision, swap, replacement, repair, and bounded
+  analysis functions as the CLI. Their router registrations are in `apps/rust-api/src/lib.rs` and
+  their adapters are in `films.rs`, `film_planning.rs`, `film_lifecycle.rs`, and `film_review.rs`.
 - **There is no in-memory state beyond the files.** The record on disk is the run
   (`crates/sceneworks-core/src/film_plan.rs:3726`).
 
@@ -47,6 +53,9 @@ Every one already exists and is used by other clients:
 | jobs | `POST /api/v1/video/jobs`, `POST /api/v1/audio/jobs`, `POST /api/v1/image/jobs`, `POST /api/v1/image/vqa/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/metrics`, job cancel |
 | capability | `GET /api/v1/host-capabilities`, `GET /api/v1/models`, `GET /api/v1/loras`, `GET /api/v1/workers` |
 | LLM | `POST /api/v1/prompts/refine` |
+| film drafts | `/api/v1/projects/:project_id/films/...`: draft, reference pack, sound, brief parse, planner availability, planning, preflight, run creation |
+| film runs | `/api/v1/projects/:project_id/film-runs/...`: read/list/progress, start/resume/cancel, review decisions and bounded take mutations, explicit export |
+| external planners | `/api/v1/film-planner-connections/...`: non-secret connection settings, connection test, optional model listing |
 
 Route strings are in `apps/rust-api/src/film_harness.rs`,
 `apps/rust-api/src/film_harness/{references,review}.rs` and `apps/rust-api/src/film_planner.rs`.
@@ -76,8 +85,10 @@ ordinary jobs routes rather than needing a new progress channel.
 
 ### 2. Long-running and resumable: `run`, `resume`
 
-Hours. `run` (`apps/rust-api/src/film_harness.rs:4823`) creates a project, imports assets, speaks
-dialogue, dispatches one video job per shot attempt, assembles a timeline and exports an MP4.
+Hours. The CLI `run` (`apps/rust-api/src/film_harness.rs:4823`) can create a project, import
+assets, speak dialogue, dispatch one video job per shot attempt, assemble a timeline, and optionally
+export. The Film workspace creates its run inside the active project, delivers each completed shot
+into the editable saved timeline, and leaves export as a separate operator action.
 
 **Recommendation: a server-hosted run should be a task the API owns, with the record file as the
 only truth.** Three properties of the current design push that way and none pushes against it:
@@ -190,9 +201,12 @@ frame extraction rides a **separate one-item timeline** named `film-harness revi
 the export timeline (runbook § *The two seams it drives*). A UI must keep that separation, because
 reviewing must not rewrite the thing the run is for.
 
-## A proposed thin route layer
+## Historical route proposal
 
-`/api/v1/film-harness/...`, calling the same library functions the CLI calls.
+The table below records the original route sketch and is not the current HTTP contract. The shipped
+project-scoped routes are registered in `apps/rust-api/src/lib.rs`; use those routes or the API
+helpers in `apps/web/src/api/films.js` and `apps/web/src/api/filmReview.js`. The governing rule still
+applies: routes call the same library functions the CLI calls.
 
 | route | library call | shape |
 | --- | --- | --- |
