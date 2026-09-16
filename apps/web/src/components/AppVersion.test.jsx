@@ -148,6 +148,33 @@ describe("app update", () => {
     expect(tauriInvoke).not.toHaveBeenCalledWith("install_app_update");
   });
 
+  it("silently ignores unavailable checks and discovers an update after recovery", async () => {
+    vi.useFakeTimers();
+    tauriInvoke.mockRejectedValue(new Error("Network unavailable"));
+    await act(async () => root.render(<Harness />));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+    expect(appConfirm).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+    tauriInvoke.mockResolvedValue({ version: "1.2.4" });
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(container.textContent).toContain("Update to 1.2.4");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(appConfirm).not.toHaveBeenCalled();
+  });
+
+  it("preserves a known update without errors when a later check is unavailable", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<Harness />));
+    tauriInvoke.mockRejectedValue(new Error("Network unavailable"));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(container.textContent).toContain("Update to 1.2.3");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(appConfirm).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   it("refreshes availability without overlapping reads and stops after unmount", async () => {
     vi.useFakeTimers();
     tauriInvoke.mockResolvedValueOnce({ version: null }).mockResolvedValue({ version: "1.2.4" });

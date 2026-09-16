@@ -76,8 +76,10 @@ pub fn spawn_startup_check(app: &AppHandle) {
                 .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!(error = %err, "auto-update: check failed"),
-                Err(err) => tracing::warn!(error = %err, "auto-update: check timed out"),
+                // Offline use is normal. Skip unavailable checks without a prompt,
+                // warning, or UI error; the hourly timer will retry automatically.
+                Ok(Err(err)) => tracing::debug!(error = %err, "auto-update: check skipped"),
+                Err(err) => tracing::debug!(error = %err, "auto-update: timed-out check skipped"),
             }
             startup = false;
         }
