@@ -2381,11 +2381,11 @@ pub(super) fn resolved_mlx_artifact_provenance(
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod resolved_artifact_provenance_tests {
+pub(crate) mod resolved_artifact_provenance_tests {
     use super::*;
     use serde_json::json;
 
-    fn settings(data_dir: &Path) -> Settings {
+    pub(crate) fn settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
             access_token: None,
@@ -8466,7 +8466,7 @@ struct PreparedMlxImageTier {
 }
 
 #[cfg(any(target_os = "macos", test))]
-enum MlxTierFit<T> {
+pub(crate) enum MlxTierFit<T> {
     Fits(T),
     TooBig(WorkerError),
 }
@@ -8474,16 +8474,16 @@ enum MlxTierFit<T> {
 /// Stop at the highest-fidelity fitting tier. Contract/source failures propagate; only an actual
 /// memory refusal can try the next installed tier. Preserve the last evaluated diagnostic.
 #[cfg(any(target_os = "macos", test))]
-fn choose_mlx_request_tier<T>(
+pub(crate) async fn choose_mlx_request_tier<T, F: std::future::Future<Output = WorkerResult<MlxTierFit<T>>>>(
     directories: Vec<PathBuf>,
-    mut probe: impl FnMut(PathBuf) -> WorkerResult<MlxTierFit<T>>,
+    mut probe: impl FnMut(PathBuf) -> F,
 ) -> WorkerResult<T> {
     let mut last_rejection = None;
     for dir in directories {
         let tier = dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
-        match probe(dir)? {
+        match probe(dir).await? {
             MlxTierFit::Fits(prepared) => return Ok(prepared),
             MlxTierFit::TooBig(error) => {
                 last_rejection = Some(WorkerError::InvalidPayload(format!(
@@ -8502,18 +8502,19 @@ fn choose_mlx_request_tier<T>(
 mod mlx_request_tier_tests {
     use super::*;
 
-    #[test]
-    fn request_tiers_preserve_the_first_fitting_prepared_candidate() {
+    #[tokio::test]
+    async fn request_tiers_preserve_the_first_fitting_prepared_candidate() {
         let mut seen = Vec::new();
         let selected =
             choose_mlx_request_tier(["bf16", "q8", "q4"].map(PathBuf::from).to_vec(), |dir| {
                 seen.push(dir.clone());
-                Ok(if dir == Path::new("bf16") {
+                std::future::ready(Ok(if dir == Path::new("bf16") {
                     MlxTierFit::TooBig(WorkerError::InvalidPayload("request exceeds budget".into()))
                 } else {
                     MlxTierFit::Fits((dir, "prepared exact adapter/decoder composition"))
-                })
+                }))
             })
+            .await
             .unwrap();
         assert_eq!(
             selected,
@@ -8525,36 +8526,38 @@ mod mlx_request_tier_tests {
         assert_eq!(seen, [PathBuf::from("bf16"), PathBuf::from("q8")]);
     }
 
-    #[test]
-    fn request_tiers_never_downtier_a_contract_or_source_failure() {
+    #[tokio::test]
+    async fn request_tiers_never_downtier_a_contract_or_source_failure() {
         let mut calls = 0;
-        let error = choose_mlx_request_tier::<()>(["q8", "q4"].map(PathBuf::from).to_vec(), |_| {
+        let error = choose_mlx_request_tier::<(), _>(["q8", "q4"].map(PathBuf::from).to_vec(), |_| {
             calls += 1;
-            Err(WorkerError::InvalidPayload(
+            std::future::ready(Err(WorkerError::InvalidPayload(
                 "artifact changed during contract query".into(),
-            ))
+            )))
         })
+        .await
         .unwrap_err();
         assert_eq!(calls, 1);
         assert!(error.to_string().contains("artifact changed"));
     }
 
-    #[test]
-    fn request_tiers_report_the_last_evaluated_constraint_and_honor_a_single_explicit_tier() {
+    #[tokio::test]
+    async fn request_tiers_report_the_last_evaluated_constraint_and_honor_a_single_explicit_tier() {
         for directories in [
             vec![PathBuf::from("q8")],
             vec![PathBuf::from("q8"), PathBuf::from("q4")],
         ] {
             let expected = directories.last().unwrap().display().to_string();
             let mut seen = Vec::new();
-            let error = choose_mlx_request_tier::<()>(directories.clone(), |dir| {
+            let error = choose_mlx_request_tier::<(), _>(directories.clone(), |dir| {
                 seen.push(dir.clone());
-                Ok(MlxTierFit::TooBig(WorkerError::InvalidPayload(format!(
+                std::future::ready(Ok(MlxTierFit::TooBig(WorkerError::InvalidPayload(format!(
                     "{} request needs 7.25 GiB but only 6.00 GiB is safely available",
                     dir.display(),
-                ))))
+                )))))
             })
-            .unwrap_err()
+            .await
+        .unwrap_err()
             .to_string();
             assert_eq!(seen, directories);
             assert!(error.contains(&format!("{expected} tier:")), "{error}");
@@ -8590,6 +8593,23 @@ fn mlx_candidate_quant(
         ),
         None => requested,
     }
+}
+
+/// Resolve the receipt of the candidate the ladder is about to score. Lower tiers remain untouched
+/// if an earlier candidate fits, including when their receipts cannot be verified offline.
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_mlx_candidate_provenance(
+    request: &ImageRequest,
+    settings: &Settings,
+    repo: &str,
+    directory: &Path,
+) -> WorkerResult<()> {
+    if model_path_override(request).is_some() { return Ok(()); }
+    let variant = tier_key_from_resolved_dir(directory).map(str::to_owned)
+        .or_else(|| requested_receipt_variant(request));
+    crate::model_jobs::receipt_verification::ensure_huggingface_receipt_provenance(
+        settings, repo, &request.model, variant.as_deref(), directory,
+    ).await
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -8968,6 +8988,12 @@ async fn generate_stream(
             .collect()
     };
     let selected = choose_mlx_request_tier(directories, |dir| {
+        let prepare = &prepare;
+        let repo = &repo;
+        async move {
+        if calibration_opt_in || quality_opt_in {
+            ensure_mlx_candidate_provenance(request, settings, repo, &dir).await?;
+        }
         let prepared = prepare(dir)?;
         // Query/validate the provider before considering a legacy load refusal, so malformed
         // artifacts are never mistaken for a reason to silently select another tier.
@@ -8990,7 +9016,8 @@ async fn generate_stream(
             crate::mlx_fit_gate::MlxRequestAdmission::Admitted(_) => MlxTierFit::Fits(prepared),
             crate::mlx_fit_gate::MlxRequestAdmission::Rejected(error) => MlxTierFit::TooBig(error),
         })
-    })?;
+        }
+    }).await?;
     if selected.weights_dir != weights_dir {
         tracing::warn!(model = %request.model, from = ?default_tier,
             to = ?tier_key_from_resolved_dir(&selected.weights_dir),
