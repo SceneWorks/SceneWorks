@@ -93,11 +93,8 @@ pub struct Managed {
     /// (those children are owned by the supervisor, not tracked here). Only populated
     /// on the Windows or Linux candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
-    /// On-demand keychain credential socket served to the API sidecar and MLX worker (sc-5891).
-    /// Started once before the API spawns; either process pulls a host's secret only when an
-    /// operation needs auth, so the keychain is read lazily instead of eagerly at launch.
-    /// macOS-only.
-    #[cfg(target_os = "macos")]
+    /// On-demand OS-credential bridge served to the API sidecar on every desktop
+    /// platform and the MLX worker on macOS (sc-5891, sc-23730).
     pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
@@ -1408,25 +1405,15 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     command = inject_huggingface_cache_env(command, &hf_home);
     command = inject_resolved_cache_env(command, &settings.resolved_cache)?;
     // External film planning resolves credentials inside the API sidecar. Reuse the same desktop
-    // secret bridge as model downloads: macOS receives only the lazy keychain IPC handle, while
-    // Windows/Linux receive the existing keychain-backed credential map. No token is written to
-    // project/config files or exposed to the webview.
-    #[cfg(target_os = "macos")]
+    // secret bridge as model downloads. The sidecar receives only an ephemeral local endpoint and
+    // per-launch capability, then resolves the current OS-stored value for each request. No token
+    // is written to project/config files or exposed to the webview.
     {
         let managed = app.state::<Managed>();
         let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
         if let Some(ipc) = guard.as_ref() {
-            command = command
-                .env(
-                    "SCENEWORKS_CRED_IPC_SOCKET",
-                    ipc.socket.to_string_lossy().to_string(),
-                )
-                .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+            command = ipc.inject_env(command);
         }
-    }
-    #[cfg(not(target_os = "macos"))]
-    if let Some(credentials) = crate::settings::credentials_env_json()? {
-        command = command.env("SCENEWORKS_CREDENTIALS", credentials);
     }
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
@@ -1765,12 +1752,11 @@ fn gate_window(app: AppHandle) {
     });
 }
 
-/// Start the on-demand credential socket (sc-5891) once and stash it in `Managed`.
-/// The API and MLX worker are handed its socket path + token at spawn and pull a recorded
-/// keychain secret only when an operation needs auth, so the keychain is read lazily rather than
-/// eagerly at launch. Idempotent; a start failure is logged and the processes simply get no
-/// credentials (a gated operation then fails with an auth error rather than prompting at launch).
-#[cfg(target_os = "macos")]
+/// Start the on-demand credential bridge once and stash it in `Managed`. The API
+/// and, on macOS, the MLX worker receive its local endpoint plus per-launch token
+/// and pull a recorded OS secret only when an operation needs auth. Idempotent; a
+/// start failure leaves sidecars without desktop credentials and never falls back
+/// to a persisted plaintext bridge.
 fn ensure_cred_ipc(app: &AppHandle) {
     let managed = app.state::<Managed>();
     let mut slot = managed.cred_ipc.lock().expect("cred_ipc lock");
@@ -1781,32 +1767,24 @@ fn ensure_cred_ipc(app: &AppHandle) {
     match crate::cred_ipc::start(socket) {
         Some(handle) => *slot = Some(handle),
         None => append_log(
-            &logs_dir().join("mlx-worker.log"),
-            "[desktop] credential socket failed to start; gated downloads will need a re-entered token\n",
+            &logs_dir().join("api.log"),
+            "[desktop] credential bridge failed to start; desktop credentials are unavailable to sidecars\n",
         ),
     }
 }
 
 /// Drop a host's cached secret from the credential socket (sc-5891) so a later pull
 /// re-reads the keychain. Called when the user updates or removes a credential, so a
-/// revoked/changed token stops being served without an app restart. No-op off macOS
-/// (no socket there).
+/// revoked/changed token stops being served without an app restart.
 pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
-    #[cfg(target_os = "macos")]
+    if let Some(ipc) = app
+        .state::<Managed>()
+        .cred_ipc
+        .lock()
+        .expect("cred_ipc lock")
+        .as_ref()
     {
-        if let Some(ipc) = app
-            .state::<Managed>()
-            .cred_ipc
-            .lock()
-            .expect("cred_ipc lock")
-            .as_ref()
-        {
-            ipc.invalidate(host);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, host);
+        ipc.invalidate(host);
     }
 }
 
@@ -2512,12 +2490,7 @@ fn supervise_mlx_worker(app: AppHandle) {
                 let managed = ctx.app.state::<Managed>();
                 let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
                 if let Some(ipc) = guard.as_ref() {
-                    command = command
-                        .env(
-                            "SCENEWORKS_CRED_IPC_SOCKET",
-                            ipc.socket.to_string_lossy().to_string(),
-                        )
-                        .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+                    command = ipc.inject_env(command);
                     let hosts = crate::settings::recorded_credential_hosts().join(",");
                     if !hosts.is_empty() {
                         command = command.env("SCENEWORKS_CREDENTIAL_HOSTS", hosts);
@@ -3103,9 +3076,8 @@ fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
         .expect("candle worker lock")
         .take();
     let api_child = managed.api.lock().expect("api lock").take();
-    // Take the credential IPC handle so its socket file can be unlinked on a graceful
-    // quit (sc-5891); see the clean-exit block below. macOS-only (the socket is too).
-    #[cfg(target_os = "macos")]
+    // Take the credential IPC handle so its Unix socket can be unlinked on a graceful
+    // quit (sc-5891). The Windows loopback listener owns no filesystem artifact.
     let cred_ipc = managed.cred_ipc.lock().expect("cred_ipc lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -3166,9 +3138,8 @@ fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
         // Unlink the credential IPC socket (sc-5891) so a graceful quit doesn't leave a
         // stale `cred-ipc.sock` in the data dir. A crash/force-quit skips this, but the
         // next launch's bind reaps it (`cred_ipc::start` removes a stale socket first).
-        #[cfg(target_os = "macos")]
         if let Some(cred_ipc) = cred_ipc {
-            let _ = std::fs::remove_file(&cred_ipc.socket);
+            cred_ipc.cleanup();
         }
         match then {
             Teardown::Exit => handle.exit(0),
@@ -3818,11 +3789,9 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     emit(&app, "starting", "Starting the local engine…", false);
-    // The API sidecar resolves saved external-planner credentials through the same lazy keychain
-    // bridge as the MLX worker. Start the bridge before constructing the API command so the
-    // sidecar receives its socket handle on the first launch; this opens no keychain item until a
-    // planning request asks for a credential.
-    #[cfg(target_os = "macos")]
+    // Start the OS-credential bridge before constructing the API command so the
+    // sidecar receives its endpoint on the first launch. This does not open a
+    // secret item until a planning request asks for one.
     ensure_cred_ipc(&app);
     if let Err(error) = spawn_api(&app) {
         emit(&app, "error", error, true);

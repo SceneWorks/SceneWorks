@@ -121,7 +121,9 @@ does not switch the film-planning provider.
    desktop app the credential stays in the operating-system secret facility and reaches the API
    sidecar through credential IPC. With the standalone API it stays in the configured server
    credential store or explicitly supplied credential environment. It is not written into the film
-   draft, project files, exported media, provenance, logs, or browser storage.
+   draft, project files, exported media, provenance, logs, or browser storage. Saving, rotating, or
+   removing a desktop credential takes effect for Test, model discovery, and planning without an
+   app or API restart.
 4. If the endpoint implements `GET /models`, leave **Endpoint supports model listing** enabled and
    choose **Test and list models**. This proves model listing only; the first planning run validates
    Chat Completions. If listing is unavailable, turn it off and type the exact model ID in
