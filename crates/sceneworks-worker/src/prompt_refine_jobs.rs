@@ -1641,6 +1641,10 @@ fn refine_result(
 mod tests {
     use super::*;
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
         let result = refine_result(
