@@ -460,6 +460,10 @@ pub(crate) enum VideoBehavior {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkerScript {
     pub(crate) behaviors: Vec<(String, VideoBehavior)>,
+    /// Cancel this run at the exact fake-worker transition where the named shot becomes running.
+    /// Tests use this lifecycle hook instead of racing setup and earlier shots with a wall-clock
+    /// polling timeout.
+    pub(crate) cancel_when_running: Option<(String, RunControl)>,
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
     pub(crate) claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
@@ -698,6 +702,24 @@ async fn run_fake_video_job(
         }),
     )
     .await;
+    let cancel = {
+        let mut script = script.lock();
+        if script
+            .cancel_when_running
+            .as_ref()
+            .is_some_and(|(target, _)| target == &shot_id)
+        {
+            script
+                .cancel_when_running
+                .take()
+                .map(|(_, control)| control)
+        } else {
+            None
+        }
+    };
+    if let Some(control) = cancel {
+        control.cancel();
+    }
     match behavior {
         VideoBehavior::HangIgnoringCancel => loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3260,13 +3282,12 @@ async fn a_failed_attempt_is_retried_only_up_to_the_declared_cap() {
 
 #[tokio::test]
 async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched() {
-    // A job that never finishes on its own, so the ONLY thing that can end the attempt is the run
-    // budget — whether setup took a moment or a while on a loaded runner. `maxShotSeconds` equals
-    // `maxRunSeconds` and the run deadline always comes first (it starts before the attempt does),
-    // so this is the run budget tripping, not the shot budget. The two-shot / one-reference
-    // documents keep the pre-dispatch work (catalog, host, project, imports) small enough that the
-    // budget bounds the RENDER rather than the setup — sc-22711 after a 3s budget expired during
-    // setup on a runner busy with other suites.
+    // A job that never finishes on its own, so once dispatched only the run budget can end it.
+    // `maxShotSeconds` equals `maxRunSeconds` and the run deadline starts first, so it wins the
+    // tie. The run budget deliberately includes setup too: on a loaded runner it may expire before
+    // the first dispatch. Both points must stop all later dispatch and leave the same durable,
+    // terminal run-budget outcome; the focused PollBounds unit test pins the in-flight precedence
+    // without relying on twelve quiet wall-clock seconds.
     let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
     let (plan, pack) = harness.minimal_documents(json!({
         "maxRunSeconds": 12, "maxShotSeconds": 12, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
@@ -3281,31 +3302,46 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
         "{:#?}",
         record.shots
     );
-    assert_eq!(
-        record.shots[0].outcome,
-        ShotOutcome::TimedOut,
-        "{:#?}",
-        record.shots[0]
-    );
-    assert_eq!(
-        record.shots[0].attempts.len(),
-        1,
-        "the run budget stops retries too"
-    );
-    assert!(record.shots[0].attempts[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("run exceeded its budget of 12s"));
+    let claimed = harness.script.lock().claimed.len();
+    match record.shots[0].outcome {
+        ShotOutcome::TimedOut => {
+            assert_eq!(
+                record.shots[0].attempts.len(),
+                1,
+                "the run budget stops retries too"
+            );
+            assert!(record.shots[0].attempts[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("run exceeded its budget of 12s"));
+            assert_eq!(claimed, 1, "only the timed-out first job was dispatched");
+        }
+        ShotOutcome::NotDispatched => {
+            assert!(
+                record.shots[0].attempts.is_empty(),
+                "a budget exhausted during setup cannot leave a partial attempt"
+            );
+            assert_eq!(
+                claimed, 0,
+                "a run whose budget expired during setup cannot dispatch after its deadline"
+            );
+        }
+        outcome => panic!("run budget left the first shot in {outcome:?}"),
+    }
     for shot in &record.shots[1..] {
         assert_eq!(shot.outcome, ShotOutcome::NotDispatched, "{shot:?}");
         assert!(shot.attempts.is_empty());
     }
     assert!(record.timeline.is_none());
     assert!(record.export.is_none());
-    let claimed = harness.script.lock().claimed.len();
-    assert_eq!(claimed, 1, "exactly one job was ever dispatched");
-    assert_eq!(harness.run_record()["outcome"], "stopped_run_budget");
+    let stop = record.stop.as_ref().expect("the run records its stop");
+    assert_eq!(stop.reason, "run_budget");
+    assert!(!stop.resumable, "an exhausted run budget is terminal");
+    let persisted = harness.run_record();
+    assert_eq!(persisted["outcome"], "stopped_run_budget");
+    assert_eq!(persisted["stop"]["reason"], "run_budget");
+    assert_eq!(persisted["stop"]["resumable"], false);
 }
 
 /// The memory limit reads the SAME signal a real render produces: the job's `generation_metrics`
@@ -5389,18 +5425,14 @@ async fn replacing_a_take_leaves_a_canceled_runs_resumable_stop_in_place() {
         Some(&["SH010", "SH020", "SH030"]),
     );
     let control = RunControl::new();
-    let app = harness.app.clone();
-    let waiter = tokio::spawn({
-        let control = control.clone();
-        async move {
-            wait_for_running_shot(&app, "SH020").await;
-            control.cancel();
-        }
-    });
+    harness.script.lock().cancel_when_running = Some(("SH020".to_owned(), control.clone()));
     let canceled = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .expect("a canceled run still returns its record");
-    waiter.await.expect("waiter joins");
+    assert!(
+        harness.script.lock().cancel_when_running.is_none(),
+        "the fake worker observed SH020 running and consumed the cancellation hook"
+    );
     assert_eq!(
         canceled.outcome,
         RunOutcome::Canceled,

@@ -6468,6 +6468,64 @@ mod unit_tests {
         assert!(with_result(json!({})).is_settled());
     }
 
+    #[tokio::test]
+    async fn an_expired_run_deadline_wins_even_when_the_shot_deadline_expired_first() {
+        struct RunningJobTransport;
+
+        impl ApiTransport for RunningJobTransport {
+            fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+                Box::pin(async move {
+                    match (request.method, request.path.as_str()) {
+                        ("GET", "/api/v1/jobs/job_running") => Ok(ApiResponse {
+                            status: 200,
+                            body: json!({"status": "running", "message": "still rendering"}),
+                        }),
+                        ("POST", "/api/v1/jobs/job_running/cancel") => Ok(ApiResponse {
+                            status: 200,
+                            body: Value::Null,
+                        }),
+                        _ => Err(HarnessError::Transport(format!(
+                            "unexpected synthetic request {} {}",
+                            request.method, request.path
+                        ))),
+                    }
+                })
+            }
+
+            fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+                Box::pin(async move {
+                    Err(HarnessError::Transport(format!(
+                        "unexpected synthetic byte request {path}"
+                    )))
+                })
+            }
+        }
+
+        let transport = RunningJobTransport;
+        let control = RunControl::new();
+        let client = Client {
+            transport: &transport,
+            control: &control,
+        };
+        let now = Instant::now();
+        let (_, stop) = client
+            .wait_for_job(
+                "job_running",
+                PollBounds {
+                    // Both limits are spent. The shot expired EARLIER, so this assertion fails if
+                    // the poller uses chronological order instead of the run-budget precedence.
+                    shot_deadline: now - Duration::from_secs(2),
+                    run_deadline: Some(now - Duration::from_secs(1)),
+                    poll_interval: Duration::ZERO,
+                    cancel_grace: Duration::ZERO,
+                    settle_grace: Duration::ZERO,
+                },
+            )
+            .await
+            .expect("synthetic running job is canceled at the expired bound");
+        assert_eq!(stop, PollStop::RunBudget);
+    }
+
     #[test]
     fn timeline_items_are_read_back_off_the_saved_document() {
         let intended = vec!["item_sh010_abcd1234".to_owned()];
