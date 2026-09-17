@@ -92,6 +92,30 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: Refine
         })
 }
 
+/// Apply the JSON grammar only when it cannot capture a reasoning model inside its thinking
+/// channel. Qwen3.6 opens `<think>` in the rendered generation prompt for both `Enabled` and
+/// `Auto`; a JSON mask then rejects the `</think>` marker, so the complete JSON value lands in
+/// `TextLlmOutput::thinking` and the final-answer text is empty. A no-think request renders a closed
+/// reasoning block before generation and remains safe to constrain. Models without a thinking mode
+/// (including the default Anubis refiner) also keep the existing JSON constraint in every mode.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn json_decode_constraint(
+    emits_json: bool,
+    supports_thinking: bool,
+    thinking_mode: gen_core::core_llm::ThinkingMode,
+) -> Option<gen_core::core_llm::Constraint> {
+    use gen_core::core_llm::{Constraint, ThinkingMode};
+
+    (emits_json
+        && !(supports_thinking
+            && matches!(thinking_mode, ThinkingMode::Enabled | ThinkingMode::Auto)))
+    .then_some(Constraint::Json)
+}
+
 /// The `prompt_refine` job multiplexed FOUR tasks through five scattered booleans
 /// (`is_magic`/`is_image_caption`/`is_image_describe`/`is_vision_task`/`is_caption_task`) re-derived in
 /// six ladders — a shape where incoherent combinations were representable and which hid the F-003
@@ -1217,9 +1241,10 @@ pub(crate) async fn run_prompt_refine_job(
     // set minimal.
     let emits_json = task.emits_json();
     let is_vision_task = task.is_vision();
-    // Resolution requirements (see the sc-8105 note below): only the request's output constraint —
-    // the JSON grammar for the JSON-emitting tasks, NONE for the prose `image_describe`/rewrite
-    // tasks. Built out here so it doubles as the cache key alongside the weights dir.
+    // Resolution requirements (see the sc-8105 note below): JSON-emitting tasks still select a
+    // provider that supports JSON constraints, preserving the existing provider/cache identity.
+    // After load, [`json_decode_constraint`] decides whether to apply the mask to this decode: an
+    // active thinking channel must first be allowed to close before the final JSON answer begins.
     let mut refine_reqs = gen_core::core_llm::ModelRequirements::default();
     if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
@@ -1255,7 +1280,7 @@ pub(crate) async fn run_prompt_refine_job(
             // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
             let text = {
                 use gen_core::core_llm::{
-                    Constraint, Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
+                    Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
                 };
                 let mut messages = Vec::with_capacity(2);
                 if !system.trim().is_empty() {
@@ -1307,7 +1332,14 @@ pub(crate) async fn run_prompt_refine_job(
                     // enforced after the decode by `film_planner::parse_planner_output`, which is the
                     // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
                     // where the FilmPlan task should take it.
-                    constraint: emits_json.then_some(Constraint::Json),
+                    // A reasoning-capable model must be allowed to close its `<think>` block before
+                    // emitting the answer. Its final answer is still parsed and validated strictly,
+                    // and the planner's existing bounded repair loop handles malformed plans.
+                    constraint: json_decode_constraint(
+                        emits_json,
+                        refiner.descriptor().capabilities.supports_thinking,
+                        thinking_mode,
+                    ),
                     cancel: blocking_cancel.clone(),
                     thinking: thinking_mode,
                     ..Default::default()
@@ -1665,6 +1697,40 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("private reasoning"));
+    }
+
+    #[test]
+    fn json_decode_constraint_yields_only_to_a_reasoning_capable_thinking_run() {
+        use gen_core::core_llm::{Constraint, ThinkingMode};
+
+        for mode in [ThinkingMode::Enabled, ThinkingMode::Auto] {
+            assert_eq!(
+                json_decode_constraint(true, true, mode),
+                None,
+                "a live thinking channel must be able to close before the JSON answer"
+            );
+        }
+        assert_eq!(
+            json_decode_constraint(true, true, ThinkingMode::Disabled),
+            Some(Constraint::Json),
+            "Qwen no-think generation remains JSON constrained"
+        );
+        for mode in [
+            ThinkingMode::Enabled,
+            ThinkingMode::Auto,
+            ThinkingMode::Disabled,
+        ] {
+            assert_eq!(
+                json_decode_constraint(true, false, mode),
+                Some(Constraint::Json),
+                "a non-reasoning refiner such as Anubis keeps constrained JSON"
+            );
+            assert_eq!(
+                json_decode_constraint(false, true, mode),
+                None,
+                "prose tasks remain unconstrained"
+            );
+        }
     }
 
     #[test]
