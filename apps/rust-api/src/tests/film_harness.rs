@@ -119,6 +119,155 @@ async fn every_run_mutation_refuses_a_competing_api_or_cli_controller() {
 }
 
 #[tokio::test]
+async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatch() {
+    let harness = Harness::start_http(
+        true,
+        vec![(
+            "SH010",
+            VideoBehavior::Complete {
+                delay_secs: 3,
+                peak_pct: 40.0,
+            },
+        )],
+    )
+    .await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Startup adoption")
+        .expect("project creates");
+    let draft_id = "film_draft_restart";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Startup adoption");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_restart";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan,
+        reference_pack_path: files.reference_pack,
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let running = Arc::new(tokio::sync::Notify::new());
+    harness.script.lock().running_hook =
+        Some(("SH010".to_owned(), RunningHook::Notify(running.clone())));
+    let controller_app = harness.app.clone();
+    let controller = tokio::spawn(async move {
+        film_harness::run(
+            &RouterTransport {
+                app: controller_app,
+            },
+            &options,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), running.notified())
+        .await
+        .expect("fake worker reaches running");
+    let original_job_id = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, job_id, _)| job_id.clone())
+        .expect("video job was claimed");
+
+    // Simulate the controller disappearing with the API process while the separately hosted
+    // worker continues the exact job. The aborted task drops its advisory lease but deliberately
+    // leaves the durable record in `running`, which is what startup reconciliation adopts.
+    controller.abort();
+    assert!(
+        controller
+            .await
+            .expect_err("controller aborts")
+            .is_cancelled(),
+        "the original controller must be gone before startup adopts it"
+    );
+    let interrupted = harness
+        .state
+        .jobs_store
+        .mark_interrupted_on_startup()
+        .expect("API startup recovery succeeds");
+    assert!(
+        interrupted.is_empty(),
+        "the worker-owned render survives API startup: {interrupted:?}"
+    );
+    let active = harness
+        .state
+        .jobs_store
+        .get_job(&original_job_id)
+        .expect("active job loads");
+    assert_eq!(
+        active.status,
+        sceneworks_core::contracts::JobStatus::Running
+    );
+    assert_eq!(active.worker_id.as_deref(), Some(WORKER_ID));
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
+            harness.state.clone(),
+        ),
+    )
+    .await
+    .expect("startup scan is bounded")
+    .expect("startup scan joins");
+    let record = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let record = film_harness::read_run_record(&files.directory)
+                .expect("startup run record remains readable");
+            if record.state == RunState::Finished {
+                break record;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("startup adoption reaches a terminal record");
+
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(harness.video_job_count(), 1, "startup must not redispatch");
+    assert_eq!(harness.api_video_job_count().await, 1);
+    let selected = record
+        .shot("SH010")
+        .and_then(|shot| shot.selected())
+        .expect("startup adopts the completed take");
+    assert_eq!(selected.job_id.as_deref(), Some(original_job_id.as_str()));
+}
+
+#[tokio::test]
 async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     let harness = Harness::start(true, vec![]).await;
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-draft", "Manual film");
@@ -630,6 +779,7 @@ pub(crate) enum VideoBehavior {
 pub(crate) enum RunningHook {
     CancelControl(RunControl),
     WriteCancelSentinel(PathBuf),
+    Notify(Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -906,6 +1056,7 @@ async fn run_fake_video_job(
             film_harness::request_cancel(&out_dir)
                 .expect("cancel sentinel writes from worker hook");
         }
+        Some(RunningHook::Notify(notify)) => notify.notify_one(),
         None => {}
     }
     match behavior {
@@ -1711,6 +1862,7 @@ async fn run_fake_export_job(
 
 pub(crate) struct Harness {
     pub(crate) app: axum::Router,
+    pub(crate) state: crate::AppState,
     pub(crate) transport: RouterTransport,
     pub(crate) temp_dir: tempfile::TempDir,
     pub(crate) script: Arc<Mutex<WorkerScript>>,
@@ -1759,6 +1911,7 @@ impl Harness {
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
+            state,
             temp_dir,
             script,
             worker: Mutex::new(worker),
@@ -1816,6 +1969,7 @@ impl Harness {
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
+            state,
             temp_dir,
             script,
             worker: Mutex::new(worker),

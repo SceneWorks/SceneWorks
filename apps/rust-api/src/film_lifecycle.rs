@@ -95,6 +95,17 @@ fn spawn_resume(
     directory: std::path::PathBuf,
     lease: ControllerLease,
 ) {
+    spawn_resume_with_install_requirement(state, project_id, run_id, directory, lease, true);
+}
+
+fn spawn_resume_with_install_requirement(
+    state: AppState,
+    project_id: String,
+    run_id: String,
+    directory: std::path::PathBuf,
+    lease: ControllerLease,
+    require_installed: bool,
+) {
     tokio::spawn(async move {
         let transport = match HttpTransport::new(
             &state.settings.mcp_api_url,
@@ -109,6 +120,7 @@ fn spawn_resume(
         let mut options = ResumeOptions::new(directory);
         options.poll_interval = Duration::from_secs(2);
         options.export = false;
+        options.require_installed = require_installed;
         if let Err(error) =
             crate::film_harness::resume_with_lease(&transport, &options, lease).await
         {
@@ -121,6 +133,22 @@ fn spawn_resume(
 /// operator stops remain idle until an explicit resume. Advisory leases make this safe after a
 /// crash and refuse adoption when another API or CLI process still owns the run.
 pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task::JoinHandle<()> {
+    spawn_film_startup_reconciliation_with_install_requirement(state, true)
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_film_startup_reconciliation_for_fake_worker(
+    state: AppState,
+) -> tokio::task::JoinHandle<()> {
+    // The fake worker deliberately owns no multi-gigabyte model installation. Production startup
+    // always enters through `spawn_film_startup_reconciliation` above and keeps this guard on.
+    spawn_film_startup_reconciliation_with_install_requirement(state, false)
+}
+
+fn spawn_film_startup_reconciliation_with_install_requirement(
+    state: AppState,
+    require_installed: bool,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let projects = match project_call(state.clone(), |store| store.list_projects()).await {
             Ok(projects) => projects,
@@ -187,12 +215,13 @@ pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task:
                         continue;
                     }
                 };
-                spawn_resume(
+                spawn_resume_with_install_requirement(
                     state.clone(),
                     project_id.clone(),
                     run_id,
                     files.directory,
                     lease,
+                    require_installed,
                 );
             }
         }
