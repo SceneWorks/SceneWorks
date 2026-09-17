@@ -1,6 +1,6 @@
 use super::*;
 
-use sceneworks_core::film_plan::RunState;
+use sceneworks_core::film_plan::{RunRecord, RunState};
 use sceneworks_core::film_workspace::FilmRunLocator;
 
 use crate::film_harness::{ControllerLease, HttpTransport, ResumeOptions};
@@ -95,8 +95,10 @@ fn spawn_resume(
     directory: std::path::PathBuf,
     lease: ControllerLease,
 ) {
-    spawn_resume_with_install_requirement(state, project_id, run_id, directory, lease, true);
+    spawn_resume_with_install_requirement(state, project_id, run_id, directory, lease, true, None);
 }
+
+type StartupResumeResults = tokio::sync::mpsc::UnboundedSender<Result<RunRecord, String>>;
 
 fn spawn_resume_with_install_requirement(
     state: AppState,
@@ -105,6 +107,7 @@ fn spawn_resume_with_install_requirement(
     directory: std::path::PathBuf,
     lease: ControllerLease,
     require_installed: bool,
+    completion: Option<StartupResumeResults>,
 ) {
     tokio::spawn(async move {
         let transport = match HttpTransport::new(
@@ -114,6 +117,9 @@ fn spawn_resume_with_install_requirement(
             Ok(transport) => transport,
             Err(error) => {
                 tracing::error!(project_id, run_id, %error, "film resume transport failed");
+                if let Some(completion) = completion {
+                    let _ = completion.send(Err(error.to_string()));
+                }
                 return;
             }
         };
@@ -121,10 +127,14 @@ fn spawn_resume_with_install_requirement(
         options.poll_interval = Duration::from_secs(2);
         options.export = false;
         options.require_installed = require_installed;
-        if let Err(error) =
-            crate::film_harness::resume_with_lease(&transport, &options, lease).await
-        {
+        let result = crate::film_harness::resume_with_lease(&transport, &options, lease)
+            .await
+            .map_err(|error| error.to_string());
+        if let Err(error) = &result {
             tracing::error!(project_id, run_id, %error, "film resume stopped");
+        }
+        if let Some(completion) = completion {
+            let _ = completion.send(result);
         }
     });
 }
@@ -133,21 +143,36 @@ fn spawn_resume_with_install_requirement(
 /// operator stops remain idle until an explicit resume. Advisory leases make this safe after a
 /// crash and refuse adoption when another API or CLI process still owns the run.
 pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task::JoinHandle<()> {
-    spawn_film_startup_reconciliation_with_install_requirement(state, true)
+    spawn_film_startup_reconciliation_with_install_requirement(state, true, None)
+}
+
+#[cfg(test)]
+pub(crate) struct FilmStartupReconciliationTestHandle {
+    pub(crate) scan: tokio::task::JoinHandle<()>,
+    pub(crate) controller_results: tokio::sync::mpsc::UnboundedReceiver<Result<RunRecord, String>>,
 }
 
 #[cfg(test)]
 pub(crate) fn spawn_film_startup_reconciliation_for_fake_worker(
     state: AppState,
-) -> tokio::task::JoinHandle<()> {
+) -> FilmStartupReconciliationTestHandle {
     // The fake worker deliberately owns no multi-gigabyte model installation. Production startup
     // always enters through `spawn_film_startup_reconciliation` above and keeps this guard on.
-    spawn_film_startup_reconciliation_with_install_requirement(state, false)
+    let (completion, controller_results) = tokio::sync::mpsc::unbounded_channel();
+    FilmStartupReconciliationTestHandle {
+        scan: spawn_film_startup_reconciliation_with_install_requirement(
+            state,
+            false,
+            Some(completion),
+        ),
+        controller_results,
+    }
 }
 
 fn spawn_film_startup_reconciliation_with_install_requirement(
     state: AppState,
     require_installed: bool,
+    completion: Option<StartupResumeResults>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let projects = match project_call(state.clone(), |store| store.list_projects()).await {
@@ -222,6 +247,7 @@ fn spawn_film_startup_reconciliation_with_install_requirement(
                     files.directory,
                     lease,
                     require_installed,
+                    completion.clone(),
                 );
             }
         }

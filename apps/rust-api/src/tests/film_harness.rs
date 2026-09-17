@@ -177,8 +177,10 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     let running = Arc::new(tokio::sync::Notify::new());
     harness.script.lock().running_hook =
         Some(("SH010".to_owned(), RunningHook::Notify(running.clone())));
+    let reached_running = running.notified();
+    tokio::pin!(reached_running);
     let controller_app = harness.app.clone();
-    let controller = tokio::spawn(async move {
+    let mut controller = tokio::spawn(async move {
         film_harness::run(
             &RouterTransport {
                 app: controller_app,
@@ -187,9 +189,12 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), running.notified())
-        .await
-        .expect("fake worker reaches running");
+    tokio::select! {
+        () = &mut reached_running => {}
+        result = &mut controller => {
+            panic!("controller ended before the fake worker reached running: {result:?}");
+        }
+    }
     let original_job_id = harness
         .script
         .lock()
@@ -230,27 +235,19 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     );
     assert_eq!(active.worker_id.as_deref(), Some(WORKER_ID));
 
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
-            harness.state.clone(),
-        ),
-    )
-    .await
-    .expect("startup scan is bounded")
-    .expect("startup scan joins");
-    let record = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let record = film_harness::read_run_record(&files.directory)
-                .expect("startup run record remains readable");
-            if record.state == RunState::Finished {
-                break record;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("startup adoption reaches a terminal record");
+    let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
+        harness.state.clone(),
+    );
+    startup.scan.await.expect("startup scan joins");
+    startup
+        .controller_results
+        .recv()
+        .await
+        .expect("startup scan launches the film controller")
+        .unwrap_or_else(|error| panic!("startup film controller failed: {error}"));
+    let record = film_harness::read_run_record(&files.directory)
+        .expect("startup run record remains readable");
+    assert_eq!(record.state, RunState::Finished, "{}", summary(&record));
 
     assert_eq!(
         record.outcome,
