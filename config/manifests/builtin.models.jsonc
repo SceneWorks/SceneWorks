@@ -26622,12 +26622,12 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "c77a041fdbd357768eda2a65b2f033193af392b36323d2d492c3a459b5ffd8cc",
+              "sha256": "aa8ba4381bec615146b0262ab0cde84cecd557dc8bb0a9dcbf8d28c52ea9e644",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
                   "byteSize": 25857,
-                  "sha256": "d4c07e6e077b43900d1121d9fa36d45699d672a55bd671da59be8cb944e2f7af"
+                  "sha256": "c2f0ff8974fda852a5589f056994a68c93a49f30d3ca80e27e80af5dfe139746"
                 },
                 {
                   "path": ".github/workflows/starvector-terminal-readiness.yml",
@@ -26732,7 +26732,7 @@
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
                   "byteSize": 2928,
-                  "sha256": "2c0a00c1a91ed5a0acfc9a1e253ca2d7a14b8cbf69a686b9148ad3ade10ec637"
+                  "sha256": "fb652a94d5508739af5617808fba6156aa590ce896c7b479ffa3553c94178062"
                 },
                 {
                   "path": "release/starvector-terminal-metrics-lock-v1.json",
