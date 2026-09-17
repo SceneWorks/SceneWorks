@@ -27,6 +27,10 @@ pub(crate) struct ParseFilmScriptRequest {
 pub(crate) struct StartFilmPlanningRequest {
     #[serde(default)]
     max_repair_rounds: Option<u32>,
+    /// Local prompt-refiner/native planner deadline, matching film-harness
+    /// `--llm-timeout-seconds`. External connections keep their own timeout setting.
+    #[serde(default)]
+    llm_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +59,8 @@ pub(crate) struct FilmPlanningOperation {
     thinking_mode: String,
     #[serde(default = "default_max_repair_rounds")]
     max_repair_rounds: u32,
+    #[serde(default = "default_llm_timeout_seconds")]
+    llm_timeout_seconds: u64,
     #[serde(default)]
     refine_prompts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +79,30 @@ pub(crate) struct FilmPlanningOperation {
     detail: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+fn default_llm_timeout_seconds() -> u64 {
+    DEFAULT_LLM_JOB_TIMEOUT.as_secs()
+}
+
+fn local_planner_timeout(seconds: Option<u64>) -> Result<(u64, Duration), ApiError> {
+    let seconds = seconds.unwrap_or_else(default_llm_timeout_seconds);
+    if seconds == 0 {
+        return Err(ApiError::bad_request(
+            "Local planner job timeout must be at least 1 second",
+        ));
+    }
+    let timeout = Duration::from_secs(seconds);
+    if std::time::Instant::now().checked_add(timeout).is_none() {
+        return Err(ApiError::bad_request(
+            "Local planner job timeout is too large for this host",
+        ));
+    }
+    Ok((seconds, timeout))
+}
+
+fn operation_llm_timeout(operation: &FilmPlanningOperation) -> Duration {
+    Duration::from_secs(operation.llm_timeout_seconds)
 }
 
 #[derive(Debug, Serialize)]
@@ -195,6 +225,11 @@ pub(crate) async fn start_film_planning(
             "Paste prose or screenplay text before planning",
         ));
     }
+    let (llm_timeout_seconds, llm_timeout) = if draft.planning.provider == "openai_compatible" {
+        (default_llm_timeout_seconds(), DEFAULT_LLM_JOB_TIMEOUT)
+    } else {
+        local_planner_timeout(payload.llm_timeout_seconds)?
+    };
     let render_options = crate::films::apply_selected_render_regime(&state, &mut draft).await?;
     if draft.render_regime == Some(FilmRenderRegime::RecommendedTurbo)
         && !render_options.recommended_turbo.available
@@ -275,6 +310,7 @@ pub(crate) async fn start_film_planning(
         video_model_id: draft.production_plan.model.id.clone(),
         thinking_mode: draft.planning.thinking_mode.clone(),
         max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
+        llm_timeout_seconds,
         refine_prompts: draft.planning.refine_prompts,
         active_job_id: None,
         job_ids: Vec::new(),
@@ -388,6 +424,11 @@ pub(crate) async fn start_film_planning(
     });
     let cancel_path = root.join(crate::film_harness::CANCEL_SENTINEL_FILE);
     let cancel_requested = std::sync::Arc::new(move || cancel_path.exists());
+    let external_started_path = latest_path.clone();
+    let external_started_operation_id = operation_id.clone();
+    let on_external_request_started = std::sync::Arc::new(move || {
+        mark_external_planner_waiting(&external_started_path, &external_started_operation_id);
+    });
     let options = PlannerOptions {
         brief_path: operation_dir.join("brief.json"),
         reference_pack_path: operation_dir.join("references.json"),
@@ -402,7 +443,7 @@ pub(crate) async fn start_film_planning(
         api_url: base_url.clone(),
         force: false,
         poll_interval: Duration::from_millis(350),
-        job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
+        job_timeout: llm_timeout,
     };
     let model_override = (draft.planning.provider == "native").then(|| planner_model.clone());
     let thinking_mode = draft.planning.thinking_mode.clone();
@@ -425,7 +466,8 @@ pub(crate) async fn start_film_planning(
                         send_reference_pixels: external_send_reference_pixels,
                     },
                     cancel_requested,
-                )?;
+                )?
+                .on_request_started(on_external_request_started);
                 crate::film_planner::generate(&transport, &llm, &options).await
             } else {
                 let llm =
@@ -443,6 +485,19 @@ pub(crate) async fn start_film_planning(
     });
 
     Ok((StatusCode::ACCEPTED, Json(operation)))
+}
+
+fn mark_external_planner_waiting(latest_path: &FsPath, operation_id: &str) {
+    let _ = update_operation(latest_path, operation_id, |operation| {
+        if operation.status != "running" {
+            return;
+        }
+        operation.stage = "planning".to_owned();
+        operation.progress = None;
+        operation.detail = Some(
+            "Waiting for the selected external planner to return a candidate plan.".to_owned(),
+        );
+    });
 }
 
 pub(crate) async fn cancel_film_planning(
@@ -613,6 +668,18 @@ fn finish_planning_operation(
             );
         }
         Err(error) => {
+            match &error {
+                HarnessError::PlannerResponse { execution, .. } => {
+                    operation.executions.push((**execution).clone());
+                }
+                HarnessError::PlannerValidation { executions, .. } => {
+                    operation.executions = executions.clone();
+                }
+                HarnessError::PlannerExecutionFailure { executions, .. } => {
+                    operation.executions = executions.clone();
+                }
+                _ => {}
+            }
             operation.status = if canceled { "canceled" } else { "failed" }.to_owned();
             operation.stage = if canceled { "canceled" } else { "failed" }.to_owned();
             operation.active_job_id = None;
@@ -706,7 +773,7 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         api_url: state.settings.mcp_api_url.clone(),
                         force: false,
                         poll_interval: Duration::from_millis(350),
-                        job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
+                        job_timeout: operation_llm_timeout(&operation),
                     };
                     let callback_path = latest_path.clone();
                     let callback_operation_id = operation.id.clone();
@@ -872,7 +939,10 @@ async fn planning_root(
 
 fn findings_from_error(error: HarnessError) -> Vec<PlanDiagnostic> {
     match error {
-        HarnessError::Validation(findings) => findings,
+        HarnessError::Validation(findings) | HarnessError::PlannerValidation { findings, .. } => {
+            findings
+        }
+        HarnessError::PlannerExecutionFailure { source, .. } => findings_from_error(*source),
         other => vec![PlanDiagnostic::plan(
             "planning.operation",
             other.to_string(),
@@ -937,6 +1007,54 @@ mod tests {
     use sceneworks_core::film_workspace::{FilmDraft, FilmRenderRegime};
 
     #[test]
+    fn native_operation_roundtrip_keeps_timeout_for_startup_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_native_timeout".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "generating".to_owned(),
+            progress: Some(0.25),
+            provider: "native".to_owned(),
+            planner_model_id: Some(QWEN36_FILM_PLANNER_MODEL_ID.to_owned()),
+            planner_model: QWEN36_FILM_PLANNER_REPO.to_owned(),
+            video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "enabled".to_owned(),
+            max_repair_rounds: 1,
+            llm_timeout_seconds: 37,
+            refine_prompts: false,
+            active_job_id: Some("job_native_timeout".to_owned()),
+            job_ids: vec!["job_native_timeout".to_owned()],
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: None,
+            compiled: None,
+            detail: Some("Native planner is running".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+
+        let recovered = read_operation(&temp.path().join("latest.json")).expect("read operation");
+        assert_eq!(recovered.llm_timeout_seconds, 37);
+        assert_eq!(operation_llm_timeout(&recovered), Duration::from_secs(37));
+
+        let mut legacy = serde_json::to_value(operation).expect("serialize operation");
+        legacy.as_object_mut().unwrap().remove("llmTimeoutSeconds");
+        let legacy: FilmPlanningOperation =
+            serde_json::from_value(legacy).expect("legacy operation remains readable");
+        assert_eq!(
+            operation_llm_timeout(&legacy),
+            DEFAULT_LLM_JOB_TIMEOUT,
+            "pre-timeout operations recover with the prior 1200-second behavior"
+        );
+    }
+
+    #[test]
     fn external_orphan_is_preserved_and_interrupted_without_constructing_a_transport() {
         let temp = tempfile::tempdir().expect("tempdir");
         let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
@@ -956,6 +1074,7 @@ mod tests {
             video_model_id: draft.production_plan.model.id.clone(),
             thinking_mode: "disabled".to_owned(),
             max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
             refine_prompts: false,
             active_job_id: Some("remote_request_1".to_owned()),
             job_ids: vec!["remote_request_1".to_owned()],
@@ -994,6 +1113,399 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("retry is explicit"));
+    }
+
+    #[test]
+    fn failed_external_response_keeps_input_and_sanitized_execution() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_failed".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "generating".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: None,
+            planner_model: "external-model".to_owned(),
+            video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "disabled".to_owned(),
+            max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: Some(draft.production_plan.clone()),
+            compiled: None,
+            detail: Some("External request is active".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+        let latest_path = temp.path().join("latest.json");
+        let execution = PlannerExecutionRecord {
+            provider: "openai_compatible".to_owned(),
+            model: "external-model".to_owned(),
+            backend: Some("fixture".to_owned()),
+            target_video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "disabled".to_owned(),
+            max_output_tokens: Some(4096),
+            reference_pixels_sent: Some(true),
+            duration_seconds: Some(12.5),
+            finish_reason: Some("length".to_owned()),
+            failure_code: Some("no_textual_plan_content".to_owned()),
+            thinking: Some("separate reasoning".to_owned()),
+            usage: Some(sceneworks_core::film_compile::PlannerUsageRecord {
+                input_tokens: Some(17),
+                output_tokens: Some(4096),
+                total_tokens: Some(4113),
+            }),
+            ..PlannerExecutionRecord::default()
+        };
+        let prior_execution = PlannerExecutionRecord {
+            model: "external-model-prior-malformed".to_owned(),
+            finish_reason: Some("stop".to_owned()),
+            failure_code: None,
+            ..execution.clone()
+        };
+
+        finish_planning_operation(
+            temp.path(),
+            &latest_path,
+            &operation.id,
+            Err(HarnessError::PlannerExecutionFailure {
+                source: Box::new(HarnessError::PlannerResponse {
+                    detail: "The external planner response has no textual plan content".to_owned(),
+                    execution: Box::new(execution.clone()),
+                }),
+                executions: vec![prior_execution.clone(), execution.clone()],
+            }),
+        );
+
+        let failed = read_operation(&latest_path).expect("read failed operation");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.stage, "failed");
+        assert_eq!(failed.provider, "openai_compatible");
+        assert!(
+            failed.job_ids.is_empty(),
+            "no native fallback job was created"
+        );
+        assert_eq!(failed.candidate_plan, operation.candidate_plan);
+        assert_eq!(failed.compiled, operation.compiled);
+        assert_eq!(failed.executions, vec![prior_execution, execution]);
+        assert_eq!(failed.findings.len(), 1);
+        assert!(failed.findings[0]
+            .message
+            .contains("no textual plan content"));
+        assert!(failed.detail.as_deref().unwrap().contains("retry"));
+    }
+
+    #[tokio::test]
+    async fn malformed_external_repairs_keep_every_execution_and_the_current_plan() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use crate::tests::film_harness::{planner_options, Harness};
+
+        #[derive(Clone, Default)]
+        struct MalformedFixture {
+            calls: Arc<AtomicUsize>,
+            requests: Arc<Mutex<Vec<Value>>>,
+        }
+
+        async fn malformed_response(
+            State(fixture): State<MalformedFixture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let attempt = fixture.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            fixture.requests.lock().unwrap().push(body);
+            Json(json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "{\"shots\":[",
+                        "reasoning_content": format!("bounded reasoning {attempt}")
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": 100 + attempt,
+                    "completion_tokens": 10 + attempt,
+                    "total_tokens": 110 + (2 * attempt)
+                },
+                "provider_debug": {"credential": "must-not-survive"}
+            }))
+        }
+
+        let fixture = MalformedFixture::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind malformed fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let app = Router::new()
+            .route("/v1/chat/completions", post(malformed_response))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+
+        let harness = Harness::start(false, vec![]).await;
+        let root = tempfile::tempdir().expect("operation root");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Existing cut");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_malformed".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "planning".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: Some("external-model".to_owned()),
+            planner_model: "external-model".to_owned(),
+            video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "enabled".to_owned(),
+            max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: Some(draft.production_plan.clone()),
+            compiled: None,
+            detail: Some("External request is active".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(root.path(), &operation).expect("write operation");
+        let latest_path = root.path().join("latest.json");
+
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            crate::film_planner_connections::FilmPlannerConnection {
+                schema_version: 1,
+                id: "malformed-fixture".to_owned(),
+                label: "Malformed fixture".to_owned(),
+                base_url: format!("http://{address}/v1"),
+                credential_host: None,
+                supports_model_listing: false,
+                supports_image_input: true,
+                timeout_seconds: 5,
+                max_output_tokens: 3072,
+            },
+            None,
+            OpenAiPlannerOptions {
+                model: "external-model".to_owned(),
+                thinking_mode: "enabled".to_owned(),
+                source_script: "A courier enters with a parcel.".to_owned(),
+                send_reference_pixels: true,
+            },
+            Arc::new(|| false),
+        )
+        .expect("planner adapter");
+        let mut options = planner_options(&harness, "malformed-external");
+        options.out_dir = root.path().join("artifacts");
+        options.require_local_planner = false;
+        options.send_reference_pixels = true;
+        options.max_repair_rounds = 2;
+
+        let result = crate::film_planner::generate(&harness.transport, &llm, &options).await;
+        assert!(
+            matches!(result, Err(HarnessError::PlannerValidation { .. })),
+            "repair exhaustion must retain planner execution provenance: {result:?}"
+        );
+        finish_planning_operation(root.path(), &latest_path, &operation.id, result);
+
+        let failed = read_operation(&latest_path).expect("read failed operation");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.stage, "failed");
+        assert_eq!(
+            failed.candidate_plan, operation.candidate_plan,
+            "bounded planner failure must preserve the current edited plan"
+        );
+        assert_eq!(failed.compiled, None);
+        assert_eq!(failed.executions.len(), 3, "initial call plus two repairs");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        assert!(
+            !options.plan_path().exists(),
+            "no refused plan becomes current"
+        );
+        assert!(options.out_dir.join("planner-rejected.txt").is_file());
+        assert!(failed
+            .findings
+            .iter()
+            .any(|finding| finding.field == "planner.repair"));
+
+        for (index, execution) in failed.executions.iter().enumerate() {
+            let attempt = index as u64 + 1;
+            assert_eq!(execution.provider, "openai_compatible");
+            assert_eq!(execution.model, "external-model");
+            assert_eq!(execution.backend.as_deref(), Some("malformed-fixture"));
+            assert_eq!(execution.target_video_model_id, "minimax_h3");
+            assert_eq!(execution.thinking_mode, "enabled");
+            assert_eq!(execution.max_output_tokens, Some(3072));
+            assert_eq!(execution.reference_pixels_sent, Some(true));
+            assert!(execution.duration_seconds.is_some_and(|value| value >= 0.0));
+            assert_eq!(execution.finish_reason.as_deref(), Some("stop"));
+            assert_eq!(execution.failure_code, None);
+            assert_eq!(
+                execution.thinking.as_deref(),
+                Some(format!("bounded reasoning {attempt}").as_str())
+            );
+            let usage = execution.usage.as_ref().expect("usage survives");
+            assert_eq!(usage.input_tokens, Some(100 + attempt));
+            assert_eq!(usage.output_tokens, Some(10 + attempt));
+            assert_eq!(usage.total_tokens, Some(110 + (2 * attempt)));
+        }
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.to_string().contains("image_url")));
+        let persisted = std::fs::read_to_string(&latest_path).expect("operation readable");
+        assert!(!persisted.contains("must-not-survive"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn external_operation_reports_planning_while_provider_response_is_blocked() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        #[derive(Clone)]
+        struct BlockedFixture {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        async fn blocked_response(
+            State(fixture): State<BlockedFixture>,
+            Json(_body): Json<Value>,
+        ) -> Json<Value> {
+            fixture.entered.notify_one();
+            fixture.release.notified().await;
+            Json(json!({"choices": [{"message": {"content": "{}"}}]}))
+        }
+
+        let fixture = BlockedFixture {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let app = Router::new()
+            .route("/v1/chat/completions", post(blocked_response))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_blocked".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: "film_1".to_owned(),
+            draft_revision: 1,
+            status: "running".to_owned(),
+            stage: "preflight".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: Some("external-model".to_owned()),
+            planner_model: "external-model".to_owned(),
+            video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "disabled".to_owned(),
+            max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: None,
+            compiled: None,
+            detail: Some(
+                "Checking the selected external connection and target video model.".to_owned(),
+            ),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+        let latest_path = temp.path().join("latest.json");
+        let callback_path = latest_path.clone();
+        let callback_operation_id = operation.id.clone();
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            crate::film_planner_connections::FilmPlannerConnection {
+                schema_version: 1,
+                id: "blocked-fixture".to_owned(),
+                label: "Blocked fixture".to_owned(),
+                base_url: format!("http://{address}/v1"),
+                credential_host: None,
+                supports_model_listing: false,
+                supports_image_input: false,
+                timeout_seconds: 5,
+                max_output_tokens: 4096,
+            },
+            None,
+            OpenAiPlannerOptions {
+                model: "external-model".to_owned(),
+                thinking_mode: "disabled".to_owned(),
+                source_script: "A courier enters.".to_owned(),
+                send_reference_pixels: false,
+            },
+            Arc::new(|| false),
+        )
+        .expect("planner adapter")
+        .on_request_started(Arc::new(move || {
+            mark_external_planner_waiting(&callback_path, &callback_operation_id);
+        }));
+        let request = crate::film_planner::LlmRequest {
+            task: Some(crate::film_planner::FILM_PLAN_TASK.to_owned()),
+            prompt: "Return a plan".to_owned(),
+            model_id: Some("minimax_h3".to_owned()),
+            workflow: "video".to_owned(),
+            guide: None,
+            reference_images: Vec::new(),
+        };
+        let response =
+            tokio::spawn(
+                async move { crate::film_planner::PlannerLlm::complete(&llm, request).await },
+            );
+
+        tokio::time::timeout(Duration::from_secs(1), fixture.entered.notified())
+            .await
+            .expect("provider request entered blocked fixture");
+        let waiting = read_operation(&latest_path).expect("read waiting operation");
+        assert_eq!(waiting.status, "running");
+        assert_eq!(waiting.stage, "planning");
+        assert_eq!(waiting.progress, None);
+        assert_eq!(
+            waiting.detail.as_deref(),
+            Some("Waiting for the selected external planner to return a candidate plan.")
+        );
+
+        fixture.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("fixture response completes")
+            .expect("planner task joins")
+            .expect("planner response succeeds");
+        server.abort();
     }
 
     #[test]

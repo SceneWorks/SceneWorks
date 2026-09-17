@@ -49,7 +49,7 @@ use std::time::Duration;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::film_compile::{
     compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
-    ResolvedConditioning,
+    PlannerExecutionRecord, ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
@@ -107,6 +107,21 @@ const REFERENCE_TAG: &str = "film-harness-reference";
 /// conditioning-eligible references cannot pick it up.
 const UNAPPROVED_REFERENCE_TAG: &str = "film-harness-reference-unapproved";
 
+/// A harness-owned asset facet that fits the project store's public 40-byte tag contract.
+///
+/// Short role and pack tags keep their established spelling for CLI/API interoperability. Plan
+/// ids and roles are valid up to 64 ASCII characters, though, so their prefixed form does not
+/// always fit in an asset tag. In that case the tag carries a namespaced 128-bit digest while the
+/// exact value remains in `extra.filmHarness`, which is also the authoritative adoption identity.
+fn harness_asset_tag(namespace: &str, value: &str) -> String {
+    let literal = format!("{namespace}:{value}");
+    if literal.len() <= 40 {
+        return literal;
+    }
+    let digest = sha256_hex(literal.as_bytes());
+    format!("{namespace}:h:{}", &digest[..32])
+}
+
 /// File name of the run record inside the run directory.
 pub const RUN_RECORD_FILE: &str = "run.json";
 
@@ -116,17 +131,91 @@ pub const RUN_RECORD_FILE: &str = "run.json";
 pub const CANCEL_SENTINEL_FILE: &str = "cancel.requested";
 pub const CONTROLLER_LOCK_FILE: &str = "controller.lock";
 
+/// Per-API-process shutdown intent shared with its Film controller leases.
+///
+/// SIGTERM is a graceful API shutdown, so Rust destructors still run even though a separately
+/// hosted worker may continue the exact Film job. This process-local flag lets an active run keep
+/// its durable owner marker through that teardown. Ordinary controller completion, failure, and
+/// operator cancellation never set it and continue to clear the marker.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FilmControllerShutdown {
+    requested: Arc<AtomicBool>,
+}
+
+impl FilmControllerShutdown {
+    pub(crate) fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Debug)]
 pub struct ControllerLease {
     path: PathBuf,
     owner: String,
+    api_shutdown: Option<FilmControllerShutdown>,
     _lock: FileLock,
 }
 
 impl ControllerLease {
     pub fn acquire(run_dir: &Path, owner: impl Into<String>) -> Result<Self, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        Self::claim(path, owner.into(), lock, None)
+    }
+
+    pub(crate) fn acquire_for_api(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: FilmControllerShutdown,
+    ) -> Result<Self, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        Self::claim(path, owner.into(), lock, Some(api_shutdown))
+    }
+
+    /// Acquire a run only when its unlocked lease still names the controller that crashed.
+    ///
+    /// A clean controller release empties the metadata while it still holds the advisory lock;
+    /// an abrupt process exit cannot run that cleanup, although the OS releases the lock. Reading
+    /// the marker only after obtaining the lock makes this distinction atomic with takeover: a
+    /// controller that finishes while startup is scanning cannot be mistaken for an interrupted
+    /// one and restarted.
+    #[cfg(test)]
+    pub(crate) fn acquire_interrupted(
+        run_dir: &Path,
+        owner: impl Into<String>,
+    ) -> Result<Option<Self>, HarnessError> {
+        Self::acquire_interrupted_with_shutdown(run_dir, owner, None)
+    }
+
+    pub(crate) fn acquire_interrupted_for_api(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: FilmControllerShutdown,
+    ) -> Result<Option<Self>, HarnessError> {
+        Self::acquire_interrupted_with_shutdown(run_dir, owner, Some(api_shutdown))
+    }
+
+    fn acquire_interrupted_with_shutdown(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: Option<FilmControllerShutdown>,
+    ) -> Result<Option<Self>, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        let interrupted = std::fs::read_to_string(&path)?.lines().any(|line| {
+            line.strip_prefix("owner=")
+                .is_some_and(|owner| !owner.is_empty())
+        });
+        if !interrupted {
+            return Ok(None);
+        }
+        Self::claim(path, owner.into(), lock, api_shutdown).map(Some)
+    }
+
+    fn lock(run_dir: &Path) -> Result<(PathBuf, FileLock), HarnessError> {
         std::fs::create_dir_all(run_dir)?;
-        let owner = owner.into();
         let path = run_dir.join(CONTROLLER_LOCK_FILE);
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -147,6 +236,15 @@ impl ControllerLease {
                 HarnessError::Io(error.to_string())
             }
         })?;
+        Ok((path, lock))
+    }
+
+    fn claim(
+        path: PathBuf,
+        owner: String,
+        lock: FileLock,
+        api_shutdown: Option<FilmControllerShutdown>,
+    ) -> Result<Self, HarnessError> {
         lock.file().set_len(0)?;
         use std::io::Write as _;
         let mut locked_file = lock.file();
@@ -162,6 +260,7 @@ impl ControllerLease {
         Ok(Self {
             path,
             owner,
+            api_shutdown,
             _lock: lock,
         })
     }
@@ -199,6 +298,23 @@ impl ControllerLease {
 impl Drop for ControllerLease {
     fn drop(&mut self) {
         tracing::debug!(path = %self.path.display(), owner = %self.owner, "releasing film controller lease");
+        let preserve_for_restart = self
+            .api_shutdown
+            .as_ref()
+            .is_some_and(FilmControllerShutdown::requested)
+            && self
+                .path
+                .parent()
+                .and_then(|run_dir| read_run_record(run_dir).ok())
+                .is_some_and(|record| record.state == RunState::Running);
+        if preserve_for_restart {
+            tracing::info!(
+                path = %self.path.display(),
+                owner = %self.owner,
+                "preserving active film controller ownership for API restart"
+            );
+            return;
+        }
         // A clean release erases its diagnostic owner while the advisory lock is still held. If
         // the process crashes this Drop never runs, so the surviving owner identifies which
         // operation startup found interrupted without being mistaken for live ownership.
@@ -285,6 +401,13 @@ pub trait ApiTransport: Send + Sync {
 pub enum HarnessError {
     /// The plan was refused before any job was created. The run record carries the same findings.
     Validation(Vec<PlanDiagnostic>),
+    /// The planner exhausted its bounded repair loop after protocol-valid replies. Keep every
+    /// sanitized execution receipt beside the findings so a failed plan has the same provider,
+    /// settings, duration, and usage provenance as a successful one.
+    PlannerValidation {
+        findings: Vec<PlanDiagnostic>,
+        executions: Vec<PlannerExecutionRecord>,
+    },
     /// The API answered a non-success status the harness cannot proceed past.
     Api {
         method: &'static str,
@@ -294,6 +417,18 @@ pub enum HarnessError {
     },
     /// The transport itself failed (connection refused, malformed response, ...).
     Transport(String),
+    /// A planner returned a protocol-valid response that cannot be accepted as plan text. The
+    /// sanitized execution survives with the actionable failure instead of being discarded.
+    PlannerResponse {
+        detail: String,
+        execution: Box<PlannerExecutionRecord>,
+    },
+    /// A later planner request failed after earlier protocol-valid replies. Preserve the earlier
+    /// sanitized receipts while retaining the original error's status and display semantics.
+    PlannerExecutionFailure {
+        source: Box<HarnessError>,
+        executions: Vec<PlannerExecutionRecord>,
+    },
     /// The requested action does not apply to the run record on disk — it is finished and not
     /// resumable, its documents no longer hash to what the run was started from, or it names no
     /// such shot. Nothing was dispatched (sc-22711).
@@ -304,7 +439,7 @@ pub enum HarnessError {
 impl std::fmt::Display for HarnessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validation(findings) => {
+            Self::Validation(findings) | Self::PlannerValidation { findings, .. } => {
                 writeln!(
                     f,
                     "plan refused before dispatch ({} finding(s)):",
@@ -322,6 +457,8 @@ impl std::fmt::Display for HarnessError {
                 detail,
             } => write!(f, "{method} {path} -> {status}: {detail}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
+            Self::PlannerResponse { detail, .. } => write!(f, "transport error: {detail}"),
+            Self::PlannerExecutionFailure { source, .. } => write!(f, "{source}"),
             Self::Refused(message) => write!(f, "refused: {message}"),
             Self::Io(message) => write!(f, "io error: {message}"),
         }
@@ -2908,8 +3045,8 @@ impl Session<'_> {
                     Some(json!({
                         "tags": [
                             SOUND_TAG,
-                            format!("role:{}", entry.role),
-                            format!("pack:{}", self.pack.id)
+                            harness_asset_tag("role", &entry.role),
+                            harness_asset_tag("pack", &self.pack.id)
                         ]
                     })),
                 )
@@ -3521,8 +3658,8 @@ impl Session<'_> {
                 Some(json!({
                     "tags": [
                         kind_tag,
-                        format!("role:{}", reference.role),
-                        format!("pack:{}", self.pack.id)
+                        harness_asset_tag("role", &reference.role),
+                        harness_asset_tag("pack", &self.pack.id)
                     ]
                 })),
             )
@@ -6294,6 +6431,33 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    fn generated_asset_tags_keep_legacy_literals_and_bound_long_ids() {
+        assert_eq!(harness_asset_tag("role", "courier"), "role:courier");
+        assert_eq!(
+            harness_asset_tag("pack", "courier-workshop-refs"),
+            "pack:courier-workshop-refs"
+        );
+
+        let shared = "r".repeat(63);
+        let first = harness_asset_tag("role", &format!("{shared}a"));
+        let second = harness_asset_tag("role", &format!("{shared}b"));
+        let sound = harness_asset_tag("role", &format!("sound_{}", "s".repeat(58)));
+        let pack = harness_asset_tag("pack", &format!("film_{}", "p".repeat(59)));
+        for tag in [&first, &second, &sound, &pack] {
+            assert!(tag.len() <= 40, "{tag}");
+        }
+        assert!(first.starts_with("role:h:"), "{first}");
+        assert!(sound.starts_with("role:h:"), "{sound}");
+        assert!(pack.starts_with("pack:h:"), "{pack}");
+        assert_ne!(first, second, "distinct legal roles need distinct facets");
+        assert_eq!(
+            first,
+            harness_asset_tag("role", &format!("{shared}a")),
+            "a replay must produce the same ownership facet"
+        );
+    }
+
+    #[test]
     fn multipart_body_carries_file_and_provenance_fields() {
         let (boundary, body) =
             encode_asset_upload("plate.png", "image/png", b"\x89PNG", &json!({ "a": 1 }));
@@ -6641,6 +6805,69 @@ mod unit_tests {
         assert_eq!(
             merge_harness_audio_track(&[], bed(1.0))["items"][0]["volume"],
             json!(1.0)
+        );
+    }
+
+    #[test]
+    fn sequence_beds_stop_at_the_measured_source_end_without_implicit_looping() {
+        let bed = SoundBed {
+            role: "notification_chime".to_owned(),
+            gain: 0.6,
+            muted: false,
+            start_seconds: 8.2,
+            source_in_seconds: 0.0,
+            fade_in_seconds: 0.02,
+            fade_out_seconds: 0.04,
+        };
+        let asset = SoundAsset {
+            asset_id: "asset_chime".to_owned(),
+            duration_seconds: Some(0.35),
+        };
+        let mut timeline = json!({ "tracks": [
+            { "id": PICTURE_TRACK_ID, "kind": "video", "items": [{
+                "id": "picture", "sourceIn": 0.0, "sourceOut": 24.041666666666668,
+                "timelineStart": 0.0, "timelineEnd": 24.041666666666668, "speed": 1.0
+            }] },
+            bed_track("track_sfx_0", "Sound effect", ROLE_SFX, &bed, &asset, "run_3e86b06e")
+        ] });
+
+        let duration = relayout_timeline(&mut timeline, None).expect("timeline relayout");
+        assert_eq!(duration, 24.041666666666668);
+        let effect = &timeline["tracks"][1]["items"][0];
+        assert_eq!(effect["timelineStart"], json!(8.2));
+        assert!(
+            (effect["timelineEnd"].as_f64().unwrap() - 8.55).abs() < 0.000_001,
+            "{effect}"
+        );
+        assert_eq!(effect["sourceIn"], json!(0.0));
+        assert_eq!(effect["sourceOut"], json!(0.35));
+        assert_eq!(effect[HARNESS_KEY]["sourceDurationSeconds"], json!(0.35));
+
+        let long_asset = SoundAsset {
+            asset_id: "asset_music".to_owned(),
+            duration_seconds: Some(32.0),
+        };
+        let long_bed = SoundBed {
+            role: "main_theme".to_owned(),
+            source_in_seconds: 0.5,
+            start_seconds: 1.2,
+            ..bed
+        };
+        timeline["tracks"][1] = bed_track(
+            MUSIC_TRACK_ID,
+            "Music",
+            ROLE_MUSIC,
+            &long_bed,
+            &long_asset,
+            "run_3e86b06e",
+        );
+        relayout_timeline(&mut timeline, None).expect("long bed relayout");
+        let music = &timeline["tracks"][1]["items"][0];
+        assert_eq!(music["timelineStart"], json!(1.2));
+        assert_eq!(music["timelineEnd"], json!(24.041666666666668));
+        assert!(
+            (music["sourceOut"].as_f64().unwrap() - 23.34166666666667).abs() < 0.000_001,
+            "{music}"
         );
     }
 
@@ -7091,6 +7318,15 @@ fn bed_track(
 ) -> Value {
     let mut block = harness_block(role, run_id, None, 0.0);
     block["startSeconds"] = json!(bed.start_seconds);
+    if let Some(duration) = asset
+        .duration_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        // A sequence bed is placed once, but no sound role implies looping. Keep the measured source
+        // bound beside the placement so relayout can extend a long bed with later picture while a
+        // short effect remains its real length.
+        block["sourceDurationSeconds"] = json!(duration);
+    }
     let item = json!({
         "id": format!("item_{role}_{}_{}", bed.role, &run_id[4..12]),
         "trackId": track_id,
@@ -7248,23 +7484,54 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
                     let start = shot_start + harness_f64(item, "offsetSeconds");
                     (start, start + item_span(item))
                 }
-                // Sequence-level beds, the only other roles the match above admits.
+                // Sequence-level beds, the only other roles the match above admits. A bed may span
+                // the sequence only while measured source remains; looping is never implicit.
                 _ => {
                     let start = harness_f64(item, "startSeconds");
-                    (start, duration)
+                    let source_in = number(item, "sourceIn", 0.0).max(0.0);
+                    let source_duration = item
+                        .get(HARNESS_KEY)
+                        .and_then(|block| block.get("sourceDurationSeconds"))
+                        .and_then(Value::as_f64)
+                        .filter(|source_duration| source_duration.is_finite());
+                    let end = source_duration
+                        .map(|source_duration| start + (source_duration - source_in).max(0.0))
+                        .unwrap_or(duration);
+                    (start, end)
                 }
             };
             if start >= duration - MIN_ITEM_SECONDS {
                 return false;
             }
-            let end = end.min(duration).max(start + MIN_ITEM_SECONDS);
+            let end = end.min(duration);
+            if end <= start {
+                return false;
+            }
             item["timelineStart"] = json!(ms(start));
             item["timelineEnd"] = json!(ms(end));
             if matches!(role.as_str(), ROLE_AMBIENCE | ROLE_MUSIC | ROLE_SFX) {
-                // A bed's source range follows its span, so the whole stretch of the file that
-                // plays under the sequence is asked for rather than a fixed four seconds.
+                // A bed's source range follows its playable span, bounded by measured source.
                 let source_in = number(item, "sourceIn", 0.0).max(0.0);
-                item["sourceOut"] = json!(ms(source_in + (end - start)));
+                let source_out = item
+                    .get(HARNESS_KEY)
+                    .and_then(|block| block.get("sourceDurationSeconds"))
+                    .and_then(Value::as_f64)
+                    .filter(|source_duration| source_duration.is_finite())
+                    .map(|source_duration| {
+                        let source_remaining = (source_duration - source_in).max(0.0);
+                        let picture_remaining = (duration - start).max(0.0);
+                        if source_remaining <= picture_remaining {
+                            // Preserve the measured endpoint exactly. Deriving it by subtracting
+                            // the placement after adding it turns 0.35 into
+                            // 0.34999999999999964 and leaves persisted source truth needlessly
+                            // dependent on the timeline start.
+                            source_duration
+                        } else {
+                            source_in + (end - start)
+                        }
+                    })
+                    .unwrap_or(source_in + (end - start));
+                item["sourceOut"] = json!(ms(source_out));
             }
             true
         });

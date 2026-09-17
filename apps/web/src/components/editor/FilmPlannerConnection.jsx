@@ -167,7 +167,7 @@ export default function FilmPlannerConnection({ planning, disabled, active, toke
       <div className="ve-film-disclosure">
         <strong>Data sent when you start external planning</strong>
         <p>Destination: {selected?.baseUrl || form.baseUrl || "Choose a connection"}</p>
-        <p>SceneWorks sends the script, edited brief, beats and dialogue, reference role names and descriptions, and the target video model capability envelope. It does not send your connection credential, local file paths, or other project assets. Reference image bytes remain local unless you enable the option below.</p>
+        <p>SceneWorks sends the script, edited brief, beats and dialogue, reference role names and descriptions, and the target video model capability envelope. A saved credential is sent to this selected endpoint only in the Authorization header; SceneWorks excludes it from the planner prompt, project files, logs, and exports. Local file paths and other project assets are not sent. Reference image bytes remain local unless you enable the option below.</p>
         <label><input checked={Boolean(planning.sendReferencePixels)} disabled={locked || !selected?.supportsImageInput} onChange={(event) => onChange((next) => { next.planning.sendReferencePixels = event.target.checked; })} type="checkbox" /> Send approved reference image pixels to this image-capable endpoint</label>
         {!selected?.supportsImageInput ? <p>Reference pixels remain local because this connection is not marked image-capable.</p> : null}
       </div>

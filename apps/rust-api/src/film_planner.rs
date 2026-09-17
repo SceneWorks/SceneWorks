@@ -171,6 +171,20 @@ impl PlannerCost {
             executions: self.executions,
         }
     }
+
+    fn preserve_on_error(mut self, error: HarnessError) -> HarnessError {
+        if let HarnessError::PlannerResponse { execution, .. } = &error {
+            self.executions.push((**execution).clone());
+        }
+        if self.executions.is_empty() {
+            error
+        } else {
+            HarnessError::PlannerExecutionFailure {
+                source: Box::new(error),
+                executions: self.executions,
+            }
+        }
+    }
 }
 
 /// [`PlannerLlm`] over the shipped `prompt_refine` seam: create the job through
@@ -379,6 +393,11 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                                 .and_then(Value::as_str)
                                 .unwrap_or(&self.thinking_mode)
                                 .to_owned(),
+                            max_output_tokens: None,
+                            reference_pixels_sent: None,
+                            duration_seconds: Some(started.elapsed().as_secs_f64()),
+                            finish_reason: None,
+                            failure_code: None,
                             thinking: thinking.clone(),
                             usage: None,
                         });
@@ -867,7 +886,7 @@ pub async fn generate(
     let mut round = 0_u32;
     let mut cost = PlannerCost::default();
     let plan = loop {
-        let reply = llm
+        let reply = match llm
             .complete(LlmRequest {
                 task: Some(FILM_PLAN_TASK.to_owned()),
                 prompt: request.clone(),
@@ -879,7 +898,11 @@ pub async fn generate(
                 guide: None,
                 reference_images: reference_images.clone(),
             })
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => return Err(cost.preserve_on_error(error)),
+        };
         cost.record(&reply);
         let reply = reply.text;
         last_reply = reply.clone();
@@ -937,10 +960,13 @@ pub async fn generate(
                     rejected.display()
                 ),
             ));
-            return Err(HarnessError::Validation(findings));
+            return Err(HarnessError::PlannerValidation {
+                findings,
+                executions: cost.executions,
+            });
         }
         round += 1;
-        request = build_repair_request(&brief, &caps, &last_reply, &findings, round, rounds);
+        request = build_repair_request(&brief, &pack, &caps, &last_reply, &findings, round, rounds);
     };
 
     let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
@@ -1297,6 +1323,51 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn execution_receipt(model: &str) -> PlannerExecutionRecord {
+        PlannerExecutionRecord {
+            provider: "openai_compatible".to_owned(),
+            model: model.to_owned(),
+            backend: Some("fixture".to_owned()),
+            target_video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "disabled".to_owned(),
+            max_output_tokens: Some(4096),
+            reference_pixels_sent: Some(true),
+            duration_seconds: Some(1.0),
+            ..PlannerExecutionRecord::default()
+        }
+    }
+
+    #[test]
+    fn accumulated_executions_survive_a_later_empty_or_provider_failure() {
+        let prior = execution_receipt("prior-malformed");
+        let final_empty = execution_receipt("final-empty");
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::PlannerResponse {
+            detail: "no textual content".to_owned(),
+            execution: Box::new(final_empty.clone()),
+        });
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected executions to wrap the final empty-response error");
+        };
+        assert!(matches!(*source, HarnessError::PlannerResponse { .. }));
+        assert_eq!(executions, vec![prior.clone(), final_empty]);
+
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::Transport(
+            "provider became unavailable".to_owned(),
+        ));
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected prior executions to wrap the later provider error");
+        };
+        assert!(matches!(*source, HarnessError::Transport(_)));
+        assert_eq!(executions, vec![prior]);
+    }
     struct NoCallsTransport;
 
     impl ApiTransport for NoCallsTransport {
@@ -1315,6 +1386,39 @@ mod tests {
     struct AdoptTransport {
         calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
         interrupted: bool,
+    }
+
+    struct PendingTransport {
+        calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ApiTransport for PendingTransport {
+        fn call(
+            &self,
+            request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .push((request.method.to_owned(), request.path.clone()));
+                let body = match (request.method, request.path.as_str()) {
+                    ("POST", "/api/v1/prompts/refine") => json!({"id": "job_pending"}),
+                    ("GET", "/api/v1/jobs/job_pending") => {
+                        json!({"id": "job_pending", "status": "running"})
+                    }
+                    ("POST", "/api/v1/jobs/job_pending/cancel") => {
+                        json!({"id": "job_pending", "status": "cancel_requested"})
+                    }
+                    other => panic!("unexpected pending planner request: {other:?}"),
+                };
+                Ok(crate::film_harness::ApiResponse { status: 200, body })
+            })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("planner timeout must not fetch files") })
+        }
     }
 
     impl ApiTransport for AdoptTransport {
@@ -1374,6 +1478,51 @@ mod tests {
             .await
             .expect_err("the cancellation is reported");
         assert!(format!("{error}").contains("canceled before"));
+    }
+
+    #[tokio::test]
+    async fn local_job_timeout_cancels_once_without_provider_fallback() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = PendingTransport {
+            calls: calls.clone(),
+        };
+        let llm = SceneWorksLlm::new(
+            &transport,
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+        )
+        .with_planner_model(Some("Qwen/Qwen3.6-27B".to_owned()), "enabled");
+        let error = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect_err("the running local job must time out");
+        assert!(error.to_string().contains("was canceled"), "{error}");
+        let calls = calls.lock();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| { method == "POST" && path == "/api/v1/prompts/refine" })
+                .count(),
+            1,
+            "the selected native provider is dispatched exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| {
+                    method == "POST" && path == "/api/v1/jobs/job_pending/cancel"
+                })
+                .count(),
+            1,
+            "the timed-out job is canceled exactly once"
+        );
     }
 
     #[tokio::test]

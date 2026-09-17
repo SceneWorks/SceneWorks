@@ -999,7 +999,12 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        // An API-only restart does not stop the separately hosted worker. Preserve an active job
+        // only when the durable worker row still proves exact ownership: the worker is busy and
+        // names this job as its current job. Its next heartbeat keeps that ownership live; an
+        // idle heartbeat from a restarted same-ID worker or the ordinary stale-worker sweep
+        // reclaims it. Everything else is already orphaned and must become terminal here.
+        let interrupted = self.list_startup_stranded_active_jobs_on_connection(&transaction)?;
         // A `pending_caption` job (sc-9120) is owned by an API-side background task, not a worker,
         // so an API restart LOSES its caption watcher — the row would otherwise sit un-claimable
         // forever (it is not `queued`, so no worker claims it, and it is not an ACTIVE status, so
@@ -1030,6 +1035,12 @@ impl JobsStore {
                    updated_at = ?1,
                    worker_id = null
              where status in ({active})
+               and not exists (
+                   select 1 from workers
+                    where workers.id = jobs.worker_id
+                      and workers.status = 'busy'
+                      and workers.current_job_id = jobs.id
+               )
             ",
                 active = active_statuses_sql()
             ),
@@ -1051,7 +1062,18 @@ impl JobsStore {
             // written. It describes why an ALIVE worker withdrew its capabilities; on a worker we
             // have just declared gone it is stale by construction, and `GET /api/v1/workers` would
             // otherwise keep handing clients a host remedy for a worker that is no longer there.
-            "update workers set status = 'offline', current_job_id = null, status_reason = null              where status != 'offline'",
+            &format!(
+                "update workers
+                    set status = 'offline', current_job_id = null, status_reason = null
+                  where status != 'offline'
+                    and not exists (
+                        select 1 from jobs
+                         where jobs.worker_id = workers.id
+                           and jobs.id = workers.current_job_id
+                           and jobs.status in ({active})
+                    )",
+                active = active_statuses_sql()
+            ),
             [],
         )?;
         let updated_ids = interrupted_ids
@@ -3389,6 +3411,29 @@ impl JobsStore {
             .join(", ");
         let mut statement = connection.prepare(&format!(
             "select * from jobs where status in ({status_list}) order by created_at desc"
+        ))?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Active jobs that cannot still belong to a separately hosted worker after an API restart.
+    /// Keep this predicate identical to the guarded UPDATE in [`Self::mark_interrupted_on_startup`]
+    /// so the snapshots returned for SSE publication are exactly the rows the transaction changed.
+    fn list_startup_stranded_active_jobs_on_connection(
+        &self,
+        connection: &Connection,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let mut statement = connection.prepare(&format!(
+            "select jobs.* from jobs
+              where jobs.status in ({active})
+                and not exists (
+                    select 1 from workers
+                     where workers.id = jobs.worker_id
+                       and workers.status = 'busy'
+                       and workers.current_job_id = jobs.id
+                )
+              order by jobs.created_at desc",
+            active = active_statuses_sql()
         ))?;
         let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)

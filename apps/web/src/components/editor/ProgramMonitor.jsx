@@ -8,6 +8,7 @@ import { Icon } from "../Icons.jsx";
 // the forwarded video ref; the play/pause events flip the screen's isPlaying state.
 export function ProgramMonitor({
   selectedAsset,
+  selectedAudioMuted = false,
   aspectClass,
   clipLabel,
   isAi,
@@ -39,7 +40,7 @@ export function ProgramMonitor({
               // the transport silently stopped working when sc-17161 made `muted` an opt-in prop.
               // Passing it explicitly is the contract assetMedia.jsx documents for script-driven
               // surfaces, and restores the always-muted element this monitor rendered before.
-              muted={!isAudio}
+              muted={isAudio ? selectedAudioMuted : true}
               onEnded={onEnded}
               onPause={onPause}
               onPlay={onPlay}

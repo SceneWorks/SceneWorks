@@ -63,6 +63,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 async function renderReview({ view = reviewView(), onChange = vi.fn(), select = vi.fn(), refresh = vi.fn() } = {}) {
@@ -82,6 +83,13 @@ async function renderReview({ view = reviewView(), onChange = vi.fn(), select = 
   return { onChange, select, refresh };
 }
 
+async function renderReviewVisibility({ active, runLocatorId = "", setNotice = vi.fn() }) {
+  await act(async () => {
+    root.render(<FilmReview active={active} draft={draft()} onChange={vi.fn()} projectId="project_1" refreshTimelines={vi.fn()} runLocatorId={runLocatorId} setNotice={setNotice} setSelectedTimelineId={vi.fn()} token="token" />);
+    await Promise.resolve(); await Promise.resolve();
+  });
+}
+
 function button(text) {
   return [...container.querySelectorAll("button")].find((item) => item.textContent === text);
 }
@@ -98,6 +106,37 @@ function changeValue(element, value) {
 }
 
 describe("FilmReview", () => {
+  it("refreshes a run created while hidden and addresses review by locator identity", async () => {
+    const locatorId = "filmrun_5c1b068b8ded44e49513775feff1d71e";
+    const recordRunId = "run_c54dd33cb3e14cd98735136aba56cbaa";
+    const baseView = reviewView();
+    const view = reviewView({
+      run: {
+        ...baseView.run,
+        locator: { id: locatorId, draftId: "film_1" },
+        record: { ...baseView.run.record, runId: recordRunId },
+      },
+    });
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith(`/film-runs/${locatorId}/review`)) return Promise.resolve(view);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    root = createRoot(container);
+
+    await renderReviewVisibility({ active: false, runLocatorId: locatorId });
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Render a shot to review takes.");
+
+    await renderReviewVisibility({ active: true, runLocatorId: locatorId });
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      `/api/v1/projects/project_1/film-runs/${locatorId}/review`,
+      "token",
+    );
+    expect(apiFetchMock.mock.calls.some(([path]) => path.includes(recordRunId))).toBe(false);
+    expect(container.querySelectorAll("video")).toHaveLength(2);
+    expect(container.textContent).not.toContain("Render a shot to review takes.");
+  });
+
   it("shows append-only take history, saved-cut truth, advisory findings, and provenance", async () => {
     const { select, refresh } = await renderReview();
     expect(container.querySelectorAll("video")).toHaveLength(2);
@@ -152,5 +191,70 @@ describe("FilmReview", () => {
     expect(button("Repair from findings").disabled).toBe(true);
     expect(button("Reject").title).toContain("api-repair:run_1 is active");
     expect(container.textContent).toContain("Actions unavailable");
+  });
+
+  it("refreshes a cached terminal view on Resume and polls the take delivered on the same timeline", async () => {
+    vi.useFakeTimers();
+    const base = reviewView();
+    const waiting = reviewView({
+      run: {
+        ...base.run,
+        controllerActive: false,
+        record: {
+          ...base.run.record,
+          timeline: null,
+          shots: base.run.record.shots.map((shot) => ({ ...shot, selectedAttempt: null, attempts: [] })),
+        },
+      },
+      takeAssets: [],
+      observations: [],
+      reviewTimelineId: null,
+      selections: [{ shotId: "SH010", state: "not_in_saved_cut" }],
+    });
+    const active = {
+      ...waiting,
+      run: { ...waiting.run, controllerActive: true, controllerOwner: "api-resume:run_1" },
+      actionDisabledReason: "api-resume:run_1 is active. Wait for it to stop or cancel it before changing takes.",
+    };
+    const delivered = reviewView({
+      run: {
+        ...base.run,
+        controllerActive: false,
+        record: { ...base.run.record, timeline: { ...base.run.record.timeline, revision: 2 } },
+      },
+    });
+    let response = waiting;
+    let reads = 0;
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs/run_1/review")) {
+        reads += 1;
+        return Promise.resolve(response);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    root = createRoot(container);
+    const render = async (runControllerActive) => {
+      await act(async () => {
+        root.render(<FilmReview active draft={draft()} onChange={vi.fn()} projectId="project_1" refreshTimelines={vi.fn()} runControllerActive={runControllerActive} runLocatorId="run_1" setNotice={vi.fn()} setSelectedTimelineId={vi.fn()} token="token" />);
+        await Promise.resolve(); await Promise.resolve();
+      });
+    };
+
+    await render(false);
+    expect(button("Analyze selected takes").disabled).toBe(false);
+    expect(button("Open saved cut").disabled).toBe(true);
+
+    response = active;
+    await render(true);
+    expect(button("Analyze selected takes").disabled).toBe(true);
+    expect(container.textContent).toContain("Actions unavailable: api-resume:run_1 is active");
+
+    response = delivered;
+    await render(false);
+    expect(button("Open saved cut").disabled).toBe(false);
+    expect(container.querySelectorAll("video")).toHaveLength(2);
+    const settledReads = reads;
+    await act(async () => { await vi.advanceTimersByTimeAsync(2400); });
+    expect(reads).toBe(settledReads);
   });
 });

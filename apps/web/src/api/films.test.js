@@ -3,10 +3,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { apiFetchMock } = vi.hoisted(() => ({ apiFetchMock: vi.fn() }));
 vi.mock("../api.js", () => ({ apiFetch: apiFetchMock }));
 
-import { getFilmRenderOptions, previewFilmRenderOptions } from "./films.js";
+import { getFilmRenderOptions, previewFilmRenderOptions, startFilmPlanning } from "./films.js";
 
 describe("film render options API", () => {
   beforeEach(() => apiFetchMock.mockReset());
+
+  it("starts planning with the author's repair-round limit", () => {
+    startFilmPlanning("project_1", "film_1", 4, 75, "token");
+
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/projects/project_1/films/film_1/planning", "token", {
+      method: "POST",
+      body: JSON.stringify({ maxRepairRounds: 4, llmTimeoutSeconds: 75 }),
+    });
+  });
 
   it("loads persisted options and previews the complete unsaved resolver input", () => {
     const signal = new AbortController().signal;

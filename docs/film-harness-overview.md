@@ -72,9 +72,10 @@ stable ids.
 
 Two things about that shot are load-bearing. It names **roles**, never files, so the same plan runs
 against any pack that declares them (runbook § *The reference-conditioned courier plan*). And
-`continuityRoles` is the continuity claim: every shot must bind at least one approved role from the
-pack, and a shot that binds none is refused (runbook § *Editing the assembled sequence*, the
-"Continuity is canonical" paragraph).
+`continuityRoles` is the continuity claim for a reference-backed shot: every named role must exist
+in the approved pack. A script-only shot may leave both role arrays empty; explicitly requesting
+reference conditioning without an approved bindable role is refused (runbook § *Editing the
+assembled sequence*, the "Continuity is canonical" paragraph).
 
 `conditioning.referenceRoles` order is the order the compiled request's `referenceAssetIds` keeps, so
 the shipped plan writes it subject-first (`config/film-harness/courier-workshop/plan.v2.jsonc`,
@@ -185,20 +186,30 @@ and refuse a document that no longer matches what the run started from.
 `film-harness plan` turns a brief plus the pack into a plan in the **same schema a hand-authored plan
 uses** (runbook § *Planning from a brief*). The loop:
 
-1. **Refuse before the first token.** The hosted-credential and remote-API ban
-   (`apps/rust-api/src/film_planner.rs:65`, `:551`), the brief's structure, the pack and its files,
-   the model's catalog entry, a beat requiring a role the pack does not approve, and the brief's own
-   model block against the installed menus. The brief must declare `limits.plannerMaxMemoryGb`,
-   checked against the host's reported memory before the first token.
+1. **Refuse before the first token.** The CLI's hosted-credential and remote-API ban, the brief's
+   structure, the pack and its files, the model's catalog entry, a beat requiring a role the pack
+   does not approve, and the brief's own model block against the installed menus. The brief must
+   declare `limits.plannerMaxMemoryGb`, checked against the host's reported memory before the first
+   token.
 2. **One draft** through `POST /api/v1/prompts/refine` with `task: "film_plan"`
    (`apps/rust-api/src/film_planner.rs:60`), decoded under a valid-JSON constraint. Object shape is
    *not* enforced by the decoder; the plan schema is enforced after the decode by
    `parse_planner_output`.
 3. **Validate**, then **bounded repair rounds**, default 2, ceiling 5
    (`apps/rust-api/src/film_planner.rs:49`, `:53`). Each round hands the validator's findings back
-   verbatim and asks for the whole plan again. No round drops a beat, shortens the film or rounds a
-   duration to make a finding go away. On exhaustion the refused answer is written to
+   verbatim and asks for the whole plan again. A repair may change the number of shots or choose
+   another legal duration to meet the brief's running-time window, but it must retain every required
+   beat and pass the same full validation. On exhaustion the refused answer is written to
    `planner-rejected.txt`.
+
+The Film workspace uses the same generation, validation, repair and compile functions through a
+durable planning operation. New drafts select the built-in `prompt_refine_anubis_8b`; the optional
+local Qwen3.6-27B planner is installed and selected only on request. A saved OpenAI-compatible
+connection is also an explicit choice, with disclosure, backend-held secret and separate reference
+pixel opt-in. Planner identity and thinking mode are recorded independently of the target video
+model. There is no provider fallback, and an unavailable, canceled or exhausted operation leaves
+the draft available for manual editing. The full operator flow is in
+[film-editor.md](film-editor.md).
 
 **The capability envelope** is what the planner is held to. Whether it may write reference shots is
 decided from exactly two facts, and install state is not one of them: the catalog must serve the
@@ -290,9 +301,10 @@ Only a **resumable** stop can be resumed. A cancel or a crash is resumable; an e
 budget, an over-budget memory peak or an exhausted attempt cap is terminal, and `stop.detail` says
 which plan value to change (`crates/sceneworks-core/src/film_plan.rs:3095`, `RunStop`).
 
-**One controller per run directory.** Nothing locks `run.json`; the idempotency keys stop a
-*sequential* replay from duplicating work but are not a lock between two live controllers (runbook
-§ *Durable run state*, and `apps/rust-api/src/bin/film-harness.rs:54`).
+**One controller per run directory.** Every mutating controller holds `ControllerLease`, an
+advisory lock whose owner marker is cleared on clean release and retained after a crash. A second
+controller is refused. Idempotency keys separately prevent duplicate work when a process dies
+between posting a job and recording its id (runbook § *Durable run state*).
 
 ## Review: assistive, never deciding
 
@@ -345,10 +357,12 @@ Every decision is appended to `decisions[]` in the order it was made; replay add
 
 ## Timeline and export
 
-The assembled timeline has four tracks: `track_main` (picture), `track_dialogue`, `track_ambience`
-and `track_music`, each audio track a bus with its own `gain` and `muted`, and **the beds placed once
-for the whole sequence** so they play straight through the cuts rather than restarting at each one
-(runbook § *Sound*).
+The assembled timeline has a picture track and ordered audio lanes for dialogue, ambience, music
+and each placed effect. Each audio track is an editable bus with its own `gain` and `muted` state.
+Sequence beds are placed once so they play through cuts instead of restarting at every shot. When a
+later incremental delivery lengthens the cut, an untouched full-sequence bed extends with it;
+gain, mute, fades and item volume remain intact. An explicit placement, source-range or duration
+trim is preserved and is never stretched automatically (runbook § *Sound*).
 
 The export mixes every non-muted audio track: gain is `track.gain * item.volume`, clips are delayed
 to where they land in the *exported picture*, per-item fades become `afade`, the summed mix passes a
@@ -373,6 +387,11 @@ history and `generatedAudio`, and an item a person pointed at a foreign asset wi
 left exactly as they left it (runbook § *Editing the assembled sequence*). Each edit is appended to
 `timeline.edits` **and** to the decision log, and leaves the MP4 flagged `export.stale` unless
 `--export` re-runs it.
+
+The Film workspace always starts runs without export. It delivers each completed shot into the
+saved timeline, preserves concurrent edits with revision checks and tombstones, and exports only
+when the operator chooses **Export current cut**. The Operations panel can select among the draft's
+durable runs; choosing an older run does not move or recreate its jobs.
 
 ## Provenance recorded per attempt
 
@@ -438,7 +457,7 @@ Header: `apps/rust-api/src/bin/film-harness.rs:5`–`:27`; worker requirements a
 | `plan` | brief → LLM draft → validate → repair rounds | blocking, minutes | brief, pack, catalog | `plan.json`, `compiled.json`, `brief.json`, `planner-rejected.txt` on exhaustion |
 | `compile` | rebuild the per-shot requests from an edited plan | blocking | plan, pack, sibling brief | `compiled.json` |
 | `validate` | check plan, pack, host, catalog and workers; create nothing | blocking, seconds | plan, pack, `compiled.json` | nothing |
-| `run` | render the selected shots, assemble, export | **long-running, resumable** | plan, pack, compiled | `run.json` (+ project mirror), project assets |
+| `run` | render selected shots and assemble; CLI exports unless `--no-export` | **long-running, resumable** | plan, pack, compiled | `run.json` (+ project mirror), project assets |
 | `resume` | pick a run back up, adopting live jobs | **long-running, resumable** | `run.json` + the pinned documents | `run.json` |
 | `replace-take` | reject the carried take, render exactly one more | long-running, one attempt | `run.json` | `run.json` |
 | `request-repair` | `replace-take` with the review's flags in the reason | long-running, one attempt | `run.json`, `reviews/*.json` | `run.json` |

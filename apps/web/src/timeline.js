@@ -25,6 +25,32 @@ export function sourceTimestampAtPlayhead(item, playheadSeconds) {
   return (Number(item.sourceIn) || 0) + (clamped - start) * (Number(item.speed) || 1);
 }
 
+export function audioPreviewState(item, track, playheadSeconds, trackSoloed = {}) {
+  const timelineStart = Number(item.timelineStart) || 0;
+  const timelineEnd = Math.max(timelineStart, Number(item.timelineEnd) || timelineStart);
+  const playhead = Number(playheadSeconds) || 0;
+  const elapsed = Math.max(0, playhead - timelineStart);
+  const remaining = Math.max(0, timelineEnd - playhead);
+  const fadeInSeconds = Math.max(0, Number(item.fadeInSeconds) || 0);
+  const fadeOutSeconds = Math.max(0, Number(item.fadeOutSeconds) || 0);
+  const fadeInGain = fadeInSeconds > 0 ? Math.min(1, elapsed / fadeInSeconds) : 1;
+  const fadeOutGain = fadeOutSeconds > 0 ? Math.min(1, remaining / fadeOutSeconds) : 1;
+  const clipGain = Math.max(0, Number(item.volume ?? 1));
+  const trackGain = Math.max(0, Number(track?.gain ?? 1));
+  const anySoloed = Object.values(trackSoloed).some(Boolean);
+  const beforePlacement = playhead < timelineStart;
+  const afterPlacement = playhead >= timelineEnd;
+
+  return {
+    afterPlacement,
+    beforePlacement,
+    currentTime: sourceTimestampAtPlayhead(item, playhead),
+    muted: Boolean(track?.muted) || (anySoloed && !trackSoloed[track?.id]) || beforePlacement || afterPlacement,
+    playbackRate: Math.max(0.01, Number(item.speed) || 1),
+    volume: Math.min(1, clipGain * trackGain * fadeInGain * fadeOutGain),
+  };
+}
+
 export function ensureItemVersionFields(item) {
   const versionAssetIds = Array.from(new Set([...(item.versionAssetIds ?? []), item.assetId].filter(Boolean)));
   return {

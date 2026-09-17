@@ -1568,7 +1568,7 @@ fn promote_pending_caption_does_not_resurrect_a_canceled_job() {
 
 /// sc-9120: a mid-flight API restart loses the caption watcher, so the startup recovery must flip any
 /// stranded `pending_caption` row to `queued` (degraded to the original prompt) rather than stranding
-/// it un-claimable. Active jobs still go to `interrupted`; a `queued` job is left alone.
+/// it un-claimable. Unowned active jobs still go to `interrupted`; a `queued` job is left alone.
 #[test]
 fn startup_recovers_stranded_pending_caption_to_queued() {
     let store = store("startup-recover-pending");
@@ -1578,16 +1578,18 @@ fn startup_recovers_stranded_pending_caption_to_queued() {
             json!({ "prompt": "a fox", "model": "ideogram_4" }),
         ))
         .expect("pending job creates");
-    // A separate job taken into an ACTIVE status: it must be INTERRUPTED, not degraded — proving the
-    // pending_caption recovery is distinct from (and runs alongside) the active-job interrupt sweep.
+    // A separate API-owned job taken into an ACTIVE status: it must be INTERRUPTED, not degraded —
+    // proving pending-caption recovery remains distinct from the active-job interrupt sweep.
     let active = store
         .create_job(image_job(object(json!({ "prompt": "active" }))))
         .expect("active job creates");
-    let claimed = store
-        .claim_next_job("worker-1")
-        .expect("claim runs")
-        .expect("the queued job is claimed");
-    assert_eq!(claimed.id, active.id);
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update jobs set status = 'preparing', stage = 'preparing' where id = ?1",
+            params![active.id],
+        )
+        .expect("API-owned active fixture updates");
 
     store
         .mark_interrupted_on_startup()
@@ -2973,12 +2975,13 @@ fn startup_interrupt_returns_post_update_job_snapshots() {
     let created = store
         .create_job(image_job(Map::new()))
         .expect("job creates");
-    let claimed = store
-        .claim_next_job("worker-1")
-        .expect("claim succeeds")
-        .expect("job claimed");
-    assert_eq!(claimed.id, created.id);
-    assert_eq!(claimed.status, JobStatus::Preparing);
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update jobs set status = 'preparing', stage = 'preparing' where id = ?1",
+            params![created.id],
+        )
+        .expect("API-owned active fixture updates");
 
     let interrupted = store
         .mark_interrupted_on_startup()
@@ -3005,63 +3008,26 @@ fn startup_interrupt_collects_every_active_status() {
     // still gathers jobs sitting in DIFFERENT active statuses (running vs saving),
     // not just one, and leaves a queued (non-active) job alone.
     let store = store("startup-interrupt-all-statuses");
-    register_image_worker(&store);
-    store
-        .register_worker(RegisterWorker {
-            worker_id: "worker-2".to_owned(),
-            gpu_id: "gpu-1".to_owned(),
-            gpu_name: Some("GPU 1".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
-            loaded_models: Vec::new(),
-            utilization: None,
-        })
-        .expect("second worker registers");
 
-    // Job A -> running (worker-1); Job B -> saving (worker-2). Both are active but
-    // in distinct statuses, so a per-status miss would drop one.
+    // These simulate API-owned tasks: active status, deliberately no worker owner. Job A is
+    // running and job B saving, so a per-status miss would drop one.
     let running = store
         .create_job(image_job(Map::new()))
         .expect("job A creates");
-    store.claim_next_job("worker-1").expect("worker-1 claims A");
-    store
-        .update_job_progress(
-            &running.id,
-            ProgressUpdate {
-                status: JobStatus::Running,
-                stage: ProgressStage::Running,
-                progress: 0.4,
-                message: "running".to_owned(),
-                error: None,
-                result: None,
-                eta_seconds: None,
-                peak_gpu_memory_pct: None,
-                peak_gpu_load_pct: None,
-                backend: None,
-                worker_id: Some("worker-1".to_owned()),
-            },
-        )
-        .expect("A -> running");
-
     let saving = store
         .create_job(image_job(Map::new()))
         .expect("job B creates");
-    store.claim_next_job("worker-2").expect("worker-2 claims B");
-    store
-        .update_job_progress(
-            &saving.id,
-            ProgressUpdate {
-                status: JobStatus::Saving,
-                stage: ProgressStage::Saving,
-                progress: 0.9,
-                message: "saving".to_owned(),
-                error: None,
-                result: None,
-                eta_seconds: None,
-                peak_gpu_memory_pct: None,
-                peak_gpu_load_pct: None,
-                backend: None,
-                worker_id: Some("worker-2".to_owned()),
-            },
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set status = 'running', stage = 'running' where id = ?1",
+            params![running.id],
+        )
+        .expect("A -> running");
+    connection
+        .execute(
+            "update jobs set status = 'saving', stage = 'saving' where id = ?1",
+            params![saving.id],
         )
         .expect("B -> saving");
 
@@ -3091,6 +3057,172 @@ fn startup_interrupt_collects_every_active_status() {
     // The queued job is untouched — not active, so not swept.
     let queued = store.get_job(&queued.id).expect("queued job loads");
     assert_eq!(queued.status, JobStatus::Queued);
+}
+
+#[test]
+fn startup_preserves_exact_worker_owner_until_same_id_worker_reports_idle() {
+    let store = store("startup-preserves-worker-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .update_job_progress(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: 0.4,
+                message: "rendering".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: Some("mlx".to_owned()),
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("job starts");
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("active worker heartbeat succeeds");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("API startup recovery succeeds");
+    assert!(interrupted.is_empty(), "live worker-owned job is preserved");
+    let job = store.get_job(&created.id).expect("job loads");
+    let worker = store.get_worker("worker-1").expect("worker loads");
+    assert_eq!(job.status, JobStatus::Running);
+    assert_eq!(job.worker_id.as_deref(), Some("worker-1"));
+    assert_eq!(worker.status, WorkerStatus::Busy);
+    assert_eq!(worker.current_job_id.as_deref(), Some(created.id.as_str()));
+
+    // A surviving external worker may re-register after the API socket comes back. The same order
+    // applies to the API's newly spawned in-process utility worker: register first, then its
+    // immediately-due idle heartbeat. Registration must not erase ownership before that heartbeat
+    // tells us whether this is the same process.
+    let registered = store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: Some("GPU 0".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("same-ID worker re-registers");
+    assert_eq!(registered.status, WorkerStatus::Busy);
+    assert_eq!(
+        registered.current_job_id.as_deref(),
+        Some(created.id.as_str())
+    );
+
+    // A restarted worker with the same ID reports idle. That is the deterministic ownership
+    // boundary: the old active job is interrupted rather than becoming immortal.
+    let heartbeat = store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Idle,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("idle heartbeat succeeds");
+    assert_eq!(
+        heartbeat.interrupted_job.as_ref().map(|job| &job.id),
+        Some(&created.id)
+    );
+    assert_eq!(
+        store.get_job(&created.id).expect("job reloads").status,
+        JobStatus::Interrupted
+    );
+}
+
+#[test]
+fn startup_preserved_worker_job_is_bounded_by_the_stale_sweep() {
+    let store = store("startup-preserved-worker-goes-stale");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("worker heartbeat succeeds");
+    assert!(store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery succeeds")
+        .is_empty());
+
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("worker timestamp ages");
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("stale sweep succeeds");
+    assert_eq!(sweep.jobs.len(), 1);
+    assert_eq!(sweep.jobs[0].id, created.id);
+    assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
+    assert_eq!(sweep.workers[0].status, WorkerStatus::Offline);
+}
+
+#[test]
+fn startup_interrupts_an_active_job_with_inconsistent_worker_ownership() {
+    let store = store("startup-inconsistent-worker-owner");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'idle', current_job_id = null where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("inconsistent worker fixture updates");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery succeeds");
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].id, created.id);
+    assert_eq!(interrupted[0].status, JobStatus::Interrupted);
+    assert_eq!(
+        store.get_worker("worker-1").expect("worker loads").status,
+        WorkerStatus::Offline
+    );
 }
 
 #[test]

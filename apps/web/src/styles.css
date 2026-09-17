@@ -10823,11 +10823,16 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
 }
 .ve-film {
+  flex: 0 1 auto;
+  max-height: min(42vh, 360px);
+  min-height: 0;
+  overflow-y: auto;
   width: 100%;
   box-sizing: border-box;
   border-bottom: 1px solid var(--border);
@@ -10941,10 +10946,23 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-dialogue { display: grid; grid-template-columns: minmax(90px, .35fr) 1fr; gap: 8px; }
 .ve-film-empty,
 .ve-film-provider-state { color: var(--muted); font-size: 12px; }
-.ve-film-operation { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-operation { display: grid; box-sizing: border-box; min-width: 0; max-width: 100%; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
 .ve-film-operation.is-failed,
 .ve-film-operation.is-canceled { border-left-color: var(--danger); }
+.ve-film-operation > span { min-width: 0; overflow-wrap: anywhere; }
 .ve-film-finding { margin: 2px 0; color: var(--danger); }
+.ve-film-planning-findings {
+  min-width: 0;
+  margin: 2px 0;
+  padding-left: 20px;
+  color: var(--danger);
+}
+.ve-film-planning-findings li {
+  min-width: 0;
+  margin: 3px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
 .ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-candidate article p { margin: 5px 0; }
@@ -11316,8 +11334,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-upper {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr) 350px;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 0 240px;
+  min-height: 240px;
 }
 
 /* Media bin */

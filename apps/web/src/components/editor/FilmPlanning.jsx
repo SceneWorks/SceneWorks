@@ -1,14 +1,23 @@
-import React, { lazy, Suspense } from "react";
+import React, { lazy, Suspense, useState } from "react";
+import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
-export function FilmPlanning({ draft, availability, operation, disabled, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
+export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, onRefreshAvailability, token }) {
+  const [maxRepairRounds, setMaxRepairRounds] = useState("2");
+  const [llmTimeoutSeconds, setLlmTimeoutSeconds] = useState("1200");
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
   const candidate = operation?.candidatePlan;
+  const installActive = installJob && !terminalStatuses.has(installJob.status);
   const videoModels = models.filter((model) => model.type === "video" && model.usable !== false);
+  const parsedMaxRepairRounds = Number(maxRepairRounds);
+  const repairRoundsValid = Number.isInteger(parsedMaxRepairRounds) && parsedMaxRepairRounds >= 0 && parsedMaxRepairRounds <= 5;
+  const parsedLlmTimeoutSeconds = Number(llmTimeoutSeconds);
+  const localTimeoutValid = Number.isSafeInteger(parsedLlmTimeoutSeconds) && parsedLlmTimeoutSeconds > 0;
+  const timeoutValid = planning.provider === "openai_compatible" || localTimeoutValid;
   function setProvider(provider) {
     onChange((next) => {
       next.planning = {
@@ -20,6 +29,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, models 
         sendReferencePixels: provider === "openai_compatible" ? Boolean(next.planning?.sendReferencePixels) : false,
       };
     });
+    if (provider === "native") void onRefreshAvailability?.();
   }
   return (
     <section aria-labelledby="film-planning-heading" className="ve-film-section">
@@ -52,20 +62,32 @@ export function FilmPlanning({ draft, availability, operation, disabled, models 
             </label>
           ) : null}
           <label className="ve-film-reference-check"><input checked={Boolean(planning.refinePrompts)} disabled={disabled || active} onChange={(event) => onChange((next) => { next.planning.refinePrompts = event.target.checked; })} type="checkbox" /> Run model-specific prompt refinement when compiling shots</label>
+          <label>Maximum planner repair rounds<input aria-label="Maximum planner repair rounds" disabled={disabled || active} max="5" min="0" onChange={(event) => setMaxRepairRounds(event.target.value)} step="1" type="number" value={maxRepairRounds} /></label>
+          {planning.provider !== "openai_compatible" ? <label>Local planner job timeout (seconds)<input aria-label="Local planner job timeout seconds" disabled={disabled || active} min="1" onChange={(event) => setLlmTimeoutSeconds(event.target.value)} step="1" type="number" value={llmTimeoutSeconds} /></label> : null}
         </div>
       </details>
       <p className="ve-film-provider-state">
         {planning.provider === "native"
-          ? (qwen?.available ? "Qwen3.6-27B is installed and available." : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
+          ? (availability == null
+            ? "Checking Qwen3.6-27B availability. No download starts automatically."
+            : qwen?.available
+              ? "Qwen3.6-27B is installed and available."
+              : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
           : planning.provider === "openai_compatible"
             ? "External planning runs only when explicitly selected. Configured credentials never change the local planner route."
           : "New drafts use the built-in prompt refiner. Qwen3.6-27B is not required."}
       </p>
-      {planning.provider === "native" && !qwen?.available ? (
-        <button disabled={disabled} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
+      {planning.provider === "native" && availability != null && !qwen?.available ? (
+        <button disabled={disabled || installActive} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
       ) : null}
+      {installJob ? <div aria-live="polite" className={`ve-film-operation is-${installJob.status}`}>
+        <strong>Qwen3.6-27B download: {installJob.status}</strong>
+        {Number.isFinite(installJob.progress) ? <progress aria-label="Qwen3.6-27B download progress" max="1" value={installJob.progress} /> : null}
+        {errorStatuses.has(installJob.status) && (installJob.message || installJob.error) ? <span>{installJob.message || installJob.error}</span> : null}
+        {installError ? <span role="alert">Status refresh failed: {installError}. Retrying.</span> : null}
+      </div> : null}
       <div className="ve-film-actions">
-        <button className="ve-generate" disabled={disabled || active || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={onStart} type="button">Generate candidate plan</button>
+        <button className="ve-generate" disabled={disabled || active || !repairRoundsValid || !timeoutValid || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={() => onStart(parsedMaxRepairRounds, planning.provider === "openai_compatible" ? undefined : parsedLlmTimeoutSeconds)} type="button">Generate candidate plan</button>
         {active ? <button disabled={operation.status === "canceling"} onClick={onCancel} type="button">Cancel planning</button> : null}
       </div>
       {operation ? (
@@ -74,8 +96,17 @@ export function FilmPlanning({ draft, availability, operation, disabled, models 
           <span>{operation.detail}</span>
           {Number.isFinite(operation.progress) ? <progress aria-label="Planning progress" max="1" value={operation.progress} /> : null}
           <span>Planner: {operation.plannerModel}; target video model: {operation.videoModelId}</span>
+          {Number.isInteger(operation.maxRepairRounds) ? <span>Maximum repair rounds: {operation.maxRepairRounds}</span> : null}
+          {operation.provider !== "openai_compatible" && Number.isInteger(operation.llmTimeoutSeconds) ? <span>Local planner job timeout: {operation.llmTimeoutSeconds} seconds per call</span> : null}
           {operation.executions?.length ? <span>Execution: {operation.executions.map((item) => `${item.backend ?? "native"} / ${item.model}`).join(", ")}</span> : null}
-          {operation.findings?.map((finding, index) => <p className="ve-film-finding" key={`${finding.field}-${index}`}>{finding.field}: {finding.message}</p>)}
+          {operation.findings?.length ? (
+            <ul aria-label="Planning findings" className="ve-film-planning-findings">
+              {operation.findings.map((finding, index) => <li key={`${finding.shotId ?? "plan"}-${finding.field}-${index}`}>
+                <strong>{finding.shotId ? `${finding.shotId} · ` : ""}{finding.field}:</strong>{" "}
+                <span>{finding.message}</span>
+              </li>)}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {candidate ? (

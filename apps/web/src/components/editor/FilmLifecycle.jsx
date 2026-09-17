@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../../api.js";
 
 function operationLabel(run) {
@@ -17,25 +17,30 @@ function runStatus(run) {
   return run.record.stop?.reason || run.record.outcome || run.record.state;
 }
 
-export function FilmLifecycle({ draftId, projectId, token, setNotice }) {
+export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId = "", token, setNotice }) {
   const [runs, setRuns] = useState([]);
   const [planning, setPlanning] = useState(null);
   const [pending, setPending] = useState("");
+  const refreshRequest = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!projectId || !draftId) return;
+    const requestId = ++refreshRequest.current;
     const [runResult, planningResult] = await Promise.allSettled([
       apiFetch(`/api/v1/projects/${projectId}/film-runs`, token),
       apiFetch(`/api/v1/projects/${projectId}/films/${draftId}/planning`, token),
     ]);
+    if (refreshRequest.current !== requestId) return;
     if (runResult.status === "fulfilled") {
       const listed = Array.isArray(runResult.value) ? runResult.value : [];
-      setRuns(listed.filter((run) => run.locator.draftId === draftId));
+      const scoped = listed.filter((run) => run.locator.draftId === draftId);
+      setRuns(scoped);
+      for (const [index, run] of scoped.entries()) onRunChange?.(run, { latest: index === 0, select: false });
     } else {
       setNotice(runResult.reason.message);
     }
     if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
-  }, [draftId, projectId, setNotice, token]);
+  }, [draftId, onRunChange, projectId, setNotice, token]);
 
   useEffect(() => {
     let canceled = false;
@@ -45,14 +50,18 @@ export function FilmLifecycle({ draftId, projectId, token, setNotice }) {
     }, 2000);
     return () => {
       canceled = true;
+      refreshRequest.current += 1;
       window.clearInterval(interval);
     };
   }, [refresh]);
 
   async function mutate(runId, action) {
+    // A list read started before this mutation cannot overwrite the accepted controller snapshot.
+    refreshRequest.current += 1;
     setPending(`${runId}:${action}`);
     try {
-      await apiFetch(`/api/v1/projects/${projectId}/film-runs/${runId}/${action}`, token, { method: "POST" });
+      const updated = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${runId}/${action}`, token, { method: "POST" });
+      if (updated?.locator?.draftId === draftId) onRunChange?.(updated, { select: true });
       setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : "Run resumed from its saved attempts.");
       await refresh();
     } catch (error) {
@@ -71,6 +80,21 @@ export function FilmLifecycle({ draftId, projectId, token, setNotice }) {
         <strong>Operations</strong>
         <span>Durable progress remains available after leaving this screen.</span>
       </div>
+      {runs.length > 1 ? (
+        <label>
+          Review run
+          <select
+            aria-label="Review run"
+            onChange={(event) => {
+              const selected = runs.find((run) => run.locator.id === event.target.value);
+              if (selected) onRunChange?.(selected, { select: true });
+            }}
+            value={runs.some((run) => run.locator.id === selectedRunId) ? selectedRunId : runs[0].locator.id}
+          >
+            {runs.map((run) => <option key={run.locator.id} value={run.locator.id}>{run.locator.id} · {runStatus(run)}</option>)}
+          </select>
+        </label>
+      ) : null}
       {planningActive ? (
         <div className="ve-film-lifecycle-row">
           <span><strong>Planning</strong> · {planning.stage}</span>

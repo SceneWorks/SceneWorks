@@ -1520,12 +1520,21 @@ pub fn build_planner_request(
     }
 
     out.push_str("\n# Approved reference roles\n\n");
-    out.push_str(
-        "These are the only reference roles that exist. Name them exactly; never invent one. \
-         Every shot lists in continuityRoles the roles it depicts, so the sequence stays anchored \
-         to these approved references rather than to whatever the previous shot happened to end \
-         on.\n\n",
-    );
+    let has_approved_roles = pack.references.iter().any(|entry| entry.approved);
+    if has_approved_roles {
+        out.push_str(
+            "These are the only reference roles that exist. Name them exactly; never invent one. \
+             Every shot lists in continuityRoles the approved roles it depicts, so the sequence \
+             stays anchored to these approved references rather than to whatever the previous \
+             shot happened to end on.\n\n",
+        );
+    } else {
+        out.push_str(
+            "This reference pack approves NO roles. Write continuityRoles: [] on EVERY shot. \
+             Characters, props and locations named only in the brief or prompt are prose, not \
+             role ids; never invent role ids for them.\n\n",
+        );
+    }
     if caps.offers_references() {
         out.push_str(
             "This model can also CONDITION on these references directly. Bind the ones a shot \
@@ -1548,7 +1557,7 @@ pub fn build_planner_request(
     out.push_str(&caps.as_prompt_section());
 
     out.push_str("\n\n# Output contract\n\n");
-    out.push_str(&plan_json_contract(caps));
+    out.push_str(&plan_json_contract(caps, pack));
     out
 }
 
@@ -1564,6 +1573,7 @@ pub fn build_planner_request(
 /// read before the contract.
 pub fn build_repair_request(
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     caps: &PlannerCapabilities,
     previous_output: &str,
     findings: &[PlanDiagnostic],
@@ -1584,7 +1594,9 @@ pub fn build_repair_request(
     }
     out.push_str("\n# Beats the corrected plan must still cover (in order)\n\n");
     out.push_str(
-        "Fixing a finding never removes a beat, shortens the film or drops a shot's subject.\n\n",
+        "Fixing a finding never removes a beat or drops a shot's subject. When a duration finding \
+         says the total is outside the brief's window, change legal shot durations or the number \
+         of shots while retaining every beat.\n\n",
     );
     for beat in &brief.required_beats {
         out.push_str(&format!("- {}: {}", beat.id, beat.summary.trim()));
@@ -1605,7 +1617,20 @@ pub fn build_repair_request(
         out.push_str(&format!("- {finding}\n"));
     }
     out.push_str("\n# Output contract\n\n");
-    out.push_str(&plan_json_contract(caps));
+    out.push_str(&plan_json_contract(caps, pack));
+    out.push_str("\n\n# Final repair checklist — apply every item now\n\n");
+    if !pack.references.iter().any(|entry| entry.approved) {
+        out.push_str(
+            "- This pack approves no roles: write continuityRoles: [] on EVERY shot and do not \
+             invent role ids from prose nouns.\n",
+        );
+    }
+    for finding in findings {
+        out.push_str(&format!("- {finding}\n"));
+    }
+    out.push_str(
+        "Return the whole corrected JSON object. Do not return the draft above unchanged.\n",
+    );
     out
 }
 
@@ -1622,6 +1647,15 @@ pub const EXAMPLE_DURATION_PLACEHOLDER: &str = "{{EXAMPLE_DURATION}}";
 /// default it must not show a `text_to_video` shot — that teaches the opposite of what the
 /// envelope's own mode guidance just said.
 pub const EXAMPLE_CONDITIONING_PLACEHOLDER: &str = "{{EXAMPLE_CONDITIONING}}";
+
+/// Where the output shape, standing rule and filled example describe continuity roles. These are
+/// filled from the approved pack rather than from the model envelope: a script-only film with no
+/// approved references must be shown empty arrays, not example role ids it cannot legally copy.
+pub const CONTINUITY_FIELD_PLACEHOLDER: &str = "{{CONTINUITY_FIELD}}";
+/// See [`CONTINUITY_FIELD_PLACEHOLDER`].
+pub const CONTINUITY_RULE_PLACEHOLDER: &str = "{{CONTINUITY_RULE}}";
+/// See [`CONTINUITY_FIELD_PLACEHOLDER`].
+pub const EXAMPLE_CONTINUITY_PLACEHOLDER: &str = "{{EXAMPLE_CONTINUITY}}";
 
 /// Where the per-envelope reference RULE goes: the standing instruction to bind approved roles on
 /// every shot, or nothing at all when no reference conditioning is on offer.
@@ -1649,7 +1683,7 @@ continuityRoles.";
 /// The contract with its worked example on THIS model's envelope: the first allowed duration when
 /// the model declares a menu, else a plain round number the "any positive value" rule admits, and
 /// the conditioning form the envelope makes the default.
-pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
+pub fn plan_json_contract(caps: &PlannerCapabilities, pack: &ReferencePack) -> String {
     let example = caps
         .durations
         .first()
@@ -1684,9 +1718,32 @@ pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
             ),
         )
     };
+    let (continuity_field, continuity_rule, example_continuity) =
+        if pack.references.iter().any(|entry| entry.approved) {
+            (
+                "[\"<the approved roles this shot depicts>\"]",
+                "- Every shot needs at least one approved role in continuityRoles, and a shot \
+                 lists every approved role that is on screen in it. Start from the array its beat \
+                 says it MUST show and copy that array whole — it is checked role by role after \
+                 you answer, and a beat that names two props and no location means exactly that, \
+                 not one character, one prop and one place.",
+                "[\"mechanic\", \"customer\", \"brass_key\"]",
+            )
+        } else {
+            (
+                "[]",
+                "- This reference pack approves NO roles. Write continuityRoles: [] on EVERY \
+                 shot. Characters, props and locations named only in the brief or prompt are \
+                 prose, not role ids; never invent role ids for them.",
+                "[]",
+            )
+        };
     PLAN_JSON_CONTRACT
         .replace(EXAMPLE_DURATION_PLACEHOLDER, &example)
         .replace(EXAMPLE_CONDITIONING_PLACEHOLDER, conditioning)
+        .replace(CONTINUITY_FIELD_PLACEHOLDER, continuity_field)
+        .replace(CONTINUITY_RULE_PLACEHOLDER, continuity_rule)
+        .replace(EXAMPLE_CONTINUITY_PLACEHOLDER, example_continuity)
         .replace(REFERENCE_RULE_PLACEHOLDER, reference_rule)
         .replace(LORA_FIELD_PLACEHOLDER, &lora_field)
         .replace(LORA_RULE_PLACEHOLDER, &lora_rule)
@@ -1713,7 +1770,7 @@ Answer with ONE JSON object and nothing else — no prose, no markdown fence, no
       \"dialogue\": \"<a spoken line, or omit the field>\",
       \"conditioning\": { \"mode\": \"<one of the allowed modes>\" },
       \"seed\": <an integer, optional>,
-      \"continuityRoles\": [\"<the approved roles this shot depicts>\"]
+      \"continuityRoles\": {{CONTINUITY_FIELD}}
     }
   ]
 }
@@ -1742,10 +1799,7 @@ conditioning tasks.
 - first_last_frame needs TWO DIFFERENT roles. The same role in both slots is refused.
 - chainFromShotId names the shot IMMEDIATELY BEFORE this one, or is omitted. It is never a \
 substitute for continuityRoles: a chained shot still names the approved roles it depicts.
-- Every shot needs at least one approved role in continuityRoles, and a shot lists every approved \
-role that is on screen in it. Start from the array its beat says it MUST show and copy that array \
-whole — it is checked role by role after you answer, and a beat that names two props and no \
-location means exactly that, not one character, one prop and one place.{{REFERENCE_RULE}}
+{{CONTINUITY_RULE}}{{REFERENCE_RULE}}
 
 One filled shot, for shape only. It is from a DIFFERENT film: copy the spelling and the level of \
 detail, never the content.
@@ -1765,7 +1819,7 @@ palm; the customer waits opposite with both hands at their sides.\",
 mechanic's hand is withdrawn.\",
   \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
   \"conditioning\": {{EXAMPLE_CONDITIONING}},
-  \"continuityRoles\": [\"mechanic\", \"customer\", \"brass_key\"]
+  \"continuityRoles\": {{EXAMPLE_CONTINUITY}}
 }";
 
 #[cfg(test)]
@@ -2002,7 +2056,7 @@ mod tests {
                 && section.contains("ON BY DEFAULT"),
             "{section}"
         );
-        let contract = plan_json_contract(&caps);
+        let contract = plan_json_contract(&caps, &pack());
         assert!(
             contract.contains(
                 "\"loras\": [\"minimax_h3_turbo_4step_v01\", \"minimax_h3_ref2v_turbo_4step\"]"
@@ -2031,9 +2085,9 @@ mod tests {
             bare.as_prompt_section()
         );
         assert!(
-            !plan_json_contract(&bare).contains("\"loras\""),
+            !plan_json_contract(&bare, &pack()).contains("\"loras\""),
             "{}",
-            plan_json_contract(&bare)
+            plan_json_contract(&bare, &pack())
         );
     }
 
@@ -2909,7 +2963,7 @@ mod tests {
         let with_references = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
             .with_reference_partition(&reference_entry())
             .narrowed_to_pack(&pack());
-        let contract = plan_json_contract(&with_references);
+        let contract = plan_json_contract(&with_references, &pack());
         assert!(
             contract.contains(
                 "\"conditioning\": { \"mode\": \"reference_to_video\", \"referenceRoles\": \
@@ -2923,7 +2977,7 @@ mod tests {
         );
 
         let without = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
-        let contract = plan_json_contract(&without);
+        let contract = plan_json_contract(&without, &pack());
         assert!(
             contract.contains("\"conditioning\": { \"mode\": \"text_to_video\" },"),
             "{contract}"
@@ -2937,11 +2991,14 @@ mod tests {
         for caps in [&with_references, &without] {
             for text in [
                 build_planner_request(&brief, &pack(), caps),
-                build_repair_request(&brief, caps, "{}", &[], 1, 1),
+                build_repair_request(&brief, &pack(), caps, "{}", &[], 1, 1),
             ] {
                 for placeholder in [
                     EXAMPLE_DURATION_PLACEHOLDER,
                     EXAMPLE_CONDITIONING_PLACEHOLDER,
+                    CONTINUITY_FIELD_PLACEHOLDER,
+                    CONTINUITY_RULE_PLACEHOLDER,
+                    EXAMPLE_CONTINUITY_PLACEHOLDER,
                     REFERENCE_RULE_PLACEHOLDER,
                 ] {
                     assert!(
@@ -2950,6 +3007,93 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A script-only film has prose nouns but no approved role ids. Its initial prompt and every
+    /// repair round must therefore model empty continuity arrays all the way through the shape,
+    /// standing rule and filled example. The repair's actionable findings are repeated after that
+    /// long shared contract so a model cannot simply echo the refused draft again.
+    #[test]
+    fn an_empty_pack_contract_and_repair_never_teach_invented_continuity_roles() {
+        let brief = brief();
+        let pack = pack_without_references();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+        let contract = plan_json_contract(&caps, &pack);
+
+        assert!(
+            request.contains(
+                "This reference pack approves NO roles. Write continuityRoles: [] on EVERY shot."
+            ),
+            "{request}"
+        );
+        assert_eq!(
+            contract.matches("\"continuityRoles\": []").count(),
+            2,
+            "the output shape and filled example both model the legal empty array: {contract}"
+        );
+        assert!(
+            !contract.contains("\"continuityRoles\": [\"mechanic\"")
+                && !contract.contains("Every shot needs at least one approved role"),
+            "the different-film example must not invent role ids for this pack: {contract}"
+        );
+
+        let findings = vec![
+            PlanDiagnostic::shot(
+                "SH010",
+                "continuityRoles",
+                "role \"courier\" is not approved by this film's reference pack",
+            ),
+            PlanDiagnostic::plan(
+                "shots.duration",
+                "total duration 13.1667s is above the brief maximum 12.91675s",
+            ),
+        ];
+        let repair = build_repair_request(&brief, &pack, &caps, "{\"shots\": []}", &findings, 1, 2);
+        assert!(
+            !repair.contains("shortens the film"),
+            "the repair cannot forbid the duration correction it requests: {repair}"
+        );
+        assert!(
+            repair.contains(
+                "change legal shot durations or the number of shots while retaining every beat"
+            ),
+            "{repair}"
+        );
+        let contract_position = repair.find("# Output contract").expect("shared contract");
+        let checklist_position = repair
+            .rfind("# Final repair checklist")
+            .expect("final checklist");
+        assert!(contract_position < checklist_position, "{repair}");
+        for finding in &findings {
+            let finding_position = repair
+                .rfind(&finding.to_string())
+                .expect("finding is repeated in the final checklist");
+            assert!(checklist_position < finding_position, "{repair}");
+        }
+        assert!(
+            repair.trim_end().ends_with(
+                "Return the whole corrected JSON object. Do not return the draft above unchanged."
+            ),
+            "the exact repair checklist must be the model's final instruction: {repair}"
+        );
+        for placeholder in [
+            EXAMPLE_DURATION_PLACEHOLDER,
+            EXAMPLE_CONDITIONING_PLACEHOLDER,
+            CONTINUITY_FIELD_PLACEHOLDER,
+            CONTINUITY_RULE_PLACEHOLDER,
+            EXAMPLE_CONTINUITY_PLACEHOLDER,
+            REFERENCE_RULE_PLACEHOLDER,
+            LORA_FIELD_PLACEHOLDER,
+            LORA_RULE_PLACEHOLDER,
+        ] {
+            assert!(
+                !repair.contains(placeholder),
+                "{placeholder} survived: {repair}"
+            );
         }
     }
 
@@ -3283,7 +3427,7 @@ mod tests {
             "{envelope}"
         );
         let request = build_planner_request(&brief, &pack(), &caps);
-        let repair = build_repair_request(&brief, &caps, "{}", &[], 1, 2);
+        let repair = build_repair_request(&brief, &pack(), &caps, "{}", &[], 1, 2);
         for (name, text) in [("request", &request), ("repair", &repair)] {
             assert!(
                 text.contains(
@@ -3296,9 +3440,9 @@ mod tests {
         // An envelope with no reference conditioning is told nothing about binding at all.
         let bare = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         assert!(
-            !plan_json_contract(&bare).contains("NEVER listed in referenceRoles"),
+            !plan_json_contract(&bare, &pack()).contains("NEVER listed in referenceRoles"),
             "{}",
-            plan_json_contract(&bare)
+            plan_json_contract(&bare, &pack())
         );
     }
 
@@ -3328,7 +3472,7 @@ mod tests {
             ),
             "{request}"
         );
-        let repair = build_repair_request(&brief, &with_references, "{}", &[], 1, 2);
+        let repair = build_repair_request(&brief, &pack(), &with_references, "{}", &[], 1, 2);
         assert!(
             repair.contains(
                 "[MUST show — write [\"courier\", \"red_parcel\", \"workbench_table\"] into the \
@@ -3361,7 +3505,7 @@ mod tests {
         }
 
         let turbo = with_references.with_installed_turbo_loras(&route_ordered_turbo_ids());
-        let contract = plan_json_contract(&turbo);
+        let contract = plan_json_contract(&turbo, &pack());
         let lora_rule = contract
             .find("- loras is the top-level list")
             .expect("the accelerator rule is in the contract");
@@ -3427,7 +3571,10 @@ mod tests {
             "an unapproved role must never be offered to the planner"
         );
         assert!(request.contains("576x320"), "{request}");
-        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+        assert!(
+            request.contains(&plan_json_contract(&caps, &pack)),
+            "{request}"
+        );
         assert!(
             !request.contains(EXAMPLE_DURATION_PLACEHOLDER),
             "the contract template must never reach the planner unfilled: {request}"
@@ -3443,14 +3590,18 @@ mod tests {
             PlanDiagnostic::plan("shots", "required beat \"delivery\" is covered by no shot"),
             PlanDiagnostic::shot("SH010", "targetDurationSeconds", "6s is not on the menu"),
         ];
-        let request = build_repair_request(&brief, &caps, "{\"shots\": []}", &findings, 1, 2);
+        let request =
+            build_repair_request(&brief, &pack(), &caps, "{\"shots\": []}", &findings, 1, 2);
         assert!(request.contains("Repair round 1 of 2"), "{request}");
         for finding in &findings {
             assert!(request.contains(&finding.to_string()), "{request}");
         }
         assert!(request.contains("arrival:"), "{request}");
         assert!(request.contains("{\"shots\": []}"), "{request}");
-        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+        assert!(
+            request.contains(&plan_json_contract(&caps, &pack())),
+            "{request}"
+        );
     }
 
     /// AT4 (sc-22715): the contract's ONE worked example copies a duration off the envelope it is
@@ -3462,9 +3613,9 @@ mod tests {
         let brief = brief();
         let h3 = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         assert!(
-            plan_json_contract(&h3).contains("\"targetDurationSeconds\": 5.1667,"),
+            plan_json_contract(&h3, &pack()).contains("\"targetDurationSeconds\": 5.1667,"),
             "{}",
-            plan_json_contract(&h3)
+            plan_json_contract(&h3, &pack())
         );
 
         // An LTX-2.5-shaped envelope: whole-second clips, none of them 5.1667.
@@ -3472,7 +3623,7 @@ mod tests {
         entry["limits"]["durations"] = json!([4, 6, 8, 10, 12, 15]);
         entry["defaults"]["duration"] = json!(6);
         let ltx = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
-        let contract = plan_json_contract(&ltx);
+        let contract = plan_json_contract(&ltx, &pack());
         assert!(
             contract.contains("\"targetDurationSeconds\": 4,"),
             "the example must be the first allowed duration: {contract}"
@@ -3487,16 +3638,16 @@ mod tests {
             "{request}"
         );
         assert!(!request.contains("5.1667"), "{request}");
-        let repair = build_repair_request(&brief, &ltx, "{}", &[], 1, 1);
+        let repair = build_repair_request(&brief, &pack(), &ltx, "{}", &[], 1, 1);
         assert!(repair.contains("\"targetDurationSeconds\": 4,"), "{repair}");
 
         // No declared menu at all: a plain round number the "any positive value" rule admits.
         entry["limits"]["durations"] = json!([]);
         let open = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
         assert!(
-            plan_json_contract(&open).contains("\"targetDurationSeconds\": 6,"),
+            plan_json_contract(&open, &pack()).contains("\"targetDurationSeconds\": 6,"),
             "{}",
-            plan_json_contract(&open)
+            plan_json_contract(&open, &pack())
         );
     }
 

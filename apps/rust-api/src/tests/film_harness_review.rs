@@ -183,8 +183,12 @@ fn observed_for(record: &RunRecord, out_dir: &Path, shot_id: &str) -> ObservedSt
 fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, String) {
     let project_id = record.project_id.clone().expect("run has project");
     let project_path = PathBuf::from(record.project_path.as_ref().expect("run has project path"));
-    let run_id = record.run_id.clone();
-    let relative = format!("films/runs/{run_id}");
+    let locator_id = format!("filmrun_route_{}", record.run_id.trim_start_matches("run_"));
+    assert_ne!(
+        locator_id, record.run_id,
+        "route and record identities differ"
+    );
+    let relative = format!("films/runs/{locator_id}");
     let run_dir = project_path.join(&relative);
     std::fs::create_dir_all(run_dir.parent().expect("run parent")).expect("run parent creates");
     std::fs::rename(harness.out_dir(), &run_dir).expect("completed run moves into project");
@@ -193,7 +197,7 @@ fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, St
         run_dir.join("locator.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "schemaVersion": 1,
-            "id": run_id,
+            "id": locator_id,
             "projectId": project_id,
             "draftId": "film_route_fixture",
             "draftRevision": 1,
@@ -204,7 +208,7 @@ fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, St
         .expect("locator serializes"),
     )
     .expect("locator writes");
-    (project_id, run_id)
+    (project_id, locator_id)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1134,6 +1138,43 @@ fn a_review_plan_that_declares_more_questions_than_it_budgets_for_is_refused_up_
 // The human loop
 // ---------------------------------------------------------------------------------------------
 
+fn review_route_settled(view: &Value, expected_observations: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["observations"]
+            .as_array()
+            .is_some_and(|observations| observations.len() == expected_observations)
+}
+
+fn repair_route_settled(view: &Value, expected_attempts: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["run"]["record"]["shots"][0]["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts.len() == expected_attempts)
+}
+
+#[test]
+fn an_inactive_controller_is_not_settled_until_its_durable_result_is_visible() {
+    let mut view = serde_json::json!({
+        "run": {
+            "controllerActive": false,
+            "record": { "shots": [{ "attempts": [{}] }] }
+        },
+        "observations": []
+    });
+
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["observations"] = serde_json::json!([{}]);
+    assert!(review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["run"]["record"]["shots"][0]["attempts"] = serde_json::json!([{}, {}]);
+    assert!(repair_route_settled(&view, 2));
+
+    view["run"]["controllerActive"] = serde_json::json!(true);
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+}
+
 #[tokio::test]
 async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without_auto_acceptance() {
     let _env = isolate_hf_cache();
@@ -1196,17 +1237,23 @@ async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without
     assert_eq!(status, StatusCode::ACCEPTED, "{reviewing}");
     assert!(reviewing["actionDisabledReason"].is_string(), "{reviewing}");
     let mut reviewed = Value::Null;
+    let mut last_review = Value::Null;
     for _ in 0..300 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (status, current) =
             request(harness.app.clone(), "GET", &review_path, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{current}");
-        if current["run"]["controllerActive"] == serde_json::json!(false) {
+        if review_route_settled(&current, 1) {
             reviewed = current;
             break;
         }
+        last_review = current;
     }
-    assert_ne!(reviewed, Value::Null, "bounded review did not settle");
+    assert_ne!(
+        reviewed,
+        Value::Null,
+        "bounded review did not settle: {last_review}"
+    );
     assert_eq!(
         reviewed["observations"]
             .as_array()
@@ -1231,17 +1278,23 @@ async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without
     assert!(started["actionDisabledReason"].is_string(), "{started}");
 
     let mut settled = Value::Null;
+    let mut last_repair = Value::Null;
     for _ in 0..80 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (status, current) =
             request(harness.app.clone(), "GET", &review_path, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{current}");
-        if current["run"]["controllerActive"] == serde_json::json!(false) {
+        if repair_route_settled(&current, original_attempts + 1) {
             settled = current;
             break;
         }
+        last_repair = current;
     }
-    assert_ne!(settled, Value::Null, "bounded repair did not settle");
+    assert_ne!(
+        settled,
+        Value::Null,
+        "bounded repair did not settle: {last_repair}"
+    );
     let shot = &settled["run"]["record"]["shots"][0];
     assert_eq!(
         shot["attempts"].as_array().expect("attempt history").len(),

@@ -3,6 +3,7 @@
 //! Same fixtures and fake worker as `film_harness.rs`; the real routes in-process throughout.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
@@ -15,8 +16,8 @@ use crate::film_harness::{
 use crate::film_planner;
 use crate::tests::film_harness::{
     close, draft_text, fast, findings_of, full_draft, harness_record, items_of, planner_llm,
-    planner_options, saved_timeline, set_plan_replies, summary, Harness, VideoBehavior,
-    BRIEF_FIXTURE, FAKE_REFINE_PEAK_BYTES, FIXTURE_DIR,
+    planner_options, saved_timeline, set_plan_replies, summary, Harness, RunningHook,
+    VideoBehavior, BRIEF_FIXTURE, FAKE_REFINE_PEAK_BYTES, FIXTURE_DIR,
 };
 use crate::tests::support::request;
 
@@ -2388,58 +2389,53 @@ async fn incremental_film_delivery_preserves_concurrent_cut_and_tombstones() {
         Some(&["SH010", "SH020"]),
     );
     options.export = false;
-    let observer = async {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let second_started =
-                    harness
-                        .script
-                        .lock()
-                        .claimed
-                        .iter()
-                        .any(|(kind, _, payload)| {
-                            kind == "video_generate"
-                                && payload["advanced"]["filmHarness"]["shotId"] == "SH020"
-                        });
-                if second_started {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("second shot starts");
-        let record = harness.run_record();
-        let project_id = record["projectId"].as_str().unwrap();
-        let timeline_id = record["timeline"]["timelineId"]
-            .as_str()
-            .expect("first shot delivered before second starts");
-        let original = saved_timeline(&harness.app, project_id, timeline_id).await;
-        assert_eq!(picture_order(&original), vec!["SH010"]);
-        let mut deleted = original.clone();
-        deleted["tracks"][0]["items"] = json!([]);
-        deleted["tracks"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|t| t["kind"] == "audio")
-            .unwrap()["gain"] = json!(0.35);
-        let (status, saved) = request(
-            harness.app.clone(),
-            "PUT",
-            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
-            json!({"timeline":deleted,"expectedRevision":original["revision"]}),
-        )
-        .await;
-        assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
-        assert!(
-            !saved["filmAssembly"]["runs"][record["runId"].as_str().unwrap()]["deletedShots"]
-                ["SH010"]
-                .is_null()
-        );
-    };
-    let (result, ()) = tokio::join!(film_harness::run(&harness.transport, &options), observer);
-    let record = result.expect("incremental run completes");
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::Notify(second_started.clone()),
+    ));
+    // Register the waiter before the run can reach the hook, so the lifecycle edge cannot be lost.
+    // Keep polling the controller until that edge; if it exits first, report its real result rather
+    // than timing out while polling shared fixture state. Once the worker reports SH020 running,
+    // leave the controller future unpolled while the editor's concurrent save lands.
+    let second_started = second_started.notified();
+    let run = film_harness::run(&harness.transport, &options);
+    tokio::pin!(second_started);
+    tokio::pin!(run);
+    tokio::select! {
+        () = &mut second_started => {},
+        result = &mut run => panic!("incremental run ended before SH020 started: {result:?}"),
+    }
+
+    let record = harness.run_record();
+    let project_id = record["projectId"].as_str().unwrap();
+    let timeline_id = record["timeline"]["timelineId"]
+        .as_str()
+        .expect("first shot delivered before second starts");
+    let original = saved_timeline(&harness.app, project_id, timeline_id).await;
+    assert_eq!(picture_order(&original), vec!["SH010"]);
+    let mut deleted = original.clone();
+    deleted["tracks"][0]["items"] = json!([]);
+    deleted["tracks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["kind"] == "audio")
+        .unwrap()["gain"] = json!(0.35);
+    let (status, saved) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({"timeline":deleted,"expectedRevision":original["revision"]}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+    assert!(
+        !saved["filmAssembly"]["runs"][record["runId"].as_str().unwrap()]["deletedShots"]["SH010"]
+            .is_null()
+    );
+
+    let record = run.await.expect("incremental run completes");
     let project_id = record.project_id.as_deref().unwrap();
     let timeline_id = &record.timeline.as_ref().unwrap().timeline_id;
     let saved = saved_timeline(&harness.app, project_id, timeline_id).await;

@@ -113,6 +113,7 @@ import {
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
   reconcileSelectedAssetId,
+  selectEditorMediaAssets,
 } from "./appStateHelpers.js";
 import {
   hydrationDomainsForRoute,
@@ -1532,10 +1533,7 @@ export function App() {
     const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
     return ["auto", ...Array.from(new Set(ids))];
   }, [visibleWorkers]);
-  const mediaAssets = useMemo(
-    () => assets.filter((asset) => ["image", "video", "upload", "frame", "render", "document"].includes(asset.type)),
-    [assets],
-  );
+  const mediaAssets = useMemo(() => selectEditorMediaAssets(assets), [assets]);
 
   useEffect(() => {
     activeViewRef.current = activeView;

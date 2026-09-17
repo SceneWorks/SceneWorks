@@ -1,6 +1,6 @@
 use super::*;
 
-use sceneworks_core::film_plan::RunState;
+use sceneworks_core::film_plan::{RunRecord, RunState};
 use sceneworks_core::film_workspace::FilmRunLocator;
 
 use crate::film_harness::{ControllerLease, HttpTransport, ResumeOptions};
@@ -47,8 +47,12 @@ pub(crate) async fn resume_film_run(
         move |store| store.film_run_files(&project_id, &run_id)
     })
     .await?;
-    let lease = ControllerLease::acquire(&files.directory, format!("api-resume:{run_id}"))
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let lease = ControllerLease::acquire_for_api(
+        &files.directory,
+        format!("api-resume:{run_id}"),
+        state.film_controller_shutdown.clone(),
+    )
+    .map_err(|error| ApiError::conflict(error.to_string()))?;
     view.controller_active = true;
     view.controller_owner = Some(format!("api-resume:{run_id}"));
     view.controller_interrupted = false;
@@ -95,6 +99,20 @@ fn spawn_resume(
     directory: std::path::PathBuf,
     lease: ControllerLease,
 ) {
+    spawn_resume_with_install_requirement(state, project_id, run_id, directory, lease, true, None);
+}
+
+type StartupResumeResults = tokio::sync::mpsc::UnboundedSender<Result<RunRecord, String>>;
+
+fn spawn_resume_with_install_requirement(
+    state: AppState,
+    project_id: String,
+    run_id: String,
+    directory: std::path::PathBuf,
+    lease: ControllerLease,
+    require_installed: bool,
+    completion: Option<StartupResumeResults>,
+) {
     tokio::spawn(async move {
         let transport = match HttpTransport::new(
             &state.settings.mcp_api_url,
@@ -103,24 +121,64 @@ fn spawn_resume(
             Ok(transport) => transport,
             Err(error) => {
                 tracing::error!(project_id, run_id, %error, "film resume transport failed");
+                if let Some(completion) = completion {
+                    let _ = completion.send(Err(error.to_string()));
+                }
                 return;
             }
         };
         let mut options = ResumeOptions::new(directory);
         options.poll_interval = Duration::from_secs(2);
         options.export = false;
-        if let Err(error) =
-            crate::film_harness::resume_with_lease(&transport, &options, lease).await
-        {
+        options.require_installed = require_installed;
+        let result = crate::film_harness::resume_with_lease(&transport, &options, lease)
+            .await
+            .map_err(|error| error.to_string());
+        if let Err(error) = &result {
             tracing::error!(project_id, run_id, %error, "film resume stopped");
+        }
+        if let Some(completion) = completion {
+            let _ = completion.send(result);
         }
     });
 }
 
-/// Adopt only records that say a controller was active when the process stopped. Resumable
-/// operator stops remain idle until an explicit resume. Advisory leases make this safe after a
-/// crash and refuse adoption when another API or CLI process still owns the run.
+/// Adopt only records whose unlocked lease still names the controller that the process stopped.
+/// A cleanly released failed run and a resumable operator stop remain idle until an explicit
+/// resume. Advisory leases make takeover atomic after a crash and refuse adoption when another
+/// API or CLI process still owns the run.
 pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task::JoinHandle<()> {
+    spawn_film_startup_reconciliation_with_install_requirement(state, true, None)
+}
+
+#[cfg(test)]
+pub(crate) struct FilmStartupReconciliationTestHandle {
+    pub(crate) scan: tokio::task::JoinHandle<()>,
+    pub(crate) controller_results: tokio::sync::mpsc::UnboundedReceiver<Result<RunRecord, String>>,
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_film_startup_reconciliation_for_fake_worker(
+    state: AppState,
+) -> FilmStartupReconciliationTestHandle {
+    // The fake worker deliberately owns no multi-gigabyte model installation. Production startup
+    // always enters through `spawn_film_startup_reconciliation` above and keeps this guard on.
+    let (completion, controller_results) = tokio::sync::mpsc::unbounded_channel();
+    FilmStartupReconciliationTestHandle {
+        scan: spawn_film_startup_reconciliation_with_install_requirement(
+            state,
+            false,
+            Some(completion),
+        ),
+        controller_results,
+    }
+}
+
+fn spawn_film_startup_reconciliation_with_install_requirement(
+    state: AppState,
+    require_installed: bool,
+    completion: Option<StartupResumeResults>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let projects = match project_call(state.clone(), |store| store.list_projects()).await {
             Ok(projects) => projects,
@@ -176,23 +234,27 @@ pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task:
                 if record.state != RunState::Running {
                     continue;
                 }
-                let lease = match ControllerLease::acquire(
+                let lease = match ControllerLease::acquire_interrupted_for_api(
                     &files.directory,
                     format!("startup-adopt:{run_id}"),
+                    state.film_controller_shutdown.clone(),
                 ) {
-                    Ok(lease) => lease,
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => continue,
                     Err(crate::film_harness::HarnessError::Refused(_)) => continue,
                     Err(error) => {
                         tracing::warn!(project_id, run_id, %error, "film startup reconciliation lease failed");
                         continue;
                     }
                 };
-                spawn_resume(
+                spawn_resume_with_install_requirement(
                     state.clone(),
                     project_id.clone(),
                     run_id,
                     files.directory,
                     lease,
+                    require_installed,
+                    completion.clone(),
                 );
             }
         }

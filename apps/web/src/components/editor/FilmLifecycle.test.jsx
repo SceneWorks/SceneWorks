@@ -23,16 +23,43 @@ afterEach(() => {
   container.remove();
 });
 
-async function renderLifecycle(setNotice = vi.fn()) {
+async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn(), props = {}) {
   root = createRoot(container);
   await act(async () => {
-    root.render(<FilmLifecycle draftId="film_1" projectId="project_1" setNotice={setNotice} token="token" />);
+    root.render(<FilmLifecycle draftId="film_1" onRunChange={onRunChange} projectId="project_1" setNotice={setNotice} token="token" {...props} />);
     await Promise.resolve();
   });
-  return setNotice;
+  return { onRunChange, setNotice };
 }
 
 describe("FilmLifecycle", () => {
+  it("lists newest and older runs and selects either durable record explicitly", async () => {
+    const newest = {
+      locator: { id: "filmrun_new", draftId: "film_1" }, controllerActive: false,
+      record: { state: "finished", outcome: "completed" },
+    };
+    const older = {
+      locator: { id: "filmrun_old", draftId: "film_1" }, controllerActive: false,
+      record: { state: "finished", outcome: "failed" },
+    };
+    apiFetchMock.mockImplementation((url) => url.endsWith("/planning")
+      ? Promise.reject(new Error("no planning operation"))
+      : Promise.resolve([newest, older]));
+    const { onRunChange } = await renderLifecycle(vi.fn(), vi.fn(), { selectedRunId: "filmrun_new" });
+
+    expect(onRunChange).toHaveBeenCalledWith(newest, { latest: true, select: false });
+    expect(onRunChange).toHaveBeenCalledWith(older, { latest: false, select: false });
+    const selector = container.querySelector('select[aria-label="Review run"]');
+    expect([...selector.options].map((option) => option.value)).toEqual(["filmrun_new", "filmrun_old"]);
+    expect(selector.value).toBe("filmrun_new");
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(selector, "filmrun_old");
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onRunChange).toHaveBeenLastCalledWith(older, { select: true });
+  });
+
   it("rediscovers running planning and render operations and requests bounded cancellation", async () => {
     apiFetchMock.mockImplementation((url, _token, options) => {
       if (url.endsWith("/planning")) return Promise.resolve({ status: "running", stage: "generating", progress: 0.4 });
@@ -42,7 +69,7 @@ describe("FilmLifecycle", () => {
         controllerOwner: "api:filmrun_1", record: { state: "running", outcome: "failed" },
       }]);
     });
-    const setNotice = await renderLifecycle();
+    const { setNotice } = await renderLifecycle();
 
     expect(container.textContent).toContain("Planning · generating");
     expect(container.textContent).toContain("Render · running");
@@ -57,15 +84,19 @@ describe("FilmLifecycle", () => {
   });
 
   it("shows actionable durable stops and resumes the same run record", async () => {
+    const resumed = {
+      locator: { id: "filmrun_2", draftId: "film_1" }, controllerActive: true,
+      controllerOwner: "api-resume:filmrun_2", record: { state: "running", outcome: "failed" },
+    };
     apiFetchMock.mockImplementation((url, _token, options) => {
       if (url.endsWith("/planning")) return Promise.reject(new Error("no planning operation"));
-      if (url.endsWith("/resume") && options?.method === "POST") return Promise.resolve({});
+      if (url.endsWith("/resume") && options?.method === "POST") return Promise.resolve(resumed);
       return Promise.resolve([{
         locator: { id: "filmrun_2", draftId: "film_1" }, controllerActive: false,
         record: { state: "finished", outcome: "failed", stop: { reason: "interrupted", resumable: true, detail: "Worker stopped; start a video worker and resume." } },
       }]);
     });
-    await renderLifecycle();
+    const { onRunChange } = await renderLifecycle();
 
     expect(container.textContent).toContain("Worker stopped; start a video worker and resume.");
     const resume = [...container.querySelectorAll("button")].find((button) => button.textContent === "Resume");
@@ -75,5 +106,6 @@ describe("FilmLifecycle", () => {
       "token",
       { method: "POST" },
     );
+    expect(onRunChange).toHaveBeenCalledWith(resumed, { select: true });
   });
 });

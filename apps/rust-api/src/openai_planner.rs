@@ -20,6 +20,7 @@ const MAX_REFERENCE_IMAGES: usize = 8;
 const MAX_REFERENCE_BYTES: u64 = 20 * 1024 * 1024;
 
 type CancelRequested = Arc<dyn Fn() -> bool + Send + Sync>;
+type RequestStarted = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) struct OpenAiPlannerOptions {
     pub model: String,
@@ -37,6 +38,7 @@ pub(crate) struct OpenAiPlannerLlm {
     source_script: String,
     send_reference_pixels: bool,
     cancel_requested: CancelRequested,
+    request_started: Option<RequestStarted>,
 }
 
 impl OpenAiPlannerLlm {
@@ -67,7 +69,13 @@ impl OpenAiPlannerLlm {
             source_script: options.source_script,
             send_reference_pixels: options.send_reference_pixels,
             cancel_requested,
+            request_started: None,
         })
+    }
+
+    pub(crate) fn on_request_started(mut self, callback: RequestStarted) -> Self {
+        self.request_started = Some(callback);
+        self
     }
 }
 
@@ -112,6 +120,9 @@ impl PlannerLlm for OpenAiPlannerLlm {
             if let Some(token) = self.credential.as_deref() {
                 builder = builder.bearer_auth(token);
             }
+            if let Some(callback) = &self.request_started {
+                callback();
+            }
             let mut pending = Box::pin(builder.json(&body).send());
             let response = loop {
                 tokio::select! {
@@ -147,11 +158,6 @@ impl PlannerLlm for OpenAiPlannerLlm {
                     "The external planner response has no choices[0].message".to_owned(),
                 )
             })?;
-            let text = message_text(message).ok_or_else(|| {
-                HarnessError::Transport(
-                    "The external planner response has no textual plan content".to_owned(),
-                )
-            })?;
             let thinking = message
                 .get("reasoning_content")
                 .or_else(|| message.get("thinking"))
@@ -159,21 +165,41 @@ impl PlannerLlm for OpenAiPlannerLlm {
                 .map(str::to_owned)
                 .filter(|value| !value.trim().is_empty());
             let usage = usage_record(value.get("usage"));
+            let duration_seconds = started.elapsed().as_secs_f64();
+            let mut execution = PlannerExecutionRecord {
+                job_id: None,
+                provider: "openai_compatible".to_owned(),
+                model: self.model.clone(),
+                backend: Some(self.connection.id.clone()),
+                target_video_model_id: request.model_id.unwrap_or_default(),
+                thinking_mode: self.thinking_mode.clone(),
+                max_output_tokens: Some(self.connection.max_output_tokens),
+                reference_pixels_sent: Some(
+                    self.send_reference_pixels && !request.reference_images.is_empty(),
+                ),
+                duration_seconds: Some(duration_seconds),
+                finish_reason: sanitized_finish_reason(value.pointer("/choices/0/finish_reason")),
+                failure_code: None,
+                thinking: thinking.clone(),
+                usage,
+            };
+            let text = match message_text(message) {
+                Some(text) => text,
+                None => {
+                    execution.failure_code = Some("no_textual_plan_content".to_owned());
+                    return Err(HarnessError::PlannerResponse {
+                        detail: "The external planner response has no textual plan content"
+                            .to_owned(),
+                        execution: Box::new(execution),
+                    });
+                }
+            };
             Ok(LlmReply {
                 text,
                 thinking: thinking.clone(),
                 job_id: None,
-                execution: Some(PlannerExecutionRecord {
-                    job_id: None,
-                    provider: "openai_compatible".to_owned(),
-                    model: self.model.clone(),
-                    backend: Some(self.connection.id.clone()),
-                    target_video_model_id: request.model_id.unwrap_or_default(),
-                    thinking_mode: self.thinking_mode.clone(),
-                    thinking,
-                    usage,
-                }),
-                elapsed_seconds: started.elapsed().as_secs_f64(),
+                execution: Some(execution),
+                elapsed_seconds: duration_seconds,
                 peak_memory_bytes: None,
             })
         })
@@ -297,6 +323,14 @@ fn usage_record(usage: Option<&Value>) -> Option<PlannerUsageRecord> {
         || record.output_tokens.is_some()
         || record.total_tokens.is_some())
     .then_some(record)
+}
+
+fn sanitized_finish_reason(value: Option<&Value>) -> Option<String> {
+    let reason = value?.as_str()?.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    Some(reason.chars().take(64).collect())
 }
 
 fn classify_transport_error(error: reqwest::Error) -> HarnessError {
@@ -476,6 +510,10 @@ mod tests {
         assert_eq!(execution.backend.as_deref(), Some("fixture"));
         assert_eq!(execution.target_video_model_id, "minimax_h3");
         assert_eq!(execution.usage.unwrap().total_tokens, Some(18));
+        assert_eq!(execution.max_output_tokens, Some(4096));
+        assert_eq!(execution.reference_pixels_sent, Some(false));
+        assert!(execution.duration_seconds.is_some());
+        assert_eq!(execution.failure_code, None);
         let seen = seen.lock().unwrap();
         assert_eq!(
             seen[0].0.get("authorization").unwrap(),
@@ -486,6 +524,67 @@ mod tests {
             .1
             .to_string()
             .contains("A courier enters the workshop."));
+        assert!(!seen[0].1.to_string().contains("fixture-secret"));
+    }
+
+    #[tokio::test]
+    async fn empty_text_fails_once_and_preserves_sanitized_response_provenance() {
+        let (base_url, seen) = fixture(
+            StatusCode::OK,
+            json!({
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": null, "reasoning_content": "bounded reasoning"}
+                }],
+                "usage": {"prompt_tokens": 19, "completion_tokens": 4096, "total_tokens": 4115},
+                "provider_debug": {"credential": "must-not-survive"}
+            }),
+            Duration::ZERO,
+        )
+        .await;
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            connection(base_url),
+            Some("fixture-secret".to_owned()),
+            options("disabled", false),
+            Arc::new(|| false),
+        )
+        .unwrap();
+
+        let error = llm.complete(request(Vec::new())).await.unwrap_err();
+        let HarnessError::PlannerResponse { detail, execution } = error else {
+            panic!("expected sanitized planner-response failure, got {error}");
+        };
+        assert_eq!(
+            detail,
+            "The external planner response has no textual plan content"
+        );
+        assert_eq!(execution.provider, "openai_compatible");
+        assert_eq!(execution.model, "planner-model");
+        assert_eq!(execution.backend.as_deref(), Some("fixture"));
+        assert_eq!(execution.target_video_model_id, "minimax_h3");
+        assert_eq!(execution.thinking_mode, "disabled");
+        assert_eq!(execution.max_output_tokens, Some(4096));
+        assert_eq!(execution.reference_pixels_sent, Some(false));
+        assert!(execution.duration_seconds.is_some_and(|value| value >= 0.0));
+        assert_eq!(execution.finish_reason.as_deref(), Some("length"));
+        assert_eq!(
+            execution.failure_code.as_deref(),
+            Some("no_textual_plan_content")
+        );
+        assert_eq!(execution.thinking.as_deref(), Some("bounded reasoning"));
+        assert_eq!(execution.usage.as_ref().unwrap().total_tokens, Some(4115));
+        let serialized = serde_json::to_string(&execution).unwrap();
+        assert!(!serialized.contains("must-not-survive"));
+        assert!(!serialized.contains("fixture-secret"));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "empty content must not retry or fall back");
+        assert_eq!(seen[0].1["model"], "planner-model");
+        assert!(seen[0].1["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Return a plan"));
         assert!(!seen[0].1.to_string().contains("fixture-secret"));
     }
 

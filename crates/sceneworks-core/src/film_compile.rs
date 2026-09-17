@@ -225,6 +225,24 @@ pub struct PlannerExecutionRecord {
     pub backend: Option<String>,
     pub target_video_model_id: String,
     pub thinking_mode: String,
+    /// Effective request bound advertised to an OpenAI-compatible planner. Native executions omit
+    /// this because their token bound belongs to the worker job payload instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// Whether approved reference pixels were actually included in this request. Kept separate
+    /// from reference roles so the external-data boundary remains explicit in provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_pixels_sent: Option<bool>,
+    /// Wall-clock time spent waiting for this individual planner response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// Sanitized provider completion reason, when the compatible endpoint reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    /// Stable failure classification for a provider response that could not become plan text.
+    /// Human-readable, actionable detail remains on the planning operation finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
     /// Provider-reported token counts. Optional because OpenAI-compatible servers are allowed to

@@ -707,8 +707,12 @@ pub(crate) async fn start_film_run(
         move |store| store.film_run_files(&project_id, &run_id)
     })
     .await?;
-    let lease = ControllerLease::acquire(&files.directory, format!("api:{run_id}"))
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let lease = ControllerLease::acquire_for_api(
+        &files.directory,
+        format!("api:{run_id}"),
+        state.film_controller_shutdown.clone(),
+    )
+    .map_err(|error| ApiError::conflict(error.to_string()))?;
     view.controller_active = true;
 
     let base_url = state.settings.mcp_api_url.clone();

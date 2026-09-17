@@ -54,6 +54,24 @@ export function FilmReferences({
     onDraftChange((next) => mutator(next));
   }
 
+  function mergeAddedReferences(saved, response) {
+    const additions = response.referencePack.references.slice(saved.referencePack.references.length);
+    mutate((current) => {
+      current.revision = response.revision;
+      current.updatedAt = response.updatedAt;
+      current.productionPlan.version = response.productionPlan.version;
+      current.referencePack.version = response.referencePack.version;
+      for (const addition of additions) {
+        const alreadyPresent = current.referencePack.references.some((reference) => (
+          reference.role === addition.role
+          && reference.sourceAssetId === addition.sourceAssetId
+          && reference.file === addition.file
+        ));
+        if (!alreadyPresent) current.referencePack.references.push(structuredClone(addition));
+      }
+    });
+  }
+
   async function addAssetReference(nextAssetId) {
     const chosen = imageAssets.find((asset) => asset.id === nextAssetId);
     const nextRole = role.trim() || defaultRole(chosen);
@@ -64,7 +82,7 @@ export function FilmReferences({
     setWorking(true);
     setNotice("");
     try {
-      const saved = await saveDraft();
+      const saved = await saveDraft({ updateLocal: false });
       const next = await apiFetch(
         `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
         token,
@@ -80,7 +98,7 @@ export function FilmReferences({
           }),
         },
       );
-      onReplaceDraft(next);
+      mergeAddedReferences(saved, next);
       setAssetId("");
       setRole("");
       setDescription("");
@@ -104,7 +122,7 @@ export function FilmReferences({
       setAssetId(imported.id);
       setRole((current) => current || defaultRole(imported));
       // Use the returned asset directly: App state propagation is asynchronous.
-      const saved = await saveDraft();
+      const saved = await saveDraft({ updateLocal: false });
       const next = await apiFetch(
         `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
         token,
@@ -120,7 +138,7 @@ export function FilmReferences({
           }),
         },
       );
-      onReplaceDraft(next);
+      mergeAddedReferences(saved, next);
       setAssetId("");
       setRole("");
       setDescription("");

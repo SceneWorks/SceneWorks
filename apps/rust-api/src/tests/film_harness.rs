@@ -62,11 +62,18 @@ fn an_unlocked_crash_metadata_file_is_recovered_without_an_age_guess() {
     )
     .unwrap();
     assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
-    let lease = film_harness::ControllerLease::acquire(&directory, "startup-adopt")
+    let lease = film_harness::ControllerLease::acquire_interrupted(&directory, "startup-adopt")
+        .expect("the interrupted lease can be inspected")
         .expect("the OS-released lock is recoverable regardless of metadata age");
     assert!(film_harness::ControllerLease::is_active(&directory).unwrap());
     drop(lease);
     assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+    assert!(
+        film_harness::ControllerLease::acquire_interrupted(&directory, "startup-again")
+            .unwrap()
+            .is_none(),
+        "a clean release erases the crash marker"
+    );
 }
 
 #[tokio::test]
@@ -116,6 +123,269 @@ async fn every_run_mutation_refuses_a_competing_api_or_cli_controller() {
         assert!(error.to_string().contains("another controller"), "{error}");
     }
     drop(held);
+}
+
+#[tokio::test]
+async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatch() {
+    let harness = Harness::start_http(
+        true,
+        vec![(
+            "SH010",
+            VideoBehavior::Complete {
+                delay_secs: 3,
+                peak_pct: 40.0,
+            },
+        )],
+    )
+    .await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Startup adoption")
+        .expect("project creates");
+    let draft_id = "film_draft_restart";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Startup adoption");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_restart";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan,
+        reference_pack_path: files.reference_pack,
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let running = Arc::new(tokio::sync::Notify::new());
+    harness.script.lock().running_hook =
+        Some(("SH010".to_owned(), RunningHook::Notify(running.clone())));
+    let reached_running = running.notified();
+    tokio::pin!(reached_running);
+    let controller_app = harness.app.clone();
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_restart",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
+    let mut controller = tokio::spawn(async move {
+        film_harness::run_with_control_and_lease(
+            &RouterTransport {
+                app: controller_app,
+            },
+            &options,
+            &film_harness::RunControl::default(),
+            lease,
+        )
+        .await
+    });
+    tokio::select! {
+        () = &mut reached_running => {}
+        result = &mut controller => {
+            panic!("controller ended before the fake worker reached running: {result:?}");
+        }
+    }
+    let original_job_id = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, job_id, _)| job_id.clone())
+        .expect("video job was claimed");
+
+    // The production SIGTERM path sets shutdown intent before Axum drains. Simulate the runtime
+    // then dropping this detached controller while the separately hosted worker continues the
+    // exact job. Unlike an ordinary handled controller exit, this Drop must retain its marker.
+    harness.state.film_controller_shutdown.request();
+    controller.abort();
+    assert!(
+        controller
+            .await
+            .expect_err("controller aborts")
+            .is_cancelled(),
+        "the original controller must be gone before startup adopts it"
+    );
+    let marker = std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE))
+        .expect("controller marker remains readable");
+    assert!(
+        marker
+            .lines()
+            .any(|line| line == "owner=api:filmrun_restart"),
+        "graceful API shutdown must retain active controller ownership: {marker:?}"
+    );
+    let interrupted = harness
+        .state
+        .jobs_store
+        .mark_interrupted_on_startup()
+        .expect("API startup recovery succeeds");
+    assert!(
+        interrupted.is_empty(),
+        "the worker-owned render survives API startup: {interrupted:?}"
+    );
+    let active = harness
+        .state
+        .jobs_store
+        .get_job(&original_job_id)
+        .expect("active job loads");
+    assert_eq!(
+        active.status,
+        sceneworks_core::contracts::JobStatus::Running
+    );
+    assert_eq!(active.worker_id.as_deref(), Some(WORKER_ID));
+
+    let mut restarted_state = harness.state.clone();
+    restarted_state.film_controller_shutdown = film_harness::FilmControllerShutdown::default();
+    let mut startup =
+        crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(restarted_state);
+    startup.scan.await.expect("startup scan joins");
+    startup
+        .controller_results
+        .recv()
+        .await
+        .expect("startup scan launches the film controller")
+        .unwrap_or_else(|error| panic!("startup film controller failed: {error}"));
+    let record = film_harness::read_run_record(&files.directory)
+        .expect("startup run record remains readable");
+    assert_eq!(record.state, RunState::Finished, "{}", summary(&record));
+
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(harness.video_job_count(), 1, "startup must not redispatch");
+    assert_eq!(harness.api_video_job_count().await, 1);
+    let selected = record
+        .shot("SH010")
+        .and_then(|shot| shot.selected())
+        .expect("startup adopts the completed take");
+    assert_eq!(selected.job_id.as_deref(), Some(original_job_id.as_str()));
+}
+
+#[tokio::test]
+async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() {
+    let harness = Harness::start_http(true, vec![]).await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Explicit resume")
+        .expect("project creates");
+    let draft_id = "film_draft_explicit_resume";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Explicit resume");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_explicit_resume";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan.clone(),
+        reference_pack_path: files.reference_pack.clone(),
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
+        .on_post_route("/api/v1/video/jobs");
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_explicit_resume",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
+    film_harness::run_with_control_and_lease(
+        &transport,
+        &options,
+        &film_harness::RunControl::default(),
+        lease,
+    )
+    .await
+    .expect_err("the injected transport loss stops the controller");
+    let failed = film_harness::read_run_record(&files.directory).expect("failed record persists");
+    assert_eq!(failed.state, RunState::Running, "{}", summary(&failed));
+    assert_eq!(failed.outcome, RunOutcome::Failed, "{}", summary(&failed));
+    assert!(failed.is_resumable(), "{}", summary(&failed));
+    assert_eq!(harness.api_video_job_count().await, 0);
+    assert_eq!(
+        std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE)).unwrap(),
+        "",
+        "an ordinary handled API controller failure clears ownership"
+    );
+
+    let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
+        harness.state.clone(),
+    );
+    startup.scan.await.expect("startup scan joins");
+    assert!(
+        startup.controller_results.recv().await.is_none(),
+        "a cleanly released failed controller must wait for explicit resume"
+    );
+    assert_eq!(harness.api_video_job_count().await, 0);
+
+    let mut resume = ResumeOptions::new(files.directory.clone());
+    resume.poll_interval = Duration::from_millis(100);
+    resume.export = false;
+    resume.require_installed = false;
+    let completed = film_harness::resume(&harness.transport, &resume)
+        .await
+        .expect("the operator can explicitly resume the failed run");
+    assert_eq!(
+        completed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&completed)
+    );
+    assert_eq!(harness.api_video_job_count().await, 1);
 }
 
 #[tokio::test]
@@ -183,6 +453,175 @@ async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
         timelines.as_array().unwrap().len(),
         1,
         "replay made no duplicate timeline"
+    );
+}
+
+#[tokio::test]
+async fn long_legal_asset_identity_is_tagged_through_real_routes_without_losing_provenance() {
+    let harness = Harness::start(true, vec![]).await;
+    let (plan_path, pack_path) = harness.minimal_documents(json!({
+        "maxRunSeconds": 120,
+        "maxShotSeconds": 30,
+        "maxAttemptsPerShot": 1,
+        "maxMemoryGb": 96
+    }));
+    let shared_role_prefix = "r".repeat(63);
+    let first_role = format!("{shared_role_prefix}a");
+    let second_role = format!("{shared_role_prefix}b");
+    let sound_role = format!("s{}", "s".repeat(63));
+    let pack_id = format!("film_{}", "p".repeat(59));
+    assert_eq!(first_role.len(), 64);
+    assert_eq!(second_role.len(), 64);
+    assert_eq!(sound_role.len(), 64);
+    assert_eq!(pack_id.len(), 64);
+
+    let mut pack: Value = serde_json::from_slice(&std::fs::read(&pack_path).unwrap()).unwrap();
+    pack["id"] = json!(pack_id);
+    pack["references"][0]["role"] = json!(first_role);
+    let mut second = pack["references"][0].clone();
+    second["role"] = json!(second_role);
+    pack["references"].as_array_mut().unwrap().push(second);
+    let sound = ffmpeg_reachable();
+    if sound {
+        let sound_dir = pack_path.parent().unwrap().join("sound");
+        std::fs::create_dir_all(&sound_dir).unwrap();
+        std::fs::copy(
+            Path::new(FIXTURE_DIR).join("sound/workshop_room_tone.wav"),
+            sound_dir.join("room-tone.wav"),
+        )
+        .unwrap();
+        pack["sound"] = json!([{
+            "role": sound_role,
+            "kind": "ambience",
+            "file": "sound/room-tone.wav"
+        }]);
+    }
+    std::fs::write(&pack_path, serde_json::to_vec_pretty(&pack).unwrap()).unwrap();
+
+    let mut plan: Value = serde_json::from_slice(&std::fs::read(&plan_path).unwrap()).unwrap();
+    for shot in plan["shots"].as_array_mut().unwrap() {
+        shot["continuityRoles"] = json!([first_role, second_role]);
+    }
+    if sound {
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "ambience": { "role": sound_role }
+        });
+    }
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+
+    let mut options = harness.options(plan_path, pack_path, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("the project store accepts every harness-generated tag");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert!(record.run_id.starts_with("run_"), "{}", record.run_id);
+    assert_eq!(record.run_id.len(), 36, "a UUID-backed production run id");
+
+    let project_id = record.project_id.as_deref().expect("project");
+    let (_, assets) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    let references: Vec<&Value> = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+        .collect();
+    assert_eq!(references.len(), 2, "{assets:#}");
+    let mut role_tags = Vec::new();
+    let mut pack_tags = Vec::new();
+    for asset in references {
+        let provenance = &asset["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert!(
+            provenance["role"] == first_role || provenance["role"] == second_role,
+            "{provenance}"
+        );
+        let tags: Vec<&str> = asset["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-reference"), "{tags:?}");
+        role_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("role:h:"))
+                .expect("long role has a bounded facet")
+                .to_string(),
+        );
+        pack_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("pack:h:"))
+                .expect("long pack id has a bounded facet")
+                .to_string(),
+        );
+    }
+    role_tags.sort();
+    role_tags.dedup();
+    pack_tags.sort();
+    pack_tags.dedup();
+    assert_eq!(role_tags.len(), 2, "role collision: {role_tags:?}");
+    assert_eq!(pack_tags.len(), 1, "one pack identity: {pack_tags:?}");
+
+    if sound {
+        let sounds: Vec<&Value> = assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "sound")
+            .collect();
+        assert_eq!(sounds.len(), 1, "{assets:#}");
+        let provenance = &sounds[0]["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert_eq!(provenance["role"], sound_role);
+        let tags: Vec<&str> = sounds[0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-sound"), "{tags:?}");
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("role:h:")),
+            "{tags:?}"
+        );
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("pack:h:")),
+            "{tags:?}"
+        );
+    }
+
+    let take_payload = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, _, payload)| payload.clone())
+        .expect("one take was dispatched");
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["runId"],
+        record.run_id
+    );
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["idempotencyKey"],
+        format!("{}:SH010:a1", record.run_id)
     );
 }
 
@@ -461,6 +900,7 @@ pub(crate) enum VideoBehavior {
 pub(crate) enum RunningHook {
     CancelControl(RunControl),
     WriteCancelSentinel(PathBuf),
+    Notify(Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -737,6 +1177,7 @@ async fn run_fake_video_job(
             film_harness::request_cancel(&out_dir)
                 .expect("cancel sentinel writes from worker hook");
         }
+        Some(RunningHook::Notify(notify)) => notify.notify_one(),
         None => {}
     }
     match behavior {
@@ -1542,6 +1983,7 @@ async fn run_fake_export_job(
 
 pub(crate) struct Harness {
     pub(crate) app: axum::Router,
+    pub(crate) state: crate::AppState,
     pub(crate) transport: RouterTransport,
     pub(crate) temp_dir: tempfile::TempDir,
     pub(crate) script: Arc<Mutex<WorkerScript>>,
@@ -1590,6 +2032,7 @@ impl Harness {
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
+            state,
             temp_dir,
             script,
             worker: Mutex::new(worker),
@@ -1647,6 +2090,7 @@ impl Harness {
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
+            state,
             temp_dir,
             script,
             worker: Mutex::new(worker),
@@ -6869,7 +7313,10 @@ pub(crate) fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Ve
 
 pub(crate) fn findings_of(error: HarnessError) -> Vec<String> {
     match error {
-        HarnessError::Validation(findings) => findings.iter().map(ToString::to_string).collect(),
+        HarnessError::Validation(findings) | HarnessError::PlannerValidation { findings, .. } => {
+            findings.iter().map(ToString::to_string).collect()
+        }
+        HarnessError::PlannerExecutionFailure { source, .. } => findings_of(*source),
         other => panic!("expected a validation refusal, got {other}"),
     }
 }
@@ -7424,6 +7871,35 @@ async fn a_dropped_beat_is_repaired_and_the_repair_loop_is_bounded() {
     );
     // Exactly 1 + 2 model calls: the loop is bounded by the declared rounds.
     assert_eq!(harness.script.lock().plan_calls, 3);
+    let prompts = refine_job_payloads(&harness, true);
+    assert_eq!(
+        prompts.len(),
+        3,
+        "the initial request plus exactly two repairs"
+    );
+    for (index, payload) in prompts.iter().enumerate().skip(1) {
+        let prompt = payload["prompt"]
+            .as_str()
+            .expect("each refine job records its prompt");
+        assert!(
+            prompt.contains(&format!("Repair round {index} of 2")),
+            "{prompt}"
+        );
+        let contract = prompt.find("# Output contract").expect("shared contract");
+        let checklist = prompt
+            .rfind("# Final repair checklist")
+            .expect("final repair checklist");
+        let finding = prompt
+            .rfind("required beat \"handover\"")
+            .expect("unchanged draft's exact finding is repeated last");
+        assert!(contract < checklist && checklist < finding, "{prompt}");
+        assert!(
+            prompt.trim_end().ends_with(
+                "Return the whole corrected JSON object. Do not return the draft above unchanged."
+            ),
+            "the repeated invalid output must receive an actionable final instruction: {prompt}"
+        );
+    }
     // Nothing was written but the diagnosable refusal.
     assert!(!options.out_dir.join("plan.json").exists());
     let rejected = std::fs::read_to_string(options.out_dir.join("planner-rejected.txt"))

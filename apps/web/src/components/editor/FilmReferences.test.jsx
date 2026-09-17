@@ -13,6 +13,7 @@ function filmDraft(references = []) {
     id: "film_1",
     projectId: "project_1",
     revision: 1,
+    planning: { provider: "prompt_refiner" },
     referencePack: {
       schemaVersion: 1,
       id: "film_1-references",
@@ -34,6 +35,8 @@ function filmDraft(references = []) {
 let container;
 let root;
 let latestDraft;
+let mutateLatestDraft;
+let saveDraftMock;
 
 beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -41,6 +44,8 @@ beforeEach(() => {
   document.body.appendChild(container);
   apiFetchMock.mockReset();
   latestDraft = null;
+  mutateLatestDraft = null;
+  saveDraftMock = vi.fn();
 });
 
 afterEach(() => {
@@ -57,6 +62,7 @@ async function renderReferences({ assets = [], draft = filmDraft(), importAsset 
       mutator(next);
       return next;
     });
+    mutateLatestDraft = mutate;
     return (
       <FilmReferences
         assets={assets}
@@ -64,7 +70,12 @@ async function renderReferences({ assets = [], draft = filmDraft(), importAsset 
         importAsset={importAsset}
         onDraftChange={mutate}
         onReplaceDraft={setCurrent}
-        saveDraft={async () => ({ ...current, revision: current.revision + 1 })}
+        saveDraft={async (options = {}) => {
+          const saved = { ...current, revision: current.revision + 1 };
+          saveDraftMock(options, saved);
+          if (options.updateLocal !== false) setCurrent(saved);
+          return saved;
+        }}
         setNotice={vi.fn()}
         token="token"
       />
@@ -129,6 +140,78 @@ describe("FilmReferences", () => {
       approved: true,
     }));
     expect(latestDraft.referencePack.references[0].sourceAssetId).toBe("asset_courier");
+  });
+
+  it("merges a delayed added reference without overwriting newer draft or reference edits", async () => {
+    const asset = {
+      id: "asset_courier",
+      projectId: "project_1",
+      displayName: "Courier Portrait",
+      type: "image",
+      file: { mimeType: "image/png" },
+      status: {},
+    };
+    const initial = filmDraft([{
+      role: "hero",
+      kind: "character",
+      file: "references/hero.png",
+      sourceAssetId: "asset_hero",
+      description: "Original description",
+      approved: true,
+      generated: false,
+    }]);
+    const returned = structuredClone(initial);
+    returned.revision = 3;
+    returned.updatedAt = "2026-09-17T12:00:00Z";
+    returned.productionPlan.version = 3;
+    returned.referencePack.version = 2;
+    returned.referencePack.references.push({
+      role: "courier",
+      kind: "character",
+      file: "references/asset_courier.png",
+      sourceAssetId: asset.id,
+      description: "",
+      approved: false,
+      generated: false,
+    });
+    let resolveAdd;
+    apiFetchMock.mockReturnValue(new Promise((resolve) => { resolveAdd = resolve; }));
+    await renderReferences({ assets: [asset], draft: initial });
+
+    await act(async () => {
+      setControl(container.querySelector('[aria-label="Reference project image"]'), asset.id);
+      setControl(container.querySelector('[aria-label="Reference role name"]'), "courier");
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Add asset").click();
+      await Promise.resolve();
+    });
+    expect(saveDraftMock).toHaveBeenCalledWith(
+      { updateLocal: false },
+      expect.objectContaining({ revision: 2 }),
+    );
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      mutateLatestDraft((current) => {
+        current.planning.provider = "openai_compatible";
+        current.referencePack.references[0].description = "Edited while the asset copied";
+        current.referencePack.references.push({
+          role: "local_style",
+          kind: "style",
+          file: "references/local.png",
+          description: "Unsaved reference",
+          approved: true,
+          generated: false,
+        });
+      });
+    });
+    await act(async () => { resolveAdd(returned); await Promise.resolve(); await Promise.resolve(); });
+
+    expect(latestDraft.planning.provider).toBe("openai_compatible");
+    expect(latestDraft.referencePack.references.map((reference) => reference.role))
+      .toEqual(["hero", "local_style", "courier"]);
+    expect(latestDraft.referencePack.references[0].description).toBe("Edited while the asset copied");
+    expect(latestDraft.revision).toBe(3);
+    expect(latestDraft.referencePack.version).toBe(2);
   });
 
   it("imports an uploaded image into the project before adding it to the pack", async () => {

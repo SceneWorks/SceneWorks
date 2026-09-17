@@ -11,18 +11,18 @@ export function parseFilmScript(projectId, draftId, script, token) {
   });
 }
 
-export function getFilmPlannerAvailability(projectId, draftId, token) {
-  return apiFetch(`${base(projectId, draftId)}/planners`, token);
+export function getFilmPlannerAvailability(projectId, draftId, token, options = {}) {
+  return apiFetch(`${base(projectId, draftId)}/planners`, token, options);
 }
 
 export function getFilmPlanning(projectId, draftId, token) {
   return apiFetch(`${base(projectId, draftId)}/planning`, token);
 }
 
-export function startFilmPlanning(projectId, draftId, token) {
+export function startFilmPlanning(projectId, draftId, maxRepairRounds, llmTimeoutSeconds, token) {
   return apiFetch(`${base(projectId, draftId)}/planning`, token, {
     method: "POST",
-    body: JSON.stringify({ maxRepairRounds: 2 }),
+    body: JSON.stringify({ maxRepairRounds, llmTimeoutSeconds }),
   });
 }
 

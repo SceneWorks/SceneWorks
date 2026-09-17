@@ -80,6 +80,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::compression::{
     predicate::{Predicate, SizeAbove},
     CompressionLayer, CompressionLevel,
@@ -816,7 +817,10 @@ async fn parent_death(parent_pid: Option<i32>) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -852,6 +856,14 @@ async fn shutdown_signal() {
             );
         }
     }
+    // Set intent before Axum starts draining. Film controllers call this API over loopback and can
+    // therefore exit as soon as the listener closes; their lease Drop must already distinguish
+    // process shutdown from an ordinary handled controller error.
+    film_controller_shutdown.request();
+    // Axum stops accepting connections when this future returns, but waits for existing
+    // connections indefinitely. End app-owned long-lived streams immediately and wake the
+    // server's finite drain deadline before returning control to Axum.
+    api_shutdown.cancel();
 }
 
 /// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
@@ -1190,7 +1202,12 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, false)
+    create_app_with_state_mode(
+        settings,
+        false,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1205,15 +1222,31 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     Ok((router, state))
 }
 
+#[cfg(test)]
 pub(crate) fn create_app_with_pending_startup_maintenance(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, true)
+    create_app_with_state_mode(
+        settings,
+        true,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
+}
+
+pub(crate) fn create_app_with_pending_startup_maintenance_with_shutdowns(
+    settings: Settings,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, true, film_controller_shutdown, api_shutdown)
 }
 
 fn create_app_with_state_mode(
     settings: Settings,
     defer_upload_sweeps: bool,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let _filesystem_phase = StartupPhaseTimer::start(
         "filesystem_preflight",
@@ -1362,6 +1395,8 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        film_controller_shutdown,
+        api_shutdown,
         catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
             std::collections::HashSet::new(),
         )),

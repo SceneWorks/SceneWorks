@@ -1,5 +1,5 @@
-import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { apiFetch } from "../../api.js";
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, isAbortError } from "../../api.js";
 import {
   applyFilmPlanning,
   cancelFilmPlanning,
@@ -11,7 +11,8 @@ import {
   startFilmPlanning,
   exportFilmRun,
 } from "../../api/films.js";
-import { useAppStatic } from "../../context/AppContext.js";
+import { useAppLive, useAppStatic } from "../../context/AppContext.js";
+import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
@@ -28,20 +29,111 @@ const FILM_VIEWS = [
   { id: "review", label: "Review & Edit" },
 ];
 
+const QWEN_PLANNER_MODEL_ID = "film_planner_qwen3_6_27b";
+
+export function activeQwenPlannerInstall(jobs = []) {
+  return jobs.find((job) =>
+    job?.type === "model_download"
+    && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID
+    && !terminalStatuses.has(job.status)) ?? null;
+}
+
+export function latestQwenPlannerInstall(jobs = []) {
+  return activeQwenPlannerInstall(jobs)
+    ?? jobs.find((job) => job?.type === "model_download" && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID)
+    ?? null;
+}
+
+export function describeActiveFilmShots(run) {
+  const record = run?.record;
+  const shots = record?.shots ?? [];
+  const active = run?.controllerActive === true && record?.state === "running";
+  const selected = new Set([
+    ...(run?.locator?.selectedShotIds ?? []),
+    ...(record?.selectedShotIds ?? []),
+  ]);
+  return shots.map((shot) => {
+    let status = shot.outcome;
+    if (active && status === "not_selected" && selected.has(shot.shotId)) {
+      status = shot.attempts?.at(-1)?.status ?? "pending";
+    }
+    return `${shot.shotId}: ${status}`;
+  }).join(" · ");
+}
+
 export function FilmWorkspace() {
   const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
+  const { jobs = [] } = useAppLive();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [plannerAvailability, setPlannerAvailability] = useState(null);
+  const [requestedPlannerInstallJob, setRequestedPlannerInstallJob] = useState(null);
+  const [plannerInstallError, setPlannerInstallError] = useState("");
   const [planningOperation, setPlanningOperation] = useState(null);
   const [selectedShotIds, setSelectedShotIds] = useState([]);
   const [preflight, setPreflight] = useState(null);
   const [lastRun, setLastRun] = useState(null);
   const [activeView, setActiveView] = useState("brief");
   const viewTabs = useRef([]);
+  const selectedDraftId = useRef("");
+  const activeTimelineId = useRef("");
+  const discoveredTimeline = useRef("");
+  const selectedRunExplicit = useRef(false);
+  const plannerAvailabilityRequest = useRef(0);
+  const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
+  const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
+  const plannerInstallJob = activeQueuePlannerInstallJob?.id !== requestedPlannerInstallJob?.id
+    ? (activeQueuePlannerInstallJob ?? requestedPlannerInstallJob ?? queuePlannerInstallJob)
+    : (requestedPlannerInstallJob ?? activeQueuePlannerInstallJob ?? queuePlannerInstallJob);
+  selectedDraftId.current = draft?.id ?? "";
+  activeTimelineId.current = activeTimeline?.id ?? "";
+
+  const acceptRunSnapshot = useCallback((run, { latest = false, select = false } = {}) => {
+    const draftId = selectedDraftId.current;
+    if (!draftId || run?.locator?.draftId !== draftId) return;
+    if (select) selectedRunExplicit.current = true;
+    setLastRun((current) => {
+      if (select || (latest && !selectedRunExplicit.current) || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
+      return current;
+    });
+  }, []);
+
+  useEffect(() => {
+    selectedRunExplicit.current = false;
+  }, [activeProject?.id, draft?.id]);
+
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const draftId = draft?.id;
+    const runId = lastRun?.locator?.id;
+    const runDraftId = lastRun?.locator?.draftId;
+    const timelineId = lastRun?.record?.timeline?.timelineId;
+    if (!projectId || !draftId || runDraftId !== draftId || !runId || !timelineId) return undefined;
+    const discoveryKey = `${projectId}:${draftId}:${runId}:${timelineId}`;
+    if (discoveredTimeline.current === discoveryKey) return undefined;
+    let canceled = false;
+    let timer = null;
+    const controller = new AbortController();
+    async function discover(attempt = 0) {
+      const result = await refreshTimelines(projectId, { signal: controller.signal });
+      if (canceled || selectedDraftId.current !== draftId) return;
+      if (result?.ok === false) {
+        if (attempt < 2) timer = window.setTimeout(() => discover(attempt + 1), 1000);
+        return;
+      }
+      discoveredTimeline.current = discoveryKey;
+      if (!activeTimelineId.current) setSelectedTimelineId(timelineId);
+    }
+    discover();
+    return () => {
+      canceled = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeProject?.id, draft?.id, lastRun?.locator?.draftId, lastRun?.locator?.id, lastRun?.record?.timeline?.timelineId, refreshTimelines, setSelectedTimelineId]);
 
   useEffect(() => {
     let canceled = false;
@@ -50,6 +142,8 @@ export function FilmWorkspace() {
     setSelectedId("");
     setNotice("");
     setPlannerAvailability(null);
+    setRequestedPlannerInstallJob(null);
+    setPlannerInstallError("");
     setPlanningOperation(null);
     setSelectedShotIds([]);
     setPreflight(null);
@@ -70,16 +164,79 @@ export function FilmWorkspace() {
   }, [activeProject?.id, token]);
 
   useEffect(() => {
+    const requestId = ++plannerAvailabilityRequest.current;
+    setPlannerAvailability(null);
     if (!activeProject?.id || !draft?.id) return undefined;
     let canceled = false;
     getFilmPlannerAvailability(activeProject.id, draft.id, token)
-      .then((value) => !canceled && setPlannerAvailability(value))
+      .then((value) => !canceled && plannerAvailabilityRequest.current === requestId && setPlannerAvailability(value))
       .catch((error) => !canceled && setNotice(error.message));
     getFilmPlanning(activeProject.id, draft.id, token)
       .then((value) => !canceled && setPlanningOperation(value))
       .catch(() => {});
     return () => { canceled = true; };
   }, [activeProject?.id, draft?.id, token]);
+
+  useEffect(() => {
+    const jobId = plannerInstallJob?.id;
+    if (!jobId || !activeProject?.id || !draft?.id) return undefined;
+    let canceled = false;
+    let timer = null;
+    const controller = new AbortController();
+
+    async function pollInstall() {
+      try {
+        const job = await apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`, token, { signal: controller.signal });
+        if (canceled) return;
+        setRequestedPlannerInstallJob(job);
+        setPlannerInstallError("");
+        if (job.status === "completed") {
+          const requestId = ++plannerAvailabilityRequest.current;
+          const availability = await getFilmPlannerAvailability(activeProject.id, draft.id, token, { signal: controller.signal });
+          if (canceled || plannerAvailabilityRequest.current !== requestId) return;
+          setPlannerAvailability(availability);
+          const qwen = availability?.providers?.find((item) => item.modelId === "film_planner_qwen3_6_27b");
+          setNotice(qwen?.available
+            ? "Qwen3.6-27B download completed. Planning did not start automatically."
+            : "Qwen3.6-27B download completed, but the planner is still unavailable. Check the model installation before retrying.");
+          return;
+        }
+        if (errorStatuses.has(job.status)) {
+          setNotice(job.message || job.error || `Qwen3.6-27B download ${job.status}.`);
+          return;
+        }
+        timer = window.setTimeout(pollInstall, 1000);
+      } catch (error) {
+        if (canceled || isAbortError(error)) return;
+        setPlannerInstallError(error.message);
+        setNotice(`Could not refresh the Qwen3.6-27B download: ${error.message}`);
+        timer = window.setTimeout(pollInstall, 2000);
+      }
+    }
+
+    timer = window.setTimeout(pollInstall, 1000);
+    return () => {
+      canceled = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeProject?.id, draft?.id, plannerInstallJob?.id, token]);
+
+  async function refreshPlannerAvailability() {
+    const projectId = activeProject?.id;
+    const draftId = draft?.id;
+    if (!projectId || !draftId) return;
+    const requestId = ++plannerAvailabilityRequest.current;
+    setPlannerAvailability(null);
+    try {
+      const value = await getFilmPlannerAvailability(projectId, draftId, token);
+      if (plannerAvailabilityRequest.current === requestId) {
+        setPlannerAvailability(value);
+      }
+    } catch (error) {
+      if (plannerAvailabilityRequest.current === requestId) setNotice(error.message);
+    }
+  }
 
   useEffect(() => {
     if (!activeProject?.id || !draft?.id || !["running", "canceling"].includes(planningOperation?.status)) return undefined;
@@ -109,6 +266,7 @@ export function FilmWorkspace() {
       setPreflight(null);
       setPlanningOperation(null);
       setLastRun(null);
+      selectedRunExplicit.current = false;
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -133,6 +291,7 @@ export function FilmWorkspace() {
       setPreflight(null);
       setPlanningOperation(null);
       setLastRun(null);
+      selectedRunExplicit.current = false;
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -149,14 +308,16 @@ export function FilmWorkspace() {
     });
   }
 
-  async function saveDraft() {
+  async function saveDraft({ updateLocal = true } = {}) {
     if (!draft) return null;
     const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${draft.id}`, token, {
       method: "PUT",
       body: JSON.stringify(draft),
     });
-    setDraft(saved);
-    setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+    if (updateLocal) {
+      setDraft(saved);
+      setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+    }
     return saved;
   }
 
@@ -182,12 +343,12 @@ export function FilmWorkspace() {
     }
   }
 
-  async function generatePlan() {
+  async function generatePlan(maxRepairRounds, llmTimeoutSeconds) {
     setBusy(true);
     setNotice("");
     try {
       const saved = await saveDraft();
-      const operation = await startFilmPlanning(activeProject.id, saved.id, token);
+      const operation = await startFilmPlanning(activeProject.id, saved.id, maxRepairRounds, llmTimeoutSeconds, token);
       setPlanningOperation(operation);
       setNotice(operation.status === "failed" ? operation.detail : "Planning started. Rendering will not start automatically.");
     } catch (error) {
@@ -223,9 +384,14 @@ export function FilmWorkspace() {
 
   async function installPlanner(modelId) {
     setBusy(true);
+    setPlannerInstallError("");
     try {
-      await installFilmPlanner(modelId, token);
-      setNotice("Qwen3.6-27B download queued. The built-in planner remains selected until you opt in.");
+      const job = await installFilmPlanner(modelId, token);
+      if (!job?.id) throw new Error("The Qwen3.6-27B download did not return a queue job.");
+      setRequestedPlannerInstallJob(job);
+      setNotice(errorStatuses.has(job.status)
+        ? (job.message || job.error || `Qwen3.6-27B download ${job.status}.`)
+        : `Qwen3.6-27B download ${job.status === "completed" ? "completed" : "queued"}. Planning will not start automatically.`);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -246,21 +412,15 @@ export function FilmWorkspace() {
       }
       const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds }) });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
+      selectedRunExplicit.current = true;
       setLastRun(run);
       setNotice(`Rendering ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"} in this project.`);
-      let shownTimelineId = null;
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
         setLastRun(run);
-        const readyTimelineId = run.record?.timeline?.timelineId;
-        if (readyTimelineId && readyTimelineId !== shownTimelineId) {
-          await refreshTimelines(activeProject.id);
-          setSelectedTimelineId(readyTimelineId);
-          shownTimelineId = readyTimelineId;
-        }
-        const shots = run.record?.shots ?? [];
-        if (shots.length) setNotice(shots.map((shot) => `${shot.shotId}: ${shot.outcome}`).join(" · "));
+        const shotProgress = describeActiveFilmShots(run);
+        if (shotProgress) setNotice(shotProgress);
       }
       if (!run.record || run.record.state !== "finished") {
         setNotice("The film controller stopped before the shot finished. The run record remains in the project.");
@@ -268,8 +428,6 @@ export function FilmWorkspace() {
       }
       const timelineId = run.record?.timeline?.timelineId;
       if (timelineId) {
-        await refreshTimelines(activeProject.id);
-        setSelectedTimelineId(timelineId);
         setNotice("Shot ready in its film timeline. Export remains a separate editor action.");
       } else {
         const detail = run.record?.diagnostics?.map((item) => item.message).join(" ");
@@ -378,7 +536,9 @@ export function FilmWorkspace() {
           </div>
           <FilmLifecycle
             draftId={draft.id}
+            onRunChange={acceptRunSnapshot}
             projectId={activeProject.id}
+            selectedRunId={lastRun?.locator?.id}
             setNotice={setNotice}
             token={token}
           />
@@ -407,6 +567,9 @@ export function FilmWorkspace() {
               onCancel={cancelPlan}
               onChange={updateDraft}
               onInstall={installPlanner}
+              onRefreshAvailability={refreshPlannerAvailability}
+              installError={plannerInstallError}
+              installJob={plannerInstallJob}
               onNotice={setNotice}
               onStart={generatePlan}
               operation={planningOperation}
@@ -449,10 +612,13 @@ export function FilmWorkspace() {
               />
             </Suspense>
             <FilmReview
+              active={activeView === "review"}
               draft={draft}
               onChange={updateDraft}
               projectId={activeProject.id}
               refreshTimelines={refreshTimelines}
+              runControllerActive={Boolean(lastRun?.controllerActive)}
+              runLocatorId={lastRun?.locator?.id}
               setNotice={setNotice}
               setSelectedTimelineId={setSelectedTimelineId}
               token={token}
