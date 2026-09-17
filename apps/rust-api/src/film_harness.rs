@@ -7425,7 +7425,19 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
                     .and_then(|block| block.get("sourceDurationSeconds"))
                     .and_then(Value::as_f64)
                     .filter(|source_duration| source_duration.is_finite())
-                    .map(|source_duration| (source_in + (end - start)).min(source_duration))
+                    .map(|source_duration| {
+                        let source_remaining = (source_duration - source_in).max(0.0);
+                        let picture_remaining = (duration - start).max(0.0);
+                        if source_remaining <= picture_remaining {
+                            // Preserve the measured endpoint exactly. Deriving it by subtracting
+                            // the placement after adding it turns 0.35 into
+                            // 0.34999999999999964 and leaves persisted source truth needlessly
+                            // dependent on the timeline start.
+                            source_duration
+                        } else {
+                            source_in + (end - start)
+                        }
+                    })
                     .unwrap_or(source_in + (end - start));
                 item["sourceOut"] = json!(ms(source_out));
             }
