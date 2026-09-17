@@ -484,6 +484,36 @@ export function EditorScreen() {
     setPlayheadSeconds(Number(marker.time) || 0);
   }
 
+  function toggleProgramPlayback() {
+    if (isPlaying) {
+      setIsPlaying(false);
+      return;
+    }
+    const media = previewVideoRef.current;
+    if (selectedItem?.type === "audio" && selectedTrack && selectedAudioPreview && media) {
+      const alignToItem = selectedAudioPreview.beforePlacement || selectedAudioPreview.afterPlacement;
+      const nextPlayhead = alignToItem ? Number(selectedItem.timelineStart) || 0 : playheadSeconds;
+      const nextPreview = alignToItem
+        ? audioPreviewState(selectedItem, selectedTrack, nextPlayhead, trackSoloed)
+        : selectedAudioPreview;
+      if (alignToItem) {
+        setPlayheadSeconds(nextPlayhead);
+      }
+      media.currentTime = nextPreview.currentTime;
+      media.volume = nextPreview.volume;
+      media.playbackRate = nextPreview.playbackRate;
+      media.muted = nextPreview.muted;
+      setIsPlaying(true);
+      try {
+        media.play().catch(() => setIsPlaying(false));
+      } catch {
+        setIsPlaying(false);
+      }
+      return;
+    }
+    setIsPlaying(true);
+  }
+
   function stepClip(direction) {
     if (!mainClips.length) {
       return;
@@ -789,7 +819,7 @@ export function EditorScreen() {
           onPause={() => setIsPlaying(false)}
           onPlay={() => setIsPlaying(true)}
           onPrev={() => stepClip(-1)}
-          onTogglePlay={() => setIsPlaying((value) => !value)}
+          onTogglePlay={toggleProgramPlayback}
           previewVideoRef={previewVideoRef}
           resolutionLabel={`${activeTimeline.width} × ${activeTimeline.height}`}
           selectedAsset={selectedAsset}

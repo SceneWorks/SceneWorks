@@ -409,6 +409,36 @@ describe("incremental film history (sc-23737)", () => {
 });
 
 describe("timeline audio editing (sc-23739)", () => {
+  it("starts an audio audition with one click when the playhead is before its placement", () => {
+    const audio = { id: "a1", type: "audio", displayName: "Room tone", url: "/room.wav", file: { mimeType: "audio/wav", duration: 8 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks.push({
+      id: "track_ambience",
+      kind: "audio",
+      role: "ambience",
+      gain: 0.25,
+      muted: false,
+      items: [{ id: "ambience", trackId: "track_ambience", assetId: "a1", type: "audio", displayName: "Ambience", sourceIn: 0.5, sourceOut: 4.5, timelineStart: 0.2, timelineEnd: 4.2, speed: 1, volume: 0.6 }],
+    });
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-audio-clip").click());
+    const ruler = container.querySelector(".ve-ruler");
+    vi.spyOn(ruler.parentElement, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 });
+    act(() => ruler.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 0 })));
+
+    act(() => {
+      container.querySelector(".ve-play").click();
+      // The first play must happen in this click callback. Deferring it to an effect loses
+      // the user gesture and native WebViews may reject the unmuted audio playback.
+      expect(play).toHaveBeenCalledTimes(1);
+    });
+    expect(container.querySelector(".ve-program audio").currentTime).toBeCloseTo(0.5);
+    expect(container.querySelector(".ve-play").title).toBe("Pause");
+  });
+
   it("places library audio, auditions it, and persists trim, placement, gain, fades, and mute", () => {
     const audio = { id: "asset_audio", type: "audio", displayName: "Recorded line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
     let latest;
