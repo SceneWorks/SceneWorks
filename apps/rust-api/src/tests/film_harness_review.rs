@@ -184,7 +184,10 @@ fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, St
     let project_id = record.project_id.clone().expect("run has project");
     let project_path = PathBuf::from(record.project_path.as_ref().expect("run has project path"));
     let locator_id = format!("filmrun_route_{}", record.run_id.trim_start_matches("run_"));
-    assert_ne!(locator_id, record.run_id, "route and record identities differ");
+    assert_ne!(
+        locator_id, record.run_id,
+        "route and record identities differ"
+    );
     let relative = format!("films/runs/{locator_id}");
     let run_dir = project_path.join(&relative);
     std::fs::create_dir_all(run_dir.parent().expect("run parent")).expect("run parent creates");
