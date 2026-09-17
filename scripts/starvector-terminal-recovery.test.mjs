@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateExecutionPredecessor, validateNativeExecutionArchives, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
+import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateCancelledAfterUpstreamArchive, validateExecutionPredecessor, validateNativeExecutionArchives, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 // Hosted Windows recovery receives this exact workflow-owned interpreter.  The
@@ -113,6 +113,135 @@ test("authenticated upstream-only failure advances execution without rewriting n
   await assert.rejects(() => verifyExecutionPredecessor({ ...config, execution_history: [value, value] }, output, native), /ordered successor chain/);
   await writeFile(path.join(output, "execution-attempts/failed-upstream/upstream.zip"), "substituted archive");
   await assert.rejects(() => verifyExecutionPredecessor(config, output, native), /evidence bytes differ/);
+});
+
+test("cancelled campaign after authenticated upstream completion advances exactly one claim", async (t) => {
+  const { config, root } = await fixture(t);
+  const campaign = "cancelled-after-upstream", revision = "c".repeat(40), sceneWorksRevision = "d".repeat(40);
+  const models = {
+    "1b": { repository: "starvector/starvector-1b-im2svg", revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9", inventory: "1".repeat(64) },
+    "8b": { repository: "starvector/starvector-8b-im2svg", revision: "518beea8dcb5f7a37c5911e92d1d62a76beee7f9", inventory: "8".repeat(64) },
+  };
+  const manifests = {}, archiveFiles = {};
+  for (const [tier, model] of Object.entries(models)) {
+    for (const role of ["config", "processor", "transcript"]) archiveFiles[`upstream-${tier}/${role}.${role === "transcript" ? "jsonl" : "json"}`] = `${tier}-${role}`;
+    const cases = Array.from({ length: 20 }, (_, case_index) => {
+      const common = { case_index, source_case_index: [0, 1, 2, 3, 4, 30, 31, 32, 33, 34, 60, 61, 62, 63, 64, 90, 91, 92, 93, 94][case_index], seed: case_index, input_png_sha256: String(case_index).padStart(64, "0") };
+      if (case_index === 0) {
+        const raw = `upstream-${tier}/case-00/raw.svg`; archiveFiles[raw] = "<svg";
+        return { ...common, outcome: "rejected", rejection_stage: "generation_limit", rejection_code: "wall_time_limit", rejection_reason: "upstream StarVector stopped at the wall_time_limit", upstream_raw_svg: raw, upstream_raw_svg_sha256: sha(archiveFiles[raw]) };
+      }
+      const svg = `upstream-${tier}/case-${String(case_index).padStart(2, "0")}/rendered/canonical.svg`, png = `upstream-${tier}/case-${String(case_index).padStart(2, "0")}/rendered/preview.png`;
+      archiveFiles[svg] = `<svg id="${case_index}"/>`; archiveFiles[png] = `png-${case_index}`;
+      return { ...common, outcome: "accepted", upstream_svg: svg, upstream_svg_sha256: sha(archiveFiles[svg]), upstream_preview_png: png, upstream_preview_png_sha256: sha(archiveFiles[png]) };
+    });
+    const reference = { implementation_repository: "https://github.com/joanrod/star-vector", implementation_revision: "0e083c1911760aa31bc576ca7f337a7f8ee605ec", checkpoint_repository: model.repository, checkpoint_revision: model.revision, checkpoint_inventory_sha256: model.inventory, config_sha256: sha(archiveFiles[`upstream-${tier}/config.json`]), processor_sha256: sha(archiveFiles[`upstream-${tier}/processor.json`]), transcript_sha256: sha(archiveFiles[`upstream-${tier}/transcript.jsonl`]) };
+    const name = `upstream-reference-${tier}.json`;
+    manifests[name] = JSON.stringify({ schema_version: 2, upstream_reference: reference, config_path: `upstream-${tier}/config.json`, processor_path: `upstream-${tier}/processor.json`, transcript_path: `upstream-${tier}/transcript.jsonl`, cases });
+    archiveFiles[name] = manifests[name];
+  }
+  const inventory = Object.entries(archiveFiles).map(([path, bytes]) => ({ path, byte_size: Buffer.byteLength(bytes), sha256: sha(bytes) })).sort((left, right) => left.path.localeCompare(right.path));
+  const controller = {
+    schema_version: 1,
+    campaign_run_id: campaign,
+    inference_revision: revision,
+    sceneworks_revision: sceneWorksRevision,
+    workflow_run_id: "101",
+    workflow_run_attempt: 1,
+    validated: Object.entries(models).map(([tier, model]) => ({ status: "validated", tier, model_inventory_sha256: model.inventory, source_sha256: "a".repeat(64), cases: 20 })),
+    artifacts: { entries: inventory, aggregate_sha256: sha(JSON.stringify(inventory)) },
+  };
+  const upstreamBytes = await writeZip(root, "88", { ...archiveFiles, "upstream-controller.json": JSON.stringify(controller) });
+  const recoveryBytes = await writeZip(root, "87", { "recovery-predecessor.json": "authenticated predecessor bytes" });
+  const value = {
+    stage: "upstream-reference",
+    predecessor_campaign_id: config.campaign_id,
+    campaign_id: campaign,
+    inference_revision: revision,
+    sceneworks_revision: sceneWorksRevision,
+    workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/server-candle-linux.yml", run_id: "101", run_attempt: 1, head_sha: sceneWorksRevision, conclusion: "cancelled" },
+    failure: { code: "campaign_cancelled_after_upstream", phase: "execution", evidence_schema_version: 1 },
+    source_artifacts: [
+      { role: "recovery", id: "87", name: `starvector-recovery-${campaign}`, size: recoveryBytes.length, digest: `sha256:${sha(recoveryBytes)}` },
+      { role: "upstream", id: "88", name: `starvector-upstream-${campaign}`, size: upstreamBytes.length, digest: `sha256:${sha(upstreamBytes)}` },
+    ],
+  };
+  config.execution_predecessor = value;
+  const run = { id: 101, run_attempt: 1, head_sha: sceneWorksRevision, path: value.workflow.path, event: "workflow_dispatch", status: "completed", conclusion: "cancelled" };
+  const artifacts = value.source_artifacts.map((input) => ({ id: Number(input.id), name: input.name, size_in_bytes: input.size, digest: input.digest, expired: false, workflow_run: { id: 101, head_sha: sceneWorksRevision } }));
+  const artifactCensus = { total_count: artifacts.length, artifacts };
+  const conclusions = new Map([
+    ["starvector-campaign / prepare-recovery", "success"],
+    ["starvector-provision", "skipped"],
+    ["starvector-diagnostic-candle-1b", "skipped"],
+    ["starvector-readiness", "skipped"],
+    ["starvector-source-closure", "skipped"],
+    ["build-candle", "skipped"],
+    ["starvector-campaign / upstream-reference", "success"],
+    ["starvector-campaign / mlx-1b", "cancelled"],
+    ["starvector-campaign / mlx-8b", "cancelled"],
+    ["starvector-campaign / cuda-1b", "cancelled"],
+    ["starvector-campaign / cuda-8b", "cancelled"],
+    ["starvector-campaign / seal-receipt", "failure"],
+  ]);
+  const jobs = { total_count: conclusions.size, jobs: [...conclusions].map(([name, conclusion]) => ({ name, conclusion, head_sha: sceneWorksRevision })) };
+  const fetchImpl = async (url) => ({ ok: true, json: async () => url.includes("/artifacts?") ? artifactCensus : url.includes("/jobs?") ? jobs : run });
+  const output = path.join(root, "cancelled-after-upstream-valid");
+  await prepareRecovery(config, output, { archiveRoot: root, token: "fixture-token", fetchImpl });
+  const native = await verifyRecovery(config, output, { campaignRunId: "next", permanentPin: "e".repeat(40) });
+  assert.deepEqual(await verifyExecutionPredecessor(config, output, native), value);
+
+  const missingTuple = structuredClone(jobs); missingTuple.jobs = missingTuple.jobs.filter((job) => !job.name.endsWith("cuda-8b")); missingTuple.total_count--;
+  assert.throws(() => validateExecutionPredecessor(config, run, artifactCensus, missingTuple), /job census differs/);
+  const extraTuple = structuredClone(jobs); extraTuple.jobs.push({ name: "starvector-campaign / cuda-extra", conclusion: "cancelled", head_sha: sceneWorksRevision }); extraTuple.total_count++;
+  assert.throws(() => validateExecutionPredecessor(config, run, artifactCensus, extraTuple), /job census differs/);
+  const wrongTuple = structuredClone(jobs); wrongTuple.jobs.find((job) => job.name.endsWith("mlx-1b")).conclusion = "success";
+  assert.throws(() => validateExecutionPredecessor(config, run, artifactCensus, wrongTuple), /job differs: starvector-campaign \/ mlx-1b/);
+  assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: { ...value, failure: { ...value.failure, reason: "operator assertion" } } }, run, artifactCensus, jobs), /failure identity/);
+  assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: { ...value, workflow: { ...value.workflow, conclusion: "failure" } } }, { ...run, conclusion: "failure" }, artifactCensus, jobs), /requires a cancelled workflow/);
+  assert.throws(() => validateExecutionPredecessor(config, { ...run, status: "in_progress" }, artifactCensus, jobs), /workflow differs/);
+  const missingArtifact = { total_count: 1, artifacts: artifacts.slice(1) };
+  assert.throws(() => validateExecutionPredecessor(config, run, missingArtifact, jobs), /artifact census differs/);
+  const extraArtifact = { total_count: 3, artifacts: [...artifacts, { ...artifacts[1], id: 99, name: "unrelated" }] };
+  assert.throws(() => validateExecutionPredecessor(config, run, extraArtifact, jobs), /artifact census differs/);
+  const unrelated = { total_count: 2, artifacts: [artifacts[0], { ...artifacts[1], id: 99, name: "unrelated" }] };
+  assert.throws(() => validateExecutionPredecessor(config, run, unrelated, jobs), /upstream artifact differs/);
+  const duplicateRole = structuredClone(value); duplicateRole.source_artifacts[0] = { ...duplicateRole.source_artifacts[1] };
+  assert.throws(() => validateExecutionPredecessor({ ...config, execution_predecessor: duplicateRole }, run, artifactCensus, jobs), /recovery artifact differs/);
+
+  let mutation = 0;
+  const expectArchiveFailure = async (files, pattern) => {
+    const id = `cancelled-mutation-${mutation++}`;
+    await writeZip(root, id, files);
+    const generated = path.join(root, `${id}.zip`);
+    await assert.rejects(() => validateCancelledAfterUpstreamArchive(value, generated), pattern);
+  };
+  const controllerWith = (change) => ({ ...archiveFiles, "upstream-controller.json": JSON.stringify(change(structuredClone(controller))) });
+  await expectArchiveFailure(controllerWith((item) => { item.campaign_run_id = "unrelated-campaign"; return item; }), /controller identity differs/);
+  await expectArchiveFailure(controllerWith((item) => { item.validated.pop(); return item; }), /validation or inventory is incomplete|validated tier differs/);
+  await expectArchiveFailure(controllerWith((item) => { item.validated[1].tier = "1b"; return item; }), /validated tier differs/);
+  await expectArchiveFailure(controllerWith((item) => { item.validated[0].status = "failed"; return item; }), /validated tier differs/);
+  await expectArchiveFailure(controllerWith((item) => { item.validated[0].cases = 19; return item; }), /validated tier differs/);
+  await expectArchiveFailure(controllerWith((item) => { item.artifacts.aggregate_sha256 = "f".repeat(64); return item; }), /validation or inventory is incomplete/);
+  await expectArchiveFailure(controllerWith((item) => { item.artifacts.entries[0].sha256 = "f".repeat(64); item.artifacts.aggregate_sha256 = sha(JSON.stringify(item.artifacts.entries)); return item; }), /archive inventory differs/);
+  const missingManifest = { ...archiveFiles, "upstream-controller.json": JSON.stringify(controller) }; delete missingManifest["upstream-reference-8b.json"];
+  await expectArchiveFailure(missingManifest, /missing, ambiguous, or oversized/);
+  const wrongManifest = structuredClone(JSON.parse(manifests["upstream-reference-1b.json"])); wrongManifest.upstream_reference.checkpoint_revision = "f".repeat(40);
+  await expectArchiveFailure({ ...archiveFiles, "upstream-reference-1b.json": JSON.stringify(wrongManifest), "upstream-controller.json": JSON.stringify(controller) }, /archive inventory differs|manifest inventory differs|manifest identity differs/);
+});
+
+test("checked-in recovery advances to the authenticated cancelled campaign without inventing the unclaimed failure", async () => {
+  const config = JSON.parse(await readFile(path.join(process.cwd(), "release/starvector-terminal-recovery-v1.json")));
+  const chain = [...config.execution_history, config.execution_predecessor];
+  let previous = config.campaign_id;
+  for (const value of chain) {
+    assert.equal(value.predecessor_campaign_id, previous);
+    previous = value.campaign_id;
+  }
+  assert.equal(config.execution_history.at(-1).campaign_id, "sc22261-252e6a7-2246088e-dab6ff70c14e4299");
+  assert.equal(config.execution_predecessor.campaign_id, "sc22261-8e2d967-848eb1a-0605dc4993d41332");
+  assert.equal(config.execution_predecessor.failure.code, "campaign_cancelled_after_upstream");
+  assert.ok(!chain.some((value) => value.campaign_id === "sc22261-c5c8c2a-db676be-5438020f56714566"));
 });
 
 test("authenticated native failure retains upstream, raw, and combined archives as one successor", async (t) => {

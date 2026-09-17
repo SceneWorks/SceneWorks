@@ -5,6 +5,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
+import { normalizeStarVectorRejection, PARITY_SOURCE_INDICES, UPSTREAM_REVISION } from "./lib/starvector-terminal-upstream-reference.mjs";
 
 const execFile = promisify(execFileCallback);
 export const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
@@ -70,6 +71,24 @@ print(json.dumps(result,separators=(',',':')))`;
     fail(`cannot inspect failed execution archive: ${error.message}`);
   }
   return Object.fromEntries(required.map((name) => [name, Buffer.from(encoded[name], "base64")]));
+}
+async function boundedArchiveInventory(archive) {
+  const program = String.raw`import hashlib,json,pathlib,stat,sys,zipfile
+archive=pathlib.Path(sys.argv[1]); result=[]; names=set(); total=0
+with zipfile.ZipFile(archive) as z:
+ infos=z.infolist()
+ if len(infos)>20000: raise ValueError('archive entry limit')
+ for i in infos:
+  p=pathlib.PurePosixPath(i.filename); total+=i.file_size
+  if p.is_absolute() or '..' in p.parts or '\\' in i.filename or i.filename in names or stat.S_ISLNK(i.external_attr>>16) or total>512*1024*1024: raise ValueError('unsafe failed execution archive')
+  names.add(i.filename)
+  if not i.is_dir(): result.append({'path':i.filename,'byte_size':i.file_size,'sha256':hashlib.sha256(z.read(i)).hexdigest()})
+print(json.dumps(sorted(result,key=lambda item:item['path']),separators=(',',':'))) `;
+  try {
+    return JSON.parse((await execFile(python(), ["-c", program, archive], { maxBuffer: 32 * 1024 * 1024 })).stdout);
+  } catch (error) {
+    fail(`cannot inventory failed execution archive: ${error.message}`);
+  }
 }
 async function boundedRouteSummary(archive) {
   const program = String.raw`import hashlib,json,pathlib,stat,sys,zipfile
@@ -143,6 +162,65 @@ export async function validateNativeExecutionArchives(value, archives) {
   return value;
 }
 
+const cancelledAfterUpstream = (value) => stable(value?.failure) === stable({
+  code: "campaign_cancelled_after_upstream",
+  phase: "execution",
+  evidence_schema_version: 1,
+});
+
+export async function validateCancelledAfterUpstreamArchive(value, archive) {
+  const records = await boundedArchiveRecords(archive, ["upstream-controller.json", "upstream-reference-1b.json", "upstream-reference-8b.json"]);
+  const controller = parseRecord(records, "upstream-controller.json");
+  if (controller.schema_version !== value.failure.evidence_schema_version
+      || controller.campaign_run_id !== value.campaign_id
+      || controller.inference_revision !== value.inference_revision
+      || controller.sceneworks_revision !== value.sceneworks_revision
+      || String(controller.workflow_run_id) !== value.workflow.run_id
+      || controller.workflow_run_attempt !== value.workflow.run_attempt) {
+    fail("cancelled upstream controller identity differs from failed execution");
+  }
+  const validated = controller.validated, entries = controller.artifacts?.entries;
+  if (!Array.isArray(validated) || validated.length !== 2 || !Array.isArray(entries) || sha(JSON.stringify(entries)) !== controller.artifacts.aggregate_sha256) fail("cancelled upstream validation or inventory is incomplete");
+  const actualInventory = (await boundedArchiveInventory(archive)).filter((entry) => entry.path !== "upstream-controller.json");
+  if (stable(actualInventory) !== stable([...entries].sort((left, right) => left.path.localeCompare(right.path)))) fail("cancelled upstream archive inventory differs");
+  const expected = {
+    "1b": { repository: "starvector/starvector-1b-im2svg", revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9" },
+    "8b": { repository: "starvector/starvector-8b-im2svg", revision: "518beea8dcb5f7a37c5911e92d1d62a76beee7f9" },
+  };
+  const seen = new Set();
+  for (const item of validated) {
+    const model = expected[item?.tier];
+    if (!model || seen.has(item.tier) || item.status !== "validated" || item.cases !== 20 || !/^[a-f0-9]{64}$/.test(item.model_inventory_sha256 ?? "") || !/^[a-f0-9]{64}$/.test(item.source_sha256 ?? "")) fail("cancelled upstream validated tier differs");
+    seen.add(item.tier);
+    const name = `upstream-reference-${item.tier}.json`, manifestBytes = records[name], manifest = parseRecord(records, name), reference = manifest.upstream_reference;
+    const matches = entries.filter((entry) => entry?.path === name);
+    if (matches.length !== 1 || matches[0].byte_size !== manifestBytes.length || matches[0].sha256 !== sha(manifestBytes)) fail("cancelled upstream manifest inventory differs");
+    if (manifest.schema_version !== 2 || manifest.cases?.length !== 20 || reference?.implementation_repository !== "https://github.com/joanrod/star-vector" || reference.implementation_revision !== UPSTREAM_REVISION || reference.checkpoint_repository !== model.repository || reference.checkpoint_revision !== model.revision || reference.checkpoint_inventory_sha256 !== item.model_inventory_sha256) fail("cancelled upstream manifest identity differs");
+    const evidenceEntry = (evidencePath, digest) => {
+      const found = entries.filter((entry) => entry?.path === evidencePath);
+      if (found.length !== 1 || found[0].sha256 !== digest) fail("cancelled upstream case inventory differs");
+    };
+    for (const role of ["config", "processor", "transcript"]) evidenceEntry(manifest[`${role}_path`], reference[`${role}_sha256`]);
+    for (const [index, evidence] of manifest.cases.entries()) {
+      if (evidence.case_index !== index || evidence.source_case_index !== PARITY_SOURCE_INDICES[index] || evidence.seed !== index || !/^[a-f0-9]{64}$/.test(evidence.input_png_sha256 ?? "")) fail("cancelled upstream case identity differs");
+      if (evidence.outcome === "accepted") {
+        const keys = ["case_index", "input_png_sha256", "outcome", "seed", "source_case_index", "upstream_preview_png", "upstream_preview_png_sha256", "upstream_svg", "upstream_svg_sha256"];
+        if (Object.keys(evidence).sort().join("|") !== keys.sort().join("|")) fail("cancelled upstream accepted case differs");
+        evidenceEntry(evidence.upstream_svg, evidence.upstream_svg_sha256); evidenceEntry(evidence.upstream_preview_png, evidence.upstream_preview_png_sha256);
+      } else if (evidence.outcome === "rejected") {
+        const common = ["case_index", "input_png_sha256", "outcome", "rejection_code", "rejection_reason", "rejection_stage", "seed", "source_case_index", "upstream_raw_svg", "upstream_raw_svg_sha256"];
+        const sanitizer = ["sanitizer_stderr", "sanitizer_stderr_sha256", "sanitizer_stdout", "sanitizer_stdout_sha256"];
+        const keys = evidence.rejection_stage === "sanitizer" ? [...common.filter((key) => key !== "rejection_code"), ...sanitizer] : common;
+        if (Object.keys(evidence).sort().join("|") !== keys.sort().join("|")) fail("cancelled upstream rejected case differs");
+        normalizeStarVectorRejection(evidence.rejection_stage === "generation_limit" ? evidence.rejection_code : evidence.rejection_reason, evidence.rejection_stage);
+        evidenceEntry(evidence.upstream_raw_svg, evidence.upstream_raw_svg_sha256);
+        if (evidence.rejection_stage === "sanitizer") { evidenceEntry(evidence.sanitizer_stdout, evidence.sanitizer_stdout_sha256); evidenceEntry(evidence.sanitizer_stderr, evidence.sanitizer_stderr_sha256); }
+      } else fail("cancelled upstream case outcome differs");
+    }
+  }
+  if (seen.size !== 2) fail("cancelled upstream validated tier differs");
+}
+
 // Invoked in a hosted preparation job, before the first hardware job. ZIPs are
 // GitHub artifacts, not model downloads. A local archive directory supports the
 // same production path for a CPU-only integration dry run.
@@ -193,7 +271,41 @@ export function validateExecutionPredecessor(config, run, artifact, jobs) {
   if (String(run?.id) !== workflow.run_id || run.run_attempt !== workflow.run_attempt || run.head_sha !== workflow.head_sha || run.path !== workflow.path || run.event !== "workflow_dispatch" || run.status !== "completed" || run.conclusion !== workflow.conclusion) fail("authenticated failed execution workflow differs");
   if (!Array.isArray(jobs?.jobs) || jobs.total_count !== jobs.jobs.length) fail("failed execution job census is incomplete");
   if (value.stage === "upstream-reference") {
-    if (!/^[1-9][0-9]*$/.test(input?.id ?? "") || input.name !== `starvector-upstream-${value.campaign_id}` || !Number.isSafeInteger(input.size) || input.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(input.digest ?? "") || String(artifact?.id) !== input.id || artifact.name !== input.name || artifact.size_in_bytes !== input.size || artifact.digest !== input.digest || artifact.expired !== false || String(artifact.workflow_run?.id) !== workflow.run_id || artifact.workflow_run?.head_sha !== workflow.head_sha) fail("authenticated upstream artifact differs");
+    const cancelled = cancelledAfterUpstream(value);
+    if (!cancelled && value.failure !== undefined) fail("invalid upstream execution failure identity");
+    if (!cancelled && (!/^[1-9][0-9]*$/.test(input?.id ?? "") || input.name !== `starvector-upstream-${value.campaign_id}` || !Number.isSafeInteger(input.size) || input.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(input.digest ?? "") || String(artifact?.id) !== input.id || artifact.name !== input.name || artifact.size_in_bytes !== input.size || artifact.digest !== input.digest || artifact.expired !== false || String(artifact.workflow_run?.id) !== workflow.run_id || artifact.workflow_run?.head_sha !== workflow.head_sha)) fail("authenticated upstream artifact differs");
+    if (cancelled) {
+      const inputs = value.source_artifacts, census = artifact;
+      const expectedRoles = ["recovery", "upstream"];
+      if (!Array.isArray(inputs) || inputs.length !== expectedRoles.length || !Array.isArray(census?.artifacts) || census.total_count !== census.artifacts.length || census.artifacts.length !== expectedRoles.length) fail("cancelled upstream artifact census differs");
+      for (const [index, role] of expectedRoles.entries()) {
+        const selected = inputs[index], observed = census.artifacts.find((entry) => String(entry.id) === selected?.id);
+        const name = `starvector-${role}-${value.campaign_id}`;
+        if (selected?.role !== role || selected.name !== name || !/^[1-9][0-9]*$/.test(selected.id ?? "") || !Number.isSafeInteger(selected.size) || selected.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(selected.digest ?? "") || !observed || observed.name !== name || observed.size_in_bytes !== selected.size || observed.digest !== selected.digest || observed.expired !== false || String(observed.workflow_run?.id) !== workflow.run_id || observed.workflow_run?.head_sha !== workflow.head_sha) fail(`cancelled upstream ${role} artifact differs`);
+      }
+      if (workflow.conclusion !== "cancelled") fail("cancelled upstream execution requires a cancelled workflow");
+      const expected = new Map([
+        ["starvector-campaign / prepare-recovery", "success"],
+        ["starvector-provision", "skipped"],
+        ["starvector-diagnostic-candle-1b", "skipped"],
+        ["starvector-readiness", "skipped"],
+        ["starvector-source-closure", "skipped"],
+        ["build-candle", "skipped"],
+        ["starvector-campaign / upstream-reference", "success"],
+        ["starvector-campaign / mlx-1b", "cancelled"],
+        ["starvector-campaign / mlx-8b", "cancelled"],
+        ["starvector-campaign / cuda-1b", "cancelled"],
+        ["starvector-campaign / cuda-8b", "cancelled"],
+        ["starvector-campaign / seal-receipt", "failure"],
+      ]);
+      if (jobs.jobs.length !== expected.size) fail("cancelled upstream execution job census differs");
+      for (const job of jobs.jobs) {
+        if (expected.get(job.name) !== job.conclusion || job.head_sha !== workflow.head_sha) fail(`cancelled upstream execution job differs: ${job.name}`);
+        expected.delete(job.name);
+      }
+      if (expected.size) fail("cancelled upstream execution job census differs");
+      return value;
+    }
     for (const stage of ["upstream-reference", "mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"]) {
       const matches = jobs.jobs.filter(job => job.name === stage || job.name.endsWith(` / ${stage}`));
       if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || (stage === "upstream-reference" ? !["failure", "cancelled", "timed_out"].includes(matches[0].conclusion) : matches[0].conclusion !== "skipped")) fail(`execution predecessor did not leave ${stage} in the required state`);
@@ -227,20 +339,22 @@ async function prepareExecutionPredecessor(config, output, { archiveRoot, token,
     return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
   };
   // The attempt-specific endpoint never substitutes a newer re-run's outcome.
-  const base = `actions/runs/${workflow.run_id}/attempts/${workflow.run_attempt}`, inputs = value.stage === "native" ? value.source_artifacts : [value.source_artifact];
-  const run = await get(base), artifacts = await Promise.all(inputs.map((input) => get(`actions/artifacts/${input.id}`))), jobs = await get(`${base}/jobs?per_page=100`);
-  validateExecutionPredecessor(config, run, value.stage === "native" ? artifacts : artifacts[0], jobs);
+  const base = `actions/runs/${workflow.run_id}/attempts/${workflow.run_attempt}`, cancelled = cancelledAfterUpstream(value);
+  const inputs = value.stage === "native" || cancelled ? value.source_artifacts : [value.source_artifact];
+  const run = await get(base), artifacts = cancelled ? await get(`actions/runs/${workflow.run_id}/artifacts?per_page=100`) : await Promise.all(inputs.map((input) => get(`actions/artifacts/${input.id}`))), jobs = await get(`${base}/jobs?per_page=100`);
+  validateExecutionPredecessor(config, run, value.stage === "native" || cancelled ? artifacts : artifacts[0], jobs);
   const root = `execution-attempts/${value.campaign_id}`;
   const archivePaths = {};
   for (const input of inputs) {
     const bytes = archiveRoot ? await readFile(path.join(archiveRoot, `${input.id}.zip`)) : await get(`actions/artifacts/${input.id}/zip`, true);
     if (bytes.length !== input.size || `sha256:${sha(bytes)}` !== input.digest) fail("failed execution archive identity differs");
-    const role = value.stage === "native" ? input.role : "upstream";
+    const role = value.stage === "native" || cancelled ? input.role : "upstream";
     await put(output, `${root}/${role}.zip`, bytes);
     archivePaths[role] = path.join(output, root, `${role}.zip`);
   }
   if (value.stage === "native") await validateNativeExecutionArchives(value, archivePaths);
-  await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, ...(value.stage === "native" ? { artifacts } : { artifact: artifacts[0] }), jobs }));
+  else if (cancelled) await validateCancelledAfterUpstreamArchive(value, archivePaths.upstream);
+  await put(output, `${root}/metadata.json`, stable({ predecessor: value, run, ...(value.stage === "native" ? { artifacts } : cancelled ? { artifact_census: artifacts } : { artifact: artifacts[0] }), jobs }));
 }
 
 // Ordered upstream-only history is retained separately from native receipts.
@@ -264,10 +378,12 @@ export async function verifyExecutionPredecessor(config, root, nativePredecessor
     const bytes = await checkedRecoveryFile(root, metadataPath, { size: info.size, sha256: sha(await readFile(path.join(root, metadataPath))) });
     const metadata = JSON.parse(bytes);
     if (stable(metadata.predecessor) !== stable(value)) fail("failed execution declaration differs from prepared evidence");
-    validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, value.stage === "native" ? metadata.artifacts : metadata.artifact, metadata.jobs);
-    const inputs = value.stage === "native" ? value.source_artifacts : [value.source_artifact];
-    for (const input of inputs) await checkedRecoveryFile(root, `${relative}/${value.stage === "native" ? input.role : "upstream"}.zip`, { size: input.size, sha256: input.digest.slice(7) });
+    const cancelled = cancelledAfterUpstream(value);
+    validateExecutionPredecessor({ ...config, execution_predecessor: value }, metadata.run, value.stage === "native" ? metadata.artifacts : cancelled ? metadata.artifact_census : metadata.artifact, metadata.jobs);
+    const inputs = value.stage === "native" || cancelled ? value.source_artifacts : [value.source_artifact];
+    for (const input of inputs) await checkedRecoveryFile(root, `${relative}/${value.stage === "native" || cancelled ? input.role : "upstream"}.zip`, { size: input.size, sha256: input.digest.slice(7) });
     if (value.stage === "native") await validateNativeExecutionArchives(value, Object.fromEntries(inputs.map((input) => [input.role, path.join(root, relative, `${input.role}.zip`)])));
+    else if (cancelled) await validateCancelledAfterUpstreamArchive(value, path.join(root, relative, "upstream.zip"));
   }
   return config.execution_predecessor ?? nativePredecessor;
 }

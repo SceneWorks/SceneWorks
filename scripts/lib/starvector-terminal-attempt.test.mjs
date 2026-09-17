@@ -50,9 +50,9 @@ test("upstream successor binds real prior claim and marker, preserves history, a
   await assert.rejects(() => claimTerminalAttempt(root, pin, "wrong-marker", options), /tuple marker differs/);
 });
 
-test("upstream-only failure permits an unclaimed Mac, but never missing or partial Windows history", async (t) => {
+test("cancelled-after-upstream predecessor permits only an all-absent Mac claim and exact Windows history", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "unclaimed-attempt-")); t.after(() => rm(root, { recursive: true, force: true }));
-  const predecessor = { stage: "upstream-reference", campaign_id: "failed", inference_revision: "a".repeat(40), predecessor_campaign_id: "older", workflow: { run_id: "10", run_attempt: 1, conclusion: "failure" } };
+  const predecessor = { stage: "upstream-reference", campaign_id: "failed", inference_revision: "a".repeat(40), predecessor_campaign_id: "older", workflow: { run_id: "10", run_attempt: 1, conclusion: "cancelled" }, failure: { code: "campaign_cancelled_after_upstream", phase: "execution", evidence_schema_version: 1 } };
   const options = { workflowRunId: "11", workflowRunAttempt: 1, predecessor };
   await assert.rejects(() => claimTerminalAttempt(root, "a".repeat(40), "next", { ...options, platform: "win32" }), /claim is missing/);
   await claimTerminalAttempt(root, "a".repeat(40), "next", { ...options, platform: "darwin" });

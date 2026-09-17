@@ -68,59 +68,38 @@
     "reason": "Retired campaign selected CPU worker; require corrected GPU identity and four fresh measured tuples. Historical evidence is quarantined only."
   },
   "execution_predecessor": {
-    "stage": "native",
-    "predecessor_campaign_id": "sc22261-252e6a7-b6ba2dd6-92ace97d18af0b9b",
-    "campaign_id": "sc22261-252e6a7-2246088e-dab6ff70c14e4299",
-    "inference_revision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
-    "sceneworks_revision": "2246088e2898744c45596f4350f1ad2d1bd662cc",
+    "stage": "upstream-reference",
+    "predecessor_campaign_id": "sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+    "campaign_id": "sc22261-8e2d967-848eb1a-0605dc4993d41332",
+    "inference_revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
+    "sceneworks_revision": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
     "workflow": {
       "repository": "SceneWorks/SceneWorks",
       "path": ".github/workflows/server-candle-linux.yml",
-      "run_id": "34915033176",
+      "run_id": "35231778201",
       "run_attempt": 1,
-      "head_sha": "2246088e2898744c45596f4350f1ad2d1bd662cc",
+      "head_sha": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
       "conclusion": "cancelled"
     },
     "failure": {
-      "code": "native_quality_budget_underprovisioned",
+      "code": "campaign_cancelled_after_upstream",
       "phase": "execution",
-      "tuple": "mlx:1b",
-      "evidence_schema_version": 1,
-      "model_id": "starvector_1b",
-      "model_repository": "starvector/starvector-1b-im2svg",
-      "model_revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
-      "configured_max_new_tokens": 4000,
-      "required_max_new_tokens": 7933,
-      "observed_quality_cases": 20,
-      "accepted_quality_cases": 11,
-      "rejected_quality_cases": 9,
-      "token_limit_quality_cases": 7,
-      "sanitizer_quality_cases": 2,
-      "required_accepted_quality_cases": 114,
-      "max_possible_accepted_quality_cases": 111,
-      "controller_failure_sha256": "5b122a3e68486133c3647baa89bc4763dfec2032d15ff257d7e656e785688905"
+      "evidence_schema_version": 1
     },
     "source_artifacts": [
       {
+        "role": "recovery",
+        "id": "10501546913",
+        "name": "starvector-recovery-sc22261-8e2d967-848eb1a-0605dc4993d41332",
+        "size": 2332696,
+        "digest": "sha256:3a2652b69f46c3cc881029e5462582665d6c036eeb9da3f8db9a8b991c7fa8c2"
+      },
+      {
         "role": "upstream",
-        "id": "10376676590",
-        "name": "starvector-upstream-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
-        "size": 240701,
-        "digest": "sha256:8b245138e527f4074aacbf308bc557ee5967e2e3924d0e57ec99d1ab94145084"
-      },
-      {
-        "role": "raw",
-        "id": "10377287739",
-        "name": "starvector-terminal-mlx-1b-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
-        "size": 356943,
-        "digest": "sha256:c2f60ba8f07d9fa7f32bc0dec5ba6ddd96b1e6c1e230335a202ef8a0e6910291"
-      },
-      {
-        "role": "combined",
-        "id": "10376364537",
-        "name": "starvector-terminal-receipt-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
-        "size": 400259,
-        "digest": "sha256:9ea28327cd17552ec6caa63b8d7f432477c6ffbf0c859fd20a21032c8d25df53"
+        "id": "10502732889",
+        "name": "starvector-upstream-sc22261-8e2d967-848eb1a-0605dc4993d41332",
+        "size": 240908,
+        "digest": "sha256:403f7a75b28889a1d5bae49a03118d03f039246129cabd42a2043015894c4d87"
       }
     ]
   },
@@ -274,6 +253,63 @@
           "name": "starvector-terminal-receipt-sc22261-252e6a7-b6ba2dd6-92ace97d18af0b9b",
           "size": 299690,
           "digest": "sha256:c080d86dd23baa9428229fd5e58b0de0b0b3c2ce470b43b65249b8d2508c2767"
+        }
+      ]
+    },
+    {
+      "stage": "native",
+      "predecessor_campaign_id": "sc22261-252e6a7-b6ba2dd6-92ace97d18af0b9b",
+      "campaign_id": "sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+      "inference_revision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+      "sceneworks_revision": "2246088e2898744c45596f4350f1ad2d1bd662cc",
+      "workflow": {
+        "repository": "SceneWorks/SceneWorks",
+        "path": ".github/workflows/server-candle-linux.yml",
+        "run_id": "34915033176",
+        "run_attempt": 1,
+        "head_sha": "2246088e2898744c45596f4350f1ad2d1bd662cc",
+        "conclusion": "cancelled"
+      },
+      "failure": {
+        "code": "native_quality_budget_underprovisioned",
+        "phase": "execution",
+        "tuple": "mlx:1b",
+        "evidence_schema_version": 1,
+        "model_id": "starvector_1b",
+        "model_repository": "starvector/starvector-1b-im2svg",
+        "model_revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+        "configured_max_new_tokens": 4000,
+        "required_max_new_tokens": 7933,
+        "observed_quality_cases": 20,
+        "accepted_quality_cases": 11,
+        "rejected_quality_cases": 9,
+        "token_limit_quality_cases": 7,
+        "sanitizer_quality_cases": 2,
+        "required_accepted_quality_cases": 114,
+        "max_possible_accepted_quality_cases": 111,
+        "controller_failure_sha256": "5b122a3e68486133c3647baa89bc4763dfec2032d15ff257d7e656e785688905"
+      },
+      "source_artifacts": [
+        {
+          "role": "upstream",
+          "id": "10376676590",
+          "name": "starvector-upstream-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+          "size": 240701,
+          "digest": "sha256:8b245138e527f4074aacbf308bc557ee5967e2e3924d0e57ec99d1ab94145084"
+        },
+        {
+          "role": "raw",
+          "id": "10377287739",
+          "name": "starvector-terminal-mlx-1b-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+          "size": 356943,
+          "digest": "sha256:c2f60ba8f07d9fa7f32bc0dec5ba6ddd96b1e6c1e230335a202ef8a0e6910291"
+        },
+        {
+          "role": "combined",
+          "id": "10376364537",
+          "name": "starvector-terminal-receipt-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+          "size": 400259,
+          "digest": "sha256:9ea28327cd17552ec6caa63b8d7f432477c6ffbf0c859fd20a21032c8d25df53"
         }
       ]
     }
