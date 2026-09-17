@@ -1458,6 +1458,7 @@ enum SvgResourceKind {
     ClipPath,
     LinearGradient,
     Filter,
+    UsePath,
 }
 
 #[derive(Debug)]
@@ -1470,6 +1471,7 @@ struct SvgResourceReference {
 #[derive(Debug)]
 struct SvgResourceCatalog {
     ids: BTreeMap<String, SvgResourceKind>,
+    use_paths: BTreeMap<String, Vec<(String, String)>>,
     width: u32,
     height: u32,
 }
@@ -1480,9 +1482,38 @@ fn sanitize_svg(input: &str) -> WorkerResult<CanonicalSvg> {
 
 #[derive(Debug)]
 struct SvgIndexFrame {
+    name: String,
     hidden: bool,
     filter_id: Option<String>,
     resource_owner: Option<String>,
+}
+
+fn direct_use_path_definition(name: &str, empty: bool, stack: &[SvgIndexFrame]) -> bool {
+    name == "path" && empty && stack.len() == 2 && stack[0].name == "svg" && stack[1].name == "defs"
+}
+
+fn canonical_use_path_definition(
+    attrs: &[(String, String)],
+) -> WorkerResult<(String, Vec<(String, String)>)> {
+    if attrs.len() != 2
+        || attrs
+            .iter()
+            .any(|(key, _)| !matches!(key.as_str(), "id" | "d"))
+    {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG local use path definition permits only id and d".to_owned(),
+        ));
+    }
+    let id = attribute_value(attrs, "id").ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG local use path requires an id".to_owned())
+    })?;
+    validate_resource_id(id, "local use path id")?;
+    let d = attribute_value(attrs, "d").ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG local use path requires path data".to_owned())
+    })?;
+    let mut definition_budget = SanitizerBudget::default();
+    validate_attribute_resource_budget("path", "d", d, &mut definition_budget)?;
+    Ok((id.to_owned(), vec![("d".to_owned(), d.to_owned())]))
 }
 
 fn attribute_value<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -1630,6 +1661,7 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
     let mut budget = SanitizerBudget::default();
     let mut elements = 0usize;
     let mut ids = BTreeMap::new();
+    let mut use_paths = BTreeMap::new();
     let mut id_counts = BTreeMap::new();
     let mut references = Vec::new();
     let mut filter_results = BTreeMap::new();
@@ -1697,6 +1729,7 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
         }
         let hidden = stack.last().is_some_and(|frame| frame.hidden)
             || (name == "g" && attribute_value(&attrs, "display") == Some("none"));
+        let is_use_path_definition = direct_use_path_definition(&name, empty, &stack);
         let resource_kind = if hidden {
             None
         } else {
@@ -1704,6 +1737,7 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
                 "clipPath" => Some(SvgResourceKind::ClipPath),
                 "linearGradient" => Some(SvgResourceKind::LinearGradient),
                 "filter" => Some(SvgResourceKind::Filter),
+                "path" if is_use_path_definition => Some(SvgResourceKind::UsePath),
                 _ => None,
             }
         };
@@ -1731,6 +1765,14 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
                 Ok(id.to_owned())
             })
             .transpose()?;
+        if is_use_path_definition {
+            let (id, canonical_attrs) = canonical_use_path_definition(&attrs)?;
+            if use_paths.insert(id, canonical_attrs).is_some() {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG local use path id is duplicated".to_owned(),
+                ));
+            }
+        }
         if !hidden && name == "stop" {
             gradient_stops = gradient_stops.checked_add(1).ok_or_else(|| {
                 WorkerError::InvalidPayload("provider SVG gradient stop count overflow".to_owned())
@@ -1750,6 +1792,38 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
             .clone()
             .or_else(|| stack.last().and_then(|frame| frame.resource_owner.clone()));
         if !hidden {
+            if name == "use" {
+                if !empty {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG local use must be empty".to_owned(),
+                    ));
+                }
+                let hrefs = attrs
+                    .iter()
+                    .filter(|(key, _)| matches!(key.as_str(), "href" | "xlink:href"))
+                    .collect::<Vec<_>>();
+                if hrefs.len() != 1 {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG local use requires exactly one href".to_owned(),
+                    ));
+                }
+                let target = local_href_target(&hrefs[0].1).ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "provider SVG local use href must be an exact local fragment".to_owned(),
+                    )
+                })?;
+                validate_resource_id(target, "local use reference")?;
+                if references.len() >= MAX_SVG_RESOURCE_REFERENCES {
+                    return Err(WorkerError::InvalidPayload(
+                        "provider SVG exceeds the resource-reference budget".to_owned(),
+                    ));
+                }
+                references.push(SvgResourceReference {
+                    source: resource_owner.clone(),
+                    target: target.to_owned(),
+                    expected: SvgResourceKind::UsePath,
+                });
+            }
             index_filter_primitive(
                 &name,
                 &attrs,
@@ -1814,6 +1888,7 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
         }
         if !empty {
             stack.push(SvgIndexFrame {
+                name,
                 hidden,
                 filter_id,
                 resource_owner,
@@ -1833,8 +1908,105 @@ fn index_svg_resources(input: &str) -> WorkerResult<SvgResourceCatalog> {
             )));
         }
     }
+    for id in use_paths.keys() {
+        if !references.iter().any(|reference| {
+            reference.expected == SvgResourceKind::UsePath
+                && reference.target.as_str() == id.as_str()
+        }) {
+            return Err(WorkerError::InvalidPayload(
+                "provider SVG local use path is not referenced".to_owned(),
+            ));
+        }
+    }
     validate_resource_cycles(&references)?;
-    Ok(SvgResourceCatalog { ids, width, height })
+    Ok(SvgResourceCatalog {
+        ids,
+        use_paths,
+        width,
+        height,
+    })
+}
+
+fn validate_indexed_use_path_definition(
+    attrs: &[(String, String)],
+    resources: &SvgResourceCatalog,
+) -> WorkerResult<()> {
+    let (id, canonical_attrs) = canonical_use_path_definition(attrs)?;
+    if resources.ids.get(&id) != Some(&SvgResourceKind::UsePath)
+        || resources.use_paths.get(&id) != Some(&canonical_attrs)
+    {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG local use path differs from the validated index".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+struct CanonicalLocalUse {
+    wrapper_attrs: Vec<(String, String)>,
+    path_attrs: Vec<(String, String)>,
+}
+
+fn canonical_local_use(
+    source_attrs: Vec<(String, String)>,
+    resources: &SvgResourceCatalog,
+    budget: &mut SanitizerBudget,
+) -> WorkerResult<CanonicalLocalUse> {
+    let mut href = None;
+    let mut wrapper_attrs = Vec::new();
+    for (key, value) in source_attrs {
+        if matches!(key.as_str(), "href" | "xlink:href") {
+            if href.is_some() {
+                return Err(WorkerError::InvalidPayload(
+                    "provider SVG local use requires exactly one href".to_owned(),
+                ));
+            }
+            let target = local_href_target(&value).ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "provider SVG local use href must be an exact local fragment".to_owned(),
+                )
+            })?;
+            validate_resource_id(target, "local use reference")?;
+            href = Some(target.to_owned());
+        } else {
+            wrapper_attrs.push((key, value));
+        }
+    }
+    let target = href.ok_or_else(|| {
+        WorkerError::InvalidPayload("provider SVG local use requires exactly one href".to_owned())
+    })?;
+    if resources.ids.get(&target) != Some(&SvgResourceKind::UsePath) {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG local use href has an unresolved or mistyped resource".to_owned(),
+        ));
+    }
+    let (_, wrapper_attrs) = canonical_element("g", wrapper_attrs, false, resources, budget)?;
+    let definition_attrs = resources.use_paths.get(&target).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "provider SVG local use path is absent from the validated index".to_owned(),
+        )
+    })?;
+    let (_, path_attrs) =
+        canonical_element("path", definition_attrs.clone(), false, resources, budget)?;
+    Ok(CanonicalLocalUse {
+        wrapper_attrs,
+        path_attrs,
+    })
+}
+
+fn record_canonical_output(output: &str, emitted_elements: usize) -> WorkerResult<()> {
+    if emitted_elements > MAX_SVG_ELEMENTS {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG expansion exceeds the element budget".to_owned(),
+        ));
+    }
+    const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+    if output.len().saturating_sub(XML_DECLARATION.len()) > MAX_SVG_BYTES {
+        return Err(WorkerError::InvalidPayload(
+            "provider SVG expansion exceeds the 256 KiB sanitizer budget".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
@@ -1852,6 +2024,7 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     let mut output = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     let mut stack: Vec<RawSvgElement> = Vec::new();
     let mut elements = 0usize;
+    let mut emitted_elements = 0usize;
     let mut budget = SanitizerBudget::default();
     let mut dimensions = None;
     let mut root_seen = false;
@@ -1911,8 +2084,12 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         dimensions = Some(svg_dimensions(&attrs)?);
                     }
                     write_start(&mut output, &name, &attrs, false);
+                    emitted_elements += 1;
+                    record_canonical_output(&output, emitted_elements)?;
                 } else if kind == RawSvgElementKind::Hidden {
                     validate_hidden_attributes(&raw_name, &source_attrs, &mut budget)?;
+                } else if kind == RawSvgElementKind::UsePathDefinition {
+                    validate_indexed_use_path_definition(&source_attrs, &resources)?;
                 } else {
                     validate_discarded_attributes(kind, &source_attrs)?;
                 }
@@ -1947,7 +2124,20 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                 )?;
                 let kind =
                     classify_element(&raw_name, stack.last(), &source_attrs, true, root_seen)?;
-                if kind.emitted() {
+                if kind == RawSvgElementKind::Use {
+                    if stack.len().saturating_add(2) > MAX_SVG_DEPTH {
+                        return Err(WorkerError::InvalidPayload(
+                            "provider SVG local use expansion exceeds the element nesting budget"
+                                .to_owned(),
+                        ));
+                    }
+                    let expanded = canonical_local_use(source_attrs, &resources, &mut budget)?;
+                    write_start(&mut output, "g", &expanded.wrapper_attrs, false);
+                    write_start(&mut output, "path", &expanded.path_attrs, true);
+                    output.push_str("</g>");
+                    emitted_elements += 2;
+                    record_canonical_output(&output, emitted_elements)?;
+                } else if kind.emitted() {
                     let (name, attrs) = canonical_emitted_element(
                         kind,
                         &raw_name,
@@ -1957,8 +2147,12 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                         &mut budget,
                     )?;
                     write_start(&mut output, &name, &attrs, true);
+                    emitted_elements += 1;
+                    record_canonical_output(&output, emitted_elements)?;
                 } else if kind == RawSvgElementKind::Hidden {
                     validate_hidden_attributes(&raw_name, &source_attrs, &mut budget)?;
+                } else if kind == RawSvgElementKind::UsePathDefinition {
+                    validate_indexed_use_path_definition(&source_attrs, &resources)?;
                 } else {
                     validate_discarded_attributes(kind, &source_attrs)?;
                 }
@@ -1983,6 +2177,7 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                     output.push_str("</");
                     output.push_str(&name);
                     output.push('>');
+                    record_canonical_output(&output, emitted_elements)?;
                 }
             }
             Ok(Event::Text(text)) => {
@@ -2057,6 +2252,8 @@ enum RawSvgElementKind {
     Retained,
     Defs,
     ResourceDefs,
+    UsePathDefinition,
+    Use,
     ClipPath,
     LinearGradient,
     GradientStop,
@@ -2673,6 +2870,10 @@ fn classify_element(
     match (parent.kind, parent.name.as_str(), name, empty) {
         (RawSvgElementKind::Retained, "svg", "defs", true) => Ok(RawSvgElementKind::Defs),
         (RawSvgElementKind::Retained, "svg", "defs", false) => Ok(RawSvgElementKind::ResourceDefs),
+        (RawSvgElementKind::ResourceDefs, "defs", "path", true) => {
+            Ok(RawSvgElementKind::UsePathDefinition)
+        }
+        (RawSvgElementKind::Retained, _, "use", true) => Ok(RawSvgElementKind::Use),
         (RawSvgElementKind::ResourceDefs, "defs", "clipPath", false) => {
             Ok(RawSvgElementKind::ClipPath)
         }
@@ -2870,6 +3071,8 @@ fn validate_discarded_attributes(
             }
             RawSvgElementKind::Retained
             | RawSvgElementKind::ResourceDefs
+            | RawSvgElementKind::UsePathDefinition
+            | RawSvgElementKind::Use
             | RawSvgElementKind::ClipPath
             | RawSvgElementKind::LinearGradient
             | RawSvgElementKind::GradientStop
@@ -3024,7 +3227,10 @@ fn canonical_presentation_style(
         seen_properties.push(key);
         if matches!(
             (key, value),
-            ("display", "inline") | ("stroke-miterlimit", "4") | ("stroke-dasharray", "none")
+            ("display", "inline")
+                | ("stroke-miterlimit", "4")
+                | ("stroke-dasharray", "none")
+                | ("vector-effect", "none")
         ) {
             continue;
         }
@@ -4529,6 +4735,119 @@ mod tests {
         ] {
             assert!(sanitize_svg(malicious).is_err(), "accepted {malicious}");
         }
+    }
+
+    #[test]
+    fn exact_vector_effect_none_is_inert_and_other_values_stay_rejected() {
+        let raw =
+            include_str!("../tests/fixtures/starvector/upstream-35238431684-quality-case-06.svg");
+        assert_eq!(
+            sha256_hex(raw.as_bytes()),
+            "182857f6688229e765b7795490ec3d11aaba4ee9a9df891ffeb20d01af48f48b"
+        );
+        let canonical = sanitize_svg(raw).expect("authenticated quality case 6");
+        assert!(!canonical.svg.contains("vector-effect"));
+        assert_eq!(
+            comparison_pixels(raw, 512),
+            comparison_pixels(&canonical.svg, 512),
+            "omitting the exact default must preserve the authenticated render"
+        );
+
+        for invalid in [
+            "<svg><path style=\"vector-effect:non-scaling-stroke\" d=\"M0 0H1\"/></svg>",
+            "<svg><path style=\"vector-effect:inherit\" d=\"M0 0H1\"/></svg>",
+            "<svg><path style=\"vector-effect:\" d=\"M0 0H1\"/></svg>",
+            "<svg><path style=\"vector-effect:url(https://example.invalid/a)\" d=\"M0 0H1\"/></svg>",
+            "<svg><path style=\"vector-effect:none;vector-effect:none\" d=\"M0 0H1\"/></svg>",
+            "<svg><path vector-effect=\"none\" d=\"M0 0H1\"/></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn exact_local_use_paths_expand_to_bounded_canonical_geometry() {
+        let raw = include_str!("../tests/fixtures/starvector/upstream-35231778201-8b-case-15.svg");
+        assert_eq!(
+            sha256_hex(raw.as_bytes()),
+            "4399cf9418f6675511cf504e94270dc490ff2acd950057eb57d313ba1c13e485"
+        );
+        let canonical = sanitize_svg(raw).expect("authenticated 8B parity case 15");
+        for removed in ["<use", "xlink:href", "id=\"a\""] {
+            assert!(!canonical.svg.contains(removed), "retained {removed}");
+        }
+        assert_eq!(canonical.svg.matches("<path ").count(), 2);
+        assert_eq!(
+            comparison_pixels(raw, 512),
+            comparison_pixels(&canonical.svg, 512),
+            "local-use expansion must preserve the authenticated render"
+        );
+        assert_eq!(
+            canonical.svg,
+            sanitize_svg(raw).expect("repeat sanitation").svg,
+            "local-use expansion must be byte deterministic"
+        );
+
+        let plain_href = sanitize_svg(
+            "<svg><defs><path id=\"p\" d=\"M0 0H1V1Z\"/></defs><use href=\"#p\"/></svg>",
+        )
+        .expect("one exact SVG2 local href");
+        assert!(plain_href.svg.contains("<path d=\"M0 0H1V1Z\"/>"));
+    }
+
+    #[test]
+    fn local_use_expansion_rejects_unsafe_ambiguous_or_unbounded_graphs() {
+        for invalid in [
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"https://example.invalid/p\"/></svg>",
+            "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#p\" xlink:href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#missing\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs></svg>",
+            "<svg><defs><linearGradient id=\"p\"/></defs><use href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" fill=\"red\" d=\"M0 0H1\"/></defs><use href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/><path id=\"p\" d=\"M0 0H2\"/></defs><use href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/><linearGradient id=\"p\"/></defs><use href=\"#p\"/></svg>",
+            "<svg><defs><g><path id=\"p\" d=\"M0 0H1\"/></g></defs><use href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#p\"><path d=\"M0 0H2\"/></use></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#p\" x=\"1\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#p\" onclick=\"alert(1)\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use href=\"#p\" style=\"fill:url(https://example.invalid/a)\"/></svg>",
+            "<svg xmlns:xlink=\"https://example.invalid\"><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use xlink:href=\"#p\"/></svg>",
+            "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs><use xlink:href=\"#p\"/></svg>",
+        ] {
+            assert!(sanitize_svg(invalid).is_err(), "accepted {invalid}");
+        }
+
+        let uses = "<use href=\"#p\"/>".repeat(MAX_SVG_RESOURCE_REFERENCES + 1);
+        let too_many = format!("<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs>{uses}</svg>");
+        assert!(
+            invalid_detail(sanitize_svg(&too_many)).contains("resource-reference budget"),
+            "local uses must share the resource-reference budget"
+        );
+
+        let long_path = "M0 0".repeat(1_000);
+        let repeated = "<use href=\"#p\"/>".repeat(40);
+        let expanded =
+            format!("<svg><defs><path id=\"p\" d=\"{long_path}\"/></defs>{repeated}</svg>");
+        assert!(
+            sanitize_svg(&expanded).is_err(),
+            "expanded path work was unbounded"
+        );
+
+        let nested_use = |groups: usize| {
+            format!(
+                "<svg><defs><path id=\"p\" d=\"M0 0H1\"/></defs>{}<use href=\"#p\"/>{}</svg>",
+                "<g>".repeat(groups),
+                "</g>".repeat(groups)
+            )
+        };
+        sanitize_svg(&nested_use(MAX_SVG_DEPTH - 3))
+            .expect("expanded path at the exact maximum canonical depth");
+        assert!(
+            invalid_detail(sanitize_svg(&nested_use(MAX_SVG_DEPTH - 2)))
+                .contains("expansion exceeds the element nesting budget"),
+            "source-valid use must fail when its expansion would exceed canonical depth"
+        );
     }
 
     #[test]
