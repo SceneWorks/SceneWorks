@@ -63,6 +63,7 @@ export function EditorScreen() {
   const [markers] = useState([]); // Local UI markers only — no persisted marker model yet (audit).
   const [timelineNotice, setTimelineNotice] = useState("");
   const previewVideoRef = useRef(null);
+  const audioPlayRequestedRef = useRef(false);
   const screenActive = useScreenActive();
 
   const assetsById = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
@@ -95,7 +96,9 @@ export function EditorScreen() {
     if (!selectedAudioPreview || !assetCanRenderAsAudio(selectedAsset) || !media) {
       return;
     }
-    media.volume = selectedAudioPreview.volume;
+    if (!audioPlayRequestedRef.current || selectedAudioPreview.muted || selectedAudioPreview.volume > 0) {
+      media.volume = selectedAudioPreview.volume;
+    }
     media.playbackRate = selectedAudioPreview.playbackRate;
     if (!isPlaying) {
       media.currentTime = selectedAudioPreview.currentTime;
@@ -127,9 +130,13 @@ export function EditorScreen() {
         media.pause();
         return;
       }
+      if (isAudio && audioPlayRequestedRef.current) {
+        return;
+      }
       media.play().catch(() => setIsPlaying(false));
       return;
     }
+    audioPlayRequestedRef.current = false;
     media.pause();
     // Re-run only when the selected clip changes (by id), not on every asset-object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -486,6 +493,7 @@ export function EditorScreen() {
 
   function toggleProgramPlayback() {
     if (isPlaying) {
+      audioPlayRequestedRef.current = false;
       setIsPlaying(false);
       return;
     }
@@ -500,13 +508,28 @@ export function EditorScreen() {
         setPlayheadSeconds(nextPlayhead);
       }
       media.currentTime = nextPreview.currentTime;
-      media.volume = nextPreview.volume;
+      // A selected item begins at its fade-in boundary, where the correct mix volume is
+      // exactly zero. WebKit then treats play() as inaudible and can pause it when the next
+      // animation frame raises the fade outside the click gesture. Use an imperceptible
+      // positive bootstrap for an audible item; the preview effect applies the exact saved
+      // fade curve immediately after playback starts.
+      media.volume = nextPreview.muted ? 0 : Math.max(nextPreview.volume, 0.0001);
       media.playbackRate = nextPreview.playbackRate;
       media.muted = nextPreview.muted;
+      audioPlayRequestedRef.current = true;
       setIsPlaying(true);
       try {
-        media.play().catch(() => setIsPlaying(false));
+        media.play().then(
+          () => {
+            audioPlayRequestedRef.current = false;
+          },
+          () => {
+            audioPlayRequestedRef.current = false;
+            setIsPlaying(false);
+          },
+        );
       } catch {
+        audioPlayRequestedRef.current = false;
         setIsPlaying(false);
       }
       return;

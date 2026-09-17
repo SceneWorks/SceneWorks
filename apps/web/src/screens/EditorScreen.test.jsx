@@ -418,9 +418,15 @@ describe("timeline audio editing (sc-23739)", () => {
       role: "ambience",
       gain: 0.25,
       muted: false,
-      items: [{ id: "ambience", trackId: "track_ambience", assetId: "a1", type: "audio", displayName: "Ambience", sourceIn: 0.5, sourceOut: 4.5, timelineStart: 0.2, timelineEnd: 4.2, speed: 1, volume: 0.6 }],
+      items: [{ id: "ambience", trackId: "track_ambience", assetId: "a1", type: "audio", displayName: "Ambience", sourceIn: 0.5, sourceOut: 4.5, timelineStart: 0.2, timelineEnd: 4.2, speed: 1, volume: 0.6, fadeInSeconds: 0.2 }],
     });
-    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    let volumeAtPlay = null;
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockImplementation(function playWithNativeAudibilityGate() {
+      volumeAtPlay = this.volume;
+      return this.volume > 0
+        ? new Promise(() => {})
+        : Promise.reject(Object.assign(new Error("audio became audible outside the user gesture"), { name: "NotAllowedError" }));
+    });
     vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
     root = createRoot(container);
     act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
@@ -434,8 +440,11 @@ describe("timeline audio editing (sc-23739)", () => {
       // The first play must happen in this click callback. Deferring it to an effect loses
       // the user gesture and native WebViews may reject the unmuted audio playback.
       expect(play).toHaveBeenCalledTimes(1);
+      expect(volumeAtPlay).toBeGreaterThan(0);
     });
-    expect(container.querySelector(".ve-program audio").currentTime).toBeCloseTo(0.5);
+    const preview = container.querySelector(".ve-program audio");
+    expect(preview.currentTime).toBeCloseTo(0.5);
+    expect(preview.volume).toBeGreaterThan(0);
     expect(container.querySelector(".ve-play").title).toBe("Pause");
   });
 
