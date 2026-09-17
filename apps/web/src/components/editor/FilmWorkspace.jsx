@@ -466,10 +466,12 @@ export function FilmWorkspace() {
               />
             </Suspense>
             <FilmReview
+              active={activeView === "review"}
               draft={draft}
               onChange={updateDraft}
               projectId={activeProject.id}
               refreshTimelines={refreshTimelines}
+              runLocatorId={lastRun?.locator?.id}
               setNotice={setNotice}
               setSelectedTimelineId={setSelectedTimelineId}
               token={token}

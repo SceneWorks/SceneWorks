@@ -56,7 +56,7 @@ function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ draft, onChange, projectId, refreshTimelines, setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, onChange, projectId, refreshTimelines, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
   const [view, setView] = useState(null);
   const [pending, setPending] = useState(false);
@@ -66,26 +66,32 @@ export function FilmReview({ draft, onChange, projectId, refreshTimelines, setNo
   const refresh = useCallback(async () => {
     if (!projectId || !draft.id) return;
     try {
-      const runs = await apiFetch(`/api/v1/projects/${projectId}/film-runs`, token);
-      const latest = runs.find((item) => item.locator.draftId === draft.id && item.record);
-      if (!latest) {
-        setRunId("");
-        setView(null);
-        return;
+      let locatorId = runLocatorId;
+      if (!locatorId) {
+        const runs = await apiFetch(`/api/v1/projects/${projectId}/film-runs`, token);
+        const latest = runs.find((item) => item.locator.draftId === draft.id && item.record);
+        if (!latest) {
+          setRunId("");
+          setView(null);
+          return;
+        }
+        locatorId = latest.locator.id;
       }
-      setRunId(latest.locator.id);
-      setView(await getFilmReview(projectId, latest.locator.id, token));
+      setRunId(locatorId);
+      setView(await getFilmReview(projectId, locatorId, token));
     } catch (error) {
       setNotice(error.message);
     }
-  }, [draft.id, projectId, setNotice, token]);
+  }, [draft.id, projectId, runLocatorId, setNotice, token]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // The three workspace panels stay mounted to preserve unsaved edits. Refresh when Review becomes
+  // visible so a run created while this hidden panel held an empty view becomes reviewable.
+  useEffect(() => { if (active) refresh(); }, [active, refresh]);
   useEffect(() => {
-    if (!view?.run?.controllerActive) return undefined;
+    if (!active || !view?.run?.controllerActive) return undefined;
     const timer = window.setTimeout(refresh, 800);
     return () => window.clearTimeout(timer);
-  }, [refresh, view]);
+  }, [active, refresh, view]);
 
   function changePlan(mutator) {
     onChange((next) => {
