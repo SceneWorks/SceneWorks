@@ -202,8 +202,12 @@ async fn spawn_take_mutation(
     ensure_mutation_available(&before)?;
     let directory = run_directory(state.clone(), &project_id, &run_id).await?;
     let action = if repair { "repair" } else { "replace" };
-    let lease = ControllerLease::acquire(&directory, format!("api-{action}:{run_id}"))
-        .map_err(harness_error)?;
+    let lease = ControllerLease::acquire_for_api(
+        &directory,
+        format!("api-{action}:{run_id}"),
+        state.film_controller_shutdown.clone(),
+    )
+    .map_err(harness_error)?;
     let active = load_review_view(state.clone(), project_id.clone(), run_id.clone()).await?;
     tokio::spawn(async move {
         let transport = match transport(&state) {

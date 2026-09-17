@@ -47,8 +47,12 @@ pub(crate) async fn resume_film_run(
         move |store| store.film_run_files(&project_id, &run_id)
     })
     .await?;
-    let lease = ControllerLease::acquire(&files.directory, format!("api-resume:{run_id}"))
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let lease = ControllerLease::acquire_for_api(
+        &files.directory,
+        format!("api-resume:{run_id}"),
+        state.film_controller_shutdown.clone(),
+    )
+    .map_err(|error| ApiError::conflict(error.to_string()))?;
     view.controller_active = true;
     view.controller_owner = Some(format!("api-resume:{run_id}"));
     view.controller_interrupted = false;
@@ -230,9 +234,10 @@ fn spawn_film_startup_reconciliation_with_install_requirement(
                 if record.state != RunState::Running {
                     continue;
                 }
-                let lease = match ControllerLease::acquire_interrupted(
+                let lease = match ControllerLease::acquire_interrupted_for_api(
                     &files.directory,
                     format!("startup-adopt:{run_id}"),
+                    state.film_controller_shutdown.clone(),
                 ) {
                     Ok(Some(lease)) => lease,
                     Ok(None) => continue,

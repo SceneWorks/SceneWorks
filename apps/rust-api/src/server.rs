@@ -41,6 +41,7 @@ use crate::catalog_scan_supervisor::CatalogScanSupervisor;
 use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
+use crate::film_harness::FilmControllerShutdown;
 use crate::manifest::ManifestCache;
 use crate::models::{ModelCatalogCache, ModelSizeCache};
 use crate::startup::{
@@ -48,7 +49,7 @@ use crate::startup::{
 };
 use crate::tickets::TicketStore;
 use crate::{
-    create_app_with_pending_startup_maintenance, env_path_or, env_string,
+    create_app_with_pending_startup_maintenance_with_film_shutdown, env_path_or, env_string,
     open_bind_override_enabled, parent_death, parent_pid_to_watch, seed_mode_for_config_dir,
     should_warn_open_bind, shutdown_signal, spawn_inprocess_utility_worker, DEFAULT_API_HOST,
     DEFAULT_CORS_ORIGINS,
@@ -377,6 +378,9 @@ pub struct AppState {
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
     /// Owns, deduplicates, cancels, and drains background catalog scans.
     pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
+    /// Preserves only active Film controller ownership across this API process's graceful exit.
+    /// Every process receives a fresh instance, so shutdown state never crosses a restart.
+    pub(crate) film_controller_shutdown: FilmControllerShutdown,
     /// Catalog ids for which this AppState has already published an invalid
     /// persisted recovery plan. Valid scheduled recoveries remain retryable if
     /// their generation later exits incomplete.
@@ -755,15 +759,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // both the bootstrap dispatcher and, once installed, the real router's auth
     // middleware. Poll this server while readiness-critical filesystem/SQLite
     // work builds the real router on the blocking pool.
+    let film_controller_shutdown = FilmControllerShutdown::default();
+    let serve_shutdown = film_controller_shutdown.clone();
     let serve = axum::serve(
         listener,
         bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown_signal(serve_shutdown))
     .into_future();
     tokio::pin!(serve);
-    let mut build =
-        tokio::task::spawn_blocking(move || create_app_with_pending_startup_maintenance(settings));
+    let mut build = tokio::task::spawn_blocking(move || {
+        create_app_with_pending_startup_maintenance_with_film_shutdown(
+            settings,
+            film_controller_shutdown,
+        )
+    });
     let build_result = tokio::select! {
         result = &mut build => result?,
         result = &mut serve => {

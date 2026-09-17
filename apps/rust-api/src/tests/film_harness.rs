@@ -187,12 +187,20 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     let reached_running = running.notified();
     tokio::pin!(reached_running);
     let controller_app = harness.app.clone();
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_restart",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
     let mut controller = tokio::spawn(async move {
-        film_harness::run(
+        film_harness::run_with_control_and_lease(
             &RouterTransport {
                 app: controller_app,
             },
             &options,
+            &film_harness::RunControl::default(),
+            lease,
         )
         .await
     });
@@ -211,9 +219,10 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
         .map(|(_, job_id, _)| job_id.clone())
         .expect("video job was claimed");
 
-    // Simulate the controller disappearing with the API process while the separately hosted
-    // worker continues the exact job. The aborted task drops its advisory lease but deliberately
-    // leaves the durable record in `running`, which is what startup reconciliation adopts.
+    // The production SIGTERM path sets shutdown intent before Axum drains. Simulate the runtime
+    // then dropping this detached controller while the separately hosted worker continues the
+    // exact job. Unlike an ordinary handled controller exit, this Drop must retain its marker.
+    harness.state.film_controller_shutdown.request();
     controller.abort();
     assert!(
         controller
@@ -222,13 +231,14 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
             .is_cancelled(),
         "the original controller must be gone before startup adopts it"
     );
-    // Aborting a Tokio task drops its lease cleanly, unlike terminating the API process. Restore
-    // the marker the OS-released lease would retain after a real process crash.
-    std::fs::write(
-        files.directory.join(film_harness::CONTROLLER_LOCK_FILE),
-        "owner=api:filmrun_restart\npid=999999\nacquiredAt=2000-01-01T00:00:00Z\n",
-    )
-    .expect("crashed controller marker writes");
+    let marker = std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE))
+        .expect("controller marker remains readable");
+    assert!(
+        marker
+            .lines()
+            .any(|line| line == "owner=api:filmrun_restart"),
+        "graceful API shutdown must retain active controller ownership: {marker:?}"
+    );
     let interrupted = harness
         .state
         .jobs_store
@@ -249,9 +259,10 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     );
     assert_eq!(active.worker_id.as_deref(), Some(WORKER_ID));
 
-    let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
-        harness.state.clone(),
-    );
+    let mut restarted_state = harness.state.clone();
+    restarted_state.film_controller_shutdown = film_harness::FilmControllerShutdown::default();
+    let mut startup =
+        crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(restarted_state);
     startup.scan.await.expect("startup scan joins");
     startup
         .controller_results
@@ -326,14 +337,30 @@ async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() 
     };
     let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
         .on_post_route("/api/v1/video/jobs");
-    film_harness::run(&transport, &options)
-        .await
-        .expect_err("the injected transport loss stops the controller");
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_explicit_resume",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
+    film_harness::run_with_control_and_lease(
+        &transport,
+        &options,
+        &film_harness::RunControl::default(),
+        lease,
+    )
+    .await
+    .expect_err("the injected transport loss stops the controller");
     let failed = film_harness::read_run_record(&files.directory).expect("failed record persists");
     assert_eq!(failed.state, RunState::Running, "{}", summary(&failed));
     assert_eq!(failed.outcome, RunOutcome::Failed, "{}", summary(&failed));
     assert!(failed.is_resumable(), "{}", summary(&failed));
     assert_eq!(harness.api_video_job_count().await, 0);
+    assert_eq!(
+        std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE)).unwrap(),
+        "",
+        "an ordinary handled API controller failure clears ownership"
+    );
 
     let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
         harness.state.clone(),

@@ -816,7 +816,7 @@ async fn parent_death(parent_pid: Option<i32>) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(film_controller_shutdown: film_harness::FilmControllerShutdown) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -852,6 +852,10 @@ async fn shutdown_signal() {
             );
         }
     }
+    // Set intent before Axum starts draining. Film controllers call this API over loopback and can
+    // therefore exit as soon as the listener closes; their lease Drop must already distinguish
+    // process shutdown from an ordinary handled controller error.
+    film_controller_shutdown.request();
 }
 
 /// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
@@ -1190,7 +1194,11 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, false)
+    create_app_with_state_mode(
+        settings,
+        false,
+        film_harness::FilmControllerShutdown::default(),
+    )
 }
 
 #[cfg(test)]
@@ -1205,15 +1213,28 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     Ok((router, state))
 }
 
+#[cfg(test)]
 pub(crate) fn create_app_with_pending_startup_maintenance(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, true)
+    create_app_with_state_mode(
+        settings,
+        true,
+        film_harness::FilmControllerShutdown::default(),
+    )
+}
+
+pub(crate) fn create_app_with_pending_startup_maintenance_with_film_shutdown(
+    settings: Settings,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, true, film_controller_shutdown)
 }
 
 fn create_app_with_state_mode(
     settings: Settings,
     defer_upload_sweeps: bool,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let _filesystem_phase = StartupPhaseTimer::start(
         "filesystem_preflight",
@@ -1362,6 +1383,7 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        film_controller_shutdown,
         catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
             std::collections::HashSet::new(),
         )),

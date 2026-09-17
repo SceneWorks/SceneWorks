@@ -131,17 +131,48 @@ pub const RUN_RECORD_FILE: &str = "run.json";
 pub const CANCEL_SENTINEL_FILE: &str = "cancel.requested";
 pub const CONTROLLER_LOCK_FILE: &str = "controller.lock";
 
+/// Per-API-process shutdown intent shared with its Film controller leases.
+///
+/// SIGTERM is a graceful API shutdown, so Rust destructors still run even though a separately
+/// hosted worker may continue the exact Film job. This process-local flag lets an active run keep
+/// its durable owner marker through that teardown. Ordinary controller completion, failure, and
+/// operator cancellation never set it and continue to clear the marker.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FilmControllerShutdown {
+    requested: Arc<AtomicBool>,
+}
+
+impl FilmControllerShutdown {
+    pub(crate) fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Debug)]
 pub struct ControllerLease {
     path: PathBuf,
     owner: String,
+    api_shutdown: Option<FilmControllerShutdown>,
     _lock: FileLock,
 }
 
 impl ControllerLease {
     pub fn acquire(run_dir: &Path, owner: impl Into<String>) -> Result<Self, HarnessError> {
         let (path, lock) = Self::lock(run_dir)?;
-        Self::claim(path, owner.into(), lock)
+        Self::claim(path, owner.into(), lock, None)
+    }
+
+    pub(crate) fn acquire_for_api(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: FilmControllerShutdown,
+    ) -> Result<Self, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        Self::claim(path, owner.into(), lock, Some(api_shutdown))
     }
 
     /// Acquire a run only when its unlocked lease still names the controller that crashed.
@@ -151,9 +182,26 @@ impl ControllerLease {
     /// the marker only after obtaining the lock makes this distinction atomic with takeover: a
     /// controller that finishes while startup is scanning cannot be mistaken for an interrupted
     /// one and restarted.
+    #[cfg(test)]
     pub(crate) fn acquire_interrupted(
         run_dir: &Path,
         owner: impl Into<String>,
+    ) -> Result<Option<Self>, HarnessError> {
+        Self::acquire_interrupted_with_shutdown(run_dir, owner, None)
+    }
+
+    pub(crate) fn acquire_interrupted_for_api(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: FilmControllerShutdown,
+    ) -> Result<Option<Self>, HarnessError> {
+        Self::acquire_interrupted_with_shutdown(run_dir, owner, Some(api_shutdown))
+    }
+
+    fn acquire_interrupted_with_shutdown(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: Option<FilmControllerShutdown>,
     ) -> Result<Option<Self>, HarnessError> {
         let (path, lock) = Self::lock(run_dir)?;
         let interrupted = std::fs::read_to_string(&path)?.lines().any(|line| {
@@ -163,7 +211,7 @@ impl ControllerLease {
         if !interrupted {
             return Ok(None);
         }
-        Self::claim(path, owner.into(), lock).map(Some)
+        Self::claim(path, owner.into(), lock, api_shutdown).map(Some)
     }
 
     fn lock(run_dir: &Path) -> Result<(PathBuf, FileLock), HarnessError> {
@@ -191,7 +239,12 @@ impl ControllerLease {
         Ok((path, lock))
     }
 
-    fn claim(path: PathBuf, owner: String, lock: FileLock) -> Result<Self, HarnessError> {
+    fn claim(
+        path: PathBuf,
+        owner: String,
+        lock: FileLock,
+        api_shutdown: Option<FilmControllerShutdown>,
+    ) -> Result<Self, HarnessError> {
         lock.file().set_len(0)?;
         use std::io::Write as _;
         let mut locked_file = lock.file();
@@ -207,6 +260,7 @@ impl ControllerLease {
         Ok(Self {
             path,
             owner,
+            api_shutdown,
             _lock: lock,
         })
     }
@@ -244,6 +298,23 @@ impl ControllerLease {
 impl Drop for ControllerLease {
     fn drop(&mut self) {
         tracing::debug!(path = %self.path.display(), owner = %self.owner, "releasing film controller lease");
+        let preserve_for_restart = self
+            .api_shutdown
+            .as_ref()
+            .is_some_and(FilmControllerShutdown::requested)
+            && self
+                .path
+                .parent()
+                .and_then(|run_dir| read_run_record(run_dir).ok())
+                .is_some_and(|record| record.state == RunState::Running);
+        if preserve_for_restart {
+            tracing::info!(
+                path = %self.path.display(),
+                owner = %self.owner,
+                "preserving active film controller ownership for API restart"
+            );
+            return;
+        }
         // A clean release erases its diagnostic owner while the advisory lock is still held. If
         // the process crashes this Drop never runs, so the surviving owner identifies which
         // operation startup found interrupted without being mistaken for live ownership.
