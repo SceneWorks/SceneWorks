@@ -14,7 +14,7 @@ use crate::film_plan::{
 use crate::time::utc_now;
 
 pub const FILM_DRAFT_SCHEMA_VERSION: u32 = 1;
-pub const FILM_RUN_LOCATOR_SCHEMA_VERSION: u32 = 1;
+pub const FILM_RUN_LOCATOR_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_FILM_PLANNING_PROVIDER: &str = "prompt_refiner";
 pub const QWEN36_FILM_PLANNER_MODEL_ID: &str = "film_planner_qwen3_6_27b";
 pub const QWEN36_FILM_PLANNER_REPO: &str = "Qwen/Qwen3.6-27B";
@@ -459,6 +459,10 @@ pub struct FilmRunLocator {
     pub selected_shot_ids: Vec<String>,
     /// Project-relative directory containing pinned inputs and canonical `run.json`.
     pub record_directory: String,
+    /// Project-relative complete authoring document pinned for this run. Legacy locators have no
+    /// snapshot; absence is reported explicitly rather than reconstructed from derived inputs.
+    #[serde(default)]
+    pub authoring_snapshot_path: Option<String>,
     pub created_at: String,
 }
 
