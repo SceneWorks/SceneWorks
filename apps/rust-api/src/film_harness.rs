@@ -6716,6 +6716,69 @@ mod unit_tests {
         );
     }
 
+    #[test]
+    fn sequence_beds_stop_at_the_measured_source_end_without_implicit_looping() {
+        let bed = SoundBed {
+            role: "notification_chime".to_owned(),
+            gain: 0.6,
+            muted: false,
+            start_seconds: 8.2,
+            source_in_seconds: 0.0,
+            fade_in_seconds: 0.02,
+            fade_out_seconds: 0.04,
+        };
+        let asset = SoundAsset {
+            asset_id: "asset_chime".to_owned(),
+            duration_seconds: Some(0.35),
+        };
+        let mut timeline = json!({ "tracks": [
+            { "id": PICTURE_TRACK_ID, "kind": "video", "items": [{
+                "id": "picture", "sourceIn": 0.0, "sourceOut": 24.041666666666668,
+                "timelineStart": 0.0, "timelineEnd": 24.041666666666668, "speed": 1.0
+            }] },
+            bed_track("track_sfx_0", "Sound effect", ROLE_SFX, &bed, &asset, "run_3e86b06e")
+        ] });
+
+        let duration = relayout_timeline(&mut timeline, None).expect("timeline relayout");
+        assert_eq!(duration, 24.041666666666668);
+        let effect = &timeline["tracks"][1]["items"][0];
+        assert_eq!(effect["timelineStart"], json!(8.2));
+        assert!(
+            (effect["timelineEnd"].as_f64().unwrap() - 8.55).abs() < 0.000_001,
+            "{effect}"
+        );
+        assert_eq!(effect["sourceIn"], json!(0.0));
+        assert_eq!(effect["sourceOut"], json!(0.35));
+        assert_eq!(effect[HARNESS_KEY]["sourceDurationSeconds"], json!(0.35));
+
+        let long_asset = SoundAsset {
+            asset_id: "asset_music".to_owned(),
+            duration_seconds: Some(32.0),
+        };
+        let long_bed = SoundBed {
+            role: "main_theme".to_owned(),
+            source_in_seconds: 0.5,
+            start_seconds: 1.2,
+            ..bed
+        };
+        timeline["tracks"][1] = bed_track(
+            MUSIC_TRACK_ID,
+            "Music",
+            ROLE_MUSIC,
+            &long_bed,
+            &long_asset,
+            "run_3e86b06e",
+        );
+        relayout_timeline(&mut timeline, None).expect("long bed relayout");
+        let music = &timeline["tracks"][1]["items"][0];
+        assert_eq!(music["timelineStart"], json!(1.2));
+        assert_eq!(music["timelineEnd"], json!(24.041666666666668));
+        assert!(
+            (music["sourceOut"].as_f64().unwrap() - 23.34166666666667).abs() < 0.000_001,
+            "{music}"
+        );
+    }
+
     // `tier_maps_to_the_shared_mlx_quantize_convention` moved to `sceneworks_core::film_compile`
     // with `mlx_quantize_for_tier` itself, which now builds every video job body (sc-22713).
 
@@ -7163,6 +7226,15 @@ fn bed_track(
 ) -> Value {
     let mut block = harness_block(role, run_id, None, 0.0);
     block["startSeconds"] = json!(bed.start_seconds);
+    if let Some(duration) = asset
+        .duration_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        // A sequence bed is placed once, but no sound role implies looping. Keep the measured source
+        // bound beside the placement so relayout can extend a long bed with later picture while a
+        // short effect remains its real length.
+        block["sourceDurationSeconds"] = json!(duration);
+    }
     let item = json!({
         "id": format!("item_{role}_{}_{}", bed.role, &run_id[4..12]),
         "trackId": track_id,
@@ -7320,23 +7392,42 @@ fn relayout_timeline(timeline: &mut Value, order: Option<&[String]>) -> Result<f
                     let start = shot_start + harness_f64(item, "offsetSeconds");
                     (start, start + item_span(item))
                 }
-                // Sequence-level beds, the only other roles the match above admits.
+                // Sequence-level beds, the only other roles the match above admits. A bed may span
+                // the sequence only while measured source remains; looping is never implicit.
                 _ => {
                     let start = harness_f64(item, "startSeconds");
-                    (start, duration)
+                    let source_in = number(item, "sourceIn", 0.0).max(0.0);
+                    let source_duration = item
+                        .get(HARNESS_KEY)
+                        .and_then(|block| block.get("sourceDurationSeconds"))
+                        .and_then(Value::as_f64)
+                        .filter(|source_duration| source_duration.is_finite());
+                    let end = source_duration
+                        .map(|source_duration| start + (source_duration - source_in).max(0.0))
+                        .unwrap_or(duration);
+                    (start, end)
                 }
             };
             if start >= duration - MIN_ITEM_SECONDS {
                 return false;
             }
-            let end = end.min(duration).max(start + MIN_ITEM_SECONDS);
+            let end = end.min(duration);
+            if end <= start {
+                return false;
+            }
             item["timelineStart"] = json!(ms(start));
             item["timelineEnd"] = json!(ms(end));
             if matches!(role.as_str(), ROLE_AMBIENCE | ROLE_MUSIC | ROLE_SFX) {
-                // A bed's source range follows its span, so the whole stretch of the file that
-                // plays under the sequence is asked for rather than a fixed four seconds.
+                // A bed's source range follows its playable span, bounded by measured source.
                 let source_in = number(item, "sourceIn", 0.0).max(0.0);
-                item["sourceOut"] = json!(ms(source_in + (end - start)));
+                let source_out = item
+                    .get(HARNESS_KEY)
+                    .and_then(|block| block.get("sourceDurationSeconds"))
+                    .and_then(Value::as_f64)
+                    .filter(|source_duration| source_duration.is_finite())
+                    .map(|source_duration| (source_in + (end - start)).min(source_duration))
+                    .unwrap_or(source_in + (end - start));
+                item["sourceOut"] = json!(ms(source_out));
             }
             true
         });
