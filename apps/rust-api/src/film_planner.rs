@@ -379,6 +379,11 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                                 .and_then(Value::as_str)
                                 .unwrap_or(&self.thinking_mode)
                                 .to_owned(),
+                            max_output_tokens: None,
+                            reference_pixels_sent: None,
+                            duration_seconds: Some(started.elapsed().as_secs_f64()),
+                            finish_reason: None,
+                            failure_code: None,
                             thinking: thinking.clone(),
                             usage: None,
                         });

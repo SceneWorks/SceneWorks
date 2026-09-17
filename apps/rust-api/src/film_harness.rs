@@ -49,7 +49,7 @@ use std::time::Duration;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::film_compile::{
     compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
-    ResolvedConditioning,
+    PlannerExecutionRecord, ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
@@ -339,6 +339,12 @@ pub enum HarnessError {
     },
     /// The transport itself failed (connection refused, malformed response, ...).
     Transport(String),
+    /// A planner returned a protocol-valid response that cannot be accepted as plan text. The
+    /// sanitized execution survives with the actionable failure instead of being discarded.
+    PlannerResponse {
+        detail: String,
+        execution: Box<PlannerExecutionRecord>,
+    },
     /// The requested action does not apply to the run record on disk — it is finished and not
     /// resumable, its documents no longer hash to what the run was started from, or it names no
     /// such shot. Nothing was dispatched (sc-22711).
@@ -367,6 +373,7 @@ impl std::fmt::Display for HarnessError {
                 detail,
             } => write!(f, "{method} {path} -> {status}: {detail}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
+            Self::PlannerResponse { detail, .. } => write!(f, "transport error: {detail}"),
             Self::Refused(message) => write!(f, "refused: {message}"),
             Self::Io(message) => write!(f, "io error: {message}"),
         }

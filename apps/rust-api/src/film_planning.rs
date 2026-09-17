@@ -613,6 +613,9 @@ fn finish_planning_operation(
             );
         }
         Err(error) => {
+            if let HarnessError::PlannerResponse { execution, .. } = &error {
+                operation.executions.push((**execution).clone());
+            }
             operation.status = if canceled { "canceled" } else { "failed" }.to_owned();
             operation.stage = if canceled { "canceled" } else { "failed" }.to_owned();
             operation.active_job_id = None;
@@ -994,6 +997,86 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("retry is explicit"));
+    }
+
+    #[test]
+    fn failed_external_response_keeps_input_and_sanitized_execution() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_failed".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "generating".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: None,
+            planner_model: "external-model".to_owned(),
+            video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "disabled".to_owned(),
+            max_repair_rounds: 2,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: Some(draft.production_plan.clone()),
+            compiled: None,
+            detail: Some("External request is active".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+        let latest_path = temp.path().join("latest.json");
+        let execution = PlannerExecutionRecord {
+            provider: "openai_compatible".to_owned(),
+            model: "external-model".to_owned(),
+            backend: Some("fixture".to_owned()),
+            target_video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "disabled".to_owned(),
+            max_output_tokens: Some(4096),
+            reference_pixels_sent: Some(true),
+            duration_seconds: Some(12.5),
+            finish_reason: Some("length".to_owned()),
+            failure_code: Some("no_textual_plan_content".to_owned()),
+            thinking: Some("separate reasoning".to_owned()),
+            usage: Some(sceneworks_core::film_compile::PlannerUsageRecord {
+                input_tokens: Some(17),
+                output_tokens: Some(4096),
+                total_tokens: Some(4113),
+            }),
+            ..PlannerExecutionRecord::default()
+        };
+
+        finish_planning_operation(
+            temp.path(),
+            &latest_path,
+            &operation.id,
+            Err(HarnessError::PlannerResponse {
+                detail: "The external planner response has no textual plan content".to_owned(),
+                execution: Box::new(execution.clone()),
+            }),
+        );
+
+        let failed = read_operation(&latest_path).expect("read failed operation");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.stage, "failed");
+        assert_eq!(failed.provider, "openai_compatible");
+        assert!(
+            failed.job_ids.is_empty(),
+            "no native fallback job was created"
+        );
+        assert_eq!(failed.candidate_plan, operation.candidate_plan);
+        assert_eq!(failed.compiled, operation.compiled);
+        assert_eq!(failed.executions, vec![execution]);
+        assert_eq!(failed.findings.len(), 1);
+        assert!(failed.findings[0]
+            .message
+            .contains("no textual plan content"));
+        assert!(failed.detail.as_deref().unwrap().contains("retry"));
     }
 
     #[test]
