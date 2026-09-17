@@ -8902,9 +8902,11 @@ mod model_size_concurrency_tests {
         // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
         // 88/85/85 (epic, at the previous sync); neither is right once both land. SC-18780 then
         // publishes the single cross-platform LTX 2.5 turnkey context, giving 90 / 87 / 87.
+        // SC-23733 adds the optional, explicitly installed Qwen3.6 film planner as one unscoped
+        // utility download context, giving 91 / 88 / 88.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 90_usize), ("windows", 87), ("linux", 87)]
+            [("macos", 91_usize), ("windows", 88), ("linux", 88)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

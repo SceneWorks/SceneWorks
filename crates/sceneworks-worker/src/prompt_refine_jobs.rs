@@ -1105,6 +1105,17 @@ pub(crate) async fn run_prompt_refine_job(
         .get("modelId")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let thinking_mode = match (task, payload.get("thinkingMode").and_then(Value::as_str)) {
+        (RefineTask::FilmPlan, Some("enabled")) => gen_core::core_llm::ThinkingMode::Enabled,
+        (RefineTask::FilmPlan, Some("auto")) => gen_core::core_llm::ThinkingMode::Auto,
+        (RefineTask::FilmPlan, _) => gen_core::core_llm::ThinkingMode::Disabled,
+        _ => gen_core::core_llm::ThinkingMode::Auto,
+    };
+    let thinking_mode_name = match thinking_mode {
+        gen_core::core_llm::ThinkingMode::Enabled => "enabled",
+        gen_core::core_llm::ThinkingMode::Auto => "auto",
+        gen_core::core_llm::ThinkingMode::Disabled => "disabled",
+    };
     let max_new_tokens = resolve_max_new_tokens(payload, task);
     let temperature = task.temperature();
     let work_message = task.work_message();
@@ -1217,7 +1228,7 @@ pub(crate) async fn run_prompt_refine_job(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
-        move |refiner| -> WorkerResult<String> {
+        move |refiner| -> WorkerResult<(String, Option<String>)> {
             emit_event(
                 "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
@@ -1298,6 +1309,7 @@ pub(crate) async fn run_prompt_refine_job(
                     // where the FilmPlan task should take it.
                     constraint: emits_json.then_some(Constraint::Json),
                     cancel: blocking_cancel.clone(),
+                    thinking: thinking_mode,
                     ..Default::default()
                 };
                 // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
@@ -1337,7 +1349,7 @@ pub(crate) async fn run_prompt_refine_job(
                 let output = refiner.generate(&request, &mut on_event).map_err(|error| {
                     WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
                 })?;
-                output.text
+                (output.text, output.thinking)
             };
 
             Ok(text)
@@ -1373,7 +1385,7 @@ pub(crate) async fn run_prompt_refine_job(
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The loop
     // yields the raw model output on clean completion.
-    let loop_result: WorkerResult<String> = async {
+    let loop_result: WorkerResult<(String, Option<String>)> = async {
         loop {
             tokio::select! {
                 // Generation finished (the shared cache thread replied). Disarm the guard before any
@@ -1437,8 +1449,8 @@ pub(crate) async fn run_prompt_refine_job(
         }
     }
     .await;
-    let raw = match loop_result {
-        Ok(raw) => raw,
+    let (raw, thinking) = match loop_result {
+        Ok(output) => output,
         Err(error) => {
             guard.cancel_and_join().await;
             return Err(error);
@@ -1479,7 +1491,14 @@ pub(crate) async fn run_prompt_refine_job(
             ProgressStage::Completed,
             1.0,
             done_message,
-            Some(refine_result(&original_prompt, &refined)),
+            Some(refine_result(
+                &original_prompt,
+                &refined,
+                thinking.as_deref(),
+                &model,
+                backend,
+                thinking_mode_name,
+            )),
             backend,
         ),
     )
@@ -1592,16 +1611,61 @@ fn refine_progress(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
+fn refine_result(
+    original_prompt: &str,
+    refined_prompt: &str,
+    thinking: Option<&str>,
+    model: &str,
+    backend: &str,
+    thinking_mode: &str,
+) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
     result.insert("refinedPrompt".to_owned(), json!(refined_prompt));
+    if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
+        result.insert("thinking".to_owned(), json!(thinking));
+    }
+    result.insert(
+        "executionIdentity".to_owned(),
+        json!({
+            "provider": "native",
+            "model": model,
+            "backend": backend,
+            "thinkingMode": thinking_mode,
+        }),
+    );
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
+        let result = refine_result(
+            "brief",
+            "{\"shots\":[]}",
+            Some("private reasoning"),
+            "Qwen/Qwen3.6-27B",
+            "mlx",
+            "enabled",
+        );
+        assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
+        assert_eq!(result["thinking"], "private reasoning");
+        assert_eq!(result["executionIdentity"]["provider"], "native");
+        assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+        assert_eq!(result["executionIdentity"]["backend"], "mlx");
+        assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
+        assert!(!result["refinedPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("private reasoning"));
+    }
 
     #[test]
     fn downscale_to_pixel_budget_caps_large_and_keeps_small() {

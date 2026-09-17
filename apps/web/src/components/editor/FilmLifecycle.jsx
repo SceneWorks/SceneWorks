@@ -1,0 +1,96 @@
+import React, { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "../../api.js";
+
+function operationLabel(run) {
+  const owner = run.controllerOwner || "";
+  if (owner.includes("review")) return "Review";
+  if (owner.includes("repair") || owner.includes("replace")) return "Repair";
+  if (owner.includes("edit")) return "Edit";
+  if (owner.includes("decision")) return "Decision";
+  return "Render";
+}
+
+function runStatus(run) {
+  if (run.controllerActive) return "running";
+  if (run.controllerInterrupted) return "interrupted";
+  if (!run.record) return "ready";
+  return run.record.stop?.reason || run.record.outcome || run.record.state;
+}
+
+export function FilmLifecycle({ draftId, projectId, token, setNotice }) {
+  const [runs, setRuns] = useState([]);
+  const [planning, setPlanning] = useState(null);
+  const [pending, setPending] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!projectId || !draftId) return;
+    const [runResult, planningResult] = await Promise.allSettled([
+      apiFetch(`/api/v1/projects/${projectId}/film-runs`, token),
+      apiFetch(`/api/v1/projects/${projectId}/films/${draftId}/planning`, token),
+    ]);
+    if (runResult.status === "fulfilled") {
+      const listed = Array.isArray(runResult.value) ? runResult.value : [];
+      setRuns(listed.filter((run) => run.locator.draftId === draftId));
+    } else {
+      setNotice(runResult.reason.message);
+    }
+    if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
+  }, [draftId, projectId, setNotice, token]);
+
+  useEffect(() => {
+    let canceled = false;
+    refresh();
+    const interval = window.setInterval(() => {
+      if (!canceled) refresh();
+    }, 2000);
+    return () => {
+      canceled = true;
+      window.clearInterval(interval);
+    };
+  }, [refresh]);
+
+  async function mutate(runId, action) {
+    setPending(`${runId}:${action}`);
+    try {
+      await apiFetch(`/api/v1/projects/${projectId}/film-runs/${runId}/${action}`, token, { method: "POST" });
+      setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : "Run resumed from its saved attempts.");
+      await refresh();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setPending("");
+    }
+  }
+
+  const planningActive = planning && ["running", "canceling"].includes(planning.status);
+  if (!planningActive && runs.length === 0) return null;
+
+  return (
+    <section aria-label="Film operations" className="ve-film-lifecycle">
+      <div className="ve-film-reference-heading">
+        <strong>Operations</strong>
+        <span>Durable progress remains available after leaving this screen.</span>
+      </div>
+      {planningActive ? (
+        <div className="ve-film-lifecycle-row">
+          <span><strong>Planning</strong> · {planning.stage}</span>
+          <span>{planning.detail || `${Math.round((planning.progress || 0) * 100)}%`}</span>
+        </div>
+      ) : null}
+      {runs.map((run) => {
+        const resumable = Boolean(run.record && (run.record.state === "running" || run.record.stop?.resumable));
+        const detail = run.record?.stop?.detail;
+        return (
+          <div className="ve-film-lifecycle-row" key={run.locator.id}>
+            <span><strong>{operationLabel(run)}</strong> · {runStatus(run)}</span>
+            {detail ? <span>{detail}</span> : null}
+            <div className="ve-film-operation-actions">
+              {run.controllerActive ? <button disabled={Boolean(pending)} onClick={() => mutate(run.locator.id, "cancel")} type="button">Cancel</button> : null}
+              {!run.controllerActive && resumable ? <button disabled={Boolean(pending)} onClick={() => mutate(run.locator.id, "resume")} type="button">Resume</button> : null}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}

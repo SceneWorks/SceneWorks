@@ -49,8 +49,9 @@ use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url
 use sceneworks_core::project_store::{
     AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
     CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
-    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
-    ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR, POSE_UPLOADS_CACHE_DIR,
+    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput,
+    FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
+    POSE_UPLOADS_CACHE_DIR,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
@@ -281,8 +282,32 @@ use logs::list_logs;
 mod error;
 // Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
 pub mod film_harness;
+mod film_lifecycle;
 pub mod film_planner;
+mod film_planner_connections;
+mod film_planning;
+mod film_review;
+mod films;
+mod openai_planner;
 pub(crate) use error::ApiError;
+use film_lifecycle::{cancel_film_run, get_film_run_progress, list_film_runs, resume_film_run};
+use film_planner_connections::{
+    list_film_planner_connections, save_film_planner_connection, test_film_planner_connection,
+};
+use film_planning::{
+    apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
+    get_film_planning_operation, parse_film_draft_script, start_film_planning,
+};
+use film_review::{
+    analyze_film_take, decide_film_take, get_film_review, repair_film_take, replace_film_take,
+    swap_film_take,
+};
+use films::{
+    add_film_reference, add_film_sound, create_film_draft, create_film_run, export_film_run,
+    get_film_draft, get_film_render_options, get_film_run, get_reference_pack, list_film_drafts,
+    preflight_film_draft, preview_film_render_options, start_film_run, update_film_draft,
+    update_reference_pack,
+};
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
 // call sites keep resolving unchanged.
@@ -1685,8 +1710,124 @@ fn create_app_with_state_mode(
             get(list_timelines).post(create_timeline),
         )
         .route(
+            "/api/v1/projects/:project_id/films",
+            get(list_film_drafts).post(create_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id",
+            get(get_film_draft).put(update_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/reference-pack",
+            get(get_reference_pack).put(update_reference_pack),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/references",
+            post(add_film_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/sound",
+            post(add_film_sound),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/runs",
+            post(create_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/preflight",
+            post(preflight_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/render-options",
+            get(get_film_render_options).post(preview_film_render_options),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/brief/parse",
+            post(parse_film_draft_script),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planners",
+            get(film_planner_availability),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning",
+            get(get_film_planning_operation).post(start_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/cancel",
+            post(cancel_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
+            post(apply_film_planning_candidate),
+        )
+        .route(
+            "/api/v1/film-planner-connections",
+            get(list_film_planner_connections),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id",
+            put(save_film_planner_connection),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id/test",
+            post(test_film_planner_connection),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id",
+            get(get_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs",
+            get(list_film_runs),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/progress",
+            get(get_film_run_progress),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/start",
+            post(start_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/resume",
+            post(resume_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/cancel",
+            post(cancel_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/export",
+            post(export_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review",
+            get(get_film_review).post(analyze_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/decision",
+            post(decide_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/swap",
+            post(swap_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/replace",
+            post(replace_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/repair",
+            post(repair_film_take),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",
             get(get_timeline).put(update_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/film-deliveries",
+            post(timelines::deliver_film_timeline),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id/exports",

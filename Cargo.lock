@@ -6786,6 +6786,7 @@ name = "sceneworks-rust-api"
 version = "0.8.12"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "fs2",
  "futures-util",
  "glob",

@@ -510,6 +510,8 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             refine_prompts,
             prompt_guide_path: prompt_guide,
             require_installed,
+            require_local_planner: true,
+            send_reference_pixels: false,
             api_url,
             force,
             poll_interval: Duration::from_secs(poll_seconds),

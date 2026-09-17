@@ -71,6 +71,9 @@ pub(crate) struct PromptRefineRequest {
     /// HF repo string of the model the worker should load (the worker resolves by repo,
     /// not by catalog id). The web sends the vision model's repo for the vision tasks.
     pub(crate) model: Option<String>,
+    /// Native planner reasoning control (`disabled`, `enabled`, or `auto`). Only the film-plan task
+    /// forwards it; other prompt-refine products retain their established model defaults.
+    pub(crate) thinking_mode: Option<String>,
     /// Plain-text describe style for `image_describe` (epic 8203, sc-8205): `"prose"`
     /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
     /// verbatim; the worker parses it (unknown/absent → prose).
@@ -401,6 +404,7 @@ pub(crate) struct TimelineCreateRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimelineSaveRequest {
     pub(crate) timeline: Value,
+    pub(crate) expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

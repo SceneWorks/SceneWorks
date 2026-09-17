@@ -234,6 +234,9 @@ pub struct PlanSound {
     pub ambience: Option<SoundBed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music: Option<SoundBed>,
+    /// Sound-effect beds, each placed once at its own sequence start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sfx: Vec<SoundBed>,
 }
 
 /// Gain and mute for one audio bus.
@@ -574,6 +577,12 @@ pub struct ReferenceEntry {
     pub kind: String,
     /// Image path relative to the pack document's directory.
     pub file: String,
+    /// Project-library asset this reference was copied from, when it entered through the Film
+    /// workspace. The copied file remains the runnable input; this id is provenance and lets the
+    /// authoring UI identify the original without making a pinned run depend on mutable library
+    /// state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_asset_id: Option<String>,
     #[serde(default)]
     pub description: String,
     /// Only approved references may be used as conditioning.
@@ -996,6 +1005,9 @@ fn validate_plan_sound(sound: &PlanSound) -> Vec<PlanDiagnostic> {
     }
     if let Some(bed) = &sound.music {
         validate_sound_bed(&mut findings, "sound.music", bed);
+    }
+    for (index, bed) in sound.sfx.iter().enumerate() {
+        validate_sound_bed(&mut findings, &format!("sound.sfx[{index}]"), bed);
     }
     findings
 }
@@ -1464,12 +1476,6 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             "reference pack version must be >= 1",
         ));
     }
-    if pack.references.is_empty() {
-        findings.push(PlanDiagnostic::plan(
-            "referencePack.references",
-            "a reference pack needs at least one reference",
-        ));
-    }
     let mut seen = BTreeSet::new();
     for (index, entry) in pack.references.iter().enumerate() {
         let field = format!("referencePack.references[{index}]");
@@ -1494,6 +1500,19 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                     "unknown reference kind {:?}; expected one of {}",
                     entry.kind,
                     REFERENCE_KINDS.join(", ")
+                ),
+            ));
+        }
+        if entry
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|asset_id| !is_safe_plan_id(asset_id))
+        {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.sourceAssetId"),
+                format!(
+                    "source asset id {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                    entry.source_asset_id.as_deref().unwrap_or_default()
                 ),
             ));
         }
@@ -1660,9 +1679,9 @@ fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic>
 }
 
 /// Findings that need both documents: every role a shot names must exist in the pack and be
-/// approved, every role bound in `conditioning.referenceRoles` must be a
-/// [`BINDABLE_REFERENCE_KINDS`] kind, and every shot must be anchored to at least one approved
-/// canonical reference.
+/// approved, and every role bound in `conditioning.referenceRoles` must be a
+/// [`BINDABLE_REFERENCE_KINDS`] kind. A nonempty pack does not force every shot to use it: mixed
+/// plans intentionally allow reference-backed and reference-free shots in one production.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -1688,7 +1707,6 @@ pub fn validate_plan_against_pack(
         for role in &shot.continuity_roles {
             slots.push(("continuityRoles", role.as_str()));
         }
-        let mut anchored = false;
         for (field, role) in slots {
             // A BOUND reference is a Ref2VA subject, and only the subject kinds belong there
             // ([`BINDABLE_REFERENCE_KINDS`]). Without this the planner's rule — which counts a
@@ -1732,29 +1750,8 @@ pub fn validate_plan_against_pack(
                         format!("reference role {role:?} is not approved for conditioning"),
                     ));
                 }
-                Some(entry) => anchored |= entry.approved,
+                Some(_) => {}
             }
-        }
-        // Continuity comes from the approved pack, not from whatever the previous shot happened to
-        // end on. A shot that names no approved role has nothing canonical holding it to the rest
-        // of the sequence — and a shot that only declares a chain is exactly the case where the
-        // last frame would silently become the sole anchor.
-        if !anchored {
-            let message = match shot.conditioning.chain_from_shot_id.as_deref() {
-                Some(target) => format!(
-                    "the only continuity this shot declares is the chain from {target:?}; a \
-                     chained shot must still bind at least one approved canonical reference role \
-                     from pack {:?} (conditioning slots or continuityRoles)",
-                    pack.id
-                ),
-                None => format!(
-                    "the shot binds no approved reference role from pack {:?}; every shot names \
-                     the canonical roles it depicts in continuityRoles (and, where the mode takes \
-                     them, in its conditioning slots)",
-                    pack.id
-                ),
-            };
-            findings.push(PlanDiagnostic::shot(&shot.id, "continuityRoles", message));
         }
     }
     findings.extend(validate_sound_against_pack(plan, pack));
@@ -1806,6 +1803,9 @@ fn validate_sound_against_pack(plan: &ProductionPlan, pack: &ReferencePack) -> V
     }
     if let Some(bed) = &plan.sound.music {
         check(None, "sound.music.role", &bed.role, "music");
+    }
+    for (index, bed) in plan.sound.sfx.iter().enumerate() {
+        check(None, &format!("sound.sfx[{index}].role"), &bed.role, "sfx");
     }
     for shot in &plan.shots {
         if let Some(clip) = &shot.dialogue_clip {
@@ -3627,6 +3627,8 @@ pub struct TimelineTrackRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineRecord {
+    #[serde(default)]
+    pub revision: u64,
     pub timeline_id: String,
     pub name: String,
     /// The aspect ratio the timeline was CREATED at. The route admits only `16:9` / `9:16` /
@@ -3678,6 +3680,8 @@ pub struct TimelineEditRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_revision: Option<u64>,
     pub job_id: String,
     pub status: String,
     /// True once a selected take changed after this export ran: the MP4 no longer matches the
@@ -4243,8 +4247,7 @@ mod tests {
         assert!(findings
             .iter()
             .any(|m| m.contains("[SH010]") && m.contains("not approved")));
-        // Both shots still list an approved role in continuityRoles, so the dangling and
-        // unapproved conditioning slots are the ONLY findings — the anchor rule does not pile on.
+        // The dangling and unapproved conditioning slots are the only findings.
     }
 
     /// Ref2VA treats every BOUND reference as a subject to depict, so only
@@ -4316,31 +4319,20 @@ mod tests {
     }
 
     #[test]
-    fn a_shot_must_bind_a_canonical_role_and_a_chain_is_never_the_only_anchor() {
+    fn a_nonempty_pack_does_not_invent_bindings_for_reference_free_shots() {
         let mut value = plan_json();
         value["shots"][0]["continuityRoles"] = json!([]);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
-        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(
-            findings[0].starts_with("[SH010] continuityRoles:")
-                && findings[0].contains("binds no approved reference role"),
-            "{findings:?}"
-        );
+        assert!(validate_plan_against_pack(&plan, &pack()).is_empty());
 
-        // A chain instead of a canonical binding is refused, and named as such.
+        // A declared chain remains traceability rather than a fabricated reference-pack binding.
         let mut value = plan_json();
         value["shots"][1]["continuityRoles"] = json!([]);
         value["shots"][1]["conditioning"] =
             json!({ "mode": "text_to_video", "chainFromShotId": "SH010" });
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         assert!(validate_plan_structure(&plan).is_empty());
-        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(
-            findings[0].contains("the only continuity this shot declares is the chain"),
-            "{findings:?}"
-        );
+        assert!(validate_plan_against_pack(&plan, &pack()).is_empty());
 
         // A chain on the FIRST shot has nothing to chain from.
         let mut value = plan_json();

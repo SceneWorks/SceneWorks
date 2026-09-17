@@ -781,6 +781,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     ready_app
         .set(app)
         .map_err(|_| "SceneWorks API router was initialized more than once")?;
+    let film_reconciliation =
+        crate::film_lifecycle::spawn_film_startup_reconciliation(state.clone());
+    let film_planning_reconciliation =
+        crate::film_planning::spawn_film_planning_startup_reconciliation(state.clone());
     tracing::info!(
         event = "api_ready",
         address = %bound,
@@ -809,6 +813,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_result = serve.await;
     state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
+    film_reconciliation.abort();
+    film_planning_reconciliation.abort();
     shutdown_catalog_scans(&state).await;
     serve_result?;
 

@@ -37,12 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # of the model manifest are cfg-split, so a Mac serves a DIFFERENT and equally correct response —
 # `encoder_route_for_model` has a real arm under
 # `any(target_os = "macos", all(not(macos), feature = "backend-candle"))` and a `None`-returning
-# stub otherwise, so `textEncoderOptions` is present on macOS and absent on the lane. Running
-# `UPDATE_SNAPSHOTS=1` here therefore bakes macOS-only keys into a Linux contract and turns this
-# suite red on CI while it passes locally — which is exactly how it was broken once.
-#
-# Expect `pytest -m parity` on a Mac to report that field as `only in candidate`. That divergence is
-# the cfg split showing through, not snapshot drift, and it is not a reason to regenerate.
+# stub otherwise, so `textEncoderOptions` is present on macOS and absent on the lane. The manifest
+# test validates that optional field exactly when the running binary exposes it, then removes only
+# that known cfg-split field before comparing with the Linux snapshot. This keeps the two live Rust
+# runtimes under full comparison without baking a macOS-only key into the CI contract.
 SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "rust_api_contract_snapshots" / "snapshots.json"
 UPDATE_SNAPSHOTS = os.getenv(
     "UPDATE_SNAPSHOTS",
@@ -61,6 +59,9 @@ PREFIXED_ID_RE = re.compile(
     r"look|character_lora|character|lora|worker)_[0-9a-f]{8,32}\b"
 )
 UPLOAD_SUFFIX_RE = re.compile(r"\b([a-z0-9]+(?:-[a-z0-9]+)*)-[0-9a-f]{8}(?=\.)")
+TIMELINE_EXPORT_SNAPSHOT_RE = re.compile(
+    r"\btimeline-exports/timeline_[0-9a-f]{32}_[0-9a-f]{32}\.json\b"
+)
 HEX_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 CLAIM_WORKER_RE = re.compile(r"\bclaim-worker-[a-z]\b")
 
@@ -358,6 +359,9 @@ def _normalize_contract(
             normalized = normalized.replace(str(root).replace("\\", "/"), "<runtime-root>")
         normalized = TIMESTAMP_RE.sub("<timestamp>", normalized)
         normalized = UPLOAD_SUFFIX_RE.sub(r"\1-<upload-suffix>", normalized)
+        normalized = TIMELINE_EXPORT_SNAPSHOT_RE.sub(
+            "timeline-exports/<timeline-export-snapshot>.json", normalized
+        )
 
         def normalize_id(match: re.Match[str]) -> str:
             prefix = match.group(1)
@@ -404,6 +408,14 @@ def test_normalize_contract_preserves_distinct_id_relationships():
     assert normalized["assets"][1]["id"] == "asset_fixture_2"
     assert normalized["selectedAssetId"] == "asset_fixture"
     assert {asset["projectId"] for asset in normalized["assets"]} == {"project_fixture"}
+
+
+def test_normalize_contract_preserves_the_immutable_timeline_export_path_shape():
+    normalized = normalize_contract(
+        "timeline-exports/timeline_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        (),
+    )
+    assert normalized == "timeline-exports/<timeline-export-snapshot>.json"
 
 
 def diff_values(left: Any, right: Any, path: str = "$") -> list[str]:
@@ -847,7 +859,28 @@ def test_system_manifest_and_http_contracts(contract_runtimes):
         ("lora manifest response", "/api/v1/loras?modelFamily=wan-video", "GET", 200),
     ]:
         responses = [runtime.request(method, path) for runtime in contract_runtimes]
-        assert_response_contract(label, baseline_runtime, candidate_runtime, responses[0], responses[1], expected_status=expected, snapshot=True)
+        normalized = assert_response_contract(
+            label,
+            baseline_runtime,
+            candidate_runtime,
+            responses[0],
+            responses[1],
+            expected_status=expected,
+            snapshot=label != "model manifest response",
+        )
+        if label == "model manifest response":
+            turbo = next(model for model in normalized if model["id"] == "z_image_turbo")
+            encoder_options = turbo.pop("textEncoderOptions", None)
+            if encoder_options is not None:
+                assert encoder_options == [
+                    {
+                        "description": "Uses the text encoder paired with z_image_turbo.",
+                        "id": "default",
+                        "isDefault": True,
+                        "label": "Model encoder (default)",
+                    }
+                ]
+            assert_snapshot(label, normalized)
 
     cors_headers = {
         "origin": "http://localhost:5173",
@@ -1338,7 +1371,16 @@ def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
         )
         for runtime in contract_runtimes
     ]
-    assert_response_contract("timeline create response", baseline_runtime, candidate_runtime, created_timelines[0], created_timelines[1], expected_status=201, snapshot=True)
+    created_contract = assert_response_contract(
+        "timeline create response",
+        baseline_runtime,
+        candidate_runtime,
+        created_timelines[0],
+        created_timelines[1],
+        expected_status=201,
+        snapshot=True,
+    )
+    assert created_contract["revision"] == 1
 
     updated_timelines = []
     for runtime, created in zip(contract_runtimes, created_timelines):
@@ -1364,10 +1406,42 @@ def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
             runtime.request(
                 "PUT",
                 f"/api/v1/projects/{runtime.project_id}/timelines/{timeline_id}",
-                json_payload={"timeline": timeline},
+                json_payload={"timeline": timeline, "expectedRevision": timeline["revision"]},
             )
         )
-    assert_response_contract("timeline update response", baseline_runtime, candidate_runtime, updated_timelines[0], updated_timelines[1], expected_status=200, snapshot=True)
+    updated_contract = assert_response_contract(
+        "timeline update response",
+        baseline_runtime,
+        candidate_runtime,
+        updated_timelines[0],
+        updated_timelines[1],
+        expected_status=200,
+        snapshot=True,
+    )
+    assert updated_contract["revision"] == 2
+
+    stale_saves = [
+        runtime.request(
+            "PUT",
+            f"/api/v1/projects/{runtime.project_id}/timelines/{created.body['id']}",
+            json_payload={"timeline": created.body, "expectedRevision": 1},
+        )
+        for runtime, created in zip(contract_runtimes, created_timelines)
+    ]
+    stale_contract = assert_response_contract(
+        "stale timeline save response",
+        baseline_runtime,
+        candidate_runtime,
+        stale_saves[0],
+        stale_saves[1],
+        expected_status=409,
+    )
+    assert stale_contract["code"] == "timeline_revision_conflict"
+    assert stale_contract["context"] == {
+        "currentRevision": 2,
+        "expectedRevision": 1,
+        "timelineId": "timeline_fixture",
+    }
 
     listed_timelines = [runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/timelines") for runtime in contract_runtimes]
     assert_response_contract("timeline list response", baseline_runtime, candidate_runtime, listed_timelines[0], listed_timelines[1], expected_status=200, snapshot=True)
@@ -1376,7 +1450,16 @@ def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
         runtime.request("GET", f"/api/v1/projects/{runtime.project_id}/timelines/{created.body['id']}")
         for runtime, created in zip(contract_runtimes, created_timelines)
     ]
-    assert_response_contract("timeline detail response", baseline_runtime, candidate_runtime, detail_timelines[0], detail_timelines[1], expected_status=200, snapshot=True)
+    detail_contract = assert_response_contract(
+        "timeline detail response",
+        baseline_runtime,
+        candidate_runtime,
+        detail_timelines[0],
+        detail_timelines[1],
+        expected_status=200,
+        snapshot=True,
+    )
+    assert detail_contract["revision"] == 2
 
     frame_jobs = [
         runtime.request(
@@ -1396,7 +1479,16 @@ def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
         )
         for runtime, created in zip(contract_runtimes, created_timelines)
     ]
-    assert_response_contract("timeline export job response", baseline_runtime, candidate_runtime, export_jobs[0], export_jobs[1], expected_status=201, snapshot=True)
+    export_contract = assert_response_contract(
+        "timeline export job response",
+        baseline_runtime,
+        candidate_runtime,
+        export_jobs[0],
+        export_jobs[1],
+        expected_status=201,
+        snapshot=True,
+    )
+    assert export_contract["payload"]["timelineRevision"] == 2
 
 
 def test_person_tracking_and_replace_person_contracts(contract_runtimes):

@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
+use sha2::{Digest, Sha256};
 
 use crate::film_plan::{
     is_reference_partition_id, plan_lora_payload_entries, plan_loras_for_partition,
@@ -40,6 +41,15 @@ use crate::MAX_PROMPT_CHARS;
 /// migration trap the v2 bump above exists to avoid. The remedy is the same one line:
 /// `film-harness compile`.
 pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 3;
+
+/// Serialize a production plan exactly as the project store and harness persist it, then hash
+/// those bytes. Keeping this beside the compiler prevents the editor preflight and CLI harness
+/// from inventing competing definitions of a "current" compiled document.
+pub fn production_plan_sha256(plan: &ProductionPlan) -> Result<String, serde_json::Error> {
+    let mut bytes = serde_json::to_vec_pretty(plan)?;
+    bytes.push(b'\n');
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
 
 /// How far apart one shot's successive attempts are seeded (sc-22715).
 ///
@@ -198,6 +208,40 @@ pub struct PlannerCostRecord {
     /// record carries the bound beside the measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner_max_memory_gb: Option<f64>,
+    /// One entry per LLM call, preserving the actual planner checkpoint separately from the target
+    /// video model. Thinking is kept out of the accepted plan text and stored only in its own field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executions: Vec<PlannerExecutionRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannerExecutionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    pub target_video_model_id: String,
+    pub thinking_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Provider-reported token counts. Optional because OpenAI-compatible servers are allowed to
+    /// omit usage, but when present the sanitized counts travel with the plan provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<PlannerUsageRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlannerUsageRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
 }
 
 /// The model-evaluation count a catalog entry declares as its default (`defaults.steps`) — what
@@ -1974,5 +2018,14 @@ mod tests {
         assert_eq!(mlx_quantize_for_tier("q4"), json!(4));
         assert_eq!(mlx_quantize_for_tier("q8"), json!(8));
         assert_eq!(mlx_quantize_for_tier("bf16"), json!(0));
+    }
+
+    #[test]
+    fn production_plan_hash_matches_the_persisted_pretty_document() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let mut persisted = serde_json::to_vec_pretty(&plan).unwrap();
+        persisted.push(b'\n');
+        let expected = format!("{:x}", Sha256::digest(&persisted));
+        assert_eq!(production_plan_sha256(&plan).unwrap(), expected);
     }
 }

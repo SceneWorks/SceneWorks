@@ -23,6 +23,7 @@ use crate::film_harness::review::{
 };
 use crate::film_harness::{self, RunControl};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
+use crate::tests::support::{huggingface_repo_cache_path, isolate_hf_cache, request, StatusCode};
 
 const REVIEW_PLAN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -58,6 +59,66 @@ fn sound_free_documents(harness: &Harness) -> (PathBuf, PathBuf) {
 fn shipped_review_plan() -> ReviewPlan {
     parse_review_plan(&std::fs::read_to_string(REVIEW_PLAN).expect("review plan reads"))
         .expect("review plan parses")
+}
+
+/// Seed the smallest structurally complete SenseNova tier and the MiniMax partition needed by a
+/// routed repair. Review tests exercise routing and lifecycle with a scripted CPU worker; they
+/// must not borrow a developer's installed weights or become red when CI supplies both HF cache
+/// variables as empty directories.
+fn seed_review_models(harness: &Harness) {
+    let write = |path: &std::path::Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("fixture model directory");
+        std::fs::write(path, bytes).expect("fixture model file");
+    };
+    let review_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/sensenova-u1-8b-mlx",
+    )
+    .expect("fixture repo path")
+    .join("snapshots/fixture/q4");
+    for file in ["model.safetensors", "config.json", "tokenizer.json"] {
+        write(&review_root.join(file), b"fixture");
+    }
+    let tier_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/minimax-h3-mlx",
+    )
+    .expect("fixture video repo path")
+    .join("snapshots/fixture/q4");
+    let index = br#"{"weight_map":{"fixture":"model-00001-of-00001.safetensors"}}"#;
+    for partition in ["transformer", "transformer_ref"] {
+        write(&tier_root.join(partition).join("config.json"), b"{}");
+        write(
+            &tier_root
+                .join(partition)
+                .join("diffusion_pytorch_model.safetensors.index.json"),
+            index,
+        );
+        write(
+            &tier_root
+                .join(partition)
+                .join("model-00001-of-00001.safetensors"),
+            b"fixture",
+        );
+    }
+    write(&tier_root.join("text_encoder/config.json"), b"{}");
+    write(
+        &tier_root.join("text_encoder/model.safetensors.index.json"),
+        index,
+    );
+
+    let shared_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "MiniMaxAI/MiniMax-H3",
+    )
+    .expect("fixture video shared repo path")
+    .join("snapshots/fixture");
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_FILES {
+        write(&shared_root.join(file), b"fixture");
+    }
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+        write(&shared_root.join("FL2VA/audio_vae").join(file), b"fixture");
+    }
 }
 
 /// A run of SH010 + SH020 that completed, ready to review.
@@ -117,6 +178,33 @@ fn observed_for(record: &RunRecord, out_dir: &Path, shot_id: &str) -> ObservedSt
     let summary = shot.latest_review().expect("the shot has a review");
     review::read_observed_state(&out_dir.join(&summary.record_path))
         .expect("the observed-state document reads")
+}
+
+fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, String) {
+    let project_id = record.project_id.clone().expect("run has project");
+    let project_path = PathBuf::from(record.project_path.as_ref().expect("run has project path"));
+    let run_id = record.run_id.clone();
+    let relative = format!("films/runs/{run_id}");
+    let run_dir = project_path.join(&relative);
+    std::fs::create_dir_all(run_dir.parent().expect("run parent")).expect("run parent creates");
+    std::fs::rename(harness.out_dir(), &run_dir).expect("completed run moves into project");
+    std::fs::copy(REVIEW_PLAN, run_dir.join("review.jsonc")).expect("review plan pins");
+    std::fs::write(
+        run_dir.join("locator.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "id": run_id,
+            "projectId": project_id,
+            "draftId": "film_route_fixture",
+            "draftRevision": 1,
+            "selectedShotIds": record.selected_shot_ids,
+            "recordDirectory": relative,
+            "createdAt": record.created_at,
+        }))
+        .expect("locator serializes"),
+    )
+    .expect("locator writes");
+    (project_id, run_id)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1045,6 +1133,135 @@ fn a_review_plan_that_declares_more_questions_than_it_budgets_for_is_refused_up_
 // ---------------------------------------------------------------------------------------------
 // The human loop
 // ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without_auto_acceptance() {
+    let _env = isolate_hf_cache();
+    let harness = Harness::start_http(true, fast(&["SH010", "SH020"])).await;
+    seed_review_models(&harness);
+    let (status, models) = request(harness.app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    for model_id in ["minimax_h3", "sensenova_u1_8b"] {
+        let model = models
+            .as_array()
+            .expect("model catalog")
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .unwrap_or_else(|| panic!("missing {model_id}: {models}"));
+        assert_eq!(model["installState"], "installed", "{model}");
+    }
+    let (plan, pack) = sound_free_documents(&harness);
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(plan, pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .expect("the two-shot run completes");
+    script_answers(&harness, &agreeing_answers());
+    let original_attempts = record.shot("SH010").expect("shot").attempts.len();
+    let (project_id, run_id) = register_run_for_routes(&harness, &record);
+    let review_path = format!("/api/v1/projects/{project_id}/film-runs/{run_id}/review");
+
+    let (status, view) = request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["selections"][0]["state"], "aligned");
+    assert_eq!(
+        view["run"]["record"]["shots"][0]["attempts"]
+            .as_array()
+            .expect("take history")
+            .len(),
+        original_attempts
+    );
+
+    let (status, accepted) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("{review_path}/decision"),
+        serde_json::json!({"shotId": "SH010", "decision": "accept", "reason": "Human approved"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(
+        accepted["run"]["record"]["shots"][0]["humanDecision"]["state"],
+        "accepted"
+    );
+
+    let (status, reviewing) = request(
+        harness.app.clone(),
+        "POST",
+        &review_path,
+        serde_json::json!({"shotIds": ["SH010"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{reviewing}");
+    assert!(reviewing["actionDisabledReason"].is_string(), "{reviewing}");
+    let mut reviewed = Value::Null;
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, current) =
+            request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        if current["run"]["controllerActive"] == serde_json::json!(false) {
+            reviewed = current;
+            break;
+        }
+    }
+    assert_ne!(reviewed, Value::Null, "bounded review did not settle");
+    assert_eq!(
+        reviewed["observations"]
+            .as_array()
+            .expect("observations")
+            .len(),
+        1
+    );
+    assert!(reviewed["reviewTimelineId"].is_string(), "{reviewed}");
+    assert_eq!(
+        reviewed["run"]["record"]["shots"][0]["humanDecision"]["state"], "accepted",
+        "advisory review cannot overwrite the human decision"
+    );
+
+    let (status, started) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("{review_path}/repair"),
+        serde_json::json!({"shotId": "SH010", "reason": "Repair the parcel handoff"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    assert!(started["actionDisabledReason"].is_string(), "{started}");
+
+    let mut settled = Value::Null;
+    for _ in 0..80 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, current) =
+            request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        if current["run"]["controllerActive"] == serde_json::json!(false) {
+            settled = current;
+            break;
+        }
+    }
+    assert_ne!(settled, Value::Null, "bounded repair did not settle");
+    let shot = &settled["run"]["record"]["shots"][0];
+    assert_eq!(
+        shot["attempts"].as_array().expect("attempt history").len(),
+        original_attempts + 1,
+        "repair appends exactly one attempt: {settled}"
+    );
+    assert!(
+        shot.get("humanDecision").is_none(),
+        "repair cannot auto-accept: {shot}"
+    );
+    assert_eq!(
+        settled["run"]["record"]["decisions"]
+            .as_array()
+            .expect("decision history")
+            .iter()
+            .filter(|decision| decision["action"] == "request_repair")
+            .count(),
+        1
+    );
+}
 
 #[tokio::test]
 async fn accepting_a_take_clears_only_that_shots_flags_and_records_the_decision() {

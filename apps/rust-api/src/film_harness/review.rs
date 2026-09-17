@@ -771,6 +771,19 @@ pub async fn review(
     options: &ReviewOptions,
     vision: &dyn ReviewVision,
 ) -> Result<RunRecord, HarnessError> {
+    let lease = super::ControllerLease::acquire(
+        &options.out_dir,
+        format!("review_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    review_with_lease(transport, options, vision, lease).await
+}
+
+pub(crate) async fn review_with_lease(
+    transport: &dyn ApiTransport,
+    options: &ReviewOptions,
+    vision: &dyn ReviewVision,
+    _lease: super::ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     let mut context =
         ReviewContext::open(&options.out_dir, options.review_plan_path.as_deref(), true)?;
     let project_id = context.record.project_id.clone().ok_or_else(|| {
@@ -1607,6 +1620,19 @@ pub fn decide_take(
     decision: Decision,
     reason: &str,
 ) -> Result<RunRecord, HarnessError> {
+    let _lease = super::ControllerLease::acquire(
+        out_dir,
+        format!("decision_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    decide_take_with_lease(out_dir, shot_id, decision, reason)
+}
+
+fn decide_take_with_lease(
+    out_dir: &Path,
+    shot_id: &str,
+    decision: Decision,
+    reason: &str,
+) -> Result<RunRecord, HarnessError> {
     let mut context = ReviewContext::open(out_dir, None, false)?;
     let Some(index) = context
         .record
@@ -1760,6 +1786,20 @@ pub async fn request_repair(
     shot_id: &str,
     reason: &str,
 ) -> Result<RunRecord, HarnessError> {
+    let lease = super::ControllerLease::acquire(
+        &options.out_dir,
+        format!("repair_{}", uuid::Uuid::new_v4().simple()),
+    )?;
+    request_repair_with_lease(transport, options, shot_id, reason, lease).await
+}
+
+pub(crate) async fn request_repair_with_lease(
+    transport: &dyn ApiTransport,
+    options: &super::ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+    lease: super::ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     let mut context = ReviewContext::open(&options.out_dir, None, false)?;
     let Some(shot) = context.record.shot(shot_id).cloned() else {
         return Err(HarnessError::Refused(format!(
@@ -1780,7 +1820,7 @@ pub async fn request_repair(
     // Written before dispatch so the authorisation survives a controller that dies during it, and
     // so `replace_take` — which re-reads the record from disk — starts from it.
     context.persist()?;
-    super::replace_take(transport, options, shot_id, &folded).await
+    super::replace_take_with_lease(transport, options, shot_id, &folded, lease).await
 }
 
 /// Build the repair reason: the person's words, plus the actionable flags of the most recent

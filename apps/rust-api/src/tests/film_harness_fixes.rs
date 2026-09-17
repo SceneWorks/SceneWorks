@@ -9,7 +9,9 @@ use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
 use serde_json::{json, Value};
 
 use crate::film_harness::review::{self, Decision};
-use crate::film_harness::{self, EditOptions, HarnessError, RunOptions, TimelineEdit};
+use crate::film_harness::{
+    self, EditOptions, HarnessError, ResumeOptions, RunOptions, TimelineEdit,
+};
 use crate::film_planner;
 use crate::tests::film_harness::{
     close, draft_text, fast, findings_of, full_draft, harness_record, items_of, planner_llm,
@@ -634,6 +636,120 @@ async fn the_run_record_carries_the_audio_layers_the_export_dropped() {
     let on_disk = harness.run_record();
     assert_eq!(on_disk["export"]["droppedAudioLayers"], json!([dropped]));
     assert_eq!(on_disk["export"]["status"], "completed");
+}
+
+#[tokio::test]
+async fn an_explicit_export_records_the_exact_job_and_never_redispatches_while_running() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    run_options.export = false;
+    let record = film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("shot run assembles without exporting");
+    assert!(record.timeline.is_some());
+    assert!(
+        record.export.is_none(),
+        "shot rendering never exports implicitly"
+    );
+
+    let mut options = ResumeOptions::new(harness.out_dir());
+    options.poll_interval = Duration::from_millis(25);
+    let (running, task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("explicit export starts");
+    assert_eq!(running.export.as_ref().unwrap().job_id, task.job_id);
+    assert_eq!(running.export.as_ref().unwrap().status, "running");
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        1
+    );
+
+    let (adopted, same_task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("second controller adopts the running export");
+    assert_eq!(same_task.job_id, task.job_id);
+    assert_eq!(adopted.export.as_ref().unwrap().job_id, task.job_id);
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        1,
+        "adoption must not create a second job"
+    );
+
+    let completed = film_harness::finish_explicit_export(&harness.transport, &options, &task)
+        .await
+        .expect("explicit export settles");
+    let export = completed.export.as_ref().unwrap();
+    assert_eq!(export.status, "completed");
+    assert!(export.asset_id.is_some());
+    assert!(!export.stale);
+}
+
+#[tokio::test]
+async fn a_supported_sfx_bed_is_imported_with_provenance_and_placed_on_an_editable_track() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "dialogue": {"gain": 1.0, "muted": false},
+            "sfx": [{
+                "role": "door_close", "gain": 0.65, "muted": false,
+                "startSeconds": 0.5, "sourceInSeconds": 0.1,
+                "fadeInSeconds": 0.05, "fadeOutSeconds": 0.1
+            }]
+        });
+    });
+    let pack = harness.edited_pack(|pack| {
+        pack["sound"] = json!([{
+            "role": "door_close", "kind": "sfx",
+            "file": "sound/door_close.wav", "description": "Door close"
+        }]);
+    });
+    let pack_dir = pack.parent().unwrap();
+    std::fs::create_dir_all(pack_dir.join("sound")).unwrap();
+    std::fs::copy(
+        Path::new(FIXTURE_DIR).join("sound/workshop_room_tone.wav"),
+        pack_dir.join("sound/door_close.wav"),
+    )
+    .unwrap();
+    let mut options = harness.options(plan, pack, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("sfx film run completes");
+    assert!(record
+        .sound
+        .iter()
+        .any(|sound| sound.role == "door_close" && sound.kind == "sfx"));
+    let track = record
+        .timeline
+        .as_ref()
+        .unwrap()
+        .tracks
+        .iter()
+        .find(|track| track.role == "sfx")
+        .expect("sfx track");
+    assert_eq!(track.track_id, "track_sfx_0");
+    assert_eq!(track.gain, 0.65);
+    assert_eq!(track.items.len(), 1);
+    assert_eq!(track.items[0].timeline_start, 0.5);
+    assert!(
+        record.export.is_none(),
+        "audio placement never implicitly exports"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2240,4 +2356,109 @@ async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_c
             .map(|request| (request.shot_id.clone(), request.model.clone()))
             .collect::<Vec<_>>()
     );
+}
+
+/// Controlled completion through real routes: an operator edits/deletes A while B still renders.
+/// Delivery B must preserve that cut, and replaying A must respect the stored deletion.
+#[tokio::test]
+async fn incremental_film_delivery_preserves_concurrent_cut_and_tombstones() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 20.0,
+                },
+            ),
+            (
+                "SH020",
+                VideoBehavior::Complete {
+                    delay_secs: 2,
+                    peak_pct: 20.0,
+                },
+            ),
+        ],
+    )
+    .await;
+    let mut options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    options.export = false;
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let second_started =
+                    harness
+                        .script
+                        .lock()
+                        .claimed
+                        .iter()
+                        .any(|(kind, _, payload)| {
+                            kind == "video_generate"
+                                && payload["advanced"]["filmHarness"]["shotId"] == "SH020"
+                        });
+                if second_started {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("second shot starts");
+        let record = harness.run_record();
+        let project_id = record["projectId"].as_str().unwrap();
+        let timeline_id = record["timeline"]["timelineId"]
+            .as_str()
+            .expect("first shot delivered before second starts");
+        let original = saved_timeline(&harness.app, project_id, timeline_id).await;
+        assert_eq!(picture_order(&original), vec!["SH010"]);
+        let mut deleted = original.clone();
+        deleted["tracks"][0]["items"] = json!([]);
+        deleted["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t["kind"] == "audio")
+            .unwrap()["gain"] = json!(0.35);
+        let (status, saved) = request(
+            harness.app.clone(),
+            "PUT",
+            &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+            json!({"timeline":deleted,"expectedRevision":original["revision"]}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+        assert!(
+            !saved["filmAssembly"]["runs"][record["runId"].as_str().unwrap()]["deletedShots"]
+                ["SH010"]
+                .is_null()
+        );
+    };
+    let (result, ()) = tokio::join!(film_harness::run(&harness.transport, &options), observer);
+    let record = result.expect("incremental run completes");
+    let project_id = record.project_id.as_deref().unwrap();
+    let timeline_id = &record.timeline.as_ref().unwrap().timeline_id;
+    let saved = saved_timeline(&harness.app, project_id, timeline_id).await;
+    assert_eq!(picture_order(&saved), vec!["SH020"]);
+    assert_eq!(
+        saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["kind"] == "audio")
+            .unwrap()["gain"],
+        0.35
+    );
+    assert!(record.export.is_none());
+    assert!(!harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .any(|(kind, _, _)| kind == "timeline_export"));
+    assert_eq!(record.timeline.as_ref().unwrap().items.len(), 1);
 }
