@@ -16,7 +16,10 @@ import { assertTerminalProductWorkerReady, startProductService, stopProductServi
 import { preserveTerminalDiagnostics, submitAndPoll, vectorRequest } from "./starvector-terminal-route.mjs";
 
 export const DIAGNOSTIC_TUPLE = "candle-cuda:1b";
-export const DIAGNOSTIC_CASES = Object.freeze([9, 11, 12, 13, 15]);
+// This dedicated diagnostic branch isolates the only Candle 1B case that the
+// prior authenticated run did not reach. Production acceptance never consumes
+// this selector or its results.
+export const DIAGNOSTIC_CASES = Object.freeze([15]);
 export const DIAGNOSTIC_BUDGET = Object.freeze({ maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 });
 export const DIAGNOSTIC_SAMPLING = Object.freeze({ temperature: 0, topP: 1, topK: 1, repetitionPenalty: 1, repetitionContext: 0, seed: 7 });
 export const DIAGNOSTIC_STOP = Object.freeze({ accepted: 3, rejected: 3 });

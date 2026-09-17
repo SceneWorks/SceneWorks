@@ -170,7 +170,7 @@ test("authenticated legacy Windows rows produce only a diagnostic current-budget
   assert.throws(() => selectDiagnosticRecordView(staleBudget, staleBytes, binding, corpusPin, { legacyCorpus: staleReceipt }), /source budget drifted/);
 });
 
-test("driver exercises authenticated legacy corpus through exact requests, both terminal outcomes, stop, and cleanup", async () => {
+test("driver exercises authenticated legacy corpus through the isolated case 15 request and cleanup", async () => {
   const runnerTemp = await mkdtemp(path.join(os.tmpdir(), "starvector-diagnostic-route-"));
   const repo = path.join(runnerTemp, "repo"), output = path.join(runnerTemp, "output"), weightsRoot = path.join(runnerTemp, "weights"), corpus = path.join(runnerTemp, "corpus");
   const options = { root: repo, output, weightsRoot, corpusAssetsRoot: corpus, permanentPin, corpusSourcePin: corpusPin, expectedSceneWorksRevision: sceneWorksRevision, leaseRoot: path.join(runnerTemp, "leases"), leaseHelper: path.join(repo, "lease"), platform: "win32", runnerTemp, noJobDownloads: "1", gpuId: "0" };
@@ -195,17 +195,17 @@ test("driver exercises authenticated legacy corpus through exact requests, both 
       importAssets: async ({ tuple }) => { assert.equal(tuple, "candle-cuda:1b"); return binding; },
       submit: async (_url, record) => {
         assert.equal(record.case_index, DIAGNOSTIC_CASES[submitted]); assert.equal(record.projectId, binding.project_id); assert.equal(record.sourceAssetId, binding.assets[record.case_index].asset_id); assert.equal(record.input_png_sha256, index.rows[record.case_index].png_sha256); assert.deepEqual(record.detailBudget, DIAGNOSTIC_BUDGET);
-        const accepted = submitted !== 1; submitted += 1;
+        const accepted = true; submitted += 1;
         const job = outcomeFixture(record, accepted);
         Object.assign(job.result.terminalEvidence, { providerTranscriptPath: acceptedFiles.transcript, providerTranscriptSha256: digest(await readFile(acceptedFiles.transcript)) });
         if (accepted) Object.assign(job.result.terminalEvidence, { canonicalSvgPath: acceptedFiles.svg, canonicalSvgSha256: digest(await readFile(acceptedFiles.svg)), previewPngPath: acceptedFiles.png, previewPngSha256: digest(await readFile(acceptedFiles.png)) });
         return job;
       },
-      preserve: async (_output, suite, caseId, job) => { assert.equal(suite, "image_quality"); assert.equal(caseId, "diagnostic-quality-v1-11"); assert.equal(job.result.terminalEvidence.accepted, false); return { artifacts: [] }; },
+      preserve: async () => { throw new Error("accepted case 15 must not use rejected diagnostic preservation"); },
       occupancy: async () => occupancy,
       stop: async () => { stopped = true; },
     });
-    assert.equal(result.status, "completed"); assert.equal(submitted, 4); assert.equal(result.results.filter((item) => item.accepted).length, 3); assert.equal(result.results.filter((item) => !item.accepted).length, 1);
+    assert.equal(result.status, "completed"); assert.equal(submitted, 1); assert.equal(result.results.filter((item) => item.accepted).length, 1); assert.equal(result.results.filter((item) => !item.accepted).length, 0);
     assert.equal(result.corpus.source_schema_version, 1); assert.equal(result.corpus.source_index_sha256, digest(indexBytes)); assert.deepEqual(result.corpus.request_detail_budget, DIAGNOSTIC_BUDGET);
     assert.equal(stopped, true); assert.equal(released, true); assert.equal(result.product_service_cleanup, "stopped_and_state_removed"); assert.equal(result.lease, "released");
   } finally { await rm(runnerTemp, { recursive: true, force: true }); }
