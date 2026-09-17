@@ -388,6 +388,11 @@ pub(crate) async fn start_film_planning(
     });
     let cancel_path = root.join(crate::film_harness::CANCEL_SENTINEL_FILE);
     let cancel_requested = std::sync::Arc::new(move || cancel_path.exists());
+    let external_started_path = latest_path.clone();
+    let external_started_operation_id = operation_id.clone();
+    let on_external_request_started = std::sync::Arc::new(move || {
+        mark_external_planner_waiting(&external_started_path, &external_started_operation_id);
+    });
     let options = PlannerOptions {
         brief_path: operation_dir.join("brief.json"),
         reference_pack_path: operation_dir.join("references.json"),
@@ -425,7 +430,8 @@ pub(crate) async fn start_film_planning(
                         send_reference_pixels: external_send_reference_pixels,
                     },
                     cancel_requested,
-                )?;
+                )?
+                .on_request_started(on_external_request_started);
                 crate::film_planner::generate(&transport, &llm, &options).await
             } else {
                 let llm =
@@ -443,6 +449,19 @@ pub(crate) async fn start_film_planning(
     });
 
     Ok((StatusCode::ACCEPTED, Json(operation)))
+}
+
+fn mark_external_planner_waiting(latest_path: &FsPath, operation_id: &str) {
+    let _ = update_operation(latest_path, operation_id, |operation| {
+        if operation.status != "running" {
+            return;
+        }
+        operation.stage = "planning".to_owned();
+        operation.progress = None;
+        operation.detail = Some(
+            "Waiting for the selected external planner to return a candidate plan.".to_owned(),
+        );
+    });
 }
 
 pub(crate) async fn cancel_film_planning(
@@ -1077,6 +1096,137 @@ mod tests {
             .message
             .contains("no textual plan content"));
         assert!(failed.detail.as_deref().unwrap().contains("retry"));
+    }
+
+    #[tokio::test]
+    async fn external_operation_reports_planning_while_provider_response_is_blocked() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        #[derive(Clone)]
+        struct BlockedFixture {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        async fn blocked_response(
+            State(fixture): State<BlockedFixture>,
+            Json(_body): Json<Value>,
+        ) -> Json<Value> {
+            fixture.entered.notify_one();
+            fixture.release.notified().await;
+            Json(json!({"choices": [{"message": {"content": "{}"}}]}))
+        }
+
+        let fixture = BlockedFixture {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let app = Router::new()
+            .route("/v1/chat/completions", post(blocked_response))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_blocked".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: "film_1".to_owned(),
+            draft_revision: 1,
+            status: "running".to_owned(),
+            stage: "preflight".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: Some("external-model".to_owned()),
+            planner_model: "external-model".to_owned(),
+            video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "disabled".to_owned(),
+            max_repair_rounds: 2,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: None,
+            compiled: None,
+            detail: Some(
+                "Checking the selected external connection and target video model.".to_owned(),
+            ),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+        let latest_path = temp.path().join("latest.json");
+        let callback_path = latest_path.clone();
+        let callback_operation_id = operation.id.clone();
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            crate::film_planner_connections::FilmPlannerConnection {
+                schema_version: 1,
+                id: "blocked-fixture".to_owned(),
+                label: "Blocked fixture".to_owned(),
+                base_url: format!("http://{address}/v1"),
+                credential_host: None,
+                supports_model_listing: false,
+                supports_image_input: false,
+                timeout_seconds: 5,
+                max_output_tokens: 4096,
+            },
+            None,
+            OpenAiPlannerOptions {
+                model: "external-model".to_owned(),
+                thinking_mode: "disabled".to_owned(),
+                source_script: "A courier enters.".to_owned(),
+                send_reference_pixels: false,
+            },
+            Arc::new(|| false),
+        )
+        .expect("planner adapter")
+        .on_request_started(Arc::new(move || {
+            mark_external_planner_waiting(&callback_path, &callback_operation_id);
+        }));
+        let request = crate::film_planner::LlmRequest {
+            task: Some(crate::film_planner::FILM_PLAN_TASK.to_owned()),
+            prompt: "Return a plan".to_owned(),
+            model_id: Some("minimax_h3".to_owned()),
+            workflow: "video".to_owned(),
+            guide: None,
+            reference_images: Vec::new(),
+        };
+        let response =
+            tokio::spawn(
+                async move { crate::film_planner::PlannerLlm::complete(&llm, request).await },
+            );
+
+        tokio::time::timeout(Duration::from_secs(1), fixture.entered.notified())
+            .await
+            .expect("provider request entered blocked fixture");
+        let waiting = read_operation(&latest_path).expect("read waiting operation");
+        assert_eq!(waiting.status, "running");
+        assert_eq!(waiting.stage, "planning");
+        assert_eq!(waiting.progress, None);
+        assert_eq!(
+            waiting.detail.as_deref(),
+            Some("Waiting for the selected external planner to return a candidate plan.")
+        );
+
+        fixture.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("fixture response completes")
+            .expect("planner task joins")
+            .expect("planner response succeeds");
+        server.abort();
     }
 
     #[test]

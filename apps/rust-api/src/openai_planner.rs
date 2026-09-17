@@ -20,6 +20,7 @@ const MAX_REFERENCE_IMAGES: usize = 8;
 const MAX_REFERENCE_BYTES: u64 = 20 * 1024 * 1024;
 
 type CancelRequested = Arc<dyn Fn() -> bool + Send + Sync>;
+type RequestStarted = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) struct OpenAiPlannerOptions {
     pub model: String,
@@ -37,6 +38,7 @@ pub(crate) struct OpenAiPlannerLlm {
     source_script: String,
     send_reference_pixels: bool,
     cancel_requested: CancelRequested,
+    request_started: Option<RequestStarted>,
 }
 
 impl OpenAiPlannerLlm {
@@ -67,7 +69,13 @@ impl OpenAiPlannerLlm {
             source_script: options.source_script,
             send_reference_pixels: options.send_reference_pixels,
             cancel_requested,
+            request_started: None,
         })
+    }
+
+    pub(crate) fn on_request_started(mut self, callback: RequestStarted) -> Self {
+        self.request_started = Some(callback);
+        self
     }
 }
 
@@ -111,6 +119,9 @@ impl PlannerLlm for OpenAiPlannerLlm {
                 .timeout(Duration::from_secs(self.connection.timeout_seconds));
             if let Some(token) = self.credential.as_deref() {
                 builder = builder.bearer_auth(token);
+            }
+            if let Some(callback) = &self.request_started {
+                callback();
             }
             let mut pending = Box::pin(builder.json(&body).send());
             let response = loop {
