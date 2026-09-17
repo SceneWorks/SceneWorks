@@ -140,8 +140,34 @@ pub struct ControllerLease {
 
 impl ControllerLease {
     pub fn acquire(run_dir: &Path, owner: impl Into<String>) -> Result<Self, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        Self::claim(path, owner.into(), lock)
+    }
+
+    /// Acquire a run only when its unlocked lease still names the controller that crashed.
+    ///
+    /// A clean controller release empties the metadata while it still holds the advisory lock;
+    /// an abrupt process exit cannot run that cleanup, although the OS releases the lock. Reading
+    /// the marker only after obtaining the lock makes this distinction atomic with takeover: a
+    /// controller that finishes while startup is scanning cannot be mistaken for an interrupted
+    /// one and restarted.
+    pub(crate) fn acquire_interrupted(
+        run_dir: &Path,
+        owner: impl Into<String>,
+    ) -> Result<Option<Self>, HarnessError> {
+        let (path, lock) = Self::lock(run_dir)?;
+        let interrupted = std::fs::read_to_string(&path)?.lines().any(|line| {
+            line.strip_prefix("owner=")
+                .is_some_and(|owner| !owner.is_empty())
+        });
+        if !interrupted {
+            return Ok(None);
+        }
+        Self::claim(path, owner.into(), lock).map(Some)
+    }
+
+    fn lock(run_dir: &Path) -> Result<(PathBuf, FileLock), HarnessError> {
         std::fs::create_dir_all(run_dir)?;
-        let owner = owner.into();
         let path = run_dir.join(CONTROLLER_LOCK_FILE);
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -162,6 +188,10 @@ impl ControllerLease {
                 HarnessError::Io(error.to_string())
             }
         })?;
+        Ok((path, lock))
+    }
+
+    fn claim(path: PathBuf, owner: String, lock: FileLock) -> Result<Self, HarnessError> {
         lock.file().set_len(0)?;
         use std::io::Write as _;
         let mut locked_file = lock.file();

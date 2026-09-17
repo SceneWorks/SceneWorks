@@ -139,9 +139,10 @@ fn spawn_resume_with_install_requirement(
     });
 }
 
-/// Adopt only records that say a controller was active when the process stopped. Resumable
-/// operator stops remain idle until an explicit resume. Advisory leases make this safe after a
-/// crash and refuse adoption when another API or CLI process still owns the run.
+/// Adopt only records whose unlocked lease still names the controller that the process stopped.
+/// A cleanly released failed run and a resumable operator stop remain idle until an explicit
+/// resume. Advisory leases make takeover atomic after a crash and refuse adoption when another
+/// API or CLI process still owns the run.
 pub(crate) fn spawn_film_startup_reconciliation(state: AppState) -> tokio::task::JoinHandle<()> {
     spawn_film_startup_reconciliation_with_install_requirement(state, true, None)
 }
@@ -229,11 +230,12 @@ fn spawn_film_startup_reconciliation_with_install_requirement(
                 if record.state != RunState::Running {
                     continue;
                 }
-                let lease = match ControllerLease::acquire(
+                let lease = match ControllerLease::acquire_interrupted(
                     &files.directory,
                     format!("startup-adopt:{run_id}"),
                 ) {
-                    Ok(lease) => lease,
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => continue,
                     Err(crate::film_harness::HarnessError::Refused(_)) => continue,
                     Err(error) => {
                         tracing::warn!(project_id, run_id, %error, "film startup reconciliation lease failed");

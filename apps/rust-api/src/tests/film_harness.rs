@@ -62,11 +62,18 @@ fn an_unlocked_crash_metadata_file_is_recovered_without_an_age_guess() {
     )
     .unwrap();
     assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
-    let lease = film_harness::ControllerLease::acquire(&directory, "startup-adopt")
+    let lease = film_harness::ControllerLease::acquire_interrupted(&directory, "startup-adopt")
+        .expect("the interrupted lease can be inspected")
         .expect("the OS-released lock is recoverable regardless of metadata age");
     assert!(film_harness::ControllerLease::is_active(&directory).unwrap());
     drop(lease);
     assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+    assert!(
+        film_harness::ControllerLease::acquire_interrupted(&directory, "startup-again")
+            .unwrap()
+            .is_none(),
+        "a clean release erases the crash marker"
+    );
 }
 
 #[tokio::test]
@@ -215,6 +222,13 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
             .is_cancelled(),
         "the original controller must be gone before startup adopts it"
     );
+    // Aborting a Tokio task drops its lease cleanly, unlike terminating the API process. Restore
+    // the marker the OS-released lease would retain after a real process crash.
+    std::fs::write(
+        files.directory.join(film_harness::CONTROLLER_LOCK_FILE),
+        "owner=api:filmrun_restart\npid=999999\nacquiredAt=2000-01-01T00:00:00Z\n",
+    )
+    .expect("crashed controller marker writes");
     let interrupted = harness
         .state
         .jobs_store
@@ -262,6 +276,89 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
         .and_then(|shot| shot.selected())
         .expect("startup adopts the completed take");
     assert_eq!(selected.job_id.as_deref(), Some(original_job_id.as_str()));
+}
+
+#[tokio::test]
+async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() {
+    let harness = Harness::start_http(true, vec![]).await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Explicit resume")
+        .expect("project creates");
+    let draft_id = "film_draft_explicit_resume";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Explicit resume");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_explicit_resume";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan.clone(),
+        reference_pack_path: files.reference_pack.clone(),
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
+        .on_post_route("/api/v1/video/jobs");
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the injected transport loss stops the controller");
+    let failed = film_harness::read_run_record(&files.directory).expect("failed record persists");
+    assert_eq!(failed.state, RunState::Running, "{}", summary(&failed));
+    assert_eq!(failed.outcome, RunOutcome::Failed, "{}", summary(&failed));
+    assert!(failed.is_resumable(), "{}", summary(&failed));
+    assert_eq!(harness.api_video_job_count().await, 0);
+
+    let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
+        harness.state.clone(),
+    );
+    startup.scan.await.expect("startup scan joins");
+    assert!(
+        startup.controller_results.recv().await.is_none(),
+        "a cleanly released failed controller must wait for explicit resume"
+    );
+    assert_eq!(harness.api_video_job_count().await, 0);
+
+    let mut resume = ResumeOptions::new(files.directory.clone());
+    resume.poll_interval = Duration::from_millis(100);
+    resume.export = false;
+    resume.require_installed = false;
+    let completed = film_harness::resume(&harness.transport, &resume)
+        .await
+        .expect("the operator can explicitly resume the failed run");
+    assert_eq!(
+        completed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&completed)
+    );
+    assert_eq!(harness.api_video_job_count().await, 1);
 }
 
 #[tokio::test]
