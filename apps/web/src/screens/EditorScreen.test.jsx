@@ -431,15 +431,51 @@ describe("timeline audio editing (sc-23739)", () => {
     act(() => container.querySelector(".ve-play").click());
     expect(play).toHaveBeenCalled();
     const form = container.querySelector('form[aria-label="Edit selected audio"]');
-    for (const [name, value] of [["timelineStart", "1.5"], ["sourceIn", "0.25"], ["sourceOut", "2.25"], ["volume", "0.7"], ["fadeInSeconds", "0.1"], ["fadeOutSeconds", "0.2"], ["trackGain", "0.8"]]) {
+    for (const [name, value] of [["timelineStart", "1.125"], ["sourceIn", "0.125"], ["sourceOut", "2.375"], ["volume", "0.7"], ["fadeInSeconds", "0.125"], ["fadeOutSeconds", "0.225"], ["trackGain", "0.8"]]) {
       const input = form.elements.namedItem(name);
       input.value = value;
     }
     form.elements.namedItem("muted").checked = true;
-    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    for (const name of ["timelineStart", "sourceIn", "sourceOut", "fadeInSeconds", "fadeOutSeconds"]) {
+      const input = form.elements.namedItem(name);
+      expect(input.step).toBe("any");
+      expect(input.validity.stepMismatch).toBe(false);
+    }
+    expect(form.checkValidity()).toBe(true);
+    act(() => form.querySelector('button[type="submit"]').click());
     const track = latest.tracks.find((item) => item.kind === "audio");
     expect(track).toMatchObject({ gain: 0.8, muted: true });
-    expect(track.items[0]).toMatchObject({ sourceIn: 0.25, sourceOut: 2.25, timelineStart: 1.5, timelineEnd: 3.5, volume: 0.7, fadeInSeconds: 0.1, fadeOutSeconds: 0.2 });
+    expect(track.items[0]).toMatchObject({ sourceIn: 0.125, sourceOut: 2.375, timelineStart: 1.125, timelineEnd: 3.375, volume: 0.7, fadeInSeconds: 0.125, fadeOutSeconds: 0.225 });
+  });
+
+  it("accepts frame-derived fractional video trim endpoints through native form validity", () => {
+    const video = { id: "v1", type: "video", displayName: "Shot", url: "/shot.mp4", file: { mimeType: "video/mp4", duration: 15 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks[0].items = [{ id: "shot", trackId: "track_main", assetId: "v1", type: "video", displayName: "Shot", sourceIn: 0, sourceOut: 14.375, timelineStart: 0, timelineEnd: 14.375, speed: 1, volume: 1 }];
+    const setActiveTimeline = vi.fn();
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [video], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline, setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-clip").click());
+    const form = container.querySelector('form[aria-label="Edit selected clip"]');
+    const sourceIn = form.elements.namedItem("sourceIn");
+    const sourceOut = form.elements.namedItem("sourceOut");
+    sourceOut.value = "0.05";
+    expect(sourceOut.validity.rangeUnderflow).toBe(true);
+    expect(form.checkValidity()).toBe(false);
+    sourceIn.value = "0.125";
+    sourceOut.value = "14.375";
+    expect(sourceIn.step).toBe("any");
+    expect(sourceOut.step).toBe("any");
+    expect(sourceIn.validity.stepMismatch).toBe(false);
+    expect(sourceOut.validity.stepMismatch).toBe(false);
+    expect(form.checkValidity()).toBe(true);
+    act(() => form.querySelector('button[type="submit"]').click());
+    expect(setActiveTimeline).toHaveBeenCalledTimes(1);
+    expect(setActiveTimeline.mock.calls[0][0].tracks[0].items[0]).toMatchObject({
+      sourceIn: 0.125,
+      sourceOut: 14.375,
+      timelineEnd: 14.25,
+    });
   });
 
   it("keeps linked dialogue placed and explicitly requests adjustment after a shorter picture trim", () => {

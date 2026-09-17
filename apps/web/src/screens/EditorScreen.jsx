@@ -784,20 +784,20 @@ export function EditorScreen() {
       {timelineNotice ? <p className="ve-notice">{timelineNotice}</p> : null}
 
       {selectedItem?.type === "video" ? <form className="ve-notice" onSubmit={trimSelected} key={`${selectedItem.id}:${selectedItem.sourceIn}:${selectedItem.sourceOut}`} aria-label="Edit selected clip">
-        <label>Source in (seconds) <input name="sourceIn" type="number" min="0" step="0.01" defaultValue={selectedItem.sourceIn} required /></label>
-        <label>Source out (seconds) <input name="sourceOut" type="number" min="0.1" step="0.01" defaultValue={selectedItem.sourceOut} required /></label>
+        <label>Source in (seconds) <input name="sourceIn" type="number" min="0" step="any" defaultValue={selectedItem.sourceIn} required /></label>
+        <label>Source out (seconds) <input name="sourceOut" type="number" min="0.1" step="any" defaultValue={selectedItem.sourceOut} required /></label>
         <button type="submit">Apply trim</button>
         <button type="button" onClick={() => moveSelected(-1)}>Move clip earlier</button>
         <button type="button" onClick={() => moveSelected(1)}>Move clip later</button>
       </form> : null}
 
       {selectedItem?.type === "audio" && selectedTrack ? <form className="ve-notice ve-audio-inspector" onSubmit={editSelectedAudio} key={`${selectedItem.id}:${selectedItem.sourceIn}:${selectedItem.sourceOut}:${selectedItem.timelineStart}`} aria-label="Edit selected audio">
-        <label>Timeline start <input name="timelineStart" type="number" min="0" step="0.01" defaultValue={selectedItem.timelineStart} required /></label>
-        <label>Source in <input name="sourceIn" type="number" min="0" step="0.01" defaultValue={selectedItem.sourceIn} required /></label>
-        <label>Source out <input name="sourceOut" type="number" min="0.1" step="0.01" defaultValue={selectedItem.sourceOut} required /></label>
+        <label>Timeline start <input name="timelineStart" type="number" min="0" step="any" defaultValue={selectedItem.timelineStart} required /></label>
+        <label>Source in <input name="sourceIn" type="number" min="0" step="any" defaultValue={selectedItem.sourceIn} required /></label>
+        <label>Source out <input name="sourceOut" type="number" min="0.1" step="any" defaultValue={selectedItem.sourceOut} required /></label>
         <label>Clip gain <input name="volume" type="number" min="0" max="2" step="0.01" defaultValue={selectedItem.volume ?? 1} required /></label>
-        <label>Fade in <input name="fadeInSeconds" type="number" min="0" step="0.01" defaultValue={selectedItem.fadeInSeconds ?? 0} required /></label>
-        <label>Fade out <input name="fadeOutSeconds" type="number" min="0" step="0.01" defaultValue={selectedItem.fadeOutSeconds ?? 0} required /></label>
+        <label>Fade in <input name="fadeInSeconds" type="number" min="0" step="any" defaultValue={selectedItem.fadeInSeconds ?? 0} required /></label>
+        <label>Fade out <input name="fadeOutSeconds" type="number" min="0" step="any" defaultValue={selectedItem.fadeOutSeconds ?? 0} required /></label>
         <label>Track gain <input name="trackGain" type="number" min="0" max="4" step="0.01" defaultValue={selectedTrack.gain ?? 1} required /></label>
         <label><input name="muted" type="checkbox" defaultChecked={Boolean(selectedTrack.muted)} /> Mute track</label>
         <button type="submit">Apply audio edit</button>
