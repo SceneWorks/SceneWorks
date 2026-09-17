@@ -183,8 +183,9 @@ fn observed_for(record: &RunRecord, out_dir: &Path, shot_id: &str) -> ObservedSt
 fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, String) {
     let project_id = record.project_id.clone().expect("run has project");
     let project_path = PathBuf::from(record.project_path.as_ref().expect("run has project path"));
-    let run_id = record.run_id.clone();
-    let relative = format!("films/runs/{run_id}");
+    let locator_id = format!("filmrun_route_{}", record.run_id.trim_start_matches("run_"));
+    assert_ne!(locator_id, record.run_id, "route and record identities differ");
+    let relative = format!("films/runs/{locator_id}");
     let run_dir = project_path.join(&relative);
     std::fs::create_dir_all(run_dir.parent().expect("run parent")).expect("run parent creates");
     std::fs::rename(harness.out_dir(), &run_dir).expect("completed run moves into project");
@@ -193,7 +194,7 @@ fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, St
         run_dir.join("locator.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "schemaVersion": 1,
-            "id": run_id,
+            "id": locator_id,
             "projectId": project_id,
             "draftId": "film_route_fixture",
             "draftRevision": 1,
@@ -204,7 +205,7 @@ fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, St
         .expect("locator serializes"),
     )
     .expect("locator writes");
-    (project_id, run_id)
+    (project_id, locator_id)
 }
 
 // ---------------------------------------------------------------------------------------------

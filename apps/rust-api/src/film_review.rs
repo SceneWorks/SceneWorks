@@ -323,7 +323,11 @@ pub(crate) async fn load_review_view(
         .timeline
         .as_ref()
         .map(|timeline| timeline.timeline_id.clone());
-    let review_name = format!("film-harness review ({run_id})");
+    // The harness names this advisory timeline with the immutable production record id, not the
+    // API locator id. They are deliberately different in project-backed runs: `filmrun_*` routes
+    // to a directory whose `run.json` owns a `run_*` identity. Looking up by the locator made a
+    // successfully completed review appear to have no frame timeline after reload.
+    let review_name = format!("film-harness review ({})", record.run_id);
     let lookup_project = project_id.clone();
     let lookup_run = run_id.clone();
     let (directory, take_assets, review_timeline_id, saved_timeline) =
