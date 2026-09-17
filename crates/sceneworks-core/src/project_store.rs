@@ -978,6 +978,7 @@ impl ProjectStore {
                 .staleness_findings(&draft.production_plan, &supplied_plan_sha)
                 .is_empty()
         });
+        draft.reconcile_review_plan();
         draft.revision = current.revision.saturating_add(1);
         draft.created_at = current.created_at;
         draft.updated_at = utc_now();
@@ -1247,6 +1248,44 @@ impl ProjectStore {
         selected_shot_ids: Vec<String>,
         compiled: Option<CompiledPlan>,
     ) -> ProjectStoreResult<FilmRunLocator> {
+        self.pin_film_run(
+            project_id,
+            run_locator_id,
+            draft_id,
+            None,
+            selected_shot_ids,
+            compiled,
+        )
+    }
+
+    /// Pin exactly the draft the caller validated; the comparison and all documents share a lock.
+    pub fn create_film_run_at_revision(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+        expected_revision: u32,
+        selected_shot_ids: Vec<String>,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        self.pin_film_run(
+            project_id,
+            run_locator_id,
+            draft_id,
+            Some(expected_revision),
+            selected_shot_ids,
+            None,
+        )
+    }
+
+    fn pin_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+        expected_revision: Option<u32>,
+        selected_shot_ids: Vec<String>,
+        compiled: Option<CompiledPlan>,
+    ) -> ProjectStoreResult<FilmRunLocator> {
         if !is_safe_id(run_locator_id) || !is_safe_id(draft_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid film run ID".to_owned(),
@@ -1267,6 +1306,44 @@ impl ProjectStore {
                 "Film draft identity does not match its project path".to_owned(),
             ));
         }
+        if expected_revision.is_some_and(|expected| expected != draft.revision) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, found {}; reload and preflight the draft before rendering",
+                expected_revision.expect("checked"), draft.revision)));
+        }
+        let selected_shot_ids = if selected_shot_ids.is_empty() {
+            draft
+                .production_plan
+                .shots
+                .iter()
+                .map(|shot| shot.id.clone())
+                .collect()
+        } else {
+            selected_shot_ids
+        };
+        if selected_shot_ids.iter().any(|id| {
+            !draft
+                .production_plan
+                .shots
+                .iter()
+                .any(|shot| &shot.id == id)
+        }) {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run selection contains an unknown shot".to_owned(),
+            ));
+        }
+        let compiled = compiled.or_else(|| draft.compiled_plan.clone());
+        if let Some(compiled) = &compiled {
+            let sha = production_plan_sha256(&draft.production_plan)?;
+            let findings = compiled.staleness_findings(&draft.production_plan, &sha);
+            if !findings.is_empty() {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film compiled plan does not match the pinned draft: {findings:?}"
+                )));
+            }
+        }
+        let mut draft = draft;
+        draft.reconcile_review_plan();
         let relative_dir = format!("films/runs/{run_locator_id}");
         let run_dir = project_path.join(&relative_dir);
         if run_dir.exists() {
@@ -14289,6 +14366,122 @@ mod tests {
         assert_eq!(
             guess_mime_from_filename("reference.avif").as_deref(),
             Some("image/avif")
+        );
+    }
+
+    #[test]
+    fn film_run_revision_barrier_refuses_concurrent_save_without_creating_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Revision race").unwrap();
+        let draft = store
+            .create_film_draft(&project.id, "film_race", "Race")
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let validated_revision = store
+                    .get_film_draft(&project.id, &draft.id)
+                    .unwrap()
+                    .revision;
+                barrier.wait();
+                barrier.wait();
+                store.create_film_run_at_revision(
+                    &project.id,
+                    "run_stale",
+                    &draft.id,
+                    validated_revision,
+                    vec![],
+                )
+            });
+            barrier.wait();
+            let mut newer = draft.clone();
+            newer.production_plan.shots[0].prompt = "Changed by the other session".to_owned();
+            let newer = store
+                .save_film_draft(&project.id, &draft.id, newer)
+                .unwrap();
+            barrier.wait();
+            assert!(handle
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("revision conflict"));
+            assert!(store.list_film_runs(&project.id).unwrap().is_empty());
+            assert!(!std::path::Path::new(&project.path)
+                .join("films/runs/run_stale")
+                .exists());
+            let locator = store
+                .create_film_run_at_revision(
+                    &project.id,
+                    "run_current",
+                    &draft.id,
+                    newer.revision,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(locator.draft_revision, newer.revision);
+            assert_eq!(locator.selected_shot_ids, vec!["SH010"]);
+            let files = store.film_run_files(&project.id, &locator.id).unwrap();
+            assert_eq!(
+                read_json(&files.plan).unwrap(),
+                serde_json::to_value(&newer.production_plan).unwrap()
+            );
+            assert_eq!(read_json(&files.review_plan).unwrap(), newer.review_plan);
+        });
+    }
+
+    #[test]
+    fn film_save_and_pin_add_missing_review_questions_without_replacing_custom_questions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Questions").unwrap();
+        let mut draft = store
+            .create_film_draft(&project.id, "film_questions", "Questions")
+            .unwrap();
+        draft.review_plan["shots"]["SH010"]["questions"][0]["ask"] =
+            json!("Is the blue parcel visible?");
+        let authored = draft.review_plan["shots"]["SH010"].clone();
+        let mut second = draft.production_plan.shots[0].clone();
+        second.id = "SH020".to_owned();
+        second.end_state = "Parcel handed over".to_owned();
+        draft.production_plan.shots.push(second);
+        let saved = store
+            .save_film_draft(&project.id, &draft.id.clone(), draft)
+            .unwrap();
+        assert_eq!(saved.review_plan["shots"]["SH010"], authored);
+        assert_eq!(
+            saved.review_plan["shots"]["SH020"]["questions"][0]["intended"],
+            "Parcel handed over"
+        );
+        store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_questions",
+                &saved.id,
+                saved.revision,
+                vec![],
+            )
+            .unwrap();
+        let files = store.film_run_files(&project.id, "run_questions").unwrap();
+        assert_eq!(read_json(&files.review_plan).unwrap(), saved.review_plan);
+    }
+
+    #[test]
+    fn film_generated_topology_keeps_detached_custom_authoring_but_pins_only_current_shots() {
+        let mut draft =
+            crate::film_workspace::FilmDraft::manual_one_shot("project", "film", "Topology");
+        draft.review_plan["shots"]["SH010"]["questions"][0]["ask"] =
+            json!("Custom question retained for the old shot");
+        let old = draft.review_plan["shots"]["SH010"].clone();
+        draft.production_plan.shots[0].id = "SH020".to_owned();
+        draft.reconcile_review_plan();
+        assert_eq!(draft.review_plan["shots"]["SH010"], old);
+        let pinned = draft.review_plan_for_run();
+        assert!(pinned["shots"].get("SH010").is_none());
+        assert_eq!(
+            pinned["shots"]["SH020"],
+            draft.review_plan["shots"]["SH020"]
         );
     }
 

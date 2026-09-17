@@ -1882,7 +1882,13 @@ async fn run_fake_refine_job(
         json!({
             "status": "completed", "stage": "completed", "progress": 1,
             "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
-            "result": { "originalPrompt": prompt, "refinedPrompt": refined }
+            "result": {
+                "originalPrompt": prompt, "refinedPrompt": refined,
+                "executionIdentity": {
+                    "provider": "native", "model": "fixture/model-keyed-refiner",
+                    "backend": "fixture", "thinkingMode": "disabled"
+                }
+            }
         }),
     )
     .await;
@@ -9590,4 +9596,110 @@ async fn a_dialogue_entry_with_both_text_and_file_synthesizes_into_the_pinned_pa
         !pinned.exists(),
         "adopting must not re-download the clip into the pack"
     );
+}
+
+#[tokio::test]
+async fn interrupted_human_operations_keep_same_attempt_scope_and_prior_budget_verdict() {
+    for exhausted in [false, true] {
+        for repair in [false, true] {
+            let harness = Harness::start(true, vec![("SH020", VideoBehavior::Hang)]).await;
+            harness.script.lock().running_hook = Some((
+                "SH020".to_owned(),
+                RunningHook::WriteCancelSentinel(harness.out_dir()),
+            ));
+            let options = harness.options(
+                harness.edited_plan(|_| {}),
+                harness.fixture_pack_without_sound(),
+                Some(&["SH010", "SH020", "SH030"]),
+            );
+            let mut before = film_harness::run_with_control(
+                &harness.transport,
+                &options,
+                &RunControl::watching(&harness.out_dir()),
+            )
+            .await
+            .expect("canceled run");
+            assert_eq!(before.outcome, RunOutcome::Canceled);
+            assert!(before.shot("SH010").unwrap().selected_attempt.is_some());
+            assert!(before.shot("SH030").unwrap().attempts.is_empty());
+            if exhausted {
+                before.elapsed_seconds = before.limits.max_run_seconds as f64;
+                before.outcome = RunOutcome::StoppedRunBudget;
+                before.stop = Some(sceneworks_core::film_plan::RunStop {
+                    reason: "run_budget".to_owned(),
+                    detail: "Automatic run budget exhausted".to_owned(),
+                    resumable: false,
+                });
+                std::fs::write(
+                    harness.out_dir().join("run.json"),
+                    serde_json::to_vec_pretty(&before).unwrap(),
+                )
+                .unwrap();
+            }
+            let other_before = other_shots_digest(&before, "SH010");
+            let jobs_before = harness.api_video_job_count().await;
+            harness.script.lock().behaviors.clear();
+            let fault = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+                .on_post_route("/api/v1/video/jobs");
+            let mut resumed_options = harness.resume_options();
+            resumed_options.export = false;
+            let result = if repair {
+                film_harness::review::request_repair(
+                    &fault,
+                    &resumed_options,
+                    "SH010",
+                    "Fix the take",
+                )
+                .await
+            } else {
+                film_harness::replace_take(&fault, &resumed_options, "SH010", "Replace the take")
+                    .await
+            };
+            result.expect_err("controller dies after job dispatch, before receiving its id");
+            assert!(fault.fired());
+            let interrupted = harness_record(&harness);
+            let operation = interrupted
+                .active_take_operation
+                .as_ref()
+                .expect("durable operation before dispatch");
+            assert_eq!(
+                operation.kind,
+                if repair { "repair" } else { "replacement" }
+            );
+            assert_eq!(operation.attempt, 2);
+            assert_eq!(operation.prior_outcome, before.outcome);
+            assert_eq!(operation.prior_stop, before.stop);
+            assert!(interrupted.shot("SH010").unwrap().attempts[1]
+                .job_id
+                .is_none());
+            assert_eq!(harness.api_video_job_count().await, jobs_before + 1);
+            let after = film_harness::resume(&harness.transport, &resumed_options)
+                .await
+                .expect("adopts bounded human operation");
+            assert_eq!(
+                harness.api_video_job_count().await,
+                jobs_before + 1,
+                "recovery cannot mint a new job or resume another shot"
+            );
+            assert_eq!(after.outcome, before.outcome);
+            assert_eq!(after.stop, before.stop);
+            // The pre-crash record is in memory and recovery reads JSON. Permit only a single
+            // representational ULP; any measurable automatic budget charge still fails.
+            assert!(
+                (after.elapsed_seconds - before.elapsed_seconds).abs()
+                    <= before.elapsed_seconds.abs().max(1.0) * f64::EPSILON,
+                "human recovery cannot charge the automatic budget: {} -> {}",
+                before.elapsed_seconds,
+                after.elapsed_seconds
+            );
+            assert!(after.human_requested_elapsed_seconds > before.human_requested_elapsed_seconds);
+            assert!(after.active_take_operation.is_none());
+            let shot = after.shot("SH010").unwrap();
+            assert_eq!(shot.attempts.len(), 2);
+            assert_eq!(shot.selected_attempt, Some(2));
+            assert_eq!(shot.attempts[1].idempotency_key, operation.idempotency_key);
+            assert!(shot.attempts[1].job_id.is_some());
+            assert_eq!(other_shots_digest(&after, "SH010"), other_before);
+        }
+    }
 }

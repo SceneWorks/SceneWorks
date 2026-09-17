@@ -22,6 +22,7 @@ import { Timeline } from "../components/editor/Timeline.jsx";
 import { FilmWorkspace } from "../components/editor/FilmWorkspace.jsx";
 import { useEditorGeneration } from "../components/editor/useEditorGeneration.js";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, MAIN_TRACK_ID } from "../components/editor/editorUtils.js";
+import { useAudioPreviewGain } from "../useAudioPreviewGain.js";
 
 export function EditorScreen() {
   const app = useAppStatic();
@@ -82,6 +83,10 @@ export function EditorScreen() {
   const selectedAudioPreview = selectedItem?.type === "audio" && selectedTrack
     ? audioPreviewState(selectedItem, selectedTrack, playheadSeconds, trackSoloed)
     : null;
+  const audioPreviewGain = useAudioPreviewGain(previewVideoRef, {
+    gain: selectedAudioPreview?.gain ?? 1,
+    muted: selectedAudioPreview?.muted ?? false,
+  });
   const duration = activeTimeline ? timelineDuration(activeTimeline) : 0;
   const mainTrack = activeTimeline?.tracks?.find((track) => track.id === MAIN_TRACK_ID || track.kind === "video") ?? null;
   const mainClips = mainTrack ? trackItems(mainTrack) : [];
@@ -95,9 +100,11 @@ export function EditorScreen() {
     if (!selectedAudioPreview || !assetCanRenderAsAudio(selectedAsset) || !media) {
       return;
     }
-    media.volume = selectedAudioPreview.volume;
     media.playbackRate = selectedAudioPreview.playbackRate;
-    if (!isPlaying) {
+    // Before a placed clip starts, the user-gesture play is already running
+    // silently through a zero-gain node. Keep its source pinned to sourceIn so
+    // it begins at the exact trim point when the timeline reaches the clip.
+    if (!isPlaying || selectedAudioPreview.beforePlacement || selectedAudioPreview.afterPlacement) {
       media.currentTime = selectedAudioPreview.currentTime;
     }
   }, [isPlaying, selectedAsset, selectedAudioPreview]);
@@ -118,8 +125,8 @@ export function EditorScreen() {
       return;
     }
     if (isPlaying && screenActive) {
-      // Timeline playback waits until an audio item's placement before starting its
-      // source trim. Once the playhead leaves the item, pause the selected audition.
+      // Before placement the user-started element runs silently while the sync
+      // effect pins it to sourceIn. Once the playhead leaves the item, pause it.
       if (isAudio && selectedAudioPreview?.beforePlacement) {
         return;
       }
@@ -136,7 +143,7 @@ export function EditorScreen() {
   }, [isPlaying, selectedAsset?.id, screenActive, selectedAudioPreview?.afterPlacement, selectedAudioPreview?.beforePlacement]);
 
   // Playhead transport: a rAF loop advances the playhead across the whole timeline while
-  // playing, wrapping to 0 at the end. Only runs while foregrounded.
+  // playing, stopping at the end. Only runs while foregrounded.
   useEffect(() => {
     if (!isPlaying || !screenActive || duration <= 0 || typeof window.requestAnimationFrame !== "function") {
       return undefined;
@@ -148,7 +155,7 @@ export function EditorScreen() {
       last = now;
       setPlayheadSeconds((prev) => {
         const next = prev + dt;
-        return next >= duration ? 0 : next;
+        return Math.min(next, duration);
       });
       raf = requestAnimationFrame(tick);
     };
@@ -156,12 +163,54 @@ export function EditorScreen() {
     return () => cancelAnimationFrame(raf);
   }, [isPlaying, screenActive, duration]);
 
-  const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId, screenActive });
-  shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId, screenActive };
+  function togglePreviewPlayback() {
+    const restartingFromEnd = !isPlaying && (
+      playheadSeconds >= duration
+      || Boolean(selectedAudioPreview?.afterPlacement)
+    );
+    if (restartingFromEnd) {
+      setPlayheadSeconds(0);
+    }
+    if (!isPlaying && selectedAudioPreview) {
+      // A completed preview stays pinned to its end for an accurate stopped
+      // readout. Move both clocks back to the timeline start before replaying.
+      if (restartingFromEnd) {
+        if (previewVideoRef.current && selectedItem) {
+          previewVideoRef.current.currentTime = sourceTimestampAtPlayhead(selectedItem, 0);
+        }
+      }
+      const prepared = audioPreviewGain.prepareForPlayback();
+      if (!prepared.ok) {
+        setTimelineNotice("This browser cannot preview gain above 1×. The saved gain is unchanged and export will use it.");
+        return;
+      }
+      prepared.resume.catch(() => {
+        previewVideoRef.current?.pause();
+        setIsPlaying(false);
+        setTimelineNotice("The browser could not start audio preview. The saved gain is unchanged and export will use it.");
+      });
+      // Both calls happen inside the pointer/keyboard handler. This gives the
+      // AudioContext and audible media element the same user activation.
+      if (screenActive) {
+        previewVideoRef.current?.play().catch(() => setIsPlaying(false));
+      }
+    }
+    setIsPlaying((value) => !value);
+  }
+
+  function handlePreviewEnded() {
+    if (selectedAudioPreview && selectedItem) {
+      setPlayheadSeconds(Math.min(duration, Math.max(0, Number(selectedItem.timelineEnd) || 0)));
+    }
+    setIsPlaying(false);
+  }
+
+  const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId, screenActive, togglePreviewPlayback });
+  shortcutStateRef.current = { undo, redo, removeSelectedItem, selectedItemId, screenActive, togglePreviewPlayback };
 
   useEffect(() => {
     function onKeyDown(event) {
-      const { undo, redo, removeSelectedItem, selectedItemId, screenActive } = shortcutStateRef.current;
+      const { undo, redo, removeSelectedItem, selectedItemId, screenActive, togglePreviewPlayback } = shortcutStateRef.current;
       // Under selective keep-alive (sc-11959) this editor stays mounted and this window
       // listener stays subscribed even when another view is foregrounded, so gate every
       // shortcut on the active flag — a backgrounded timeline must never eat Space (play),
@@ -176,7 +225,7 @@ export function EditorScreen() {
       }
       if (event.code === "Space") {
         event.preventDefault();
-        setIsPlaying((value) => !value);
+        togglePreviewPlayback();
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -784,16 +833,16 @@ export function EditorScreen() {
           clipLabel={selectedItem ? `${selectedItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}
           isAi={isSelectedAi}
           isPlaying={isPlaying}
-          onEnded={() => setIsPlaying(false)}
+          onEnded={handlePreviewEnded}
           onNext={() => stepClip(1)}
           onPause={() => setIsPlaying(false)}
           onPlay={() => setIsPlaying(true)}
           onPrev={() => stepClip(-1)}
-          onTogglePlay={() => setIsPlaying((value) => !value)}
-          previewVideoRef={previewVideoRef}
+          onTogglePlay={togglePreviewPlayback}
           resolutionLabel={`${activeTimeline.width} × ${activeTimeline.height}`}
           selectedAsset={selectedAsset}
           selectedAudioMuted={selectedAudioPreview?.muted ?? false}
+          previewVideoRef={audioPreviewGain.mediaRef}
         />
         <GenerationRail
           contextActions={contextActions}

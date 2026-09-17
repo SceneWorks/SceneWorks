@@ -784,16 +784,72 @@ pub(crate) async fn review_with_lease(
     vision: &dyn ReviewVision,
     _lease: super::ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
-    let mut context =
-        ReviewContext::open(&options.out_dir, options.review_plan_path.as_deref(), true)?;
-    let project_id = context.record.project_id.clone().ok_or_else(|| {
-        HarnessError::Refused(format!(
-            "run {} never created a project, so it has no take to review",
-            context.record.run_id
-        ))
-    })?;
-    let review_plan = context.review_plan()?.clone();
+    let prior_reviews: BTreeMap<String, usize> = super::read_run_record(&options.out_dir)?
+        .shots
+        .iter()
+        .map(|shot| (shot.shot_id.clone(), shot.reviews.len()))
+        .collect();
+    write_review_operation(options, "running", None)?;
+    let result = review_inner(transport, options, vision).await;
+    let detail = match &result {
+        Err(error) => Some(error.to_string()),
+        Ok(record) => {
+            let stops: Vec<String> = record
+                .shots
+                .iter()
+                .flat_map(|shot| {
+                    shot.reviews
+                        .iter()
+                        .skip(*prior_reviews.get(&shot.shot_id).unwrap_or(&0))
+                        .filter_map(|review| {
+                            review
+                                .stop
+                                .as_ref()
+                                .map(|stop| format!("{}: {stop}", shot.shot_id))
+                        })
+                })
+                .collect();
+            (!stops.is_empty()).then(|| stops.join("; "))
+        }
+    };
+    write_review_operation(
+        options,
+        if detail.is_none() {
+            "completed"
+        } else {
+            "failed"
+        },
+        detail.as_deref(),
+    )?;
+    result
+}
 
+pub(crate) const REVIEW_OPERATION_FILE: &str = "review-operation.json";
+
+pub(crate) fn write_review_operation(
+    options: &ReviewOptions,
+    status: &str,
+    detail: Option<&str>,
+) -> Result<(), HarnessError> {
+    let value = serde_json::json!({"status": status, "shotIds": options.shot_ids, "updatedAt": utc_now(), "detail": detail});
+    super::write_atomically(
+        &options.out_dir.join(REVIEW_OPERATION_FILE),
+        &serde_json::to_vec_pretty(&value).map_err(|error| HarnessError::Io(error.to_string()))?,
+    )
+}
+
+/// Refuse invalid shot/question contracts before accepting work or consulting a model.
+pub(crate) fn validate_review_request(options: &ReviewOptions) -> Result<(), HarnessError> {
+    let context = ReviewContext::open(&options.out_dir, options.review_plan_path.as_deref(), true)?;
+    review_targets(&context, options)?;
+    Ok(())
+}
+
+fn review_targets(
+    context: &ReviewContext,
+    options: &ReviewOptions,
+) -> Result<Vec<String>, HarnessError> {
+    let review_plan = context.review_plan()?;
     let targets: Vec<String> = if options.shot_ids.is_empty() {
         context
             .record
@@ -832,6 +888,25 @@ pub(crate) async fn review_with_lease(
         }
     }
 
+    Ok(targets)
+}
+
+async fn review_inner(
+    transport: &dyn ApiTransport,
+    options: &ReviewOptions,
+    vision: &dyn ReviewVision,
+) -> Result<RunRecord, HarnessError> {
+    let mut context =
+        ReviewContext::open(&options.out_dir, options.review_plan_path.as_deref(), true)?;
+    let project_id = context.record.project_id.clone().ok_or_else(|| {
+        HarnessError::Refused(format!(
+            "run {} never created a project, so it has no take to review",
+            context.record.run_id
+        ))
+    })?;
+    let review_plan = context.review_plan()?.clone();
+
+    let targets = review_targets(&context, options)?;
     let client = Client {
         transport,
         control: &options.control,
@@ -1820,7 +1895,8 @@ pub(crate) async fn request_repair_with_lease(
     // Written before dispatch so the authorisation survives a controller that dies during it, and
     // so `replace_take` — which re-reads the record from disk — starts from it.
     context.persist()?;
-    super::replace_take_with_lease(transport, options, shot_id, &folded, lease).await
+    super::replace_take_operation_with_lease(transport, options, shot_id, &folded, "repair", lease)
+        .await
 }
 
 /// Build the repair reason: the person's words, plus the actionable flags of the most recent

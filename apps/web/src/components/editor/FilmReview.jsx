@@ -19,10 +19,10 @@ function list(value) {
 
 function defaultQuestion(shot) {
   return {
-    id: "action-complete",
+    id: `${shot.id}_action`,
     topic: "action_completion",
     intended: shot.endState || shot.beat || "Intended end state",
-    ask: "Complete?",
+    ask: "Does the final frame show the authored action completed? Answer yes or no.",
     expect: ["yes"],
     contradict: ["no"],
     frames: "last",
@@ -31,25 +31,25 @@ function defaultQuestion(shot) {
   };
 }
 
-function normalizedPlan(draft) {
+export function normalizedPlan(draft) {
   const current = draft.reviewPlan ?? {};
   const shots = current.shots && typeof current.shots === "object" ? structuredClone(current.shots) : {};
   for (const shot of draft.productionPlan.shots) {
-    shots[shot.id] ??= { questions: [defaultQuestion(shot)] };
+    if (!(shot.id in shots)) shots[shot.id] = { questions: [defaultQuestion(shot)] };
   }
   return {
-    schemaVersion: 1,
-    id: current.id || `${draft.id}-review`,
-    version: Number(current.version) || 1,
+    schemaVersion: current.schemaVersion ?? 1,
+    id: current.id ?? `${draft.id}-review`,
+    version: current.version ?? 1,
     description: current.description || "",
-    sampling: { positions: current.sampling?.positions?.length ? current.sampling.positions : [0.1, 0.5, 0.9] },
+    sampling: { positions: current.sampling?.positions ?? [0.1, 0.5, 0.9] },
     limits: {
-      maxSeconds: current.limits?.maxSeconds || 120,
-      maxFramesPerShot: current.limits?.maxFramesPerShot || 3,
-      maxQuestionsPerShot: current.limits?.maxQuestionsPerShot || 8,
-      maxAnswerSeconds: current.limits?.maxAnswerSeconds || 30,
-      maxNewTokens: current.limits?.maxNewTokens || 192,
-      maxMemoryGb: current.limits?.maxMemoryGb || 16,
+      maxSeconds: current.limits?.maxSeconds ?? 120,
+      maxFramesPerShot: current.limits?.maxFramesPerShot ?? 3,
+      maxQuestionsPerShot: current.limits?.maxQuestionsPerShot ?? 8,
+      maxAnswerSeconds: current.limits?.maxAnswerSeconds ?? 30,
+      maxNewTokens: current.limits?.maxNewTokens ?? 192,
+      maxMemoryGb: current.limits?.maxMemoryGb ?? 16,
     },
     shots,
     uncertainBelow: Number.isFinite(current.uncertainBelow) ? current.uncertainBelow : 0.5,
@@ -197,6 +197,8 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
             <button disabled={!view.reviewTimelineId} onClick={() => openTimeline(view.reviewTimelineId)} type="button">Open review frames</button>
           </div>
           {disabledReason ? <p className="ve-film-warning" role="status">Actions unavailable: {disabledReason}</p> : null}
+          {["failed", "rejected"].includes(view.reviewOperation?.status) ? <p role="alert">Assistive review failed: {view.reviewOperation.detail}. Correct the problem and analyze again; existing observations may be partial.</p> : null}
+          {view.reviewOperation?.status === "running" && !view.run.controllerActive ? <p role="alert">Assistive review was interrupted. Analyze again to complete it; existing observations may be partial.</p> : null}
           <p>{view.assistiveNotice}</p>
           {(view.run.record?.shots ?? []).map((shot) => {
             const selection = view.selections.find((item) => item.shotId === shot.shotId);

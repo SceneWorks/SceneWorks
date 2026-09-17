@@ -173,18 +173,21 @@ pub(crate) fn find_connection(
     id: &str,
 ) -> Result<FilmPlannerConnection, ApiError> {
     validate_id(id)?;
-    read_connections(state)?
+    let mut connection = read_connections(state)?
         .into_iter()
         .find(|connection| connection.id == id)
         .ok_or_else(|| {
             ApiError::bad_request(format!("Saved planning connection {id:?} was not found"))
-        })
+        })?;
+    connection.base_url = validate_base_url(&connection.base_url)?;
+    Ok(connection)
 }
 
 pub(crate) async fn resolve_connection_credential(
     state: &AppState,
     connection: &FilmPlannerConnection,
 ) -> Result<Option<String>, ApiError> {
+    validate_base_url(&connection.base_url)?;
     let Some(host) = connection.credential_host.as_deref() else {
         return Ok(None);
     };

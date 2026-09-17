@@ -202,6 +202,11 @@ impl From<JobsStoreError> for ApiError {
 impl From<ProjectStoreError> for ApiError {
     fn from(error: ProjectStoreError) -> Self {
         match error {
+            ProjectStoreError::BadRequest(detail)
+                if detail.starts_with("Film draft revision conflict:") =>
+            {
+                Self::conflict(detail)
+            }
             ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
             ProjectStoreError::TimelineConflict { code, context } => Self {
                 status: StatusCode::CONFLICT,

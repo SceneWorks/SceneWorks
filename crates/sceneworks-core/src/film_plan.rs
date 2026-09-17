@@ -3728,6 +3728,9 @@ pub struct ExportPending {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
+    /// Human operation still owed after controller loss; its attempt carries the durable job ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_take_operation: Option<TakeOperation>,
     pub schema_version: u32,
     pub run_id: String,
     pub created_at: String,
@@ -3801,6 +3804,20 @@ pub struct RunRecord {
     /// (`elapsedSeconds + humanRequestedElapsedSeconds`).
     #[serde(default)]
     pub human_requested_elapsed_seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TakeOperation {
+    pub kind: String,
+    pub shot_id: String,
+    pub attempt: u32,
+    pub idempotency_key: String,
+    pub prior_outcome: RunOutcome,
+    pub prior_stop: Option<RunStop>,
+    pub reason: String,
+    pub export: bool,
+    pub max_shot_seconds: u64,
 }
 
 impl RunRecord {
@@ -5046,6 +5063,7 @@ mod tests {
             }],
             elapsed_seconds: 0.0,
             human_requested_elapsed_seconds: 0.0,
+            active_take_operation: None,
         };
         let json = record.to_json();
         assert_eq!(json["outcome"], "rejected");

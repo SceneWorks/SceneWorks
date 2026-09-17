@@ -257,4 +257,10 @@ describe("FilmReview", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2400); });
     expect(reads).toBe(settledReads);
   });
+  it.each(["failed", "rejected"])("shows a durable %s analysis when reopened", async (status) => {
+    await renderReview({ view: reviewView({ reviewOperation: { status, detail: "SH010: frame extraction timed out" } }) });
+    expect(container.querySelector('[role="alert"]').textContent).toContain("frame extraction timed out");
+    expect(container.querySelector('[role="alert"]').textContent).toContain("partial");
+  });
+
 });

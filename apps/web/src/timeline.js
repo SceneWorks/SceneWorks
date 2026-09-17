@@ -35,8 +35,8 @@ export function audioPreviewState(item, track, playheadSeconds, trackSoloed = {}
   const fadeOutSeconds = Math.max(0, Number(item.fadeOutSeconds) || 0);
   const fadeInGain = fadeInSeconds > 0 ? Math.min(1, elapsed / fadeInSeconds) : 1;
   const fadeOutGain = fadeOutSeconds > 0 ? Math.min(1, remaining / fadeOutSeconds) : 1;
-  const clipGain = Math.max(0, Number(item.volume ?? 1));
-  const trackGain = Math.max(0, Number(track?.gain ?? 1));
+  const clipGain = Math.min(2, Math.max(0, Number(item.volume ?? 1)));
+  const trackGain = Math.min(4, Math.max(0, Number(track?.gain ?? 1)));
   const anySoloed = Object.values(trackSoloed).some(Boolean);
   const beforePlacement = playhead < timelineStart;
   const afterPlacement = playhead >= timelineEnd;
@@ -47,7 +47,10 @@ export function audioPreviewState(item, track, playheadSeconds, trackSoloed = {}
     currentTime: sourceTimestampAtPlayhead(item, playhead),
     muted: Boolean(track?.muted) || (anySoloed && !trackSoloed[track?.id]) || beforePlacement || afterPlacement,
     playbackRate: Math.max(0.01, Number(item.speed) || 1),
-    volume: Math.min(1, clipGain * trackGain * fadeInGain * fadeOutGain),
+    // Keep this as the actual mix gain. HTMLMediaElement.volume cannot represent
+    // values above one, so the editor routes this value through a Web Audio gain
+    // node. Export applies the same clip × track × fade product.
+    gain: clipGain * trackGain * fadeInGain * fadeOutGain,
   };
 }
 

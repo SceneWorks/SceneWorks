@@ -29,6 +29,7 @@ pub(crate) struct FilmReviewView {
     run: FilmRunView,
     take_assets: Vec<Value>,
     observations: Vec<ObservedState>,
+    review_operation: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_timeline_id: Option<String>,
     selections: Vec<FilmTakeSelection>,
@@ -175,12 +176,18 @@ pub(crate) async fn analyze_film_take(
     options.shot_ids = payload.shot_ids;
     options.poll_interval = Duration::from_secs(2);
     options.control = control.clone();
+    if let Err(error) = review::validate_review_request(&options) {
+        review::write_review_operation(&options, "rejected", Some(&error.to_string()))
+            .map_err(harness_error)?;
+        return Err(harness_error(error));
+    }
     let transport = transport(&state)?;
     let limits = review::review_limits(&directory, options.review_plan_path.as_deref())
         .map_err(harness_error)?;
     let vision = VqaVision::new(&transport, options.poll_interval, control);
     vision.preflight(limits).await.map_err(harness_error)?;
     vision.preflight_model().await.map_err(harness_error)?;
+    review::write_review_operation(&options, "running", None).map_err(harness_error)?;
     let active = load_review_view(state.clone(), project_id.clone(), run_id.clone()).await?;
     tokio::spawn(async move {
         let vision = VqaVision::new(&transport, options.poll_interval, options.control.clone());
@@ -358,6 +365,14 @@ pub(crate) async fn load_review_view(
         })
         .await?;
     let observations = read_observations(&directory, record)?;
+    let review_operation = match std::fs::read(directory.join(review::REVIEW_OPERATION_FILE)) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<Value>(&bytes)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ApiError::internal(error.to_string())),
+    };
     let selections = record
         .shots
         .iter()
@@ -368,6 +383,7 @@ pub(crate) async fn load_review_view(
         run,
         take_assets,
         observations,
+        review_operation,
         review_timeline_id,
         selections,
         action_disabled_reason,

@@ -933,22 +933,36 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     )
     .await;
     let project_id = project["id"].as_str().unwrap();
-    let (_, draft) = request(
+    let (_, mut draft) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/films"),
         json!({"title": "Candidate review"}),
     )
     .await;
-    let draft_id = draft["id"].as_str().unwrap();
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["reviewPlan"]["shots"]["SH010"]["questions"][0]["ask"] =
+        json!("Is the custom authored action visible?");
+    let (status, draft) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let authored_review = draft["reviewPlan"]["shots"]["SH010"].clone();
     let mut candidate = draft["productionPlan"].clone();
     candidate["shots"][0]["prompt"] = json!("Generated candidate prompt.");
+    let mut added_shot = candidate["shots"][0].clone();
+    added_shot["id"] = json!("SH020");
+    candidate["shots"].as_array_mut().unwrap().push(added_shot);
     let planning_root = std::path::Path::new(project["path"].as_str().unwrap())
         .join("films")
         .join("planning")
-        .join(draft_id);
+        .join(&draft_id);
     std::fs::create_dir_all(&planning_root).unwrap();
-    let compiled = json!({
+    let mut compiled = json!({
         "schemaVersion": 3,
         "planId": draft_id,
         "planVersion": 1,
@@ -965,6 +979,12 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
             "width": 576, "height": 320, "referenceRoles": [], "continuityRoles": []
         }]
     });
+    let mut second_request = compiled["requests"][0].clone();
+    second_request["shotId"] = json!("SH020");
+    compiled["requests"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_request);
     std::fs::write(
         planning_root.join("latest.json"),
         serde_json::to_vec_pretty(&json!({
@@ -972,7 +992,7 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
             "id": "filmplan_candidate",
             "projectId": project_id,
             "draftId": draft_id,
-            "draftRevision": 1,
+            "draftRevision": draft["revision"],
             "status": "ready",
             "stage": "review",
             "provider": "prompt_refiner",
@@ -1011,6 +1031,24 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["reviewPlan"]["shots"]["SH010"], authored_review);
+    assert!(!applied["reviewPlan"]["shots"]["SH020"]["questions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let (_, reopened) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(reopened["reviewPlan"], applied["reviewPlan"]);
+    for shot in reopened["productionPlan"]["shots"].as_array().unwrap() {
+        assert!(reopened["reviewPlan"]["shots"]
+            .get(shot["id"].as_str().unwrap())
+            .is_some());
+    }
     assert_eq!(
         applied["productionPlan"]["shots"][0]["prompt"],
         "Generated candidate prompt."
@@ -1036,4 +1074,153 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{stale}");
     assert!(stale["detail"].as_str().unwrap().contains("changed after"));
+}
+
+#[tokio::test]
+async fn film_render_refuses_an_authorized_revision_changed_by_another_session() {
+    let temporary = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temporary);
+    let app = create_app(settings).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Revision"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title":"Revision"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let authorized_revision = draft["revision"].clone();
+    draft["productionPlan"]["shots"][0]["prompt"] = json!("Another session changed the prompt");
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for suffix in ["preflight", "runs"] {
+        let (status, refusal) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/films/{draft_id}/{suffix}"),
+            json!({"expectedDraftRevision": authorized_revision, "selectedShotIds":["SH010"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        assert!(refusal.to_string().contains("revision conflict"));
+    }
+    let (_, runs) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(runs, json!([]));
+    let directory = std::path::Path::new(project["path"].as_str().unwrap()).join("films/runs");
+    assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jobs, json!([]));
+}
+
+#[tokio::test]
+async fn film_render_store_pin_rechecks_revision_after_route_validation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temporary)).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Pin race"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap().to_owned();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title":"Pin race"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["productionPlan"]["shots"][0]["prompt"] =
+        json!("A courier walks across a quiet workshop.");
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    let (validated, resume) = crate::films::film_pin_barrier(&draft_id);
+    let app_request = app.clone();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/runs");
+    let revision = saved["revision"].clone();
+    let rendering = tokio::spawn(async move {
+        request(
+            app_request,
+            "POST",
+            &route,
+            json!({"expectedDraftRevision":revision, "selectedShotIds":["SH010"]}),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), validated)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut concurrent = saved;
+    concurrent["productionPlan"]["shots"][0]["prompt"] = json!("Changed after route validation");
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        concurrent,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    resume.send(()).unwrap();
+    let (status, conflict) = rendering.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert!(conflict.to_string().contains("revision conflict"));
+    let (_, runs) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs"),
+        Value::Null,
+    )
+    .await;
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(runs, json!([]));
+    assert_eq!(jobs, json!([]));
+}
+
+#[tokio::test]
+async fn planning_repair_ceiling_is_rejected_before_creating_an_operation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temporary)).unwrap();
+    let (status, failure) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects/no-project/films/no-draft/planning",
+        json!({"maxRepairRounds": 999}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failure}");
+    assert!(failure["detail"]
+        .as_str()
+        .unwrap()
+        .contains("between 0 and 5"));
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs, json!([]));
 }

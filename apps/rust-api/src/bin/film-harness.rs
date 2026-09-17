@@ -356,6 +356,20 @@ mod error_classification_tests {
             executions: Vec::new(),
         };
         assert!(!is_validation_or_refused(&provider));
+        let write_failure = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Io(
+                "plan.json already exists and differs".to_owned(),
+            )),
+            executions: Vec::new(),
+        };
+        assert!(!is_validation_or_refused(&write_failure));
+        let canceled = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Refused(
+                "planning canceled by user".to_owned(),
+            )),
+            executions: Vec::new(),
+        };
+        assert!(is_validation_or_refused(&canceled));
     }
 }
 

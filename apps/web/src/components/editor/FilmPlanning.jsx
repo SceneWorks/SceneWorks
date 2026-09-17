@@ -17,7 +17,8 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
   const repairRoundsValid = Number.isInteger(parsedMaxRepairRounds) && parsedMaxRepairRounds >= 0 && parsedMaxRepairRounds <= 5;
   const parsedLlmTimeoutSeconds = Number(llmTimeoutSeconds);
   const localTimeoutValid = Number.isSafeInteger(parsedLlmTimeoutSeconds) && parsedLlmTimeoutSeconds > 0;
-  const timeoutValid = planning.provider === "openai_compatible" || localTimeoutValid;
+  const usesLocalRefiner = planning.provider !== "openai_compatible" || Boolean(planning.refinePrompts);
+  const timeoutValid = !usesLocalRefiner || localTimeoutValid;
   function setProvider(provider) {
     onChange((next) => {
       next.planning = {
@@ -62,8 +63,9 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
             </label>
           ) : null}
           <label className="ve-film-reference-check"><input checked={Boolean(planning.refinePrompts)} disabled={disabled || active} onChange={(event) => onChange((next) => { next.planning.refinePrompts = event.target.checked; })} type="checkbox" /> Run model-specific prompt refinement when compiling shots</label>
+          {planning.refinePrompts ? <p>Shot refinement uses the local prompt refiner and the video model’s guide. It requires an available local refiner and records a separate execution from film planning.</p> : null}
           <label>Maximum planner repair rounds<input aria-label="Maximum planner repair rounds" disabled={disabled || active} max="5" min="0" onChange={(event) => setMaxRepairRounds(event.target.value)} step="1" type="number" value={maxRepairRounds} /></label>
-          {planning.provider !== "openai_compatible" ? <label>Local planner job timeout (seconds)<input aria-label="Local planner job timeout seconds" disabled={disabled || active} min="1" onChange={(event) => setLlmTimeoutSeconds(event.target.value)} step="1" type="number" value={llmTimeoutSeconds} /></label> : null}
+          {usesLocalRefiner ? <label>Local planner job timeout (seconds)<input aria-label="Local planner job timeout seconds" disabled={disabled || active} min="1" onChange={(event) => setLlmTimeoutSeconds(event.target.value)} step="1" type="number" value={llmTimeoutSeconds} /></label> : null}
         </div>
       </details>
       <p className="ve-film-provider-state">
@@ -87,7 +89,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
         {installError ? <span role="alert">Status refresh failed: {installError}. Retrying.</span> : null}
       </div> : null}
       <div className="ve-film-actions">
-        <button className="ve-generate" disabled={disabled || active || !repairRoundsValid || !timeoutValid || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={() => onStart(parsedMaxRepairRounds, planning.provider === "openai_compatible" ? undefined : parsedLlmTimeoutSeconds)} type="button">Generate candidate plan</button>
+        <button className="ve-generate" disabled={disabled || active || !repairRoundsValid || !timeoutValid || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={() => onStart(parsedMaxRepairRounds, usesLocalRefiner ? parsedLlmTimeoutSeconds : undefined)} type="button">Generate candidate plan</button>
         {active ? <button disabled={operation.status === "canceling"} onClick={onCancel} type="button">Cancel planning</button> : null}
       </div>
       {operation ? (
@@ -97,7 +99,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
           {Number.isFinite(operation.progress) ? <progress aria-label="Planning progress" max="1" value={operation.progress} /> : null}
           <span>Planner: {operation.plannerModel}; target video model: {operation.videoModelId}</span>
           {Number.isInteger(operation.maxRepairRounds) ? <span>Maximum repair rounds: {operation.maxRepairRounds}</span> : null}
-          {operation.provider !== "openai_compatible" && Number.isInteger(operation.llmTimeoutSeconds) ? <span>Local planner job timeout: {operation.llmTimeoutSeconds} seconds per call</span> : null}
+          {(operation.provider !== "openai_compatible" || operation.refinePrompts) && Number.isInteger(operation.llmTimeoutSeconds) ? <span>Local planner job timeout: {operation.llmTimeoutSeconds} seconds per call</span> : null}
           {operation.executions?.length ? <span>Execution: {operation.executions.map((item) => `${item.backend ?? "native"} / ${item.model}`).join(", ")}</span> : null}
           {operation.findings?.length ? (
             <ul aria-label="Planning findings" className="ve-film-planning-findings">
