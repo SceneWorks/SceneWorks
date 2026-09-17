@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { assetCanRenderAsAudio, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { formatTimecode } from "../formatting.js";
 import {
-  audioPreviewState,
   ensureItemVersionFields,
   itemDuration,
   sourceTimestampAtPlayhead,
@@ -22,7 +21,8 @@ import { Timeline } from "../components/editor/Timeline.jsx";
 import { FilmWorkspace } from "../components/editor/FilmWorkspace.jsx";
 import { useEditorGeneration } from "../components/editor/useEditorGeneration.js";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, MAIN_TRACK_ID } from "../components/editor/editorUtils.js";
-import { useAudioPreviewGain } from "../useAudioPreviewGain.js";
+import { timelineAudioPlan } from "../timelineAudio.js";
+import { TimelineAudio } from "../components/editor/TimelineAudio.jsx";
 
 export function EditorScreen() {
   const app = useAppStatic();
@@ -80,34 +80,20 @@ export function EditorScreen() {
   }, [activeTimeline, selectedItemId]);
   const selectedAsset = assetsById.get(selectedItem?.assetId) ?? null;
   const selectedTrack = activeTimeline?.tracks?.find((track) => track.items.some((item) => item.id === selectedItemId)) ?? null;
-  const selectedAudioPreview = selectedItem?.type === "audio" && selectedTrack
-    ? audioPreviewState(selectedItem, selectedTrack, playheadSeconds, trackSoloed)
-    : null;
-  const audioPreviewGain = useAudioPreviewGain(previewVideoRef, {
-    gain: selectedAudioPreview?.gain ?? 1,
-    muted: selectedAudioPreview?.muted ?? false,
-  });
-  const duration = activeTimeline ? timelineDuration(activeTimeline) : 0;
+  const audioPlan = useMemo(() => timelineAudioPlan(activeTimeline, trackSoloed), [activeTimeline, trackSoloed]);
+  const timelineAudioRef = useRef(null);
+  const duration = audioPlan.duration;
+  const timelinePlayhead = audioPlan.toTimelineTime(playheadSeconds);
+  const monitorItem = isPlaying
+    ? [...audioPlan.pictures].reverse().find((item) => audioPlan.toPictureTime(Number(item.timelineStart) || 0) <= playheadSeconds) ?? selectedItem
+    : selectedItem;
+  const monitorAsset = assetsById.get(monitorItem?.assetId) ?? selectedAsset;
   const mainTrack = activeTimeline?.tracks?.find((track) => track.id === MAIN_TRACK_ID || track.kind === "video") ?? null;
   const mainClips = mainTrack ? trackItems(mainTrack) : [];
   const isSelectedAi = useMemo(() => {
-    const history = selectedItem?.versionHistory ?? [];
+    const history = monitorItem?.versionHistory ?? [];
     return history.some((entry) => ["extension", "bridge", "replacement"].includes(entry?.source));
-  }, [selectedItem]);
-
-  useEffect(() => {
-    const media = previewVideoRef.current;
-    if (!selectedAudioPreview || !assetCanRenderAsAudio(selectedAsset) || !media) {
-      return;
-    }
-    media.playbackRate = selectedAudioPreview.playbackRate;
-    // Before a placed clip starts, the user-gesture play is already running
-    // silently through a zero-gain node. Keep its source pinned to sourceIn so
-    // it begins at the exact trim point when the timeline reaches the clip.
-    if (!isPlaying || selectedAudioPreview.beforePlacement || selectedAudioPreview.afterPlacement) {
-      media.currentTime = selectedAudioPreview.currentTime;
-    }
-  }, [isPlaying, selectedAsset, selectedAudioPreview]);
+  }, [monitorItem]);
 
   useEffect(() => {
     setHistory([]);
@@ -115,32 +101,25 @@ export function EditorScreen() {
     setSelectedItemId(null);
     setSelectionKind(null);
     setPlayheadSeconds(0);
+    setIsPlaying(false);
   }, [activeTimeline?.id]);
 
-  // Preview playback: drive the selected video or audio element only while foregrounded.
   useEffect(() => {
     const media = previewVideoRef.current;
-    const isAudio = assetCanRenderAsAudio(selectedAsset);
-    if ((!assetCanRenderAsVideo(selectedAsset) && !isAudio) || !media) {
-      return;
-    }
-    if (isPlaying && screenActive) {
-      // Before placement the user-started element runs silently while the sync
-      // effect pins it to sourceIn. Once the playhead leaves the item, pause it.
-      if (isAudio && selectedAudioPreview?.beforePlacement) {
-        return;
-      }
-      if (isAudio && selectedAudioPreview?.afterPlacement) {
-        media.pause();
-        return;
-      }
-      media.play().catch(() => setIsPlaying(false));
-      return;
-    }
-    media.pause();
-    // Re-run only when the selected clip changes (by id), not on every asset-object identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedAsset?.id, screenActive, selectedAudioPreview?.afterPlacement, selectedAudioPreview?.beforePlacement]);
+    if (!media || !monitorItem || (!assetCanRenderAsVideo(monitorAsset) && !assetCanRenderAsAudio(monitorAsset))) return;
+    const start = audioPlan.toPictureTime(Number(monitorItem.timelineStart) || 0);
+    const position = sourceTimestampAtPlayhead(monitorItem, (Number(monitorItem.timelineStart) || 0) + Math.max(0, playheadSeconds - start));
+    media.playbackRate = Math.max(0.1, Number(monitorItem.speed) || 1);
+    media.muted = true;
+    if (!isPlaying || Math.abs(media.currentTime - position) > 0.12) media.currentTime = position;
+    if (isPlaying && screenActive && assetCanRenderAsVideo(monitorAsset)) {
+      void media.play().catch(() => {});
+    } else media.pause();
+  }, [audioPlan, monitorItem, monitorAsset, playheadSeconds, isPlaying, screenActive]);
+
+  useEffect(() => {
+    if (playheadSeconds >= duration || !screenActive) setIsPlaying(false);
+  }, [playheadSeconds, duration, screenActive]);
 
   // Playhead transport: a rAF loop advances the playhead across the whole timeline while
   // playing, stopping at the end. Only runs while foregrounded.
@@ -164,45 +143,20 @@ export function EditorScreen() {
   }, [isPlaying, screenActive, duration]);
 
   function togglePreviewPlayback() {
-    const restartingFromEnd = !isPlaying && (
-      playheadSeconds >= duration
-      || Boolean(selectedAudioPreview?.afterPlacement)
-    );
-    if (restartingFromEnd) {
-      setPlayheadSeconds(0);
+    if (isPlaying) {
+      timelineAudioRef.current?.pause();
+      setIsPlaying(false);
+      return;
     }
-    if (!isPlaying && selectedAudioPreview) {
-      // A completed preview stays pinned to its end for an accurate stopped
-      // readout. Move both clocks back to the timeline start before replaying.
-      if (restartingFromEnd) {
-        if (previewVideoRef.current && selectedItem) {
-          previewVideoRef.current.currentTime = sourceTimestampAtPlayhead(selectedItem, 0);
-        }
-      }
-      const prepared = audioPreviewGain.prepareForPlayback();
-      if (!prepared.ok) {
-        setTimelineNotice("This browser cannot preview gain above 1×. The saved gain is unchanged and export will use it.");
-        return;
-      }
-      prepared.resume.catch(() => {
-        previewVideoRef.current?.pause();
-        setIsPlaying(false);
-        setTimelineNotice("The browser could not start audio preview. The saved gain is unchanged and export will use it.");
-      });
-      // Both calls happen inside the pointer/keyboard handler. This gives the
-      // AudioContext and audible media element the same user activation.
-      if (screenActive) {
-        previewVideoRef.current?.play().catch(() => setIsPlaying(false));
-      }
-    }
-    setIsPlaying((value) => !value);
+    const position = playheadSeconds >= duration ? 0 : playheadSeconds;
+    if (timelineAudioRef.current?.start(position) === false) return;
+    setPlayheadSeconds(position);
+    setIsPlaying(true);
   }
 
-  function handlePreviewEnded() {
-    if (selectedAudioPreview && selectedItem) {
-      setPlayheadSeconds(Math.min(duration, Math.max(0, Number(selectedItem.timelineEnd) || 0)));
-    }
+  function handleAudioPreviewError(error) {
     setIsPlaying(false);
+    setTimelineNotice(`Audio preview could not play this cut: ${error.message || "media unavailable"}. The saved edit is unchanged.`);
   }
 
   const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId, screenActive, togglePreviewPlayback });
@@ -399,7 +353,7 @@ export function EditorScreen() {
       track = { id: `track_audio_${crypto.randomUUID().replaceAll("-", "")}`, name: "Audio 1", kind: "audio", role: "sound", gain: 1, locked: false, muted: false, items: [] };
       tracks = [...tracks, track];
     }
-    const start = isAudio ? Math.max(0, playheadSeconds) : Math.max(0, ...track.items.map((item) => item.timelineEnd));
+    const start = isAudio ? Math.max(0, timelinePlayhead) : Math.max(0, ...track.items.map((item) => item.timelineEnd));
     const sourceDuration = Number(asset.file?.duration) || 4;
     const durationSeconds = isStill ? 4 : sourceDuration;
     const item = normalizeTimelineItem({
@@ -505,7 +459,7 @@ export function EditorScreen() {
     setSelectionKind(trackKindById.get(item.trackId) === "audio" ? "audio" : "clip");
     setSelectedGap(null);
     setSelectedMarker(null);
-    setPlayheadSeconds(Number(item.timelineStart) || 0);
+    setPlayheadSeconds(audioPlan.toPictureTime(Number(item.timelineStart) || 0));
     setIsPlaying(false);
     setTimelineNotice("");
   }
@@ -516,7 +470,7 @@ export function EditorScreen() {
     setSelectedItemId(item.id);
     setSelectionKind("key");
     setSelectedGap(null);
-    setPlayheadSeconds(Number(item.timelineStart) || 0);
+    setPlayheadSeconds(audioPlan.toPictureTime(Number(item.timelineStart) || 0));
     setIsPlaying(false);
   }
   function selectGap(gap) {
@@ -524,13 +478,13 @@ export function EditorScreen() {
     setSelectionKind("gap");
     setSelectedItemId(null);
     setSelectedMarker(null);
-    setPlayheadSeconds(Number(gap.leftItem.timelineEnd) || 0);
+    setPlayheadSeconds(audioPlan.toPictureTime(Number(gap.leftItem.timelineEnd) || 0));
     setIsPlaying(false);
   }
   function selectMarker(marker) {
     setSelectedMarker(marker);
     setSelectionKind("marker");
-    setPlayheadSeconds(Number(marker.time) || 0);
+    setPlayheadSeconds(audioPlan.toPictureTime(Number(marker.time) || 0));
   }
 
   function stepClip(direction) {
@@ -551,7 +505,7 @@ export function EditorScreen() {
       itemId: item.id,
       trackId: item.trackId,
       sourceAssetId: item.assetId,
-      sourceTimestamp: sourceTimestampAtPlayhead(item, playheadSeconds),
+      sourceTimestamp: sourceTimestampAtPlayhead(item, timelinePlayhead),
       ...extra,
     };
   }
@@ -561,7 +515,7 @@ export function EditorScreen() {
       setTimelineNotice("Select a video clip before extracting a frame.");
       return;
     }
-    const job = await extractTimelineFrame({ timeline: activeTimeline, item: selectedItem, playheadSeconds, intendedUse: "reuse" });
+    const job = await extractTimelineFrame({ timeline: activeTimeline, item: selectedItem, playheadSeconds: timelinePlayhead, intendedUse: "reuse" });
     if (job) {
       setTimelineNotice("Frame extraction queued.");
     }
@@ -826,23 +780,22 @@ export function EditorScreen() {
         )),
       )}
 
+      <TimelineAudio key={activeTimeline.id} ref={timelineAudioRef} plan={audioPlan} assetsById={assetsById}
+        time={playheadSeconds} playing={isPlaying && screenActive} onError={handleAudioPreviewError} />
       <div className="ve-upper">
         <MediaBin assets={assets} onAddToTrack={(asset) => addAssetToTrack(asset)} onPreview={(asset) => setPreviewAsset(asset, assets)} />
         <ProgramMonitor
           aspectClass={aspectClass}
-          clipLabel={selectedItem ? `${selectedItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}
+          clipLabel={monitorItem ? `${monitorItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}
           isAi={isSelectedAi}
           isPlaying={isPlaying}
-          onEnded={handlePreviewEnded}
           onNext={() => stepClip(1)}
-          onPause={() => setIsPlaying(false)}
-          onPlay={() => setIsPlaying(true)}
           onPrev={() => stepClip(-1)}
           onTogglePlay={togglePreviewPlayback}
           resolutionLabel={`${activeTimeline.width} × ${activeTimeline.height}`}
-          selectedAsset={selectedAsset}
-          selectedAudioMuted={selectedAudioPreview?.muted ?? false}
-          previewVideoRef={audioPreviewGain.mediaRef}
+          selectedAsset={monitorAsset}
+          canPlayTimeline={duration > 0}
+          previewVideoRef={previewVideoRef}
         />
         <GenerationRail
           contextActions={contextActions}
@@ -858,6 +811,7 @@ export function EditorScreen() {
         <p className="ve-notice" key={asset.id}>{Number.isInteger(asset.recipe.normalizedSettings.timelineRevision) && asset.recipe.normalizedSettings.timelineRevision === activeTimeline.revision && !isActiveTimelineDirty?.() ? "Latest export matches this saved timeline." : "Latest export is stale. Export again when your edits are ready."}</p>
       ))}
       {timelineNotice ? <p className="ve-notice">{timelineNotice}</p> : null}
+      {Object.values(trackSoloed).some(Boolean) ? <p className="ve-notice">Solo is an audition control. Export includes all unmuted tracks.</p> : null}
 
       {selectedItem?.type === "video" ? <form className="ve-notice" onSubmit={trimSelected} key={`${selectedItem.id}:${selectedItem.sourceIn}:${selectedItem.sourceOut}`} aria-label="Edit selected clip">
         <label>Source in (seconds) <input name="sourceIn" type="number" min="0" step="any" defaultValue={selectedItem.sourceIn} required /></label>
@@ -891,12 +845,12 @@ export function EditorScreen() {
 
       <Timeline
         assetsById={assetsById}
-        duration={duration}
+        duration={timelineDuration(activeTimeline)}
         markers={markers}
         onAddAudioTrack={addAudioTrack}
         onScrub={(seconds) => {
           setIsPlaying(false);
-          setPlayheadSeconds(seconds);
+          setPlayheadSeconds(audioPlan.toPictureTime(seconds));
         }}
         onSelectGap={selectGap}
         onSelectItem={selectItem}
@@ -908,7 +862,7 @@ export function EditorScreen() {
         onToggleVisible={(id) => toggleMap(setTrackVisible, id)}
         onZoomIn={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(2)))}
         onZoomOut={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(2)))}
-        playheadSeconds={playheadSeconds}
+        playheadSeconds={timelinePlayhead}
         selectedGapId={selectedGap?.id}
         selectedItemId={selectedItemId}
         snap={snap}

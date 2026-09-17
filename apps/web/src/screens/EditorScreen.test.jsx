@@ -18,6 +18,30 @@ vi.mock("../appConfirm.jsx", () => ({ appConfirm: appConfirmMock }));
 
 import { EditorScreen } from "./EditorScreen.jsx";
 
+function installAudioContext(events = []) {
+  const contexts = [];
+  const node = () => ({ connect: vi.fn(), disconnect: vi.fn() });
+  class Context {
+    constructor() {
+      this.destination = {};
+      this.currentTime = 0;
+      this.gains = [];
+      this.createGain = vi.fn(() => {
+        const gain = { ...node(), gain: { value: 1, cancelScheduledValues: vi.fn(), setValueAtTime: vi.fn() } };
+        this.gains.push(gain);
+        return gain;
+      });
+      this.createMediaElementSource = vi.fn(() => node());
+      this.createDynamicsCompressor = vi.fn(() => ({ ...node(), ...Object.fromEntries(["threshold", "knee", "ratio", "attack", "release"].map((key) => [key, { value: 0 }])) }));
+      this.resume = vi.fn(async () => { events.push("resume"); });
+      this.close = vi.fn(async () => {});
+      contexts.push(this);
+    }
+  }
+  vi.stubGlobal("AudioContext", Context);
+  return contexts;
+}
+
 function makeTimeline(id, name) {
   return { id, name, aspectRatio: "16:9", fps: 30, width: 1280, height: 720, tracks: [{ id: "track_main", name: "Main", items: [] }] };
 }
@@ -411,6 +435,7 @@ describe("incremental film history (sc-23737)", () => {
 
 describe("timeline audio editing (sc-23739)", () => {
   it("places library audio, auditions it, and persists trim, placement, gain, fades, and mute", () => {
+    installAudioContext();
     const audio = { id: "asset_audio", type: "audio", displayName: "Recorded line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
     let latest;
     function Harness() {
@@ -450,33 +475,14 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(track.items[0]).toMatchObject({ sourceIn: 0.125, sourceOut: 2.375, timelineStart: 1.125, timelineEnd: 3.375, volume: 0.7, fadeInSeconds: 0.125, fadeOutSeconds: 0.225 });
     const preview = container.querySelector(".ve-program audio");
     expect(preview.currentTime).toBeCloseTo(0.125);
-    expect(preview.volume).toBe(0);
+    expect(container.querySelectorAll(".ve-timeline-audio audio")).toHaveLength(0);
     expect(preview.muted).toBe(true);
   });
 
-  it("routes boosted preview gain from the first pointer and replaces graphs only with media elements", async () => {
+  it("plays the entire mix on the first gesture and retains every layer across picture/audio reselection", async () => {
     const events = [];
-    const contexts = [];
-    const sourcedElements = new WeakSet();
-    class FakeAudioContext {
-      constructor() {
-        this.state = "suspended";
-        this.destination = {};
-        this.source = { connect: vi.fn(), disconnect: vi.fn() };
-        this.gainNode = { connect: vi.fn(), disconnect: vi.fn(), gain: { value: 1 } };
-        this.createMediaElementSource = vi.fn((element) => {
-          if (sourcedElements.has(element)) throw new DOMException("Element already has a source node", "InvalidStateError");
-          sourcedElements.add(element);
-          return this.source;
-        });
-        this.createGain = vi.fn(() => this.gainNode);
-        this.resume = vi.fn(async () => { events.push("resume"); this.state = "running"; });
-        this.close = vi.fn(async () => {});
-        contexts.push(this);
-      }
-    }
-    vi.stubGlobal("AudioContext", FakeAudioContext);
-    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockImplementation(() => {
+    const contexts = installAudioContext(events);
+    vi.spyOn(window.HTMLMediaElement.prototype, "play").mockImplementation(() => {
       events.push("play");
       return Promise.resolve();
     });
@@ -485,7 +491,7 @@ describe("timeline audio editing (sc-23739)", () => {
     const audio = { id: "boosted", type: "audio", displayName: "Boosted", url: "/boosted.wav", file: { mimeType: "audio/wav", duration: 3 } };
     const video = { id: "video", type: "video", displayName: "Picture", url: "/picture.mp4", file: { mimeType: "video/mp4", duration: 2 } };
     const timeline = makeTimeline("tl_1", "Film");
-    timeline.tracks[0].items.push({ id: "video_1", trackId: "track_main", assetId: "video", type: "video", displayName: "Picture", sourceIn: 0, sourceOut: 2, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 1 });
+    timeline.tracks[0].items.push({ id: "video_1", trackId: "track_main", assetId: "video", type: "video", displayName: "Picture", sourceIn: 0, sourceOut: 2, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 1, generatedAudio: "include" });
     timeline.tracks.push({
       id: "track_audio",
       kind: "audio",
@@ -497,46 +503,56 @@ describe("timeline audio editing (sc-23739)", () => {
       ],
     });
     root = createRoot(container);
-    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio, video], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => root.render(<React.StrictMode><AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio, video], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider></React.StrictMode>));
     act(() => container.querySelector(".ve-audio-clip").click());
 
-    const preview = container.querySelector(".ve-program audio");
-    expect(preview.currentTime).toBeCloseTo(0.25);
-    expect(preview.muted).toBe(false);
+    const layers = [...container.querySelectorAll(".ve-timeline-audio audio")];
+    expect(layers).toHaveLength(3);
+    expect(layers.map((layer) => layer.currentTime)).toEqual([0.25, 0.5, 0]);
     expect(contexts).toHaveLength(0);
 
     act(() => container.querySelector(".ve-play").click());
-    expect(play).toHaveBeenCalled();
-    expect(preview.volume).toBe(1);
-    expect(preview.muted).toBe(false);
     expect(contexts).toHaveLength(1);
-    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
-    expect(contexts[0].gainNode.gain.value).toBe(8);
-    expect(events.slice(0, 2)).toEqual(["resume", "play"]);
-    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(3);
+    expect(contexts[0].gains.map((gain) => gain.gain.value)).toEqual([8, 8, 1]);
+    expect(events.slice(0, 4)).toEqual(["resume", "play", "play", "play"]);
+    expect(layers.every((layer) => layer.volume === 1 && !layer.muted)).toBe(true);
+    expect(container.querySelector(".ve-program video").muted).toBe(true);
 
+    await flush();
     act(() => container.querySelector(".ve-play").click());
     act(() => container.querySelectorAll(".ve-audio-clip")[1].click());
-    expect(container.querySelector(".ve-program audio")).toBe(preview);
     act(() => container.querySelector(".ve-play").click());
-    expect(contexts).toHaveLength(1);
-    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(3);
+    expect([...container.querySelectorAll(".ve-timeline-audio audio")]).toEqual(layers);
 
-    act(() => container.querySelector(".ve-play").click());
+    await flush();
     act(() => container.querySelector(".ve-clip").click());
-    await act(async () => Promise.resolve());
-    expect(contexts[0].close).toHaveBeenCalledTimes(1);
-
-    act(() => container.querySelector(".ve-audio-clip").click());
-    const replacementPreview = container.querySelector(".ve-program audio");
-    expect(replacementPreview).not.toBe(preview);
+    expect(contexts[0].close).not.toHaveBeenCalled();
     act(() => container.querySelector(".ve-play").click());
-    expect(contexts).toHaveLength(2);
-    expect(contexts[1].createMediaElementSource).toHaveBeenCalledWith(replacementPreview);
-    expect(contexts[1].gainNode.gain.value).toBe(8);
+    expect(contexts[0].gains.map((gain) => gain.gain.value)).toEqual([8, 8, 1]);
+    act(() => root.unmount());
+    root = null;
+    await flush();
+    expect(contexts[0].close).toHaveBeenCalledTimes(1);
   });
 
-  it("pins a completed audio preview to source out and replays it from source in", () => {
+  it("reports unavailable and measured-silent layers while retaining playable dialogue", () => {
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks[0].items = [{ id: "picture", assetId: "picture", timelineStart: 0, timelineEnd: 4, generatedAudio: "include" }];
+    timeline.tracks.push({ id: "dialogue", kind: "audio", items: ["voice", "missing"].map((id) => ({ id, assetId: id, timelineStart: 0, timelineEnd: 4 })) });
+    render({ activeTimeline: timeline, mediaAssets: [
+      { id: "picture", type: "video", file: { hasAudio: false }, url: "/silent.mp4" },
+      { id: "voice", type: "audio", url: "/voice.wav" },
+    ] });
+    expect(container.querySelectorAll(".ve-timeline-audio audio")).toHaveLength(1);
+    expect(container.textContent).toContain("Audio preview skips picture: no audio stream.");
+    expect(container.textContent).toContain("Audio preview skips missing: asset unavailable.");
+  });
+
+  it("pins a completed audio preview to source out and replays it from source in", async () => {
+    installAudioContext();
     const animationFrames = [];
     vi.spyOn(performance, "now").mockReturnValue(0);
     vi.stubGlobal("requestAnimationFrame", vi.fn((callback) => {
@@ -579,6 +595,7 @@ describe("timeline audio editing (sc-23739)", () => {
     act(() => container.querySelector(".ve-play").click());
     expect(animationFrames).toHaveLength(1);
 
+    await flush();
     // A delayed frame used to wrap the playhead to zero. The later ended event
     // then stopped playback and the audio sync effect rewound currentTime.
     act(() => animationFrames.shift()(2100));
@@ -593,9 +610,8 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(container.querySelector(".ve-tc-now").textContent).toBe("00:00:00");
     expect(container.querySelector(".ve-play").title).toBe("Pause");
     expect(preview.currentTime).toBeCloseTo(0);
-    // Audio starts in the gesture handler and the playback effect confirms the
-    // desired state, preserving the existing first-pointer activation path.
-    expect(play).toHaveBeenCalledTimes(4);
+    // One source starts per gesture; the selected monitor never duplicates it.
+    expect(play).toHaveBeenCalledTimes(2);
   });
 
   it("accepts frame-derived fractional video trim endpoints through native form validity", () => {
