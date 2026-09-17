@@ -10941,10 +10941,23 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-dialogue { display: grid; grid-template-columns: minmax(90px, .35fr) 1fr; gap: 8px; }
 .ve-film-empty,
 .ve-film-provider-state { color: var(--muted); font-size: 12px; }
-.ve-film-operation { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-operation { display: grid; box-sizing: border-box; min-width: 0; max-width: 100%; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
 .ve-film-operation.is-failed,
 .ve-film-operation.is-canceled { border-left-color: var(--danger); }
+.ve-film-operation > span { min-width: 0; overflow-wrap: anywhere; }
 .ve-film-finding { margin: 2px 0; color: var(--danger); }
+.ve-film-planning-findings {
+  min-width: 0;
+  margin: 2px 0;
+  padding-left: 20px;
+  color: var(--danger);
+}
+.ve-film-planning-findings li {
+  min-width: 0;
+  margin: 3px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
 .ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-candidate article p { margin: 5px 0; }

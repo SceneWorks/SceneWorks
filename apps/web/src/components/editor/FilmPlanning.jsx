@@ -75,7 +75,14 @@ export function FilmPlanning({ draft, availability, operation, disabled, models 
           {Number.isFinite(operation.progress) ? <progress aria-label="Planning progress" max="1" value={operation.progress} /> : null}
           <span>Planner: {operation.plannerModel}; target video model: {operation.videoModelId}</span>
           {operation.executions?.length ? <span>Execution: {operation.executions.map((item) => `${item.backend ?? "native"} / ${item.model}`).join(", ")}</span> : null}
-          {operation.findings?.map((finding, index) => <p className="ve-film-finding" key={`${finding.field}-${index}`}>{finding.field}: {finding.message}</p>)}
+          {operation.findings?.length ? (
+            <ul aria-label="Planning findings" className="ve-film-planning-findings">
+              {operation.findings.map((finding, index) => <li key={`${finding.shotId ?? "plan"}-${finding.field}-${index}`}>
+                <strong>{finding.shotId ? `${finding.shotId} · ` : ""}{finding.field}:</strong>{" "}
+                <span>{finding.message}</span>
+              </li>)}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {candidate ? (

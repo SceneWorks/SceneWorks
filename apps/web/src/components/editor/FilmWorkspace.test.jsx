@@ -17,7 +17,7 @@ vi.mock("../../credentials.js", async (importOriginal) => ({
   saveCredential: saveCredentialMock,
 }));
 
-import { FilmWorkspace } from "./FilmWorkspace.jsx";
+import { describeActiveFilmShots, FilmWorkspace } from "./FilmWorkspace.jsx";
 
 function draft(overrides = {}) {
   return {
@@ -109,6 +109,29 @@ function changeValue(element, value) {
 }
 
 describe("FilmWorkspace", () => {
+  it("describes selected active shots from attempts without relabeling terminal or unselected outcomes", () => {
+    const active = {
+      locator: { selectedShotIds: ["SH010", "SH020"] },
+      controllerActive: true,
+      record: {
+        state: "running",
+        selectedShotIds: ["SH010", "SH020"],
+        shots: [
+          { shotId: "SH010", outcome: "not_selected", attempts: [{ status: "running" }] },
+          { shotId: "SH020", outcome: "not_selected", attempts: [] },
+          { shotId: "SH030", outcome: "not_selected", attempts: [] },
+        ],
+      },
+    };
+    expect(describeActiveFilmShots(active)).toBe("SH010: running · SH020: pending · SH030: not_selected");
+
+    const terminal = structuredClone(active);
+    terminal.controllerActive = false;
+    terminal.record.state = "finished";
+    terminal.record.shots[0].attempts[0].status = "completed";
+    expect(describeActiveFilmShots(terminal)).toBe("SH010: not_selected · SH020: not_selected · SH030: not_selected");
+  });
+
   it("keeps unsaved work mounted across three keyboard-navigable views and collapses advanced controls", async () => {
     const film = draft({ originalScript: "A courier enters." });
     apiFetchMock.mockImplementation((path) => {

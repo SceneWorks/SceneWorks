@@ -28,6 +28,23 @@ const FILM_VIEWS = [
   { id: "review", label: "Review & Edit" },
 ];
 
+export function describeActiveFilmShots(run) {
+  const record = run?.record;
+  const shots = record?.shots ?? [];
+  const active = run?.controllerActive === true && record?.state === "running";
+  const selected = new Set([
+    ...(run?.locator?.selectedShotIds ?? []),
+    ...(record?.selectedShotIds ?? []),
+  ]);
+  return shots.map((shot) => {
+    let status = shot.outcome;
+    if (active && status === "not_selected" && selected.has(shot.shotId)) {
+      status = shot.attempts?.at(-1)?.status ?? "pending";
+    }
+    return `${shot.shotId}: ${status}`;
+  }).join(" · ");
+}
+
 export function FilmWorkspace() {
   const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
   const [drafts, setDrafts] = useState([]);
@@ -259,8 +276,8 @@ export function FilmWorkspace() {
           setSelectedTimelineId(readyTimelineId);
           shownTimelineId = readyTimelineId;
         }
-        const shots = run.record?.shots ?? [];
-        if (shots.length) setNotice(shots.map((shot) => `${shot.shotId}: ${shot.outcome}`).join(" · "));
+        const shotProgress = describeActiveFilmShots(run);
+        if (shotProgress) setNotice(shotProgress);
       }
       if (!run.record || run.record.state !== "finished") {
         setNotice("The film controller stopped before the shot finished. The run record remains in the project.");
