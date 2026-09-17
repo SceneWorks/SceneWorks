@@ -1130,14 +1130,20 @@ mod server_tests {
             .expect("server task joins")
             .expect("server exits successfully");
         assert_eq!(outcome, ServerDrainOutcome::Drained);
-        assert!(
-            open_editor_stream
+        // The authoritative jobs/queue snapshots may already be buffered behind `ready` when
+        // shutdown closes the stream. They remain legal response bytes after the server task has
+        // drained; consume that finite buffer and require an actual EOF rather than assuming the
+        // very next chunk is empty.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while open_editor_stream
                 .chunk()
                 .await
                 .expect("closed event stream reads cleanly")
-                .is_none(),
-            "the browser stream must end rather than hold process shutdown open"
-        );
+                .is_some()
+            {}
+        })
+        .await
+        .expect("the browser stream reaches EOF after its buffered snapshots");
     }
 
     #[tokio::test]
