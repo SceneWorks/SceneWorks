@@ -65,6 +65,67 @@ use serde_json::{json, Map as JsonObject, Value};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
+/// The latest controller action is separate from the film verdict: a refused resume or
+/// replacement must not rewrite the prior outcome, spend an attempt, or lose an owned job.
+const ACTION_OPERATION_FILE: &str = "action-operation.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionOperation {
+    pub action: String,
+    pub shot_id: Option<String>,
+    pub status: String,
+    pub detail: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+pub fn read_action_operation(directory: &Path) -> Result<Option<ActionOperation>, HarnessError> {
+    match std::fs::read(directory.join(ACTION_OPERATION_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| HarnessError::Io(error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The caller retains its controller lease until this receipt is durable, including early
+/// document/transport/admission failures. An interrupted receipt never authorizes redispatch;
+/// only the run's existing resume and job reconciliation rules do that.
+pub(crate) async fn record_action<T>(
+    directory: &Path,
+    action: &str,
+    shot_id: Option<&str>,
+    operation: impl Future<Output = Result<T, HarnessError>>,
+) -> Result<T, HarnessError> {
+    let mut receipt = ActionOperation {
+        action: action.to_owned(),
+        shot_id: shot_id.map(str::to_owned),
+        status: "running".to_owned(),
+        detail: None,
+        started_at: utc_now(),
+        finished_at: None,
+    };
+    let persist = |receipt: &ActionOperation| {
+        let bytes = serde_json::to_vec_pretty(receipt)
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
+        write_atomically(&directory.join(ACTION_OPERATION_FILE), &bytes)
+    };
+    persist(&receipt)?;
+    let result = operation.await;
+    receipt.status = if result.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    }
+    .to_owned();
+    receipt.detail = result.as_ref().err().map(ToString::to_string);
+    receipt.finished_at = Some(utc_now());
+    persist(&receipt)?;
+    result
+}
+
 /// Statuses the job store treats as terminal.
 const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 
@@ -5261,6 +5322,20 @@ pub async fn run_with_control_and_lease(
     control: &RunControl,
     _lease: ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
+    record_action(
+        &options.out_dir,
+        "start",
+        None,
+        run_with_control_inner(transport, options, control),
+    )
+    .await
+}
+
+async fn run_with_control_inner(
+    transport: &dyn ApiTransport,
+    options: &RunOptions,
+    control: &RunControl,
+) -> Result<RunRecord, HarnessError> {
     // A `run` over a directory that already holds a record would mint a NEW run id and persist over
     // the previous run's state, while `persist_record` keeps the plan/pack copies it finds (they
     // are written once and then left alone) — so the surviving documents would belong to the old
@@ -5660,6 +5735,19 @@ pub(crate) async fn resume_with_lease(
     options: &ResumeOptions,
     _lease: ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
+    record_action(
+        &options.out_dir,
+        "resume",
+        None,
+        resume_inner(transport, options),
+    )
+    .await
+}
+
+async fn resume_inner(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
     if continued.record.active_take_operation.is_some() {
@@ -5751,6 +5839,22 @@ pub(crate) async fn replace_take_operation_with_lease(
     reason: &str,
     kind: &str,
     _lease: ControllerLease,
+) -> Result<RunRecord, HarnessError> {
+    record_action(
+        &options.out_dir,
+        kind,
+        Some(shot_id),
+        replace_take_operation(transport, options, shot_id, reason, kind),
+    )
+    .await
+}
+
+async fn replace_take_operation(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+    kind: &str,
 ) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;

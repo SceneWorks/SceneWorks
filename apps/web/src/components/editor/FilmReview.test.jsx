@@ -264,3 +264,14 @@ describe("FilmReview", () => {
   });
 
 });
+
+it.each(["replacement", "repair"])("reloads a failed %s with its take history and explicit retry", async (action) => {
+  const view = reviewView();
+  view.run.actionOperation = { action, status: "failed", detail: "No video_generate worker is available" };
+  view.selections = [{ shotId: "SH010", state: "aligned", timelineAssetId: "asset_2", timelineAttempt: 2 }];
+  await renderReview({ view });
+  expect(container.querySelector('[role="alert"]').textContent).toContain(`${action} failed: No video_generate worker`);
+  expect(container.querySelectorAll("video")).toHaveLength(2);
+  const label = action === "repair" ? "Repair from findings" : "Render one replacement";
+  expect([...container.querySelectorAll("button")].find((button) => button.textContent === label).disabled).toBe(false);
+});

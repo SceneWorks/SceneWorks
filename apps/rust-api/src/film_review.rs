@@ -216,19 +216,8 @@ async fn spawn_take_mutation(
     )
     .map_err(harness_error)?;
     let active = load_review_view(state.clone(), project_id.clone(), run_id.clone()).await?;
+    let transport = transport(&state)?;
     tokio::spawn(async move {
-        let transport = match transport(&state) {
-            Ok(transport) => transport,
-            Err(error) => {
-                tracing::error!(
-                    project_id,
-                    run_id,
-                    ?error,
-                    "film take mutation transport failed"
-                );
-                return;
-            }
-        };
         let mut options = ResumeOptions::new(directory);
         options.poll_interval = Duration::from_secs(2);
         options.export = false;

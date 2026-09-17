@@ -54,6 +54,8 @@ pub(crate) struct FilmRunView {
     pub locator: FilmRunLocator,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record: Option<RunRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_operation: Option<crate::film_harness::ActionOperation>,
     pub controller_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_owner: Option<String>,
@@ -583,6 +585,7 @@ pub(crate) async fn create_film_run(
         Json(FilmRunView {
             locator,
             record: None,
+            action_operation: None,
             controller_active: false,
             controller_owner: None,
             controller_interrupted: false,
@@ -767,14 +770,9 @@ pub(crate) async fn start_film_run(
     let token = state.settings.access_token.clone();
     let project_id_for_run = project_id.clone();
     let selected_shot_ids = view.locator.selected_shot_ids.clone();
+    let transport = HttpTransport::new(&base_url, Some(token))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     tokio::spawn(async move {
-        let transport = match HttpTransport::new(&base_url, Some(token)) {
-            Ok(transport) => transport,
-            Err(error) => {
-                tracing::error!(project_id, run_id, %error, "film run transport failed");
-                return;
-            }
-        };
         let options = RunOptions {
             plan_path: files.plan,
             reference_pack_path: files.reference_pack,
@@ -825,6 +823,8 @@ pub(crate) async fn export_film_run(
     let controller_owner = format!("api-export:{run_id}");
     let locator =
         project_call(state, move |store| store.get_film_run(&project_id, &run_id)).await?;
+    let action_operation = crate::film_harness::read_action_operation(&options.out_dir)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     tokio::spawn(async move {
         let _lease = lease;
         let transport = match HttpTransport::new(&base_url, Some(token)) {
@@ -843,6 +843,7 @@ pub(crate) async fn export_film_run(
         Json(FilmRunView {
             locator,
             record: Some(record),
+            action_operation,
             controller_active: true,
             controller_owner: Some(controller_owner),
             controller_interrupted: false,
@@ -893,6 +894,8 @@ pub(crate) async fn load_run_view(
     Ok(FilmRunView {
         locator,
         record,
+        action_operation: crate::film_harness::read_action_operation(&files.directory)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
         controller_active,
         controller_interrupted: !controller_active && controller_owner.is_some(),
         controller_owner,

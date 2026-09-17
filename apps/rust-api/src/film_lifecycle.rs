@@ -120,6 +120,12 @@ fn spawn_resume_with_install_requirement(
         ) {
             Ok(transport) => transport,
             Err(error) => {
+                let result: Result<RunRecord, _> =
+                    crate::film_harness::record_action(&directory, "resume", None, async {
+                        Err(error)
+                    })
+                    .await;
+                let error = result.expect_err("transport construction failed");
                 tracing::error!(project_id, run_id, %error, "film resume transport failed");
                 if let Some(completion) = completion {
                     let _ = completion.send(Err(error.to_string()));
