@@ -7424,6 +7424,35 @@ async fn a_dropped_beat_is_repaired_and_the_repair_loop_is_bounded() {
     );
     // Exactly 1 + 2 model calls: the loop is bounded by the declared rounds.
     assert_eq!(harness.script.lock().plan_calls, 3);
+    let prompts = refine_job_payloads(&harness, true);
+    assert_eq!(
+        prompts.len(),
+        3,
+        "the initial request plus exactly two repairs"
+    );
+    for (index, payload) in prompts.iter().enumerate().skip(1) {
+        let prompt = payload["prompt"]
+            .as_str()
+            .expect("each refine job records its prompt");
+        assert!(
+            prompt.contains(&format!("Repair round {index} of 2")),
+            "{prompt}"
+        );
+        let contract = prompt.find("# Output contract").expect("shared contract");
+        let checklist = prompt
+            .rfind("# Final repair checklist")
+            .expect("final repair checklist");
+        let finding = prompt
+            .rfind("required beat \"handover\"")
+            .expect("unchanged draft's exact finding is repeated last");
+        assert!(contract < checklist && checklist < finding, "{prompt}");
+        assert!(
+            prompt.trim_end().ends_with(
+                "Return the whole corrected JSON object. Do not return the draft above unchanged."
+            ),
+            "the repeated invalid output must receive an actionable final instruction: {prompt}"
+        );
+    }
     // Nothing was written but the diagnosable refusal.
     assert!(!options.out_dir.join("plan.json").exists());
     let rejected = std::fs::read_to_string(options.out_dir.join("planner-rejected.txt"))

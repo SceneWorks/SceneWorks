@@ -940,7 +940,7 @@ pub async fn generate(
             return Err(HarnessError::Validation(findings));
         }
         round += 1;
-        request = build_repair_request(&brief, &caps, &last_reply, &findings, round, rounds);
+        request = build_repair_request(&brief, &pack, &caps, &last_reply, &findings, round, rounds);
     };
 
     let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
