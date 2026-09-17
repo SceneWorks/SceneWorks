@@ -4,7 +4,7 @@ import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
-export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
+export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, onRefreshAvailability, token }) {
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
@@ -22,6 +22,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
         sendReferencePixels: provider === "openai_compatible" ? Boolean(next.planning?.sendReferencePixels) : false,
       };
     });
+    if (provider === "native") void onRefreshAvailability?.();
   }
   return (
     <section aria-labelledby="film-planning-heading" className="ve-film-section">

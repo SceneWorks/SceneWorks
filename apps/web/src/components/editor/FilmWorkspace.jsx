@@ -11,8 +11,8 @@ import {
   startFilmPlanning,
   exportFilmRun,
 } from "../../api/films.js";
-import { useAppStatic } from "../../context/AppContext.js";
-import { errorStatuses } from "../../jobTypes.js";
+import { useAppLive, useAppStatic } from "../../context/AppContext.js";
+import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
@@ -28,6 +28,21 @@ const FILM_VIEWS = [
   { id: "shots", label: "Shots" },
   { id: "review", label: "Review & Edit" },
 ];
+
+const QWEN_PLANNER_MODEL_ID = "film_planner_qwen3_6_27b";
+
+export function activeQwenPlannerInstall(jobs = []) {
+  return jobs.find((job) =>
+    job?.type === "model_download"
+    && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID
+    && !terminalStatuses.has(job.status)) ?? null;
+}
+
+export function latestQwenPlannerInstall(jobs = []) {
+  return activeQwenPlannerInstall(jobs)
+    ?? jobs.find((job) => job?.type === "model_download" && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID)
+    ?? null;
+}
 
 export function describeActiveFilmShots(run) {
   const record = run?.record;
@@ -48,13 +63,14 @@ export function describeActiveFilmShots(run) {
 
 export function FilmWorkspace() {
   const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
+  const { jobs = [] } = useAppLive();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [plannerAvailability, setPlannerAvailability] = useState(null);
-  const [plannerInstallJob, setPlannerInstallJob] = useState(null);
+  const [requestedPlannerInstallJob, setRequestedPlannerInstallJob] = useState(null);
   const [plannerInstallError, setPlannerInstallError] = useState("");
   const [planningOperation, setPlanningOperation] = useState(null);
   const [selectedShotIds, setSelectedShotIds] = useState([]);
@@ -62,6 +78,12 @@ export function FilmWorkspace() {
   const [lastRun, setLastRun] = useState(null);
   const [activeView, setActiveView] = useState("brief");
   const viewTabs = useRef([]);
+  const plannerAvailabilityRequest = useRef(0);
+  const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
+  const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
+  const plannerInstallJob = activeQueuePlannerInstallJob?.id !== requestedPlannerInstallJob?.id
+    ? (activeQueuePlannerInstallJob ?? requestedPlannerInstallJob ?? queuePlannerInstallJob)
+    : (requestedPlannerInstallJob ?? activeQueuePlannerInstallJob ?? queuePlannerInstallJob);
 
   useEffect(() => {
     let canceled = false;
@@ -70,7 +92,7 @@ export function FilmWorkspace() {
     setSelectedId("");
     setNotice("");
     setPlannerAvailability(null);
-    setPlannerInstallJob(null);
+    setRequestedPlannerInstallJob(null);
     setPlannerInstallError("");
     setPlanningOperation(null);
     setSelectedShotIds([]);
@@ -92,10 +114,12 @@ export function FilmWorkspace() {
   }, [activeProject?.id, token]);
 
   useEffect(() => {
+    const requestId = ++plannerAvailabilityRequest.current;
+    setPlannerAvailability(null);
     if (!activeProject?.id || !draft?.id) return undefined;
     let canceled = false;
     getFilmPlannerAvailability(activeProject.id, draft.id, token)
-      .then((value) => !canceled && setPlannerAvailability(value))
+      .then((value) => !canceled && plannerAvailabilityRequest.current === requestId && setPlannerAvailability(value))
       .catch((error) => !canceled && setNotice(error.message));
     getFilmPlanning(activeProject.id, draft.id, token)
       .then((value) => !canceled && setPlanningOperation(value))
@@ -114,11 +138,12 @@ export function FilmWorkspace() {
       try {
         const job = await apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`, token, { signal: controller.signal });
         if (canceled) return;
-        setPlannerInstallJob(job);
+        setRequestedPlannerInstallJob(job);
         setPlannerInstallError("");
         if (job.status === "completed") {
+          const requestId = ++plannerAvailabilityRequest.current;
           const availability = await getFilmPlannerAvailability(activeProject.id, draft.id, token, { signal: controller.signal });
-          if (canceled) return;
+          if (canceled || plannerAvailabilityRequest.current !== requestId) return;
           setPlannerAvailability(availability);
           const qwen = availability?.providers?.find((item) => item.modelId === "film_planner_qwen3_6_27b");
           setNotice(qwen?.available
@@ -146,6 +171,22 @@ export function FilmWorkspace() {
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [activeProject?.id, draft?.id, plannerInstallJob?.id, token]);
+
+  async function refreshPlannerAvailability() {
+    const projectId = activeProject?.id;
+    const draftId = draft?.id;
+    if (!projectId || !draftId) return;
+    const requestId = ++plannerAvailabilityRequest.current;
+    setPlannerAvailability(null);
+    try {
+      const value = await getFilmPlannerAvailability(projectId, draftId, token);
+      if (plannerAvailabilityRequest.current === requestId) {
+        setPlannerAvailability(value);
+      }
+    } catch (error) {
+      if (plannerAvailabilityRequest.current === requestId) setNotice(error.message);
+    }
+  }
 
   useEffect(() => {
     if (!activeProject?.id || !draft?.id || !["running", "canceling"].includes(planningOperation?.status)) return undefined;
@@ -293,7 +334,7 @@ export function FilmWorkspace() {
     try {
       const job = await installFilmPlanner(modelId, token);
       if (!job?.id) throw new Error("The Qwen3.6-27B download did not return a queue job.");
-      setPlannerInstallJob(job);
+      setRequestedPlannerInstallJob(job);
       setNotice(errorStatuses.has(job.status)
         ? (job.message || job.error || `Qwen3.6-27B download ${job.status}.`)
         : `Qwen3.6-27B download ${job.status === "completed" ? "completed" : "queued"}. Planning will not start automatically.`);
@@ -478,6 +519,7 @@ export function FilmWorkspace() {
               onCancel={cancelPlan}
               onChange={updateDraft}
               onInstall={installPlanner}
+              onRefreshAvailability={refreshPlannerAvailability}
               installError={plannerInstallError}
               installJob={plannerInstallJob}
               onNotice={setNotice}

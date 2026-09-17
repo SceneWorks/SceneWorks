@@ -322,6 +322,91 @@ describe("FilmWorkspace", () => {
     expect(apiFetchMock.mock.calls.some(([path, , request]) => path.endsWith("/planning") && request?.method === "POST")).toBe(false);
   });
 
+  it("recovers an in-flight Qwen install from the normal queue after remount and stops at completion", async () => {
+    vi.useFakeTimers();
+    const film = draft({
+      originalScript: "A courier enters.",
+      planning: { provider: "native", modelId: "film_planner_qwen3_6_27b", thinkingMode: "enabled", refinePrompts: false },
+    });
+    let plannerReads = 0;
+    let jobReads = 0;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) {
+        plannerReads += 1;
+        return Promise.resolve({ providers: [
+          { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },
+          { provider: "native", modelId: "film_planner_qwen3_6_27b", available: plannerReads > 1 },
+        ] });
+      }
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path === "/api/v1/jobs/job_recovered") {
+        jobReads += 1;
+        return Promise.resolve({
+          id: "job_recovered", type: "model_download", status: "completed", progress: 1,
+          payload: { modelId: "film_planner_qwen3_6_27b" },
+        });
+      }
+      throw new Error(`Unexpected request ${path} ${options.method ?? "GET"}`);
+    });
+
+    await renderWorkspace({
+      jobs: [{
+        id: "job_recovered", type: "model_download", status: "running", progress: 0.75,
+        payload: { modelId: "film_planner_qwen3_6_27b" },
+      }],
+    });
+
+    expect(container.textContent).toContain("Qwen3.6-27B download: running");
+    expect(container.querySelector('progress[aria-label="Qwen3.6-27B download progress"]').value).toBe(0.75);
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Install Qwen3.6-27B")).disabled).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(container.textContent).toContain("Qwen3.6-27B download: completed");
+    expect(container.textContent).toContain("Qwen3.6-27B is installed and available");
+    expect(container.textContent).toContain("download completed. Planning did not start automatically");
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("native");
+    expect(apiFetchMock.mock.calls.some(([path, , request]) => path.includes("/models/") && request?.method === "POST")).toBe(false);
+    expect(apiFetchMock.mock.calls.some(([path, , request]) => path.endsWith("/planning") && request?.method === "POST")).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(jobReads).toBe(1);
+  });
+
+  it("refreshes externally changed Qwen availability when Native is selected", async () => {
+    const film = draft({ originalScript: "A courier enters." });
+    let plannerReads = 0;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) {
+        plannerReads += 1;
+        return Promise.resolve({ providers: [
+          { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },
+          { provider: "native", modelId: "film_planner_qwen3_6_27b", available: plannerReads > 1 },
+        ] });
+      }
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path} ${options.method ?? "GET"}`);
+    });
+
+    await renderWorkspace();
+    const provider = container.querySelector('select[aria-label="Planning provider"]');
+    await act(async () => {
+      changeValue(provider, "native");
+      await Promise.resolve();
+    });
+
+    expect(plannerReads).toBe(2);
+    expect(container.textContent).toContain("Qwen3.6-27B is installed and available");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(false);
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").disabled).toBe(false);
+    expect(apiFetchMock.mock.calls.some(([path, , request]) => path.includes("/models/") && request?.method === "POST")).toBe(false);
+  });
+
   it("shows an explicit Qwen install failure and allows retry without changing provider", async () => {
     vi.useFakeTimers();
     const film = draft({
