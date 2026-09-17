@@ -248,6 +248,155 @@ class OracleTests(unittest.TestCase):
         incomplete, reason = oracle.classify_generation('<svg>', {'generated_tokens': 1}, 3, 10)
         self.assertEqual((incomplete, reason), ('<svg>', 'complete'))
 
+    def byte_tokenizer(self):
+        class Tokenizer:
+            errors = 'replace'
+            clean_up_tokenization_spaces = True
+            vocab_size = 100
+            all_special_tokens = ['<eos>']
+            additional_special_tokens = []
+            _added_tokens_encoder = {'<added>': 10, '<eos>': 99}
+            tokens = {1: '/', 2: '>', 3: 'a', 4: 'b', 5: 'α', 6: 'β', 7: 'γ',
+                      10: '<added>', 20: '<', 21: 's', 22: 'v', 23: 'g', 99: '<eos>'}
+            byte_decoder = {chr(value): value for value in range(128)}
+            byte_decoder.update({'α': 0xe2, 'β': 0x82, 'γ': 0xac})
+
+            def __init__(self):
+                self.converted_lengths = []
+                self.full_decodes = 0
+
+            def convert_tokens_to_ids(self, token):
+                return self._added_tokens_encoder.get(token, -1)
+
+            def convert_ids_to_tokens(self, ids, skip_special_tokens=False):
+                self.converted_lengths.append(len(ids))
+                values = [self.tokens[value] for value in ids]
+                return [value for value in values
+                        if not (skip_special_tokens and value in self.all_special_tokens)]
+
+            def decode(self, ids, skip_special_tokens=False, clean_up_tokenization_spaces=None):
+                self.full_decodes += 1
+                tokens = self.convert_ids_to_tokens(ids, skip_special_tokens=skip_special_tokens)
+                legacy = set(self._added_tokens_encoder) - set(self.all_special_tokens)
+                values, current = [], []
+                for token in tokens:
+                    if token in legacy:
+                        if current:
+                            values.append(bytearray(self.byte_decoder[c] for item in current
+                                                    for c in item).decode('utf-8', errors=self.errors))
+                            current = []
+                        values.append(token)
+                    else:
+                        current.append(token)
+                if current:
+                    values.append(bytearray(self.byte_decoder[c] for item in current
+                                            for c in item).decode('utf-8', errors=self.errors))
+                text = ' '.join(value for value in values if value)
+                # Production explicitly requests no cleanup even though the
+                # pinned tokenizer's configured default may be true.
+                return text if clean_up_tokenization_spaces is False else self.clean_up_tokenization(text)
+
+            def clean_up_tokenization(self, text):
+                return text.replace(' a', 'A')
+        return Tokenizer()
+
+    def test_incremental_gpt2_decode_matches_every_prefix_and_final_flush(self):
+        tokenizer = self.byte_tokenizer()
+        decoder = oracle.IncrementalGpt2Decode(tokenizer)
+        prefixes = [[5], [5, 6], [5, 6, 7], [5, 6, 7, 10, 3, 99]]
+        for prefix in prefixes:
+            self.assertEqual(decoder.decode_prefix(prefix), tokenizer.decode(
+                prefix, skip_special_tokens=True, clean_up_tokenization_spaces=False))
+        # The incomplete UTF-8 replacement is allowed to be rewritten when a
+        # later byte completes the code point, exactly like full-prefix decode.
+        self.assertEqual(oracle.IncrementalGpt2Decode(self.byte_tokenizer()).decode_prefix([5]), '�')
+        self.assertEqual(decoder.finish(prefixes[-1]), '€ <added> a')
+        self.assertEqual(tokenizer.full_decodes, len(prefixes) + 1)
+        seeded_tokenizer = self.byte_tokenizer()
+        seeded = oracle.IncrementalGpt2Decode(seeded_tokenizer, [20, 21, 22, 23])
+        self.assertEqual(seeded.decode_prefix([10, 3]), seeded_tokenizer.decode(
+            [20, 21, 22, 23, 10, 3], skip_special_tokens=True,
+            clean_up_tokenization_spaces=False))
+        cleanup_observation = {}
+        cleanup = oracle.BoundedGpt2Completion(
+            self.byte_tokenizer(), [20, 21, 22, 23], 10.0, 100,
+            cleanup_observation, clock=lambda: 9.0)
+        self.assertEqual(cleanup.finish([10, 3]), '<svg <added>A')
+        with self.assertRaisesRegex(ValueError, 'moved backwards'):
+            decoder.decode_prefix([5])
+
+    def test_bounded_stream_preserves_root_byte_wall_eos_and_model_budgets(self):
+        class Batch(list):
+            @property
+            def shape(self):
+                return (1, len(self[0]))
+        for tier, budget in [('1b', 7933), ('8b', 15422)]:
+            with self.subTest(tier=tier):
+                observation = {}
+                tokenizer = self.byte_tokenizer()
+                completion = oracle.BoundedGpt2Completion(
+                    tokenizer, [20, 21, 22, 23], 10.0, len('<svg/>'.encode()), observation,
+                    clock=lambda: 10.0)
+                self.assertTrue(completion(Batch([[1, 2]])))
+                self.assertEqual(observation, {
+                    'complete_root': True, 'completion_tokens': 2,
+                    'completion_bytes': len('<svg/>'.encode()), 'completion_end': len('<svg/>')})
+                self.assertEqual(completion.finish([1, 2]), '<svg/>')
+                self.assertTrue(observation['stream_decode_verified'])
+                self.assertEqual(oracle.classify_generation(
+                    '<svg/>', {**observation, 'generated_tokens': 2}, budget,
+                    len('<svg/>'.encode())), ('<svg/>', 'complete'))
+
+                byte_observation = {}
+                byte_bound = oracle.BoundedGpt2Completion(
+                    self.byte_tokenizer(), [20, 21, 22, 23], 10.0, 5, byte_observation,
+                    clock=lambda: 9.0)
+                self.assertTrue(byte_bound(Batch([[1, 2]])))
+                self.assertEqual(byte_observation, {'byte_exceeded': True})
+
+                wall_observation = {}
+                wall_bound = oracle.BoundedGpt2Completion(
+                    self.byte_tokenizer(), [20, 21, 22, 23], 10.0, 100, wall_observation,
+                    clock=lambda: 10.001)
+                self.assertTrue(wall_bound(Batch([[3]])))
+                self.assertEqual(wall_observation, {'deadline_exceeded': True})
+
+                eos_observation = {}
+                eos_bound = oracle.BoundedGpt2Completion(
+                    self.byte_tokenizer(), [20, 21, 22, 23], 10.0, 100, eos_observation,
+                    clock=lambda: 9.0)
+                self.assertFalse(eos_bound(Batch([[99]])))
+                self.assertEqual(eos_bound.finish([99]), '<svg')
+                self.assertTrue(eos_observation['stream_decode_verified'])
+
+                # Preserve the prior limit semantics: sample the wall clock
+                # before decoding the newly sampled token prefix. Crossing the
+                # deadline in host-side decoding applies to the next token.
+                time_value = [9.999]
+                ordered_observation = {}
+                ordered = oracle.BoundedGpt2Completion(
+                    self.byte_tokenizer(), [20, 21, 22, 23], 10.0, 100,
+                    ordered_observation, clock=lambda: time_value[0])
+                decode = ordered.decoder.decode_prefix
+                def crossing_decode(ids):
+                    time_value[0] = 10.001
+                    return decode(ids)
+                ordered.decoder.decode_prefix = crossing_decode
+                self.assertFalse(ordered(Batch([[3]])))
+                self.assertEqual(ordered_observation, {})
+
+    def test_incremental_decoder_processes_only_appended_ids_until_one_final_check(self):
+        tokenizer = self.byte_tokenizer()
+        decoder = oracle.IncrementalGpt2Decode(tokenizer)
+        decoder.decode_prefix([3])
+        decoder.decode_prefix([3, 4, 3])
+        decoder.finish([3, 4, 3, 4])
+        # Pending chunks are 1, 2, and 1 tokens. The only full-prefix operation
+        # is the final equality check; no generation step revisits old IDs.
+        self.assertEqual(tokenizer.converted_lengths[:-1], [1, 2, 1])
+        self.assertEqual(tokenizer.converted_lengths[-1], 4)
+        self.assertEqual(tokenizer.full_decodes, 1)
+
     def test_diagnostic_outcome_distinguishes_bounded_root_from_early_eos(self):
         self.assertEqual(
             oracle.diagnostic_generation_outcome('<svg><path/></svg>', 'complete'),
