@@ -9,6 +9,7 @@ import { claimTerminalAttempt } from "./lib/starvector-terminal-attempt.mjs";
 import { verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 import { readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { terminalGpuBinding, terminalGpuEnvironment } from "./lib/starvector-terminal-gpu.mjs";
+import { captureDiagnosticCudaOccupancy } from "./starvector-terminal-diagnostic.mjs";
 import { loadUpstreamReference, PARITY_SOURCE_INDICES } from "./lib/starvector-terminal-upstream-reference.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 const execFile = promisify(callback);
@@ -136,6 +137,34 @@ export async function produceUpstreamReferences(options, output, binding, rows, 
   await promoteUpstreamManifests(output);
 }
 
+export async function produceQualityHardcaseDiagnostic(options, output, binding, execute = execFile) {
+  const args = [path.join(options.sceneWorksRoot, "scripts/starvector-terminal-upstream-oracle.py"), "diagnose-quality-hardcases", "--upstream-root", options.upstreamRoot, "--weights-root", options.weightsRoot, "--assets-root", options.assetsRoot, "--output", output, "--components-root", options.componentsRoot, "--sanitizer", options.sanitizer, "--tier", "1b", "--device", "cuda:0"];
+  await execute(options.python, args, { env: { ...process.env, ...terminalGpuEnvironment(binding), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, timeout: 900 * 1000, maxBuffer: 1024 * 1024 });
+  const resultPath = path.join(output, "diagnostic-quality-hardcases.json");
+  const result = await json(resultPath);
+  if (result?.schema_version !== 1 || result.kind !== "starvector_upstream_quality_hardcases_diagnostic" || result.acceptance_use !== "diagnostic_only" || result.usable_for_terminal_acceptance !== false || result.inference_revision !== "8e2d9671fd28ab1b34aa22c8fc49de221d43b000" || JSON.stringify(result.selected_case_indices) !== "[6,9,11,13,15]" || !Array.isArray(result.cases) || result.cases.length !== 5 || result.cases.some((item, index) => item.case_index !== [6, 9, 11, 13, 15][index])) throw new Error("upstream quality hard-case diagnostic result identity drifted");
+  return { result, resultPath };
+}
+
+export async function runQualityHardcaseDiagnostic(sceneWorksRoot, output) {
+  const options = upstreamOptions(sceneWorksRoot), pin = process.env.STARVECTOR_TERMINAL_PERMANENT_PIN;
+  if (pin !== "8e2d9671fd28ab1b34aa22c8fc49de221d43b000") throw new Error("upstream quality hard-case diagnostic requires the reviewed inference pin");
+  await verifyPermanentPin(sceneWorksRoot, pin);
+  const binding = await terminalGpuBinding();
+  if (binding.backend !== "candle") throw new Error("upstream quality hard-case diagnostic requires the qualified CUDA lane");
+  const diagnosticRunId = `upstream-hardcases-${process.env.GITHUB_RUN_ID ?? "local"}-${process.env.GITHUB_RUN_ATTEMPT ?? "0"}`;
+  const release = await acquireStableLease(process.env.STARVECTOR_TERMINAL_LEASE_ROOT, process.env.STARVECTOR_TERMINAL_LEASE_HELPER, pin, diagnosticRunId);
+  try {
+    await mkdir(output, { recursive: true });
+    const occupancy = await captureDiagnosticCudaOccupancy();
+    await writeFile(path.join(output, "cuda-occupancy-before.json"), JSON.stringify(occupancy, null, 2) + "\n", { flag: "wx" });
+    if (!occupancy.functional_execution_allowed) throw new Error("upstream quality hard-case diagnostic CUDA admission failed");
+    const { resultPath } = await produceQualityHardcaseDiagnostic(options, output, binding);
+    const controller = { schema_version: 1, kind: "starvector_upstream_quality_hardcases_controller", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, inference_revision: pin, sceneworks_revision: process.env.GITHUB_SHA, workflow_run_id: String(process.env.GITHUB_RUN_ID ?? "local"), workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0), gpu_binding: binding, occupancy_before: occupancy, result: path.basename(resultPath), result_sha256: hash(await readFile(resultPath)), artifacts: await inventory(output) };
+    await writeFile(path.join(output, "diagnostic-quality-hardcases-controller.json"), JSON.stringify(controller, null, 2) + "\n", { flag: "wx" });
+  } finally { await release(); }
+}
+
 export async function runUpstream(sceneWorksRoot, output) {
   const options = upstreamOptions(sceneWorksRoot), pin = process.env.STARVECTOR_TERMINAL_PERMANENT_PIN, campaign = process.env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID;
   const { plan } = await readPlanAndLock(path.join(sceneWorksRoot, "release/starvector-terminal-campaign-v1.json"));
@@ -158,5 +187,5 @@ export async function runUpstream(sceneWorksRoot, output) {
 }
 if (isExecutedModule(import.meta.url)) {
   const [mode, root, output] = process.argv.slice(2);
-  (mode === "validate" ? validateUpstreamInputs(upstreamOptions(root), output) : mode === "run" ? runUpstream(root, output) : Promise.reject(new Error("usage: validate|run <sceneworks-root> <output>"))).catch(error => { console.error(error.message); process.exitCode = error?.code === 3 ? 3 : 1; });
+  (mode === "validate" ? validateUpstreamInputs(upstreamOptions(root), output) : mode === "run" ? runUpstream(root, output) : mode === "diagnose-quality-hardcases" ? runQualityHardcaseDiagnostic(root, output) : Promise.reject(new Error("usage: validate|run|diagnose-quality-hardcases <sceneworks-root> <output>"))).catch(error => { console.error(error.message); process.exitCode = error?.code === 3 ? 3 : 1; });
 }

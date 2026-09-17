@@ -523,6 +523,39 @@ class OracleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'authenticated readiness input'):
                 oracle.select_diagnostic_case_9(self.root, '1b')
 
+    def current_quality_hardcase_rows(self):
+        rows = self.rows()
+        for index, row in enumerate(rows):
+            row.update(dataset='fixture/data', revision='a' * 40, row_index=index,
+                       filename=str(index), svg_sha256=hashlib.sha256(('svg-%s' % index).encode()).hexdigest(),
+                       sampling=dict(oracle.DIAGNOSTIC_SAMPLING))
+        row_identity = oracle.source_rows_sha256(rows)
+        value = {'schema_version': 2,
+                 'inference_revision': oracle.QUALITY_HARDCASE_INFERENCE_REVISION,
+                 'row_identity_sha256': row_identity, 'rows': rows}
+        index_path = self.root / 'starvector-terminal-row-index-v1.json'
+        index_path.write_text(json.dumps(value))
+        return rows, index_path, row_identity
+
+    def test_current_quality_hardcases_bind_exact_schema2_rows_and_budgets(self):
+        rows, index_path, row_identity = self.current_quality_hardcase_rows()
+        with patch.object(oracle, 'QUALITY_HARDCASE_CORPUS_SHA256', oracle.digest(index_path)), \
+             patch.object(oracle, 'QUALITY_HARDCASE_ROWS_SHA256', row_identity):
+            selected = oracle.select_quality_hardcases(self.root, '1b')
+            self.assertEqual([row['case_index'] for row in selected], [6, 9, 11, 13, 15])
+            self.assertTrue(all(row['seed'] == 7 and row['sampling'] == oracle.DIAGNOSTIC_SAMPLING
+                                and row['detail_budget'] == oracle.DIAGNOSTIC_BUDGET for row in selected))
+            self.assertEqual([row['input_png_sha256'] for row in selected],
+                             [rows[index]['png_sha256'] for index in [6, 9, 11, 13, 15]])
+            with self.assertRaisesRegex(ValueError, 'fixed to StarVector 1B'):
+                oracle.select_quality_hardcases(self.root, '8b')
+            value = json.loads(index_path.read_text())
+            value['rows'][6]['detail_budgets']['1b']['maxNewTokens'] = 4000
+            index_path.write_text(json.dumps(value))
+            with patch.object(oracle, 'QUALITY_HARDCASE_CORPUS_SHA256', oracle.digest(index_path)), \
+                 self.assertRaisesRegex(ValueError, 'sampling or Detailed budget drifted'):
+                oracle.select_quality_hardcases(self.root, '1b')
+
     def test_path_escape_and_symlink_are_rejected(self):
         (self.root / 'real').write_text('bytes')
         (self.root / 'link').symlink_to(self.root / 'real')

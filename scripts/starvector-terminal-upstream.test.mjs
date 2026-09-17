@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { produceUpstreamReferences, promoteUpstreamManifests, validateUpstreamInputs } from "./starvector-terminal-upstream.mjs";
+import { produceQualityHardcaseDiagnostic, produceUpstreamReferences, promoteUpstreamManifests, validateUpstreamInputs } from "./starvector-terminal-upstream.mjs";
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const parityIndices = [0, 30, 60, 90].flatMap(start => Array.from({ length: 5 }, (_, offset) => start + offset));
 const referenceRows = () => Array.from({ length: 120 }, (_, index) => ({ png_sha256: `input-${index}` }));
@@ -43,6 +43,28 @@ test("both upstream models validate entirely offline before caller claims an att
   });
   assert.deepEqual(reports.map(x => x.tier), ["1b", "8b"]);
   for (const {command,args,options} of calls) { assert.equal(command, "/oracle/python"); assert.equal(args[1], "validate"); assert.equal(options.env.HF_HUB_OFFLINE, "1"); assert.equal(options.env.TRANSFORMERS_OFFLINE, "1"); assert.ok(args.includes("--components-root")); }
+});
+
+test("quality hard-case diagnostic is fixed offline 1B evidence and validates all five identities", async t => {
+  const output = await mkdtemp(path.join(tmpdir(), "upstream-quality-hardcases-"));
+  t.after(() => rm(output, { recursive: true, force: true }));
+  const expected = [6, 9, 11, 13, 15];
+  const calls = [];
+  const execute = async (command, args, options) => {
+    calls.push({ command, args, options });
+    await writeFile(path.join(output, "diagnostic-quality-hardcases.json"), JSON.stringify({ schema_version: 1, kind: "starvector_upstream_quality_hardcases_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, inference_revision: "8e2d9671fd28ab1b34aa22c8fc49de221d43b000", selected_case_indices: expected, cases: expected.map(case_index => ({ case_index })) }));
+  };
+  const options = { sceneWorksRoot: "/repo", python: "/oracle/python", upstreamRoot: "/source", weightsRoot: "/weights", assetsRoot: "/assets", componentsRoot: "/components", sanitizer: "/sanitize" };
+  await produceQualityHardcaseDiagnostic(options, output, { backend: "candle", uuid: "GPU-fixed" }, execute);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args[1], "diagnose-quality-hardcases");
+  assert.equal(calls[0].args[calls[0].args.indexOf("--tier") + 1], "1b");
+  assert.equal(calls[0].args[calls[0].args.indexOf("--device") + 1], "cuda:0");
+  assert.equal(calls[0].options.env.HF_HUB_OFFLINE, "1");
+  assert.equal(calls[0].options.env.TRANSFORMERS_OFFLINE, "1");
+  assert.equal(calls[0].options.env.CUDA_VISIBLE_DEVICES, "GPU-fixed");
+  await writeFile(path.join(output, "diagnostic-quality-hardcases.json"), JSON.stringify({ schema_version: 1, kind: "starvector_upstream_quality_hardcases_diagnostic", acceptance_use: "diagnostic_only", usable_for_terminal_acceptance: false, inference_revision: "8e2d9671fd28ab1b34aa22c8fc49de221d43b000", selected_case_indices: expected, cases: expected.slice(0, 4).map(case_index => ({ case_index })) }));
+  await assert.rejects(produceQualityHardcaseDiagnostic(options, output, { backend: "candle", uuid: "GPU-fixed" }, async () => {}), /result identity drifted/);
 });
 
 test("one upstream job precedes all four native tuples and every tuple consumes its artifact", async () => {

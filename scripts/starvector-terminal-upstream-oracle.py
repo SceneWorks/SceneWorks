@@ -59,6 +59,10 @@ DIAGNOSTIC_ROWS_SHA256 = 'f9529c2e5a86bef6644054c909c4f621991f6384d9b33a029ad46f
 DIAGNOSTIC_BUDGET = {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}
 DIAGNOSTIC_SAMPLING = {'temperature': 0.0, 'topP': 1.0, 'topK': 1,
                        'repetitionPenalty': 1.0, 'seed': 7}
+QUALITY_HARDCASE_INDICES = [6, 9, 11, 13, 15]
+QUALITY_HARDCASE_CORPUS_SHA256 = 'd98afaa25794f7154eadb5ab4aa0cb8a62d0fb3696069b771f2e553acbe424d5'
+QUALITY_HARDCASE_ROWS_SHA256 = 'f9529c2e5a86bef6644054c909c4f621991f6384d9b33a029ad46ff2e6cd3b88'
+QUALITY_HARDCASE_INFERENCE_REVISION = '8e2d9671fd28ab1b34aa22c8fc49de221d43b000'
 _CAIRO_HANDLES = []
 
 
@@ -333,6 +337,35 @@ def select_diagnostic_case_9(assets_root, tier):
             'sampling': dict(DIAGNOSTIC_SAMPLING), 'detail_budget': dict(DIAGNOSTIC_BUDGET)}
 
 
+def select_quality_hardcases(assets_root, tier):
+    """Authenticate the current schema-2 corpus and select five fixed 1B diagnostics."""
+    if tier != '1b':
+        fail('quality hard-case diagnostic is fixed to StarVector 1B')
+    index_path = local_file(assets_root, 'starvector-terminal-row-index-v1.json')
+    if digest(index_path) != QUALITY_HARDCASE_CORPUS_SHA256:
+        fail('quality hard-case corpus index is not the authenticated schema-2 input')
+    index = json.loads(index_path.read_text())
+    rows = index.get('rows', [])
+    if (index.get('schema_version') != 2 or index.get('inference_revision') != QUALITY_HARDCASE_INFERENCE_REVISION
+            or len(rows) != 120 or [row.get('case_index') for row in rows] != list(range(120))
+            or index.get('row_identity_sha256') != QUALITY_HARDCASE_ROWS_SHA256
+            or source_rows_sha256(rows) != QUALITY_HARDCASE_ROWS_SHA256):
+        fail('quality hard-case corpus identity drifted')
+    selected = []
+    for case_index in QUALITY_HARDCASE_INDICES:
+        row = rows[case_index]
+        png = verified_file(assets_root, row['input_png_path'], row['png_sha256'])
+        detail_budget = row.get('detail_budgets', {}).get('1b')
+        if row.get('sampling') != DIAGNOSTIC_SAMPLING or detail_budget != DIAGNOSTIC_BUDGET:
+            fail('quality hard-case sampling or Detailed budget drifted')
+        selected.append({'case_index': case_index, 'source_case_index': case_index,
+                         'seed': 7, 'input_png': str(png),
+                         'input_png_sha256': row['png_sha256'],
+                         'sampling': dict(DIAGNOSTIC_SAMPLING),
+                         'detail_budget': dict(DIAGNOSTIC_BUDGET)})
+    return selected
+
+
 def checkpoint_map(model_root):
     index = json.loads(local_file(model_root, 'model.safetensors.index.json').read_text())
     mapping = index.get('weight_map')
@@ -430,9 +463,12 @@ def validate(args, packages=True):
         configs[key] = str(verified_file(args.components_root, component['config_path'], component['config_sha256']))
     sanitizer = absolute_regular_file(args.sanitizer, 'production sanitizer binary')
     args.sanitizer = str(sanitizer)
-    rows = ([select_diagnostic_case_9(args.assets_root, args.tier)]
-            if args.command in ('diagnose-case-9', '_diagnostic_worker')
-            else select_rows(args.assets_root, args.tier))
+    if args.command in ('diagnose-case-9', '_diagnostic_worker'):
+        rows = [select_diagnostic_case_9(args.assets_root, args.tier)]
+    elif args.command in ('diagnose-quality-hardcases', '_quality_hardcase_worker'):
+        rows = select_quality_hardcases(args.assets_root, args.tier)
+    else:
+        rows = select_rows(args.assets_root, args.tier)
     runtime = import_upstream_runtime(args.upstream_root, lock) if packages else None
     return {'lock': lock, 'source_sha256': source_hash, 'model_root': str(model_root), 'model_inventory_sha256': model_hash,
             'config_path': str(config_path), 'processor_path': str(processor_path), 'components': components,
@@ -931,6 +967,113 @@ def diagnostic_worker(args, facts):
     durable_json(output / 'diagnostic-case-9.json', result)
 
 
+def quality_hardcase_worker(args, facts):
+    """Run five current schema-2 quality rows as non-promotable upstream diagnostics."""
+    import torch
+    sys.path.insert(0, str(Path(args.upstream_root).resolve()))
+    if args.tier != '1b' or not args.device.startswith('cuda:') or not torch.cuda.is_available():
+        fail('quality hard-case diagnostic requires the coordinator-admitted CUDA 1B device')
+    device = torch.device(args.device)
+    free, total = torch.cuda.mem_get_info(device)
+    if free < args.min_free_vram_gib * 1024**3:
+        fail('insufficient free CUDA memory for admitted diagnostic bound')
+    if args.max_vram_gib * 1024**3 > total:
+        fail('CUDA allocation cap exceeds device memory')
+    torch.cuda.set_per_process_memory_fraction(args.max_vram_gib * 1024**3 / total, device)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.use_deterministic_algorithms(True)
+    output = Path(args.output)
+    tier_root = output / 'diagnostic-quality-hardcases'
+    tier_root.mkdir(parents=True, exist_ok=False)
+    transcript_path = tier_root / 'transcript.jsonl'
+    cases = []
+    with transcript_path.open('x') as transcript:
+        def record(event):
+            transcript.write(json.dumps(event, separators=(',', ':')) + '\n')
+            transcript.flush(); os.fsync(transcript.fileno())
+        record({'event': 'start', 'kind': 'starvector_upstream_quality_hardcases_diagnostic',
+                'acceptance_use': 'diagnostic_only', 'usable_for_terminal_acceptance': False,
+                'implementation_revision': facts['lock']['implementation_revision'],
+                'source_sha256': facts['source_sha256'],
+                'checkpoint_revision': facts['lock']['checkpoints']['1b']['revision'],
+                'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
+                'config_sha256': digest(facts['config_path']),
+                'processor_sha256': digest(facts['processor_path']),
+                'runtime': facts['runtime'], 'attention_implementation': 'eager',
+                'max_rss_gib': args.max_rss_gib, 'max_vram_gib': args.max_vram_gib,
+                'timeout_seconds': args.timeout_seconds,
+                'selected_case_indices': QUALITY_HARDCASE_INDICES})
+        model, coverage = load_model(facts, device)
+        try:
+            record({'event': 'model_loaded', **coverage})
+            for row in facts['rows']:
+                case_root = tier_root / ('case-%02d' % row['case_index'])
+                case_root.mkdir()
+                record({'event': 'case_started', 'started_at': time.time(), **row})
+                generation_started = time.monotonic()
+                raw, generation = generate(model, row, device)
+                elapsed = time.monotonic() - generation_started
+                raw_path = case_root / 'raw.svg'
+                raw_path.write_bytes(raw.encode('utf-8'))
+                diagnostic = diagnostic_generation_outcome(raw, generation['finish_reason'])
+                result = {'case_index': row['case_index'], 'source_case_index': row['source_case_index'],
+                          'seed': row['seed'], 'input_png_sha256': row['input_png_sha256'],
+                          'sampling': row['sampling'], 'detail_budget': row['detail_budget'],
+                          'finish_reason': generation['finish_reason'], **diagnostic,
+                          'generated_tokens': generation['generated_tokens'],
+                          'generated_bytes': generation['generated_bytes'],
+                          'generation_elapsed_seconds': elapsed,
+                          'raw_svg': raw_path.relative_to(output).as_posix(),
+                          'raw_svg_sha256': digest(raw_path)}
+                if generation['finish_reason'] != 'complete':
+                    result.update(outcome='rejected', rejection_stage='generation_limit',
+                                  rejection_code=generation['finish_reason'])
+                else:
+                    rendered = case_root / 'rendered'
+                    try:
+                        render_upstream_svg(args.sanitizer, raw_path, rendered, row['case_index'])
+                    except SvgCaseRejected as exc:
+                        stdout = case_root / 'sanitizer.stdout.log'
+                        stderr = case_root / 'sanitizer.stderr.log'
+                        result.update(outcome='rejected', rejection_stage='sanitizer',
+                                      rejection_code=exc.event['error_code'],
+                                      sanitizer_stdout=stdout.relative_to(output).as_posix(),
+                                      sanitizer_stdout_sha256=digest(stdout),
+                                      sanitizer_stderr=stderr.relative_to(output).as_posix(),
+                                      sanitizer_stderr_sha256=digest(stderr))
+                    else:
+                        svg = local_file(rendered, 'canonical.svg')
+                        preview = local_file(rendered, 'preview.png')
+                        result.update(outcome='accepted',
+                                      canonical_svg=svg.relative_to(output).as_posix(),
+                                      canonical_svg_sha256=digest(svg),
+                                      preview_png=preview.relative_to(output).as_posix(),
+                                      preview_png_sha256=digest(preview))
+                cases.append(result)
+                record({'event': 'case_completed', **result})
+            record({'event': 'completed', 'cases': len(cases),
+                    'accepted_cases': sum(item['outcome'] == 'accepted' for item in cases),
+                    'rejected_cases': sum(item['outcome'] == 'rejected' for item in cases),
+                    'peak_cuda_bytes': torch.cuda.max_memory_allocated(device)})
+        finally:
+            del model
+            torch.cuda.empty_cache()
+    value = {'schema_version': 1, 'kind': 'starvector_upstream_quality_hardcases_diagnostic',
+             'acceptance_use': 'diagnostic_only', 'usable_for_terminal_acceptance': False,
+             'tier': '1b', 'inference_revision': QUALITY_HARDCASE_INFERENCE_REVISION,
+             'implementation_revision': facts['lock']['implementation_revision'],
+             'source_sha256': facts['source_sha256'],
+             'checkpoint_revision': facts['lock']['checkpoints']['1b']['revision'],
+             'checkpoint_inventory_sha256': facts['model_inventory_sha256'],
+             'config_sha256': digest(facts['config_path']),
+             'processor_sha256': digest(facts['processor_path']),
+             'selected_case_indices': QUALITY_HARDCASE_INDICES,
+             'upstream_transcript': transcript_path.relative_to(output).as_posix(),
+             'upstream_transcript_sha256': digest(transcript_path), 'cases': cases}
+    durable_json(output / 'diagnostic-quality-hardcases.json', value)
+
+
 def reference_metadata(facts, tier, config_path, processor_path, transcript_path):
     checkpoint = facts['lock']['checkpoints'][tier]
     return {'implementation_repository': facts['lock']['implementation_repository'],
@@ -985,17 +1128,23 @@ def verify_collected_rejections(output, tier, rows):
     return summaries
 
 
-def supervise(args, facts, diagnostic=False):
+def supervise(args, facts, diagnostic=False, quality_hardcases=False):
     import psutil
+    if diagnostic and quality_hardcases:
+        fail('only one upstream diagnostic mode may run')
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
-    tier_directory = 'diagnostic-case-9' if diagnostic else 'upstream-' + args.tier
-    result_file = 'diagnostic-case-9.json' if diagnostic else 'upstream-reference-' + args.tier + '.json'
+    tier_directory = ('diagnostic-quality-hardcases' if quality_hardcases else
+                      'diagnostic-case-9' if diagnostic else 'upstream-' + args.tier)
+    result_file = ('diagnostic-quality-hardcases.json' if quality_hardcases else
+                   'diagnostic-case-9.json' if diagnostic else 'upstream-reference-' + args.tier + '.json')
     if (output / tier_directory).exists() or (output / result_file).exists():
         fail('output already contains this run; preserve the attempt and select a fresh output directory')
-    worker_command = '_diagnostic_worker' if diagnostic else '_worker'
+    worker_command = ('_quality_hardcase_worker' if quality_hardcases else
+                      '_diagnostic_worker' if diagnostic else '_worker')
     command = [sys.executable, str(Path(__file__).resolve()), worker_command, *sys.argv[2:]]
     start = time.monotonic()
-    process_log = 'diagnostic-case-9-process.log' if diagnostic else 'upstream-' + args.tier + '-process.log'
+    process_log = ('diagnostic-quality-hardcases-process.log' if quality_hardcases else
+                   'diagnostic-case-9-process.log' if diagnostic else 'upstream-' + args.tier + '-process.log')
     with (output / process_log).open('x') as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -1025,7 +1174,7 @@ def supervise(args, facts, diagnostic=False):
                 if time.monotonic() - start > args.timeout_seconds:
                     fail('hard runtime deadline exceeded')
                 time.sleep(1)
-            if process.returncode == 3 and not diagnostic:
+            if process.returncode == 3 and not diagnostic and not quality_hardcases:
                 verify_collected_rejections(output, args.tier, facts['rows'])
                 raise CollectedSvgRejections('upstream tier completed with rejected SVG cases; '
                                              'preserved process log, raw SVGs, sanitizer logs, and transcript')
@@ -1045,8 +1194,9 @@ def main():
         print(json.dumps(provision_native_cairo(sys.argv[2], sys.argv[3], json.loads(LOCK.read_text()))))
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['validate', 'prepare', 'diagnose-case-9', '_worker',
-                                            '_diagnostic_worker'])
+    parser.add_argument('command', choices=['validate', 'prepare', 'diagnose-case-9',
+                                            'diagnose-quality-hardcases', '_worker',
+                                            '_diagnostic_worker', '_quality_hardcase_worker'])
     for key in ['upstream-root', 'weights-root', 'assets-root', 'output', 'components-root', 'sanitizer']:
         parser.add_argument('--' + key, required=True)
     parser.add_argument('--tier', choices=['1b', '8b'], required=True)
@@ -1070,8 +1220,12 @@ def main():
         worker(args, facts)
     elif args.command == '_diagnostic_worker':
         diagnostic_worker(args, facts)
+    elif args.command == '_quality_hardcase_worker':
+        quality_hardcase_worker(args, facts)
     elif args.command == 'diagnose-case-9':
         supervise(args, facts, diagnostic=True)
+    elif args.command == 'diagnose-quality-hardcases':
+        supervise(args, facts, quality_hardcases=True)
     else:
         supervise(args, facts)
 
