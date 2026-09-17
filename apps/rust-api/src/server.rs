@@ -15,7 +15,7 @@
 //! module reaches them through `crate::`.
 
 use std::collections::HashMap;
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -31,6 +31,7 @@ use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use sceneworks_core::jobs_store::JobsStore;
@@ -49,7 +50,7 @@ use crate::startup::{
 };
 use crate::tickets::TicketStore;
 use crate::{
-    create_app_with_pending_startup_maintenance_with_film_shutdown, env_path_or, env_string,
+    create_app_with_pending_startup_maintenance_with_shutdowns, env_path_or, env_string,
     open_bind_override_enabled, parent_death, parent_pid_to_watch, seed_mode_for_config_dir,
     should_warn_open_bind, shutdown_signal, spawn_inprocess_utility_worker, DEFAULT_API_HOST,
     DEFAULT_CORS_ORIGINS,
@@ -168,6 +169,46 @@ pub struct Settings {
     /// loopback bind (loopback is always allowed) — see
     /// [`sceneworks_mcp::mcp_allowed_hosts`].
     pub mcp_allowed_hosts_extra: Vec<String>,
+}
+
+const API_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerDrainOutcome {
+    Drained,
+    Forced,
+}
+
+/// Axum's graceful shutdown stops accepting new connections but deliberately waits without a
+/// deadline for every existing connection. Browser `EventSource` connections are long lived, and
+/// a buggy or third-party streaming response must not hold the API process past the desktop
+/// helper's termination window. App-owned streams receive the cancellation token as well; this
+/// deadline is the fail-closed backstop for any connection that does not cooperate.
+async fn bounded_server_drain<F>(
+    server: F,
+    shutdown: CancellationToken,
+    timeout: Duration,
+) -> Result<ServerDrainOutcome, std::io::Error>
+where
+    F: Future<Output = Result<(), std::io::Error>>,
+{
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result.map(|()| ServerDrainOutcome::Drained),
+        () = shutdown.cancelled() => {
+            match tokio::time::timeout(timeout, &mut server).await {
+                Ok(result) => result.map(|()| ServerDrainOutcome::Drained),
+                Err(_) => {
+                    tracing::warn!(
+                        event = "api_connection_drain_forced",
+                        timeout_ms = timeout.as_millis(),
+                        "API connection drain exceeded its deadline; dropping remaining connections"
+                    );
+                    Ok(ServerDrainOutcome::Forced)
+                }
+            }
+        }
+    }
 }
 
 impl Settings {
@@ -381,6 +422,9 @@ pub struct AppState {
     /// Preserves only active Film controller ownership across this API process's graceful exit.
     /// Every process receives a fresh instance, so shutdown state never crosses a restart.
     pub(crate) film_controller_shutdown: FilmControllerShutdown,
+    /// Process-local cancellation for long-lived HTTP response streams. The process-shutdown path
+    /// trips it before Axum begins draining so an open editor cannot hold exit indefinitely.
+    pub(crate) api_shutdown: CancellationToken,
     /// Catalog ids for which this AppState has already published an invalid
     /// persisted recovery plan. Valid scheduled recoveries remain retryable if
     /// their generation later exits incomplete.
@@ -760,18 +804,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // middleware. Poll this server while readiness-critical filesystem/SQLite
     // work builds the real router on the blocking pool.
     let film_controller_shutdown = FilmControllerShutdown::default();
+    let api_shutdown = CancellationToken::new();
     let serve_shutdown = film_controller_shutdown.clone();
-    let serve = axum::serve(
-        listener,
-        bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal(serve_shutdown))
-    .into_future();
+    let signal_shutdown = api_shutdown.clone();
+    let serve = bounded_server_drain(
+        axum::serve(
+            listener,
+            bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal(serve_shutdown, signal_shutdown))
+        .into_future(),
+        api_shutdown.clone(),
+        API_CONNECTION_DRAIN_TIMEOUT,
+    );
     tokio::pin!(serve);
     let mut build = tokio::task::spawn_blocking(move || {
-        create_app_with_pending_startup_maintenance_with_film_shutdown(
+        create_app_with_pending_startup_maintenance_with_shutdowns(
             settings,
             film_controller_shutdown,
+            api_shutdown,
         )
     });
     let build_result = tokio::select! {
@@ -890,11 +941,16 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod server_tests {
-    use super::{bootstrap_router, default_mcp_api_url, env_secs};
+    use super::{
+        bootstrap_router, bounded_server_drain, default_mcp_api_url, env_secs, ServerDrainOutcome,
+    };
+    use crate::film_harness::FilmControllerShutdown;
     use crate::startup::StartupMaintenance;
     use crate::tests::support::test_settings;
+    use std::future::IntoFuture;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn env_secs_parses_whole_seconds_and_falls_back() {
@@ -1019,6 +1075,132 @@ mod server_tests {
         assert_eq!(ready["status"], "ok");
         assert_eq!(ready["readiness"]["status"], "ready");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_shutdown_ends_an_open_editor_event_stream_and_drains_normally() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let shutdown = CancellationToken::new();
+        let (app, _) = crate::create_app_with_pending_startup_maintenance_with_shutdowns(
+            test_settings(&temp_dir),
+            FilmControllerShutdown::default(),
+            shutdown.clone(),
+        )
+        .expect("app creates");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("bound address reads");
+        let graceful_shutdown = shutdown.clone();
+        let drain_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            bounded_server_drain(
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(graceful_shutdown.cancelled_owned())
+                .into_future(),
+                drain_shutdown,
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        let mut open_editor_stream = reqwest::Client::new()
+            .get(format!("http://{address}/api/v1/jobs/events"))
+            .send()
+            .await
+            .expect("editor event stream connects");
+        assert_eq!(open_editor_stream.status(), reqwest::StatusCode::OK);
+        let first_chunk = tokio::time::timeout(Duration::from_secs(1), open_editor_stream.chunk())
+            .await
+            .expect("ready event arrives before timeout")
+            .expect("ready event reads")
+            .expect("ready event has a body chunk");
+        assert!(
+            String::from_utf8_lossy(&first_chunk).contains("event: ready"),
+            "the held request must be the real editor SSE stream"
+        );
+
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("cooperative event stream lets the API drain promptly")
+            .expect("server task joins")
+            .expect("server exits successfully");
+        assert_eq!(outcome, ServerDrainOutcome::Drained);
+        assert!(
+            open_editor_stream
+                .chunk()
+                .await
+                .expect("closed event stream reads cleanly")
+                .is_none(),
+            "the browser stream must end rather than hold process shutdown open"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_shutdown_forces_a_noncooperative_stream_after_the_finite_deadline() {
+        use axum::response::sse::{Event, Sse};
+        use axum::routing::get;
+        use axum::Router;
+        use std::convert::Infallible;
+
+        let app = Router::new().route(
+            "/events",
+            get(|| async {
+                let stream = futures_util::stream::unfold(true, |send_ready| async move {
+                    if send_ready {
+                        Some((
+                            Ok::<_, Infallible>(Event::default().event("ready").data("{}")),
+                            false,
+                        ))
+                    } else {
+                        std::future::pending().await
+                    }
+                });
+                Sse::new(stream)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("bound address reads");
+        let shutdown = CancellationToken::new();
+        let graceful_shutdown = shutdown.clone();
+        let drain_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            bounded_server_drain(
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(graceful_shutdown.cancelled_owned())
+                    .into_future(),
+                drain_shutdown,
+                Duration::from_millis(50),
+            )
+            .await
+        });
+        let mut noncooperative_stream = reqwest::Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await
+            .expect("noncooperative stream connects");
+        assert!(
+            noncooperative_stream
+                .chunk()
+                .await
+                .expect("ready event reads")
+                .is_some(),
+            "the response must be open before shutdown"
+        );
+
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("hard drain deadline bounds a noncooperative connection")
+            .expect("server task joins")
+            .expect("forced drain is a clean API shutdown");
+        assert_eq!(outcome, ServerDrainOutcome::Forced);
     }
 
     #[test]
