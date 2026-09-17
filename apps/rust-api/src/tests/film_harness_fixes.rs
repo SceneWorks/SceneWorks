@@ -1140,7 +1140,30 @@ async fn plan_refuses_to_overwrite_a_differing_plan_json_unless_forced() {
         .await
         .expect_err("a differing plan.json is refused");
     let message = format!("{error}");
-    assert!(matches!(error, HarnessError::Io(_)), "{error}");
+    let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+        panic!("the refused write must retain the spent planner receipt: {message}");
+    };
+    assert!(matches!(*source, HarnessError::Io(_)), "{source}");
+    assert_eq!(message, source.to_string());
+    assert_eq!(executions.len(), 1);
+    let execution = &executions[0];
+    let plan_job_ids: Vec<String> = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(kind, _, payload)| kind == "prompt_refine" && payload["task"] == "film_plan")
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    assert_eq!(plan_job_ids.len(), 3);
+    assert_eq!(execution.job_id.as_ref(), plan_job_ids.last());
+    assert_eq!(execution.provider, "native");
+    assert_eq!(execution.model, "fixture/model-keyed-refiner");
+    assert_eq!(execution.request_timeout_seconds, Some(30));
+    assert!(execution
+        .duration_seconds
+        .is_some_and(|seconds| seconds >= 0.0));
+    assert_eq!(execution.failure_code, None);
     assert!(
         message.contains("already exists and differs") && message.contains("--force"),
         "{message}"
