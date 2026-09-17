@@ -294,7 +294,7 @@ test("current built-in manifest supplies the exact diagnostic model and Detailed
 });
 
 test("current source derives one exact inference pin without a workflow input", async () => {
-  assert.equal(await readCurrentInferencePin(root), "c21f11f5c1b69d09a4058849260008b9056bdbcc");
+  assert.equal(await readCurrentInferencePin(root), "8e2d9671fd28ab1b34aa22c8fc49de221d43b000");
 });
 
 test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {
