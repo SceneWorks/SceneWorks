@@ -239,9 +239,9 @@ jobs:
           echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
           git init "$inference_root"
           git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
-          git -C "$inference_root" fetch --depth=1 origin 252e6a7a0fee08d2e07b0e8652234e4cea28aa59
+          git -C "$inference_root" fetch --depth=1 origin 8e2d9671fd28ab1b34aa22c8fc49de221d43b000
           git -C "$inference_root" checkout --detach FETCH_HEAD
-          test "$(git -C "$inference_root" rev-parse HEAD)" = 252e6a7a0fee08d2e07b0e8652234e4cea28aa59
+          test "$(git -C "$inference_root" rev-parse HEAD)" = 8e2d9671fd28ab1b34aa22c8fc49de221d43b000
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"

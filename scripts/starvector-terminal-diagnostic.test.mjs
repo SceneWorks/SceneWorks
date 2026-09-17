@@ -294,7 +294,12 @@ test("current built-in manifest supplies the exact diagnostic model and Detailed
 });
 
 test("current source derives one exact inference pin without a workflow input", async () => {
-  assert.equal(await readCurrentInferencePin(root), "8e2d9671fd28ab1b34aa22c8fc49de221d43b000");
+  const pin = await readCurrentInferencePin(root);
+  assert.equal(pin, "8e2d9671fd28ab1b34aa22c8fc49de221d43b000");
+  const checkWorkflow = await readFile(path.join(root, ".github/workflows/check.yml"), "utf8");
+  const fetch = checkWorkflow.slice(checkWorkflow.indexOf("      - name: Fetch the exact public inference terminal contract"));
+  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=1 origin ${pin}`));
+  assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${pin}`));
 });
 
 test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {
