@@ -1138,6 +1138,43 @@ fn a_review_plan_that_declares_more_questions_than_it_budgets_for_is_refused_up_
 // The human loop
 // ---------------------------------------------------------------------------------------------
 
+fn review_route_settled(view: &Value, expected_observations: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["observations"]
+            .as_array()
+            .is_some_and(|observations| observations.len() == expected_observations)
+}
+
+fn repair_route_settled(view: &Value, expected_attempts: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["run"]["record"]["shots"][0]["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts.len() == expected_attempts)
+}
+
+#[test]
+fn an_inactive_controller_is_not_settled_until_its_durable_result_is_visible() {
+    let mut view = serde_json::json!({
+        "run": {
+            "controllerActive": false,
+            "record": { "shots": [{ "attempts": [{}] }] }
+        },
+        "observations": []
+    });
+
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["observations"] = serde_json::json!([{}]);
+    assert!(review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["run"]["record"]["shots"][0]["attempts"] = serde_json::json!([{}, {}]);
+    assert!(repair_route_settled(&view, 2));
+
+    view["run"]["controllerActive"] = serde_json::json!(true);
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+}
+
 #[tokio::test]
 async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without_auto_acceptance() {
     let _env = isolate_hf_cache();
@@ -1200,17 +1237,23 @@ async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without
     assert_eq!(status, StatusCode::ACCEPTED, "{reviewing}");
     assert!(reviewing["actionDisabledReason"].is_string(), "{reviewing}");
     let mut reviewed = Value::Null;
+    let mut last_review = Value::Null;
     for _ in 0..300 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (status, current) =
             request(harness.app.clone(), "GET", &review_path, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{current}");
-        if current["run"]["controllerActive"] == serde_json::json!(false) {
+        if review_route_settled(&current, 1) {
             reviewed = current;
             break;
         }
+        last_review = current;
     }
-    assert_ne!(reviewed, Value::Null, "bounded review did not settle");
+    assert_ne!(
+        reviewed,
+        Value::Null,
+        "bounded review did not settle: {last_review}"
+    );
     assert_eq!(
         reviewed["observations"]
             .as_array()
@@ -1235,17 +1278,23 @@ async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without
     assert!(started["actionDisabledReason"].is_string(), "{started}");
 
     let mut settled = Value::Null;
+    let mut last_repair = Value::Null;
     for _ in 0..80 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (status, current) =
             request(harness.app.clone(), "GET", &review_path, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{current}");
-        if current["run"]["controllerActive"] == serde_json::json!(false) {
+        if repair_route_settled(&current, original_attempts + 1) {
             settled = current;
             break;
         }
+        last_repair = current;
     }
-    assert_ne!(settled, Value::Null, "bounded repair did not settle");
+    assert_ne!(
+        settled,
+        Value::Null,
+        "bounded repair did not settle: {last_repair}"
+    );
     let shot = &settled["run"]["record"]["shots"][0];
     assert_eq!(
         shot["attempts"].as_array().expect("attempt history").len(),
