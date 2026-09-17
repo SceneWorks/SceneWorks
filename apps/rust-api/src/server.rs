@@ -337,6 +337,21 @@ fn default_mcp_api_url(host: &str, port: u16) -> String {
     format!("http://{dial_host}:{port}")
 }
 
+/// Resolve the API base used by this process's own HTTP clients after the
+/// listener has bound. Port `0` asks the OS for an available port, so the
+/// pre-bind value in [`Settings`] is not dialable. An explicit API URL remains
+/// authoritative for reverse-proxy and container deployments.
+fn mcp_api_url_for_bound_listener(
+    host: &str,
+    bound_port: u16,
+    explicit_api_url: Option<&str>,
+) -> String {
+    explicit_api_url
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_mcp_api_url(host, bound_port))
+}
+
 /// Parse a whole-seconds env var into a [`Duration`], keeping `default` when the
 /// variable is unset or not a non-negative integer (sc-10277).
 fn env_secs(name: &str, default: Duration) -> Duration {
@@ -652,7 +667,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "SceneWorks API defaulting HF_HOME"
         );
     }
-    let settings = Settings::from_env();
+    let explicit_mcp_api_url = std::env::var("SCENEWORKS_API_URL").ok();
+    let mut settings = Settings::from_env();
     // A populated builtin catalog is mandatory — model->file resolution depends on
     // it. The desktop wrapper and the Compose bind mount normally provide it; seed
     // any missing manifests here so launching the API binary directly works too,
@@ -786,6 +802,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // readiness-critical invariants are complete.
     let bound = listener.local_addr()?;
     let port = bound.port();
+    settings.mcp_api_url =
+        mcp_api_url_for_bound_listener(&settings.host, port, explicit_mcp_api_url.as_deref());
     let ready_app = Arc::new(OnceLock::new());
     let bootstrap_maintenance = StartupMaintenance::pending();
     let bootstrap = bootstrap_router(
@@ -942,7 +960,8 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod server_tests {
     use super::{
-        bootstrap_router, bounded_server_drain, default_mcp_api_url, env_secs, ServerDrainOutcome,
+        bootstrap_router, bounded_server_drain, default_mcp_api_url, env_secs,
+        mcp_api_url_for_bound_listener, ServerDrainOutcome,
     };
     use crate::film_harness::FilmControllerShutdown;
     use crate::startup::StartupMaintenance;
@@ -1255,6 +1274,37 @@ mod server_tests {
         assert_eq!(
             default_mcp_api_url("[fe80::1]", 8000),
             "http://[fe80::1]:8000"
+        );
+    }
+
+    #[test]
+    fn bound_listener_url_uses_ephemeral_port_unless_explicitly_overridden() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral localhost listener binds");
+        let bound_port = listener
+            .local_addr()
+            .expect("bound localhost address reads")
+            .port();
+        assert_ne!(bound_port, 0, "the OS must assign a dialable port");
+
+        assert_eq!(
+            mcp_api_url_for_bound_listener("localhost", bound_port, None),
+            format!("http://127.0.0.1:{bound_port}"),
+            "an implicit self-call URL must follow the actual listener port"
+        );
+        assert_eq!(
+            mcp_api_url_for_bound_listener("localhost", bound_port, Some("  ")),
+            format!("http://127.0.0.1:{bound_port}"),
+            "a blank override has the same meaning as an unset override"
+        );
+        assert_eq!(
+            mcp_api_url_for_bound_listener(
+                "localhost",
+                bound_port,
+                Some("https://api.internal.example/base")
+            ),
+            "https://api.internal.example/base",
+            "an explicit proxy/container URL remains authoritative"
         );
     }
 }
