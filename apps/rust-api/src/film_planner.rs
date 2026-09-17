@@ -173,8 +173,14 @@ impl PlannerCost {
     }
 
     fn preserve_on_error(mut self, error: HarnessError) -> HarnessError {
-        if let HarnessError::PlannerResponse { execution, .. } = &error {
-            self.executions.push((**execution).clone());
+        match &error {
+            HarnessError::PlannerResponse { execution, .. } => {
+                self.executions.push((**execution).clone());
+            }
+            HarnessError::PlannerExecutionFailure { executions, .. } => {
+                self.executions.extend(executions.iter().cloned());
+            }
+            _ => {}
         }
         if self.executions.is_empty() {
             error
@@ -394,6 +400,8 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                                 .unwrap_or(&self.thinking_mode)
                                 .to_owned(),
                             max_output_tokens: None,
+                            request_timeout_seconds: Some(self.job_timeout.as_secs()),
+                            temperature: None,
                             reference_pixels_sent: None,
                             duration_seconds: Some(started.elapsed().as_secs_f64()),
                             finish_reason: None,
@@ -716,7 +724,11 @@ async fn refiner_findings(
 /// is refused before the first token, and a host that reports no memory at all is refused too —
 /// an unchecked ceiling is not a checked one.
 fn planner_memory_findings(brief: &ProductionBrief, facts: &HostFacts) -> Vec<PlanDiagnostic> {
-    let Some(budget) = brief.limits.planner_max_memory_gb else {
+    planner_budget_findings(brief.limits.planner_max_memory_gb, facts)
+}
+
+fn planner_budget_findings(budget: Option<f64>, facts: &HostFacts) -> Vec<PlanDiagnostic> {
+    let Some(budget) = budget else {
         // `validate_brief` has already refused an undeclared budget.
         return Vec::new();
     };
@@ -864,6 +876,16 @@ pub async fn generate(
     llm: &dyn PlannerLlm,
     options: &PlannerOptions,
 ) -> Result<PlannerArtifacts, HarnessError> {
+    generate_with_refiner(transport, llm, llm, options).await
+}
+
+/// Select the film planner independently from the target-model shot refinement seam.
+pub async fn generate_with_refiner(
+    transport: &dyn ApiTransport,
+    llm: &dyn PlannerLlm,
+    refiner: &dyn PlannerLlm,
+    options: &PlannerOptions,
+) -> Result<PlannerArtifacts, HarnessError> {
     let (brief, pack, catalog, caps, facts) = prepare(transport, options).await?;
     let entries = catalog
         .entries()
@@ -969,10 +991,26 @@ pub async fn generate(
         request = build_repair_request(&brief, &pack, &caps, &last_reply, &findings, round, rounds);
     };
 
-    let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
-    copy_brief_beside_plan(options)?;
+    let (plan_path, plan_bytes) = write_generated_plan(options, &plan)
+        .map_err(|error| cost.clone().preserve_on_error(error))?;
+    copy_brief_beside_plan(options).map_err(|error| cost.clone().preserve_on_error(error))?;
+    if options.refine_prompts && !options.require_local_planner {
+        let readiness = async {
+            let mut findings = refiner_findings(transport).await?;
+            findings.extend(planner_memory_findings(&brief, &facts));
+            if findings.is_empty() {
+                Ok(())
+            } else {
+                Err(HarnessError::Validation(findings))
+            }
+        }
+        .await;
+        if let Err(error) = readiness {
+            return Err(cost.preserve_on_error(error));
+        }
+    }
     let (compiled, compiled_path) = compile_and_write(
-        llm,
+        refiner,
         options,
         &plan,
         &pack,
@@ -1001,12 +1039,28 @@ pub async fn compile_existing(
     options: &PlannerOptions,
     plan_path: &Path,
 ) -> Result<PlannerArtifacts, HarnessError> {
+    compile_existing_with_executions(transport, llm, options, plan_path, Vec::new()).await
+}
+
+/// Resume native refinement of an already validated external candidate without resending it.
+pub(crate) async fn compile_existing_with_executions(
+    transport: &dyn ApiTransport,
+    llm: &dyn PlannerLlm,
+    options: &PlannerOptions,
+    plan_path: &Path,
+    executions: Vec<PlannerExecutionRecord>,
+) -> Result<PlannerArtifacts, HarnessError> {
+    let repair_rounds = executions
+        .iter()
+        .filter(|entry| entry.provider == "openai_compatible")
+        .count()
+        .saturating_sub(1) as u32;
     let plan = film_plan::read_plan_file(plan_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let pack = film_plan::read_reference_pack_file(&options.reference_pack_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let mut findings = Vec::new();
-    if !options.api_url.trim().is_empty() {
+    if options.require_local_planner && !options.api_url.trim().is_empty() {
         findings.extend(local_only_findings(&options.api_url, &|name| {
             std::env::var(name).ok()
         }));
@@ -1065,7 +1119,11 @@ pub async fn compile_existing(
         }
     }
     if options.refine_prompts {
-        let findings = refiner_findings(transport).await?;
+        let mut findings = refiner_findings(transport).await?;
+        findings.extend(planner_budget_findings(
+            plan.limits.planner_max_memory_gb,
+            &facts,
+        ));
         if !findings.is_empty() {
             return Err(HarnessError::Validation(findings));
         }
@@ -1079,8 +1137,15 @@ pub async fn compile_existing(
         &entries,
         facts.lane(),
         &plan_bytes,
-        PlannerCost::default(),
-        0,
+        PlannerCost {
+            elapsed_seconds: executions
+                .iter()
+                .filter_map(|entry| entry.duration_seconds)
+                .sum(),
+            executions,
+            ..PlannerCost::default()
+        },
+        repair_rounds,
     )
     .await?;
     Ok(PlannerArtifacts {
@@ -1088,7 +1153,7 @@ pub async fn compile_existing(
         plan_path: plan_path.to_path_buf(),
         compiled,
         compiled_path,
-        repair_rounds: 0,
+        repair_rounds,
     })
 }
 
@@ -1188,59 +1253,66 @@ async fn compile_and_write(
     mut cost: PlannerCost,
     repair_rounds: u32,
 ) -> Result<(CompiledPlan, PathBuf), HarnessError> {
-    std::fs::create_dir_all(&options.out_dir)?;
-    let mut refined = BTreeMap::new();
-    if options.refine_prompts {
-        // Read once, not once per shot: the guide is the same for every rewrite in this compile.
-        // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
-        // even when some shots dispatch on the reference partition (sc-23402).
-        let guide = resolve_prompt_guide(options, entries.base_entry())?;
-        for shot in &plan.shots {
-            // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
-            // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
-            // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
-            // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
-            // names it).
-            let reply = llm
-                .complete(LlmRequest {
-                    task: None,
-                    prompt: shot.prompt.clone(),
-                    model_id: Some(plan.model.id.clone()),
-                    workflow: "video".to_owned(),
-                    guide: guide.clone(),
-                    reference_images: Vec::new(),
-                })
-                .await?;
-            cost.record(&reply);
-            refined.insert(shot.id.clone(), reply.text);
+    let result = async {
+        std::fs::create_dir_all(&options.out_dir)?;
+        let mut refined = BTreeMap::new();
+        if options.refine_prompts {
+            // Read once, not once per shot: the guide is the same for every rewrite in this compile.
+            // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
+            // even when some shots dispatch on the reference partition (sc-23402).
+            let guide = resolve_prompt_guide(options, entries.base_entry())?;
+            for shot in &plan.shots {
+                // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
+                // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
+                // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
+                // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
+                // names it).
+                let reply = llm
+                    .complete(LlmRequest {
+                        task: None,
+                        prompt: shot.prompt.clone(),
+                        model_id: Some(plan.model.id.clone()),
+                        workflow: "video".to_owned(),
+                        guide: guide.clone(),
+                        reference_images: Vec::new(),
+                    })
+                    .await?;
+                cost.record(&reply);
+                refined.insert(shot.id.clone(), reply.text);
+            }
         }
+        let mut compiled = compile_plan(
+            plan,
+            pack,
+            &CompileInputs {
+                entries,
+                lane: lane.manifest_key(),
+                plan_sha256: &sha256_hex(plan_bytes),
+                compiled_at: &utc_now(),
+                refined_prompts: &refined,
+            },
+        )
+        .map_err(HarnessError::Validation)?;
+        // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
+        // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
+        // would read as a measured cost.
+        if !cost.job_ids.is_empty() || !cost.executions.is_empty() || repair_rounds > 0 {
+            compiled.planner = Some(
+                cost.clone()
+                    .into_record(repair_rounds, plan.limits.planner_max_memory_gb),
+            );
+        }
+        let compiled_path = options.compiled_path();
+        std::fs::write(
+            &compiled_path,
+            serde_json::to_string_pretty(&compiled)
+                .map_err(|error| HarnessError::Io(error.to_string()))?
+                + "\n",
+        )?;
+        Ok((compiled, compiled_path))
     }
-    let mut compiled = compile_plan(
-        plan,
-        pack,
-        &CompileInputs {
-            entries,
-            lane: lane.manifest_key(),
-            plan_sha256: &sha256_hex(plan_bytes),
-            compiled_at: &utc_now(),
-            refined_prompts: &refined,
-        },
-    )
-    .map_err(HarnessError::Validation)?;
-    // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
-    // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
-    // would read as a measured cost.
-    if !cost.job_ids.is_empty() || !cost.executions.is_empty() || repair_rounds > 0 {
-        compiled.planner = Some(cost.into_record(repair_rounds, plan.limits.planner_max_memory_gb));
-    }
-    let compiled_path = options.compiled_path();
-    std::fs::write(
-        &compiled_path,
-        serde_json::to_string_pretty(&compiled)
-            .map_err(|error| HarnessError::Io(error.to_string()))?
-            + "\n",
-    )?;
-    Ok((compiled, compiled_path))
+    .await;
+    result.map_err(|error| cost.preserve_on_error(error))
 }
 
 /// The prompt guide to forward on every rewrite of this compile.
@@ -1366,7 +1438,25 @@ mod tests {
             panic!("expected prior executions to wrap the later provider error");
         };
         assert!(matches!(*source, HarnessError::Transport(_)));
-        assert_eq!(executions, vec![prior]);
+        assert_eq!(executions, vec![prior.clone()]);
+        let mut final_dispatch = execution_receipt("failed-attempt");
+        final_dispatch.failure_code = Some("canceled".to_owned());
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Refused("canceled".to_owned())),
+            executions: vec![final_dispatch.clone()],
+        });
+        let HarnessError::PlannerExecutionFailure { executions, .. } = error else {
+            panic!("missing receipts")
+        };
+        assert_eq!(
+            executions,
+            vec![prior, final_dispatch],
+            "earlier repair and canceled attempt appear once each"
+        );
     }
     struct NoCallsTransport;
 

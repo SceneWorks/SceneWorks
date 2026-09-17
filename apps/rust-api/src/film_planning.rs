@@ -214,6 +214,14 @@ pub(crate) async fn start_film_planning(
     Path((project_id, draft_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<StartFilmPlanningRequest>,
 ) -> Result<(StatusCode, Json<FilmPlanningOperation>), ApiError> {
+    let max_repair_rounds = payload
+        .max_repair_rounds
+        .unwrap_or(default_max_repair_rounds());
+    if max_repair_rounds > crate::film_planner::MAX_REPAIR_ROUNDS_CEILING {
+        return Err(ApiError::bad_request(
+            "maxRepairRounds must be between 0 and 5",
+        ));
+    }
     let mut draft = project_call(state.clone(), {
         let project_id = project_id.clone();
         let draft_id = draft_id.clone();
@@ -225,11 +233,12 @@ pub(crate) async fn start_film_planning(
             "Paste prose or screenplay text before planning",
         ));
     }
-    let (llm_timeout_seconds, llm_timeout) = if draft.planning.provider == "openai_compatible" {
-        (default_llm_timeout_seconds(), DEFAULT_LLM_JOB_TIMEOUT)
-    } else {
-        local_planner_timeout(payload.llm_timeout_seconds)?
-    };
+    let (llm_timeout_seconds, llm_timeout) =
+        if draft.planning.provider == "openai_compatible" && !draft.planning.refine_prompts {
+            (default_llm_timeout_seconds(), DEFAULT_LLM_JOB_TIMEOUT)
+        } else {
+            local_planner_timeout(payload.llm_timeout_seconds)?
+        };
     let render_options = crate::films::apply_selected_render_regime(&state, &mut draft).await?;
     if draft.render_regime == Some(FilmRenderRegime::RecommendedTurbo)
         && !render_options.recommended_turbo.available
@@ -309,7 +318,7 @@ pub(crate) async fn start_film_planning(
         planner_model: planner_model.clone(),
         video_model_id: draft.production_plan.model.id.clone(),
         thinking_mode: draft.planning.thinking_mode.clone(),
-        max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
+        max_repair_rounds,
         llm_timeout_seconds,
         refine_prompts: draft.planning.refine_prompts,
         active_job_id: None,
@@ -406,9 +415,17 @@ pub(crate) async fn start_film_planning(
             if operation.status != "running" {
                 return;
             }
-            operation.stage = "generating".to_owned();
-            operation.detail =
-                Some("The selected local planner is generating a candidate plan.".to_owned());
+            let refining = operation.provider == "openai_compatible";
+            operation.stage = if refining { "compiling" } else { "generating" }.to_owned();
+            operation.progress = None;
+            operation.detail = Some(
+                if refining {
+                    "The local target-model refiner is rewriting a shot prompt."
+                } else {
+                    "The selected local planner is generating a candidate plan."
+                }
+                .to_owned(),
+            );
             operation.active_job_id = Some(job_id.to_owned());
             operation.job_ids.push(job_id.to_owned());
         });
@@ -428,6 +445,11 @@ pub(crate) async fn start_film_planning(
     let external_started_operation_id = operation_id.clone();
     let on_external_request_started = std::sync::Arc::new(move || {
         mark_external_planner_waiting(&external_started_path, &external_started_operation_id);
+    });
+    let execution_path = latest_path.clone();
+    let execution_operation_id = operation_id.clone();
+    let on_execution_updated = std::sync::Arc::new(move |execution: &PlannerExecutionRecord| {
+        record_external_execution(&execution_path, &execution_operation_id, execution)
     });
     let options = PlannerOptions {
         brief_path: operation_dir.join("brief.json"),
@@ -465,10 +487,17 @@ pub(crate) async fn start_film_planning(
                         source_script,
                         send_reference_pixels: external_send_reference_pixels,
                     },
-                    cancel_requested,
+                    cancel_requested.clone(),
                 )?
-                .on_request_started(on_external_request_started);
-                crate::film_planner::generate(&transport, &llm, &options).await
+                .on_request_started(on_external_request_started)
+                .on_execution_updated(on_execution_updated);
+                let refiner =
+                    SceneWorksLlm::new(&transport, options.poll_interval, options.job_timeout)
+                        .on_job_created(on_job_created)
+                        .on_job_progress(on_job_progress)
+                        .cancel_requested(cancel_requested);
+                crate::film_planner::generate_with_refiner(&transport, &llm, &refiner, &options)
+                    .await
             } else {
                 let llm =
                     SceneWorksLlm::new(&transport, options.poll_interval, options.job_timeout)
@@ -485,6 +514,26 @@ pub(crate) async fn start_film_planning(
     });
 
     Ok((StatusCode::ACCEPTED, Json(operation)))
+}
+
+fn record_external_execution(
+    latest_path: &FsPath,
+    operation_id: &str,
+    execution: &PlannerExecutionRecord,
+) -> Result<(), HarnessError> {
+    update_operation(latest_path, operation_id, |operation| {
+        if operation
+            .executions
+            .last()
+            .is_some_and(|previous| previous.failure_code.as_deref() == Some("dispatch_started"))
+        {
+            *operation.executions.last_mut().expect("pending attempt") = execution.clone();
+        } else {
+            operation.executions.push(execution.clone());
+        }
+    })
+    .map(|_| ())
+    .map_err(|error| HarnessError::Io(error.detail))
 }
 
 fn mark_external_planner_waiting(latest_path: &FsPath, operation_id: &str) {
@@ -506,7 +555,7 @@ pub(crate) async fn cancel_film_planning(
 ) -> Result<Json<FilmPlanningOperation>, ApiError> {
     let root = planning_root(state.clone(), &project_id, &draft_id).await?;
     let path = root.join("latest.json");
-    let mut operation = read_operation(&path)?;
+    let operation = read_operation(&path)?;
     if !matches!(operation.status.as_str(), "running" | "canceling") {
         return Ok(Json(operation));
     }
@@ -518,13 +567,20 @@ pub(crate) async fn cancel_film_planning(
     if let Some(job_id) = operation.active_job_id.clone() {
         let _ = crate::jobs::cancel_job(State(state), Path(job_id)).await;
     }
-    operation.status = "canceling".to_owned();
-    operation.stage = "canceling".to_owned();
-    operation.detail =
-        Some("Cancellation requested; waiting for the planning request to stop.".to_owned());
-    operation.updated_at = sceneworks_core::time::utc_now();
-    write_latest_operation(&root, &operation)?;
-    Ok(Json(operation))
+    mark_planning_canceling(&path, &operation.id)?;
+    Ok(Json(read_operation(&path)?))
+}
+
+fn mark_planning_canceling(path: &FsPath, operation_id: &str) -> Result<(), ApiError> {
+    update_operation(path, operation_id, |operation| {
+        if matches!(operation.status.as_str(), "running" | "canceling") {
+            operation.status = "canceling".to_owned();
+            operation.stage = "canceling".to_owned();
+            operation.detail = Some(
+                "Cancellation requested; waiting for the planning request to stop.".to_owned(),
+            );
+        }
+    })
 }
 
 pub(crate) async fn apply_film_planning_candidate(
@@ -562,6 +618,7 @@ pub(crate) async fn apply_film_planning_candidate(
         compiled.plan_version = candidate.version;
         compiled.plan_sha256 = sceneworks_core::film_compile::production_plan_sha256(&candidate)?;
         draft.production_plan = candidate;
+        draft.reconcile_review_plan();
         draft.compiled_plan = Some(compiled);
         store.save_film_draft(&project_id, &draft_id, draft)
     })
@@ -754,7 +811,13 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         drop(lease);
                         return;
                     }
-                    if operation.provider == "openai_compatible" {
+                    let external_compile = operation.provider == "openai_compatible"
+                        && root
+                            .join("operations")
+                            .join(&operation.id)
+                            .join("plan.json")
+                            .is_file();
+                    if operation.provider == "openai_compatible" && !external_compile {
                         interrupt_external_planning(&latest_path, &operation);
                         drop(lease);
                         return;
@@ -768,7 +831,7 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         refine_prompts: operation.refine_prompts,
                         prompt_guide_path: None,
                         require_installed: true,
-                        require_local_planner: true,
+                        require_local_planner: !external_compile,
                         send_reference_pixels: false,
                         api_url: state.settings.mcp_api_url.clone(),
                         force: false,
@@ -785,7 +848,12 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                                 if current.status != "running" {
                                     return;
                                 }
-                                current.stage = "generating".to_owned();
+                                current.stage = if current.provider == "openai_compatible" {
+                                    "compiling"
+                                } else {
+                                    "generating"
+                                }
+                                .to_owned();
                                 current.active_job_id = Some(job_id.to_owned());
                                 if !current.job_ids.iter().any(|known| known == job_id) {
                                     current.job_ids.push(job_id.to_owned());
@@ -832,7 +900,23 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         .on_job_progress(on_job_progress)
                         .cancel_requested(cancel_requested)
                         .adopt_jobs(operation.job_ids.clone());
-                        crate::film_planner::generate(&transport, &llm, &options).await
+                        if external_compile {
+                            crate::film_planner::compile_existing_with_executions(
+                                &transport,
+                                &llm,
+                                &options,
+                                &options.plan_path(),
+                                operation
+                                    .executions
+                                    .iter()
+                                    .filter(|execution| execution.provider == "openai_compatible")
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .await
+                        } else {
+                            crate::film_planner::generate(&transport, &llm, &options).await
+                        }
                     }
                     .await;
                     finish_planning_operation(&root, &latest_path, &operation.id, result);
@@ -847,6 +931,11 @@ fn interrupt_external_planning(latest_path: &FsPath, operation: &FilmPlanningOpe
     let _ = update_operation(latest_path, &operation.id, |current| {
         current.status = "interrupted".to_owned();
         current.stage = "interrupted".to_owned();
+        for execution in &mut current.executions {
+            if execution.failure_code.as_deref() == Some("dispatch_started") {
+                execution.failure_code = Some("interrupted".to_owned());
+            }
+        }
         current.active_job_id = None;
         if !current.findings.iter().any(|finding| {
             finding.field == "planning.operation"
@@ -907,6 +996,11 @@ async fn reconcile_canceled_planning(
         }
     }
     let _ = update_operation(latest_path, &operation.id, |current| {
+        for execution in &mut current.executions {
+            if execution.failure_code.as_deref() == Some("dispatch_started") {
+                execution.failure_code = Some("canceled".to_owned());
+            }
+        }
         current.status = "canceled".to_owned();
         current.stage = "canceled".to_owned();
         current.active_job_id = None;
@@ -987,11 +1081,16 @@ fn write_latest_operation(
     std::fs::rename(temp, path).map_err(|error| ApiError::internal(error.to_string()))
 }
 
+// Cancellation and job/receipt callbacks may run on different API tasks. Keep their short
+// read/modify/write transactions atomic so a stale status update cannot erase attempt receipts.
+static OPERATION_UPDATE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn update_operation(
     path: &FsPath,
     operation_id: &str,
     mutate: impl FnOnce(&mut FilmPlanningOperation),
 ) -> Result<(), ApiError> {
+    let _guard = OPERATION_UPDATE_LOCK.lock();
     let mut operation = read_operation(path)?;
     if operation.id != operation_id {
         return Ok(());
@@ -1203,6 +1302,12 @@ mod tests {
             .message
             .contains("no textual plan content"));
         assert!(failed.detail.as_deref().unwrap().contains("retry"));
+        // A cancel request may have read the earlier running snapshot before awaiting job
+        // cancellation. Its late status write must not erase the final failure or receipts.
+        mark_planning_canceling(&latest_path, &operation.id).unwrap();
+        let after_late_cancel = read_operation(&latest_path).unwrap();
+        assert_eq!(after_late_cancel.status, "failed");
+        assert_eq!(after_late_cancel.executions, failed.executions);
     }
 
     #[tokio::test]
@@ -1474,6 +1579,11 @@ mod tests {
         .on_request_started(Arc::new(move || {
             mark_external_planner_waiting(&callback_path, &callback_operation_id);
         }));
+        let receipt_path = latest_path.clone();
+        let receipt_id = operation.id.clone();
+        let llm = llm.on_execution_updated(Arc::new(move |execution| {
+            record_external_execution(&receipt_path, &receipt_id, execution)
+        }));
         let request = crate::film_planner::LlmRequest {
             task: Some(crate::film_planner::FILM_PLAN_TASK.to_owned()),
             prompt: "Return a plan".to_owned(),
@@ -1494,6 +1604,11 @@ mod tests {
         assert_eq!(waiting.status, "running");
         assert_eq!(waiting.stage, "planning");
         assert_eq!(waiting.progress, None);
+        assert_eq!(waiting.executions.len(), 1);
+        assert_eq!(
+            waiting.executions[0].failure_code.as_deref(),
+            Some("dispatch_started")
+        );
         assert_eq!(
             waiting.detail.as_deref(),
             Some("Waiting for the selected external planner to return a candidate plan.")
@@ -1505,6 +1620,14 @@ mod tests {
             .expect("fixture response completes")
             .expect("planner task joins")
             .expect("planner response succeeds");
+        let completed = read_operation(&latest_path).expect("read completed attempt");
+        assert_eq!(
+            completed.executions.len(),
+            1,
+            "terminal update replaces dispatch checkpoint"
+        );
+        assert_eq!(completed.executions[0].failure_code, None);
+        assert!(completed.executions[0].duration_seconds.unwrap() > 0.0);
         server.abort();
     }
 

@@ -229,7 +229,14 @@ pub struct PlannerExecutionRecord {
     /// this because their token bound belongs to the worker job payload instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
-    /// Whether approved reference pixels were actually included in this request. Kept separate
+    /// Effective per-request wall-clock bound, retained even for failed dispatch attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_seconds: Option<u64>,
+    /// Effective sampler temperature when explicitly controlled by the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Whether approved reference pixels were included in the attempted request payload.
+    /// This is not an acknowledgement of server receipt after a network failure. Kept separate
     /// from reference roles so the external-data boundary remains explicit in provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_pixels_sent: Option<bool>,

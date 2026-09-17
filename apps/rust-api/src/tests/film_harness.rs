@@ -1882,7 +1882,13 @@ async fn run_fake_refine_job(
         json!({
             "status": "completed", "stage": "completed", "progress": 1,
             "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
-            "result": { "originalPrompt": prompt, "refinedPrompt": refined }
+            "result": {
+                "originalPrompt": prompt, "refinedPrompt": refined,
+                "executionIdentity": {
+                    "provider": "native", "model": "fixture/model-keyed-refiner",
+                    "backend": "fixture", "thinkingMode": "disabled"
+                }
+            }
         }),
     )
     .await;

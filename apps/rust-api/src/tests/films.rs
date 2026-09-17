@@ -933,22 +933,36 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     )
     .await;
     let project_id = project["id"].as_str().unwrap();
-    let (_, draft) = request(
+    let (_, mut draft) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/films"),
         json!({"title": "Candidate review"}),
     )
     .await;
-    let draft_id = draft["id"].as_str().unwrap();
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["reviewPlan"]["shots"]["SH010"]["questions"][0]["ask"] =
+        json!("Is the custom authored action visible?");
+    let (status, draft) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let authored_review = draft["reviewPlan"]["shots"]["SH010"].clone();
     let mut candidate = draft["productionPlan"].clone();
     candidate["shots"][0]["prompt"] = json!("Generated candidate prompt.");
+    let mut added_shot = candidate["shots"][0].clone();
+    added_shot["id"] = json!("SH020");
+    candidate["shots"].as_array_mut().unwrap().push(added_shot);
     let planning_root = std::path::Path::new(project["path"].as_str().unwrap())
         .join("films")
         .join("planning")
-        .join(draft_id);
+        .join(&draft_id);
     std::fs::create_dir_all(&planning_root).unwrap();
-    let compiled = json!({
+    let mut compiled = json!({
         "schemaVersion": 3,
         "planId": draft_id,
         "planVersion": 1,
@@ -965,6 +979,12 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
             "width": 576, "height": 320, "referenceRoles": [], "continuityRoles": []
         }]
     });
+    let mut second_request = compiled["requests"][0].clone();
+    second_request["shotId"] = json!("SH020");
+    compiled["requests"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_request);
     std::fs::write(
         planning_root.join("latest.json"),
         serde_json::to_vec_pretty(&json!({
@@ -972,7 +992,7 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
             "id": "filmplan_candidate",
             "projectId": project_id,
             "draftId": draft_id,
-            "draftRevision": 1,
+            "draftRevision": draft["revision"],
             "status": "ready",
             "stage": "review",
             "provider": "prompt_refiner",
@@ -1011,6 +1031,24 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["reviewPlan"]["shots"]["SH010"], authored_review);
+    assert!(!applied["reviewPlan"]["shots"]["SH020"]["questions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let (_, reopened) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(reopened["reviewPlan"], applied["reviewPlan"]);
+    for shot in reopened["productionPlan"]["shots"].as_array().unwrap() {
+        assert!(reopened["reviewPlan"]["shots"]
+            .get(shot["id"].as_str().unwrap())
+            .is_some());
+    }
     assert_eq!(
         applied["productionPlan"]["shots"][0]["prompt"],
         "Generated candidate prompt."
@@ -1164,5 +1202,25 @@ async fn film_render_store_pin_rechecks_revision_after_route_validation() {
     .await;
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(runs, json!([]));
+    assert_eq!(jobs, json!([]));
+}
+
+#[tokio::test]
+async fn planning_repair_ceiling_is_rejected_before_creating_an_operation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temporary)).unwrap();
+    let (status, failure) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects/no-project/films/no-draft/planning",
+        json!({"maxRepairRounds": 999}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{failure}");
+    assert!(failure["detail"]
+        .as_str()
+        .unwrap()
+        .contains("between 0 and 5"));
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(jobs, json!([]));
 }
