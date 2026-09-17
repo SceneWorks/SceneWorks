@@ -186,6 +186,175 @@ async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     );
 }
 
+#[tokio::test]
+async fn long_legal_asset_identity_is_tagged_through_real_routes_without_losing_provenance() {
+    let harness = Harness::start(true, vec![]).await;
+    let (plan_path, pack_path) = harness.minimal_documents(json!({
+        "maxRunSeconds": 120,
+        "maxShotSeconds": 30,
+        "maxAttemptsPerShot": 1,
+        "maxMemoryGb": 96
+    }));
+    let shared_role_prefix = "r".repeat(63);
+    let first_role = format!("{shared_role_prefix}a");
+    let second_role = format!("{shared_role_prefix}b");
+    let sound_role = format!("s{}", "s".repeat(63));
+    let pack_id = format!("film_{}", "p".repeat(59));
+    assert_eq!(first_role.len(), 64);
+    assert_eq!(second_role.len(), 64);
+    assert_eq!(sound_role.len(), 64);
+    assert_eq!(pack_id.len(), 64);
+
+    let mut pack: Value = serde_json::from_slice(&std::fs::read(&pack_path).unwrap()).unwrap();
+    pack["id"] = json!(pack_id);
+    pack["references"][0]["role"] = json!(first_role);
+    let mut second = pack["references"][0].clone();
+    second["role"] = json!(second_role);
+    pack["references"].as_array_mut().unwrap().push(second);
+    let sound = ffmpeg_reachable();
+    if sound {
+        let sound_dir = pack_path.parent().unwrap().join("sound");
+        std::fs::create_dir_all(&sound_dir).unwrap();
+        std::fs::copy(
+            Path::new(FIXTURE_DIR).join("sound/workshop_room_tone.wav"),
+            sound_dir.join("room-tone.wav"),
+        )
+        .unwrap();
+        pack["sound"] = json!([{
+            "role": sound_role,
+            "kind": "ambience",
+            "file": "sound/room-tone.wav"
+        }]);
+    }
+    std::fs::write(&pack_path, serde_json::to_vec_pretty(&pack).unwrap()).unwrap();
+
+    let mut plan: Value = serde_json::from_slice(&std::fs::read(&plan_path).unwrap()).unwrap();
+    for shot in plan["shots"].as_array_mut().unwrap() {
+        shot["continuityRoles"] = json!([first_role, second_role]);
+    }
+    if sound {
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "ambience": { "role": sound_role }
+        });
+    }
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+
+    let mut options = harness.options(plan_path, pack_path, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("the project store accepts every harness-generated tag");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert!(record.run_id.starts_with("run_"), "{}", record.run_id);
+    assert_eq!(record.run_id.len(), 36, "a UUID-backed production run id");
+
+    let project_id = record.project_id.as_deref().expect("project");
+    let (_, assets) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    let references: Vec<&Value> = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+        .collect();
+    assert_eq!(references.len(), 2, "{assets:#}");
+    let mut role_tags = Vec::new();
+    let mut pack_tags = Vec::new();
+    for asset in references {
+        let provenance = &asset["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert!(
+            provenance["role"] == first_role || provenance["role"] == second_role,
+            "{provenance}"
+        );
+        let tags: Vec<&str> = asset["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-reference"), "{tags:?}");
+        role_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("role:h:"))
+                .expect("long role has a bounded facet")
+                .to_string(),
+        );
+        pack_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("pack:h:"))
+                .expect("long pack id has a bounded facet")
+                .to_string(),
+        );
+    }
+    role_tags.sort();
+    role_tags.dedup();
+    pack_tags.sort();
+    pack_tags.dedup();
+    assert_eq!(role_tags.len(), 2, "role collision: {role_tags:?}");
+    assert_eq!(pack_tags.len(), 1, "one pack identity: {pack_tags:?}");
+
+    if sound {
+        let sounds: Vec<&Value> = assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "sound")
+            .collect();
+        assert_eq!(sounds.len(), 1, "{assets:#}");
+        let provenance = &sounds[0]["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert_eq!(provenance["role"], sound_role);
+        let tags: Vec<&str> = sounds[0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-sound"), "{tags:?}");
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("role:h:")),
+            "{tags:?}"
+        );
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("pack:h:")),
+            "{tags:?}"
+        );
+    }
+
+    let take_payload = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, _, payload)| payload.clone())
+        .expect("one take was dispatched");
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["runId"],
+        record.run_id
+    );
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["idempotencyKey"],
+        format!("{}:SH010:a1", record.run_id)
+    );
+}
+
 impl ApiTransport for RouterTransport {
     fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
         let app = self.app.clone();

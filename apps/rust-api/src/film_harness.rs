@@ -107,6 +107,21 @@ const REFERENCE_TAG: &str = "film-harness-reference";
 /// conditioning-eligible references cannot pick it up.
 const UNAPPROVED_REFERENCE_TAG: &str = "film-harness-reference-unapproved";
 
+/// A harness-owned asset facet that fits the project store's public 40-byte tag contract.
+///
+/// Short role and pack tags keep their established spelling for CLI/API interoperability. Plan
+/// ids and roles are valid up to 64 ASCII characters, though, so their prefixed form does not
+/// always fit in an asset tag. In that case the tag carries a namespaced 128-bit digest while the
+/// exact value remains in `extra.filmHarness`, which is also the authoritative adoption identity.
+fn harness_asset_tag(namespace: &str, value: &str) -> String {
+    let literal = format!("{namespace}:{value}");
+    if literal.len() <= 40 {
+        return literal;
+    }
+    let digest = sha256_hex(literal.as_bytes());
+    format!("{namespace}:h:{}", &digest[..32])
+}
+
 /// File name of the run record inside the run directory.
 pub const RUN_RECORD_FILE: &str = "run.json";
 
@@ -2908,8 +2923,8 @@ impl Session<'_> {
                     Some(json!({
                         "tags": [
                             SOUND_TAG,
-                            format!("role:{}", entry.role),
-                            format!("pack:{}", self.pack.id)
+                            harness_asset_tag("role", &entry.role),
+                            harness_asset_tag("pack", &self.pack.id)
                         ]
                     })),
                 )
@@ -3521,8 +3536,8 @@ impl Session<'_> {
                 Some(json!({
                     "tags": [
                         kind_tag,
-                        format!("role:{}", reference.role),
-                        format!("pack:{}", self.pack.id)
+                        harness_asset_tag("role", &reference.role),
+                        harness_asset_tag("pack", &self.pack.id)
                     ]
                 })),
             )
@@ -6292,6 +6307,33 @@ impl ApiTransport for HttpTransport {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn generated_asset_tags_keep_legacy_literals_and_bound_long_ids() {
+        assert_eq!(harness_asset_tag("role", "courier"), "role:courier");
+        assert_eq!(
+            harness_asset_tag("pack", "courier-workshop-refs"),
+            "pack:courier-workshop-refs"
+        );
+
+        let shared = "r".repeat(63);
+        let first = harness_asset_tag("role", &format!("{shared}a"));
+        let second = harness_asset_tag("role", &format!("{shared}b"));
+        let sound = harness_asset_tag("role", &format!("sound_{}", "s".repeat(58)));
+        let pack = harness_asset_tag("pack", &format!("film_{}", "p".repeat(59)));
+        for tag in [&first, &second, &sound, &pack] {
+            assert!(tag.len() <= 40, "{tag}");
+        }
+        assert!(first.starts_with("role:h:"), "{first}");
+        assert!(sound.starts_with("role:h:"), "{sound}");
+        assert!(pack.starts_with("pack:h:"), "{pack}");
+        assert_ne!(first, second, "distinct legal roles need distinct facets");
+        assert_eq!(
+            first,
+            harness_asset_tag("role", &format!("{shared}a")),
+            "a replay must produce the same ownership facet"
+        );
+    }
 
     #[test]
     fn multipart_body_carries_file_and_provenance_fields() {
