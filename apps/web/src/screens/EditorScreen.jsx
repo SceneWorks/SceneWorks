@@ -143,7 +143,7 @@ export function EditorScreen() {
   }, [isPlaying, selectedAsset?.id, screenActive, selectedAudioPreview?.afterPlacement, selectedAudioPreview?.beforePlacement]);
 
   // Playhead transport: a rAF loop advances the playhead across the whole timeline while
-  // playing, wrapping to 0 at the end. Only runs while foregrounded.
+  // playing, stopping at the end. Only runs while foregrounded.
   useEffect(() => {
     if (!isPlaying || !screenActive || duration <= 0 || typeof window.requestAnimationFrame !== "function") {
       return undefined;
@@ -155,7 +155,7 @@ export function EditorScreen() {
       last = now;
       setPlayheadSeconds((prev) => {
         const next = prev + dt;
-        return next >= duration ? 0 : next;
+        return Math.min(next, duration);
       });
       raf = requestAnimationFrame(tick);
     };
@@ -164,7 +164,21 @@ export function EditorScreen() {
   }, [isPlaying, screenActive, duration]);
 
   function togglePreviewPlayback() {
+    const restartingFromEnd = !isPlaying && (
+      playheadSeconds >= duration
+      || Boolean(selectedAudioPreview?.afterPlacement)
+    );
+    if (restartingFromEnd) {
+      setPlayheadSeconds(0);
+    }
     if (!isPlaying && selectedAudioPreview) {
+      // A completed preview stays pinned to its end for an accurate stopped
+      // readout. Move both clocks back to the timeline start before replaying.
+      if (restartingFromEnd) {
+        if (previewVideoRef.current && selectedItem) {
+          previewVideoRef.current.currentTime = sourceTimestampAtPlayhead(selectedItem, 0);
+        }
+      }
       const prepared = audioPreviewGain.prepareForPlayback();
       if (!prepared.ok) {
         setTimelineNotice("This browser cannot preview gain above 1×. The saved gain is unchanged and export will use it.");
@@ -182,6 +196,13 @@ export function EditorScreen() {
       }
     }
     setIsPlaying((value) => !value);
+  }
+
+  function handlePreviewEnded() {
+    if (selectedAudioPreview && selectedItem) {
+      setPlayheadSeconds(Math.min(duration, Math.max(0, Number(selectedItem.timelineEnd) || 0)));
+    }
+    setIsPlaying(false);
   }
 
   const shortcutStateRef = useRef({ undo, redo, removeSelectedItem, selectedItemId, screenActive, togglePreviewPlayback });
@@ -812,7 +833,7 @@ export function EditorScreen() {
           clipLabel={selectedItem ? `${selectedItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}
           isAi={isSelectedAi}
           isPlaying={isPlaying}
-          onEnded={() => setIsPlaying(false)}
+          onEnded={handlePreviewEnded}
           onNext={() => stepClip(1)}
           onPause={() => setIsPlaying(false)}
           onPlay={() => setIsPlaying(true)}

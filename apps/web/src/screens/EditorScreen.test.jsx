@@ -536,6 +536,68 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(contexts[1].gainNode.gain.value).toBe(8);
   });
 
+  it("pins a completed audio preview to source out and replays it from source in", () => {
+    const animationFrames = [];
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback) => {
+      animationFrames.push(callback);
+      return animationFrames.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+
+    const audio = { id: "quiet-tone", type: "audio", displayName: "Quiet tone", url: "/quiet-tone.wav", file: { mimeType: "audio/wav", duration: 2 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks.push({
+      id: "track_audio",
+      kind: "audio",
+      gain: 1,
+      muted: false,
+      items: [{
+        id: "audio_1",
+        trackId: "track_audio",
+        assetId: "quiet-tone",
+        type: "audio",
+        displayName: "Quiet tone",
+        sourceIn: 0,
+        sourceOut: 2,
+        timelineStart: 0,
+        timelineEnd: 2,
+        speed: 1,
+        volume: 1,
+        fadeInSeconds: 0,
+        fadeOutSeconds: 0,
+      }],
+    });
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-audio-clip").click());
+
+    const preview = container.querySelector(".ve-program audio");
+    expect(preview.currentTime).toBeCloseTo(0);
+    act(() => container.querySelector(".ve-play").click());
+    expect(animationFrames).toHaveLength(1);
+
+    // A delayed frame used to wrap the playhead to zero. The later ended event
+    // then stopped playback and the audio sync effect rewound currentTime.
+    act(() => animationFrames.shift()(2100));
+    preview.currentTime = 2;
+    act(() => preview.dispatchEvent(new Event("ended")));
+
+    expect(container.querySelector(".ve-tc-now").textContent).toBe("00:02:00");
+    expect(container.querySelector(".ve-play").title).toBe("Play");
+    expect(preview.currentTime).toBeCloseTo(2);
+
+    act(() => container.querySelector(".ve-play").click());
+    expect(container.querySelector(".ve-tc-now").textContent).toBe("00:00:00");
+    expect(container.querySelector(".ve-play").title).toBe("Pause");
+    expect(preview.currentTime).toBeCloseTo(0);
+    // Audio starts in the gesture handler and the playback effect confirms the
+    // desired state, preserving the existing first-pointer activation path.
+    expect(play).toHaveBeenCalledTimes(4);
+  });
+
   it("accepts frame-derived fractional video trim endpoints through native form validity", () => {
     const video = { id: "v1", type: "video", displayName: "Shot", url: "/shot.mp4", file: { mimeType: "video/mp4", duration: 15 } };
     const timeline = makeTimeline("tl_1", "Film");
