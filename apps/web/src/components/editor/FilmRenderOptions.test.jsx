@@ -132,4 +132,31 @@ describe("FilmRenderOptions", () => {
     expect(radios[1].checked).toBe(true);
     expect(container.textContent).toContain("selected resolution is incompatible");
   });
+
+  it("shows the server's custom selection for a legacy draft and preserves authored controls in preview", async () => {
+    vi.useFakeTimers();
+    const legacy = makeDraft({ renderRegime: undefined });
+    legacy.productionPlan.model.loras = ["authored_adapter"];
+    legacy.productionPlan.model.advanced.steps = 9;
+    getOptionsMock.mockResolvedValue(resolved({
+      selectedRegime: "custom",
+      effective: { adapterIds: ["authored_adapter"], effectiveSteps: 9 },
+    }));
+    previewOptionsMock.mockResolvedValue(resolved({
+      selectedRegime: "custom",
+      effective: { adapterIds: ["authored_adapter"], effectiveSteps: 9 },
+    }));
+    const view = await render({ draft: legacy });
+
+    expect([...container.querySelectorAll('input[type="radio"]')][2].checked).toBe(true);
+    const edited = structuredClone(legacy);
+    edited.productionPlan.model.resolution = "768x432";
+    await view.rerender({ draft: edited });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120); });
+
+    const previewed = previewOptionsMock.mock.calls[0][2];
+    expect(previewed.renderRegime).toBeUndefined();
+    expect(previewed.productionPlan.model.loras).toEqual(["authored_adapter"]);
+    expect(previewed.productionPlan.model.advanced.steps).toBe(9);
+  });
 });

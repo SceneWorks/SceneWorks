@@ -63,7 +63,7 @@ export function previewFilmRenderOptions(projectId, draftId, draft, token, optio
       draftRevision: draft.revision,
       productionPlan: draft.productionPlan,
       referencePack: draft.referencePack,
-      renderRegime: draft.renderRegime,
+      renderRegime: draft.renderRegime ?? "custom",
     }),
   });
 }
