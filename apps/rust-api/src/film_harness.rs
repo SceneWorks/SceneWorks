@@ -401,6 +401,13 @@ pub trait ApiTransport: Send + Sync {
 pub enum HarnessError {
     /// The plan was refused before any job was created. The run record carries the same findings.
     Validation(Vec<PlanDiagnostic>),
+    /// The planner exhausted its bounded repair loop after protocol-valid replies. Keep every
+    /// sanitized execution receipt beside the findings so a failed plan has the same provider,
+    /// settings, duration, and usage provenance as a successful one.
+    PlannerValidation {
+        findings: Vec<PlanDiagnostic>,
+        executions: Vec<PlannerExecutionRecord>,
+    },
     /// The API answered a non-success status the harness cannot proceed past.
     Api {
         method: &'static str,
@@ -416,6 +423,12 @@ pub enum HarnessError {
         detail: String,
         execution: Box<PlannerExecutionRecord>,
     },
+    /// A later planner request failed after earlier protocol-valid replies. Preserve the earlier
+    /// sanitized receipts while retaining the original error's status and display semantics.
+    PlannerExecutionFailure {
+        source: Box<HarnessError>,
+        executions: Vec<PlannerExecutionRecord>,
+    },
     /// The requested action does not apply to the run record on disk — it is finished and not
     /// resumable, its documents no longer hash to what the run was started from, or it names no
     /// such shot. Nothing was dispatched (sc-22711).
@@ -426,7 +439,7 @@ pub enum HarnessError {
 impl std::fmt::Display for HarnessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validation(findings) => {
+            Self::Validation(findings) | Self::PlannerValidation { findings, .. } => {
                 writeln!(
                     f,
                     "plan refused before dispatch ({} finding(s)):",
@@ -445,6 +458,7 @@ impl std::fmt::Display for HarnessError {
             } => write!(f, "{method} {path} -> {status}: {detail}"),
             Self::Transport(message) => write!(f, "transport error: {message}"),
             Self::PlannerResponse { detail, .. } => write!(f, "transport error: {detail}"),
+            Self::PlannerExecutionFailure { source, .. } => write!(f, "{source}"),
             Self::Refused(message) => write!(f, "refused: {message}"),
             Self::Io(message) => write!(f, "io error: {message}"),
         }

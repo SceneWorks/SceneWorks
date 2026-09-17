@@ -7313,7 +7313,10 @@ pub(crate) fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Ve
 
 pub(crate) fn findings_of(error: HarnessError) -> Vec<String> {
     match error {
-        HarnessError::Validation(findings) => findings.iter().map(ToString::to_string).collect(),
+        HarnessError::Validation(findings) | HarnessError::PlannerValidation { findings, .. } => {
+            findings.iter().map(ToString::to_string).collect()
+        }
+        HarnessError::PlannerExecutionFailure { source, .. } => findings_of(*source),
         other => panic!("expected a validation refusal, got {other}"),
     }
 }

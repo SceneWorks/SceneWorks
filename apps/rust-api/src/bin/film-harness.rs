@@ -317,9 +317,45 @@ fn guarded_transport(api_url: &str, token: Option<String>) -> Result<HttpTranspo
 
 fn report_error(error: HarnessError) -> ExitCode {
     eprintln!("film-harness: {error}");
+    if is_validation_or_refused(&error) {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn is_validation_or_refused(error: &HarnessError) -> bool {
     match error {
-        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
-        _ => ExitCode::from(1),
+        HarnessError::Validation(_)
+        | HarnessError::PlannerValidation { .. }
+        | HarnessError::Refused(_) => true,
+        HarnessError::PlannerExecutionFailure { source, .. } => is_validation_or_refused(source),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use sceneworks_core::film_plan::PlanDiagnostic;
+
+    use super::{is_validation_or_refused, HarnessError};
+
+    #[test]
+    fn planner_execution_receipts_do_not_change_cli_failure_classification() {
+        let validation = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::PlannerValidation {
+                findings: vec![PlanDiagnostic::plan("planner.output", "malformed")],
+                executions: Vec::new(),
+            }),
+            executions: Vec::new(),
+        };
+        assert!(is_validation_or_refused(&validation));
+
+        let provider = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Transport("provider unavailable".to_owned())),
+            executions: Vec::new(),
+        };
+        assert!(!is_validation_or_refused(&provider));
     }
 }
 

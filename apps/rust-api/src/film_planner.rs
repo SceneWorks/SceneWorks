@@ -171,6 +171,20 @@ impl PlannerCost {
             executions: self.executions,
         }
     }
+
+    fn preserve_on_error(mut self, error: HarnessError) -> HarnessError {
+        if let HarnessError::PlannerResponse { execution, .. } = &error {
+            self.executions.push((**execution).clone());
+        }
+        if self.executions.is_empty() {
+            error
+        } else {
+            HarnessError::PlannerExecutionFailure {
+                source: Box::new(error),
+                executions: self.executions,
+            }
+        }
+    }
 }
 
 /// [`PlannerLlm`] over the shipped `prompt_refine` seam: create the job through
@@ -872,7 +886,7 @@ pub async fn generate(
     let mut round = 0_u32;
     let mut cost = PlannerCost::default();
     let plan = loop {
-        let reply = llm
+        let reply = match llm
             .complete(LlmRequest {
                 task: Some(FILM_PLAN_TASK.to_owned()),
                 prompt: request.clone(),
@@ -884,7 +898,11 @@ pub async fn generate(
                 guide: None,
                 reference_images: reference_images.clone(),
             })
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => return Err(cost.preserve_on_error(error)),
+        };
         cost.record(&reply);
         let reply = reply.text;
         last_reply = reply.clone();
@@ -942,7 +960,10 @@ pub async fn generate(
                     rejected.display()
                 ),
             ));
-            return Err(HarnessError::Validation(findings));
+            return Err(HarnessError::PlannerValidation {
+                findings,
+                executions: cost.executions,
+            });
         }
         round += 1;
         request = build_repair_request(&brief, &pack, &caps, &last_reply, &findings, round, rounds);
@@ -1302,6 +1323,51 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn execution_receipt(model: &str) -> PlannerExecutionRecord {
+        PlannerExecutionRecord {
+            provider: "openai_compatible".to_owned(),
+            model: model.to_owned(),
+            backend: Some("fixture".to_owned()),
+            target_video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "disabled".to_owned(),
+            max_output_tokens: Some(4096),
+            reference_pixels_sent: Some(true),
+            duration_seconds: Some(1.0),
+            ..PlannerExecutionRecord::default()
+        }
+    }
+
+    #[test]
+    fn accumulated_executions_survive_a_later_empty_or_provider_failure() {
+        let prior = execution_receipt("prior-malformed");
+        let final_empty = execution_receipt("final-empty");
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::PlannerResponse {
+            detail: "no textual content".to_owned(),
+            execution: Box::new(final_empty.clone()),
+        });
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected executions to wrap the final empty-response error");
+        };
+        assert!(matches!(*source, HarnessError::PlannerResponse { .. }));
+        assert_eq!(executions, vec![prior.clone(), final_empty]);
+
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::Transport(
+            "provider became unavailable".to_owned(),
+        ));
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected prior executions to wrap the later provider error");
+        };
+        assert!(matches!(*source, HarnessError::Transport(_)));
+        assert_eq!(executions, vec![prior]);
+    }
     struct NoCallsTransport;
 
     impl ApiTransport for NoCallsTransport {

@@ -632,8 +632,17 @@ fn finish_planning_operation(
             );
         }
         Err(error) => {
-            if let HarnessError::PlannerResponse { execution, .. } = &error {
-                operation.executions.push((**execution).clone());
+            match &error {
+                HarnessError::PlannerResponse { execution, .. } => {
+                    operation.executions.push((**execution).clone());
+                }
+                HarnessError::PlannerValidation { executions, .. } => {
+                    operation.executions = executions.clone();
+                }
+                HarnessError::PlannerExecutionFailure { executions, .. } => {
+                    operation.executions = executions.clone();
+                }
+                _ => {}
             }
             operation.status = if canceled { "canceled" } else { "failed" }.to_owned();
             operation.stage = if canceled { "canceled" } else { "failed" }.to_owned();
@@ -894,7 +903,10 @@ async fn planning_root(
 
 fn findings_from_error(error: HarnessError) -> Vec<PlanDiagnostic> {
     match error {
-        HarnessError::Validation(findings) => findings,
+        HarnessError::Validation(findings) | HarnessError::PlannerValidation { findings, .. } => {
+            findings
+        }
+        HarnessError::PlannerExecutionFailure { source, .. } => findings_from_error(*source),
         other => vec![PlanDiagnostic::plan(
             "planning.operation",
             other.to_string(),
@@ -1069,14 +1081,23 @@ mod tests {
             }),
             ..PlannerExecutionRecord::default()
         };
+        let prior_execution = PlannerExecutionRecord {
+            model: "external-model-prior-malformed".to_owned(),
+            finish_reason: Some("stop".to_owned()),
+            failure_code: None,
+            ..execution.clone()
+        };
 
         finish_planning_operation(
             temp.path(),
             &latest_path,
             &operation.id,
-            Err(HarnessError::PlannerResponse {
-                detail: "The external planner response has no textual plan content".to_owned(),
-                execution: Box::new(execution.clone()),
+            Err(HarnessError::PlannerExecutionFailure {
+                source: Box::new(HarnessError::PlannerResponse {
+                    detail: "The external planner response has no textual plan content".to_owned(),
+                    execution: Box::new(execution.clone()),
+                }),
+                executions: vec![prior_execution.clone(), execution.clone()],
             }),
         );
 
@@ -1090,12 +1111,182 @@ mod tests {
         );
         assert_eq!(failed.candidate_plan, operation.candidate_plan);
         assert_eq!(failed.compiled, operation.compiled);
-        assert_eq!(failed.executions, vec![execution]);
+        assert_eq!(failed.executions, vec![prior_execution, execution]);
         assert_eq!(failed.findings.len(), 1);
         assert!(failed.findings[0]
             .message
             .contains("no textual plan content"));
         assert!(failed.detail.as_deref().unwrap().contains("retry"));
+    }
+
+    #[tokio::test]
+    async fn malformed_external_repairs_keep_every_execution_and_the_current_plan() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use crate::tests::film_harness::{planner_options, Harness};
+
+        #[derive(Clone, Default)]
+        struct MalformedFixture {
+            calls: Arc<AtomicUsize>,
+            requests: Arc<Mutex<Vec<Value>>>,
+        }
+
+        async fn malformed_response(
+            State(fixture): State<MalformedFixture>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let attempt = fixture.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            fixture.requests.lock().unwrap().push(body);
+            Json(json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "{\"shots\":[",
+                        "reasoning_content": format!("bounded reasoning {attempt}")
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": 100 + attempt,
+                    "completion_tokens": 10 + attempt,
+                    "total_tokens": 110 + (2 * attempt)
+                },
+                "provider_debug": {"credential": "must-not-survive"}
+            }))
+        }
+
+        let fixture = MalformedFixture::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind malformed fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let app = Router::new()
+            .route("/v1/chat/completions", post(malformed_response))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fixture");
+        });
+
+        let harness = Harness::start(false, vec![]).await;
+        let root = tempfile::tempdir().expect("operation root");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Existing cut");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_external_malformed".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "planning".to_owned(),
+            progress: None,
+            provider: "openai_compatible".to_owned(),
+            planner_model_id: Some("external-model".to_owned()),
+            planner_model: "external-model".to_owned(),
+            video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "enabled".to_owned(),
+            max_repair_rounds: 2,
+            refine_prompts: false,
+            active_job_id: None,
+            job_ids: Vec::new(),
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: Some(draft.production_plan.clone()),
+            compiled: None,
+            detail: Some("External request is active".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(root.path(), &operation).expect("write operation");
+        let latest_path = root.path().join("latest.json");
+
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            crate::film_planner_connections::FilmPlannerConnection {
+                schema_version: 1,
+                id: "malformed-fixture".to_owned(),
+                label: "Malformed fixture".to_owned(),
+                base_url: format!("http://{address}/v1"),
+                credential_host: None,
+                supports_model_listing: false,
+                supports_image_input: true,
+                timeout_seconds: 5,
+                max_output_tokens: 3072,
+            },
+            None,
+            OpenAiPlannerOptions {
+                model: "external-model".to_owned(),
+                thinking_mode: "enabled".to_owned(),
+                source_script: "A courier enters with a parcel.".to_owned(),
+                send_reference_pixels: true,
+            },
+            Arc::new(|| false),
+        )
+        .expect("planner adapter");
+        let mut options = planner_options(&harness, "malformed-external");
+        options.out_dir = root.path().join("artifacts");
+        options.require_local_planner = false;
+        options.send_reference_pixels = true;
+        options.max_repair_rounds = 2;
+
+        let result = crate::film_planner::generate(&harness.transport, &llm, &options).await;
+        assert!(
+            matches!(result, Err(HarnessError::PlannerValidation { .. })),
+            "repair exhaustion must retain planner execution provenance: {result:?}"
+        );
+        finish_planning_operation(root.path(), &latest_path, &operation.id, result);
+
+        let failed = read_operation(&latest_path).expect("read failed operation");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.stage, "failed");
+        assert_eq!(
+            failed.candidate_plan, operation.candidate_plan,
+            "bounded planner failure must preserve the current edited plan"
+        );
+        assert_eq!(failed.compiled, None);
+        assert_eq!(failed.executions.len(), 3, "initial call plus two repairs");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        assert!(
+            !options.plan_path().exists(),
+            "no refused plan becomes current"
+        );
+        assert!(options.out_dir.join("planner-rejected.txt").is_file());
+        assert!(failed
+            .findings
+            .iter()
+            .any(|finding| finding.field == "planner.repair"));
+
+        for (index, execution) in failed.executions.iter().enumerate() {
+            let attempt = index as u64 + 1;
+            assert_eq!(execution.provider, "openai_compatible");
+            assert_eq!(execution.model, "external-model");
+            assert_eq!(execution.backend.as_deref(), Some("malformed-fixture"));
+            assert_eq!(execution.target_video_model_id, "minimax_h3");
+            assert_eq!(execution.thinking_mode, "enabled");
+            assert_eq!(execution.max_output_tokens, Some(3072));
+            assert_eq!(execution.reference_pixels_sent, Some(true));
+            assert!(execution.duration_seconds.is_some_and(|value| value >= 0.0));
+            assert_eq!(execution.finish_reason.as_deref(), Some("stop"));
+            assert_eq!(execution.failure_code, None);
+            assert_eq!(
+                execution.thinking.as_deref(),
+                Some(format!("bounded reasoning {attempt}").as_str())
+            );
+            let usage = execution.usage.as_ref().expect("usage survives");
+            assert_eq!(usage.input_tokens, Some(100 + attempt));
+            assert_eq!(usage.output_tokens, Some(10 + attempt));
+            assert_eq!(usage.total_tokens, Some(110 + (2 * attempt)));
+        }
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.to_string().contains("image_url")));
+        let persisted = std::fs::read_to_string(&latest_path).expect("operation readable");
+        assert!(!persisted.contains("must-not-survive"));
+        server.abort();
     }
 
     #[tokio::test]
