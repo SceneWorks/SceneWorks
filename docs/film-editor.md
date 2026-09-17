@@ -108,6 +108,12 @@ planning operation.
 
 External planning is opt-in per draft. There is no automatic external fallback.
 
+When **Run model-specific prompt refinement when compiling shots** is enabled, film planning
+still uses the selected external endpoint, while each shot is refined locally with the target
+video model’s guide. The local refiner must be available; its per-call timeout is separate from
+the connection timeout, and its execution identity is retained separately. A local-refiner failure
+does not switch the film-planning provider.
+
 1. Select **Saved OpenAI-compatible connection**.
 2. Create or choose a connection. Enter a label and an HTTP(S) base URL ending at the provider's
    OpenAI-compatible API root, such as `https://provider.example/v1`.

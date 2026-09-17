@@ -126,6 +126,26 @@ describe("FilmPlanning", () => {
     expect(externalStart).toHaveBeenCalledWith(2, undefined);
   });
 
+  it("uses a separate local refinement timeout with external film planning", async () => {
+    const onStart = vi.fn();
+    root = createRoot(container);
+    await act(async () => root.render(<FilmPlanning
+      availability={{ providers: [] }} disabled={false}
+      draft={{ originalScript: "A courier arrives.", productionPlan: { model: { id: "minimax_h3" } }, planning: { provider: "openai_compatible", connectionId: "remote", modelId: "model", refinePrompts: true } }}
+      onChange={vi.fn()} onNotice={vi.fn()} onStart={onStart}
+      operation={{ status: "failed", provider: "openai_compatible", refinePrompts: true, llmTimeoutSeconds: 75, findings: [] }} token=""
+    />));
+    expect(container.textContent).toContain("Shot refinement uses the local prompt refiner");
+    expect(container.textContent).toContain("Local planner job timeout: 75 seconds per call");
+    const timeout = container.querySelector('input[aria-label="Local planner job timeout seconds"]');
+    act(() => changeValue(timeout, "37"));
+    const start = [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan");
+    act(() => start.click());
+    expect(onStart).toHaveBeenCalledWith(2, 37);
+    act(() => changeValue(timeout, "0"));
+    expect(start.disabled).toBe(true);
+  });
+
   it("renders long failed-plan findings as a labeled list with shot and field context", async () => {
     const referencePack = "film_a96f0c96c6a64e1da49bbbb6a5b9f976-references";
     const rejectedPath = `/Volumes/Models/codex/sc-23730/runtime/terminal/evidence/projects/example/films/planning/operations/filmplan_4af8883889984985823abb5c53ff7a0b/planner-rejected.txt`;
