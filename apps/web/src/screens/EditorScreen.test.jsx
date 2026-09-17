@@ -430,6 +430,7 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(container.querySelector(".ve-program audio")).not.toBeNull();
     act(() => container.querySelector(".ve-play").click());
     expect(play).toHaveBeenCalled();
+    act(() => container.querySelector(".ve-play").click());
     const form = container.querySelector('form[aria-label="Edit selected audio"]');
     for (const [name, value] of [["timelineStart", "1.125"], ["sourceIn", "0.125"], ["sourceOut", "2.375"], ["volume", "0.7"], ["fadeInSeconds", "0.125"], ["fadeOutSeconds", "0.225"], ["trackGain", "0.8"]]) {
       const input = form.elements.namedItem(name);
@@ -446,6 +447,10 @@ describe("timeline audio editing (sc-23739)", () => {
     const track = latest.tracks.find((item) => item.kind === "audio");
     expect(track).toMatchObject({ gain: 0.8, muted: true });
     expect(track.items[0]).toMatchObject({ sourceIn: 0.125, sourceOut: 2.375, timelineStart: 1.125, timelineEnd: 3.375, volume: 0.7, fadeInSeconds: 0.125, fadeOutSeconds: 0.225 });
+    const preview = container.querySelector(".ve-program audio");
+    expect(preview.currentTime).toBeCloseTo(0.125);
+    expect(preview.volume).toBe(0);
+    expect(preview.muted).toBe(true);
   });
 
   it("accepts frame-derived fractional video trim endpoints through native form validity", () => {

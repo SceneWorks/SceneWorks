@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { assetCanRenderAsAudio, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { formatTimecode } from "../formatting.js";
 import {
+  audioPreviewState,
   ensureItemVersionFields,
   itemDuration,
   sourceTimestampAtPlayhead,
@@ -78,6 +79,9 @@ export function EditorScreen() {
   }, [activeTimeline, selectedItemId]);
   const selectedAsset = assetsById.get(selectedItem?.assetId) ?? null;
   const selectedTrack = activeTimeline?.tracks?.find((track) => track.items.some((item) => item.id === selectedItemId)) ?? null;
+  const selectedAudioPreview = selectedItem?.type === "audio" && selectedTrack
+    ? audioPreviewState(selectedItem, selectedTrack, playheadSeconds, trackSoloed)
+    : null;
   const duration = activeTimeline ? timelineDuration(activeTimeline) : 0;
   const mainTrack = activeTimeline?.tracks?.find((track) => track.id === MAIN_TRACK_ID || track.kind === "video") ?? null;
   const mainClips = mainTrack ? trackItems(mainTrack) : [];
@@ -85,6 +89,18 @@ export function EditorScreen() {
     const history = selectedItem?.versionHistory ?? [];
     return history.some((entry) => ["extension", "bridge", "replacement"].includes(entry?.source));
   }, [selectedItem]);
+
+  useEffect(() => {
+    const media = previewVideoRef.current;
+    if (!selectedAudioPreview || !assetCanRenderAsAudio(selectedAsset) || !media) {
+      return;
+    }
+    media.volume = selectedAudioPreview.volume;
+    media.playbackRate = selectedAudioPreview.playbackRate;
+    if (!isPlaying) {
+      media.currentTime = selectedAudioPreview.currentTime;
+    }
+  }, [isPlaying, selectedAsset, selectedAudioPreview]);
 
   useEffect(() => {
     setHistory([]);
@@ -97,17 +113,27 @@ export function EditorScreen() {
   // Preview playback: drive the selected video or audio element only while foregrounded.
   useEffect(() => {
     const media = previewVideoRef.current;
-    if ((!assetCanRenderAsVideo(selectedAsset) && !assetCanRenderAsAudio(selectedAsset)) || !media) {
+    const isAudio = assetCanRenderAsAudio(selectedAsset);
+    if ((!assetCanRenderAsVideo(selectedAsset) && !isAudio) || !media) {
       return;
     }
     if (isPlaying && screenActive) {
+      // Timeline playback waits until an audio item's placement before starting its
+      // source trim. Once the playhead leaves the item, pause the selected audition.
+      if (isAudio && selectedAudioPreview?.beforePlacement) {
+        return;
+      }
+      if (isAudio && selectedAudioPreview?.afterPlacement) {
+        media.pause();
+        return;
+      }
       media.play().catch(() => setIsPlaying(false));
       return;
     }
     media.pause();
     // Re-run only when the selected clip changes (by id), not on every asset-object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, selectedAsset?.id, screenActive]);
+  }, [isPlaying, selectedAsset?.id, screenActive, selectedAudioPreview?.afterPlacement, selectedAudioPreview?.beforePlacement]);
 
   // Playhead transport: a rAF loop advances the playhead across the whole timeline while
   // playing, wrapping to 0 at the end. Only runs while foregrounded.
@@ -767,6 +793,7 @@ export function EditorScreen() {
           previewVideoRef={previewVideoRef}
           resolutionLabel={`${activeTimeline.width} × ${activeTimeline.height}`}
           selectedAsset={selectedAsset}
+          selectedAudioMuted={selectedAudioPreview?.muted ?? false}
         />
         <GenerationRail
           contextActions={contextActions}
