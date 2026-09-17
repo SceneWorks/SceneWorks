@@ -151,6 +151,9 @@ pub fn reconcile_cut(previous: &Value, next: &mut Value, next_revision: u64) {
     if next.get("filmAssembly").is_none() && previous.get("filmAssembly").is_some() {
         next["filmAssembly"] = previous["filmAssembly"].clone();
     }
+    if !next.get("filmAssembly").is_some_and(Value::is_object) {
+        return;
+    }
     let old = pictures(previous);
     let present: Vec<(String, String, String, f64)> = pictures(next)
         .iter()
@@ -187,7 +190,11 @@ pub fn reconcile_cut(previous: &Value, next: &mut Value, next_revision: u64) {
             deleted.remove(shot);
         }
     }
-    if let Some(runs) = next["filmAssembly"]["runs"].as_object_mut() {
+    if let Some(runs) = next
+        .get_mut("filmAssembly")
+        .and_then(|assembly| assembly.get_mut("runs"))
+        .and_then(Value::as_object_mut)
+    {
         for (run, data) in runs {
             let mut ordered: Vec<_> = present.iter().filter(|(r, _, _, _)| r == run).collect();
             ordered.sort_by(|a, b| a.3.total_cmp(&b.3));
@@ -534,6 +541,20 @@ mod tests {
     fn send(cut: &mut Value, shot: &str, attempt: u64, length: f64) {
         deliver(cut, delivery(shot, attempt), |_| Ok(length)).unwrap();
     }
+    #[test]
+    fn reconciling_an_ordinary_timeline_does_not_add_film_metadata() {
+        let previous = cut();
+        let mut next = previous.clone();
+        next["name"] = json!("Edited cut");
+        reconcile_cut(&previous, &mut next, 2);
+        assert!(next.get("filmAssembly").is_none());
+
+        let mut sparse = previous.clone();
+        sparse["filmAssembly"] = json!({"schemaVersion": 1});
+        reconcile_cut(&previous, &mut sparse, 2);
+        assert_eq!(sparse["filmAssembly"], json!({"schemaVersion": 1}));
+    }
+
     #[test]
     fn out_of_order_delivery_replay_and_user_deletion_are_idempotent() {
         let mut saved = cut();
