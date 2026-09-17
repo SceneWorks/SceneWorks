@@ -21,7 +21,30 @@ describe("audioPreviewState", () => {
       currentTime: 0.75,
       muted: false,
       playbackRate: 1,
-      volume: 0.2,
+      gain: 0.2,
+    });
+  });
+
+  it("preserves the export-supported above-unity gain product", () => {
+    expect(audioPreviewState(
+      { ...item, volume: 2, fadeInSeconds: 0, fadeOutSeconds: 0 },
+      { ...track, gain: 4 },
+      3,
+    ).gain).toBe(8);
+    expect(audioPreviewState({ ...item, volume: 0 }, { ...track, gain: 4 }, 3).gain).toBe(0);
+    expect(audioPreviewState(
+      { ...item, volume: 99, fadeInSeconds: 0, fadeOutSeconds: 0 },
+      { ...track, gain: 99 },
+      3,
+    ).gain).toBe(8);
+  });
+
+  it("applies fade-out and pins the source time at the source-out boundary", () => {
+    expect(audioPreviewState(item, track, 5).gain).toBeCloseTo(0.2);
+    expect(audioPreviewState(item, track, 6)).toMatchObject({
+      afterPlacement: true,
+      currentTime: 4.25,
+      muted: true,
     });
   });
 

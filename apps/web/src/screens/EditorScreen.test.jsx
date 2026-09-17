@@ -44,6 +44,7 @@ async function flush() {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -451,6 +452,88 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(preview.currentTime).toBeCloseTo(0.125);
     expect(preview.volume).toBe(0);
     expect(preview.muted).toBe(true);
+  });
+
+  it("routes boosted preview gain from the first pointer and replaces graphs only with media elements", async () => {
+    const events = [];
+    const contexts = [];
+    const sourcedElements = new WeakSet();
+    class FakeAudioContext {
+      constructor() {
+        this.state = "suspended";
+        this.destination = {};
+        this.source = { connect: vi.fn(), disconnect: vi.fn() };
+        this.gainNode = { connect: vi.fn(), disconnect: vi.fn(), gain: { value: 1 } };
+        this.createMediaElementSource = vi.fn((element) => {
+          if (sourcedElements.has(element)) throw new DOMException("Element already has a source node", "InvalidStateError");
+          sourcedElements.add(element);
+          return this.source;
+        });
+        this.createGain = vi.fn(() => this.gainNode);
+        this.resume = vi.fn(async () => { events.push("resume"); this.state = "running"; });
+        this.close = vi.fn(async () => {});
+        contexts.push(this);
+      }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockImplementation(() => {
+      events.push("play");
+      return Promise.resolve();
+    });
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+
+    const audio = { id: "boosted", type: "audio", displayName: "Boosted", url: "/boosted.wav", file: { mimeType: "audio/wav", duration: 3 } };
+    const video = { id: "video", type: "video", displayName: "Picture", url: "/picture.mp4", file: { mimeType: "video/mp4", duration: 2 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks[0].items.push({ id: "video_1", trackId: "track_main", assetId: "video", type: "video", displayName: "Picture", sourceIn: 0, sourceOut: 2, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 1 });
+    timeline.tracks.push({
+      id: "track_audio",
+      kind: "audio",
+      gain: 4,
+      muted: false,
+      items: [
+        { id: "audio_1", trackId: "track_audio", assetId: "boosted", type: "audio", displayName: "Boosted A", sourceIn: 0.25, sourceOut: 2.25, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 2, fadeInSeconds: 0, fadeOutSeconds: 0 },
+        { id: "audio_2", trackId: "track_audio", assetId: "boosted", type: "audio", displayName: "Boosted B", sourceIn: 0.5, sourceOut: 2.5, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 2, fadeInSeconds: 0, fadeOutSeconds: 0 },
+      ],
+    });
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio, video], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-audio-clip").click());
+
+    const preview = container.querySelector(".ve-program audio");
+    expect(preview.currentTime).toBeCloseTo(0.25);
+    expect(preview.muted).toBe(false);
+    expect(contexts).toHaveLength(0);
+
+    act(() => container.querySelector(".ve-play").click());
+    expect(play).toHaveBeenCalled();
+    expect(preview.volume).toBe(1);
+    expect(preview.muted).toBe(false);
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
+    expect(contexts[0].gainNode.gain.value).toBe(8);
+    expect(events.slice(0, 2)).toEqual(["resume", "play"]);
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
+
+    act(() => container.querySelector(".ve-play").click());
+    act(() => container.querySelectorAll(".ve-audio-clip")[1].click());
+    expect(container.querySelector(".ve-program audio")).toBe(preview);
+    act(() => container.querySelector(".ve-play").click());
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledTimes(1);
+
+    act(() => container.querySelector(".ve-play").click());
+    act(() => container.querySelector(".ve-clip").click());
+    await act(async () => Promise.resolve());
+    expect(contexts[0].close).toHaveBeenCalledTimes(1);
+
+    act(() => container.querySelector(".ve-audio-clip").click());
+    const replacementPreview = container.querySelector(".ve-program audio");
+    expect(replacementPreview).not.toBe(preview);
+    act(() => container.querySelector(".ve-play").click());
+    expect(contexts).toHaveLength(2);
+    expect(contexts[1].createMediaElementSource).toHaveBeenCalledWith(replacementPreview);
+    expect(contexts[1].gainNode.gain.value).toBe(8);
   });
 
   it("accepts frame-derived fractional video trim endpoints through native form validity", () => {
