@@ -1,0 +1,295 @@
+{
+  // Courier / workshop / red parcel, PHASE 2 — the TURBO variant of `plan.v2.jsonc` (epic 23401,
+  // sc-23406). Byte-for-byte the same film as its sibling: the same id, the same six beats, the
+  // same six shot ids, the same durations, geometry, seeds, spoken lines and bound reference roles.
+  // The ONLY difference is `model.loras`, which selects the step-distill accelerators.
+  //
+  // --------------------------------------------------------------------------------------------
+  // WHY THIS FILE EXISTS
+  //
+  // The 50-step base regime renders a minute of film in hours. sc-18729 measured 12.6 min against
+  // 2.42 h at 1344x768 (11.57x), with a matched-geometry floor of 7.05x at this plan's own 576x320.
+  // That is the difference between a plan a user runs and a plan a user reads about — so the turbo
+  // recipe is the path most runs take, and this is the plan that takes it.
+  //
+  // Both files are kept for the same reason `plan.jsonc` is kept beside `plan.v2.jsonc`: the base
+  // regime is what a turbo take is JUDGED against. Quality here is a different sample, not a
+  // degraded one, and the only way to say which is which is to render both.
+  //
+  // --------------------------------------------------------------------------------------------
+  // WHICH ADAPTERS, AND WHY THESE TWO
+  //
+  // The plan declares the LoRAs ONCE on the family, exactly as it declares `tier` once. Each
+  // catalog entry carries the `modelIds` allowlist naming the partition it was distilled for, and
+  // the compiler routes each id to the shots whose resolved partition it is declared for. So one
+  // list covers a mixed plan with no per-shot bookkeeping.
+  //
+  //   minimax_h3_ref2v_turbo_4step  modelIds ["minimax_h3_ref"] — 4 NFE, video shift 12, audio 3.
+  //                                 It distils the REFERENCE-conditioned path, which is the path
+  //                                 every one of this plan's six shots takes. It is the only
+  //                                 published ref2v accelerator, so there is no choice to make.
+  //
+  //   minimax_h3_turbo_4step_v01    modelIds ["minimax_h3"] — 4 NFE, video shift 12, audio 3.
+  //                                 The BASE-partition entry. Every shot here resolves to
+  //                                 `minimax_h3_ref`, so nothing in THIS plan dispatches it; it is
+  //                                 declared so the file states one regime for the whole family and
+  //                                 keeps working unchanged if a shot is edited to drop its
+  //                                 reference roles.
+  //
+  // 4step_v01 rather than 8step, on two grounds and not on step count alone:
+  //
+  //   1. SCHEDULE PARITY WITH THE REF2V FILE. Both are the v0.1 544p training canvas at the same
+  //      (4 NFE, video shift 12.0, audio shift 3.0) triple. A mixed plan therefore samples its base
+  //      shots and its reference shots on ONE schedule, so the two halves of a film are comparable
+  //      to each other. `minimax_h3_turbo_8step` is the v1.0 file at 8 NFE: pairing it with the
+  //      v0.1 ref2v adapter would render the same sequence on two different regimes and two
+  //      different adapter versions, which is the shape of comparison nobody can read.
+  //   2. TRAINING CANVAS. This plan renders 576x320. Both 544p files match it; the 768p file
+  //      (`minimax_h3_turbo_4step_768p`, video shift 6) is trained at 1344x768 and is the wrong
+  //      canvas here — and its `modelIds` would put it on the base partition anyway.
+  //
+  // The cost of 4 NFE against 8 is a quality axis, not a correctness one, and it is the axis the
+  // base `plan.v2.jsonc` exists to measure against. A run that wants the 8-step file edits this one
+  // line; a run that wants the full 50 steps runs `plan.v2.jsonc`.
+  //
+  // `model.advanced.steps` is deliberately NOT set. Omitted, the recipe's own 4 governs; setting it
+  // would override the count the adapter was distilled for, which is the off-distribution render
+  // the recipe exists to prevent. It is there for a caller who knows the checkpoint.
+  //
+  //   film-harness run \
+  //     --plan       config/film-harness/courier-workshop/plan.v2.turbo.jsonc \
+  //     --references ~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc \
+  //     --out        film-harness-runs/courier-v2-turbo
+  //
+  // --------------------------------------------------------------------------------------------
+  // Everything below this line is `plan.v2.jsonc` verbatim, apart from `model.loras`.
+  // --------------------------------------------------------------------------------------------
+  // Courier / workshop / red parcel, PHASE 2 — the REFERENCE-CONDITIONED plan (epic 23401,
+  // sc-23405). Same six beats, same six shot ids, same durations, geometry and spoken lines as
+  // `plan.jsonc`; the only thing that changes is what each shot is conditioned ON.
+  //
+  //   plan.jsonc     phase 1 baseline: no shot binds referenceRoles, so every shot resolves to
+  //                  `minimax_h3` and the two keyframe shots start on the approved workshop plate.
+  //   plan.v2.jsonc  this file: EVERY shot is `reference_to_video` and binds the approved roles it
+  //                  depicts, so every shot resolves to `minimax_h3_ref`.
+  //
+  // Both are kept. The baseline is what a reference-conditioned take is judged against — it is the
+  // same film with the identity of the courier, the recipient, the parcel and the room left to the
+  // model, which is exactly the thing references are supposed to fix.
+  //
+  // REFERENCES ARE OPTIONAL INPUT (E1). A user who supplies no pack runs `plan.jsonc` and nothing
+  // about the harness changes. This plan is what the harness does when they DO supply one.
+  //
+  // --------------------------------------------------------------------------------------------
+  // WHICH PACK
+  //
+  // The roles below are the ones every courier pack declares, so this plan validates against
+  //
+  //   * the checked-in stand-in pack beside it, `references.jsonc` — deterministic placeholder
+  //     plates (`film-harness fixture-images`). It proves the PLUMBING: the right checkpoint, the
+  //     right payload, the right record. It cannot prove likeness, because the plates are flat
+  //     colour.
+  //   * a GENERATED pack written by `film-harness make-references --spec references.spec.jsonc`
+  //     (sc-23403) — Krea 2 plates of one courier, one recipient, one red parcel, one workshop and
+  //     one workbench, all from the same verbatim workshop description. This is the pack the
+  //     sc-23405 evidence was produced against:
+  //     `~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc`. It is NOT
+  //     checked in (PNGs), so it is named by `--references` at the command line.
+  //   * a pack the user supplied themselves, with the same seven roles.
+  //
+  //   film-harness run \
+  //     --plan       config/film-harness/courier-workshop/plan.v2.jsonc \
+  //     --references ~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc \
+  //     --out        film-harness-runs/courier-v2
+  //
+  // --------------------------------------------------------------------------------------------
+  // WHAT EACH SHOT BINDS
+  //
+  // Every shot binds `workshop_location` and `workbench_table` — one room and one bench across all
+  // six cuts, including the two close-ups, where the plate is what tells the model whose sawdust
+  // and whose light this is — plus `red_parcel` and whichever person is on screen. `house_style`
+  // stays in `continuityRoles` only: it is a style reference, and MiniMax-H3's Ref2VA treats every
+  // bound image as a subject to depict, so binding a look as a subject asks for a shot OF the look.
+  //
+  // `minimax_h3_ref` declares `maxReferenceAssets: 9`; the widest shot here binds four.
+  //
+  // `conditioning.referenceRoles` order is the order the compiled request's `referenceAssetIds`
+  // keeps, so it is written subject-first: who the shot is about, then what they handle, then
+  // where they are.
+  //
+  // --------------------------------------------------------------------------------------------
+  // BEAT IDS
+  //
+  // Each shot carries the `beatId` of the beat it covers in `brief.jsonc`, so `film-harness
+  // compile` re-checks coverage against that brief (it picks the sibling up with no `--brief`) and
+  // a hand edit that drops the parcel out of the handover is refused rather than compiled. The
+  // phase-1 `plan.jsonc` carries none, which is the ordinary hand-authored case and stays legal.
+  //
+  // --------------------------------------------------------------------------------------------
+  // BUDGET
+  //
+  // `maxShotSeconds` is 10800, the same per-shot ceiling `plan.ref.jsonc` measured the reference
+  // partition against (sc-23402): its cold load — the 18.78 GB `transformer_ref` DiT plus the
+  // staged text encoder — took ~21 minutes before the first denoise step, and a
+  // reference-conditioned step at 576x320 costs ~143 s. `plan.jsonc`'s 2700 s cuts a legitimate
+  // reference shot at roughly step 14 of 50. `maxRunSeconds` is six of those ceilings (64800), so
+  // the run bound is the shot bound times the shots and neither is a runaway.
+  "schemaVersion": 2,
+  "id": "courier-workshop-v2",
+  "version": 1,
+  "title": "Courier at the Workshop (references)",
+  "synopsis": "A courier enters a cluttered workshop carrying a red parcel, sets it on the workbench and leaves; the recipient comes in, finds the parcel and opens it.",
+  "model": {
+    "id": "minimax_h3",
+    "tier": "q4",
+    "fps": 24,
+    "resolution": "576x320",
+    // Declared once on the FAMILY; the compiler routes each id to the partitions its catalog entry
+    // allows. See the header for why these two and not the 8-step or 768p files.
+    "loras": ["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]
+  },
+  "limits": {
+    "maxRunSeconds": 64800,
+    "maxShotSeconds": 10800,
+    "maxAttemptsPerShot": 1,
+    "maxMemoryGb": 96
+  },
+  // Sound is unchanged from `plan.jsonc` (sc-22712, sc-23404): three independently controlled
+  // buses, the two beds placed ONCE across the whole sequence, and three spoken lines placed per
+  // shot. The pack's three `dialogue` entries carry `text` rather than a file, so the run speaks
+  // them through `POST /api/v1/audio/jobs` and the film says out loud what the plan says it says.
+  "sound": {
+    "generatedAudio": "mute",
+    "dialogue": { "gain": 1.0, "muted": false },
+    "ambience": {
+      "role": "workshop_room_tone",
+      "gain": 0.35,
+      "fadeInSeconds": 1.0,
+      "fadeOutSeconds": 1.5
+    },
+    "music": {
+      "role": "main_theme",
+      "gain": 0.2,
+      "startSeconds": 0.0,
+      "fadeInSeconds": 2.0,
+      "fadeOutSeconds": 3.0
+    }
+  },
+  "shots": [
+    {
+      "id": "SH010",
+      "beatId": "arrival",
+      "beat": "Establish the empty workshop; the door opens.",
+      "framing": "wide static, eye level, door camera-left, workbench centre",
+      "prompt": "A quiet, cluttered woodworking workshop in warm late-afternoon light. Tools hang on a pegboard, raw timber is stacked against the walls, sawdust lies on the long wooden workbench in the centre of frame, a closed door on the left. After a beat the door opens and the courier in the blue work jacket steps into the doorway holding the small bright red parcel. Static wide shot, natural light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, door closed, workbench clear.",
+      "endState": "Door open, courier standing in the doorway holding the red parcel, workbench still clear.",
+      "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
+      },
+      "seed": 23405,
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH020",
+      "beatId": "approach",
+      "beat": "The courier crosses to the workbench with the parcel.",
+      "framing": "medium, slow push-in following the courier to the bench",
+      "prompt": "The courier in the blue work jacket walks in from the left of a cluttered woodworking workshop carrying the small bright red parcel with both hands and approaches the long wooden workbench in the centre, hand tools on the pegboard behind them. Warm late-afternoon light, sawdust in the air, natural handheld feel, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier in the doorway with the red parcel.",
+      "endState": "Courier standing at the workbench, parcel still in hand.",
+      "dialogue": "Courier: \"Delivery — I'll leave it on the bench.\"",
+      // Placed against SH020 so the two-shot smoke (`--shots SH010,SH020`) exercises all three
+      // buses: a line inside the second shot, with both beds running continuously under the cut.
+      "dialogueClip": { "role": "courier_line", "offsetSeconds": 1.2, "gain": 1.0 },
+      "sound": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
+      },
+      "seed": 23406,
+      "dependsOn": [{ "shotId": "SH010", "kind": "continuity", "note": "The courier and the parcel enter in SH010; SH020 starts from that doorway." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH030",
+      "beatId": "handover",
+      "beat": "The courier places the red parcel on the workbench.",
+      "framing": "close on the workbench surface, hands and parcel",
+      "prompt": "Close-up on the long wooden workbench of a cluttered woodworking workshop, dusted with sawdust. Two hands in the sleeves of the courier's blue work jacket lower the small bright red parcel onto the bench and let go, then withdraw out of frame. Warm late-afternoon light, shallow depth of field, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Parcel in the courier's hands above the bench.",
+      "endState": "Red parcel resting on the workbench, hands gone.",
+      "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["courier", "red_parcel", "workbench_table", "workshop_location"]
+      },
+      "seed": 23407,
+      "dependsOn": [{ "shotId": "SH020", "kind": "continuity", "note": "SH030 starts with the parcel in the hands SH020 brought to the bench." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH040",
+      "beatId": "departure",
+      "beat": "The courier leaves; the parcel stays.",
+      "framing": "wide static, same setup as SH010",
+      "prompt": "A wide view of the cluttered woodworking workshop with the small bright red parcel resting on the long wooden workbench, hand tools on the pegboard and raw timber stacked against the walls. The courier in the blue work jacket walks away from the bench toward the door on the left, steps out and pulls the door closed behind them. The parcel stays on the bench. Static wide shot, warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier at the bench, red parcel on the bench.",
+      "endState": "Door closed, workshop empty except for the red parcel on the bench.",
+      "sound": "Footsteps receding, door creak and latch, then room tone.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
+      },
+      "seed": 23408,
+      "dependsOn": [{ "shotId": "SH030", "kind": "continuity", "note": "SH040 starts from the parcel SH030 left resting on the workbench." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH050",
+      "beatId": "discovery",
+      "beat": "The recipient enters and notices the parcel.",
+      "framing": "medium, recipient enters camera-left, bench centre",
+      "prompt": "The recipient in the grey work apron with rolled sleeves enters the cluttered woodworking workshop through the door on the left, wiping her hands on a rag, hand tools on the pegboard behind her. She stops as she notices the small bright red parcel sitting on the long wooden workbench in the centre and walks toward it. Warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, red parcel on the bench, door closed.",
+      "endState": "Recipient standing at the bench looking down at the parcel.",
+      "dialogue": "Recipient (quietly): \"Huh. That's not mine.\"",
+      "dialogueClip": { "role": "recipient_line", "offsetSeconds": 2.6, "gain": 1.0 },
+      "sound": "Door opening, footsteps, a rag dropped on the bench, room tone.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["recipient", "red_parcel", "workshop_location", "workbench_table"]
+      },
+      "seed": 23409,
+      "dependsOn": [{ "shotId": "SH040", "kind": "continuity", "note": "SH050 starts from the empty workshop SH040 closed the door on." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "recipient", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH060",
+      "beatId": "opening",
+      "beat": "The recipient opens the parcel.",
+      "framing": "close on hands and parcel, slight high angle",
+      "prompt": "Close-up on the small bright red parcel on the sawdust-covered wooden workbench of the cluttered woodworking workshop. The recipient's hands, with the grey apron sleeve, tear the tape, fold back the flaps and lift the lid, and a soft warm glow from inside lights her fingers. Shallow depth of field, warm late-afternoon light, film grain.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Sealed red parcel on the bench, recipient's hands entering frame.",
+      "endState": "Parcel open, flaps folded back, hands resting on the bench beside it.",
+      "dialogue": "Recipient (whisper): \"Oh. Oh, that's lovely.\"",
+      "dialogueClip": { "role": "recipient_reveal_line", "offsetSeconds": 3.0, "gain": 0.8, "fadeOutSeconds": 0.4 },
+      "sound": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
+      "conditioning": {
+        "mode": "reference_to_video",
+        "referenceRoles": ["recipient", "red_parcel", "workbench_table", "workshop_location"]
+      },
+      "seed": 23410,
+      "dependsOn": [{ "shotId": "SH050", "kind": "continuity", "note": "SH060 opens the parcel SH050 found sealed on the bench." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "recipient", "red_parcel", "house_style"]
+    }
+  ]
+}

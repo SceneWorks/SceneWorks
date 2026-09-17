@@ -71,6 +71,34 @@ print(json.dumps(result,separators=(',',':')))`;
   }
   return Object.fromEntries(required.map((name) => [name, Buffer.from(encoded[name], "base64")]));
 }
+async function boundedRouteSummary(archive) {
+  const program = String.raw`import hashlib,json,pathlib,stat,sys,zipfile
+archive=pathlib.Path(sys.argv[1]); names=set(); total=0
+with zipfile.ZipFile(archive) as z:
+ infos=z.infolist()
+ if len(infos)>20000: raise ValueError('archive entry limit')
+ for i in infos:
+  p=pathlib.PurePosixPath(i.filename); total+=i.file_size
+  if p.is_absolute() or '..' in p.parts or '\\' in i.filename or i.filename in names or stat.S_ISLNK(i.external_attr>>16) or total>512*1024*1024: raise ValueError('unsafe failed execution archive')
+  names.add(i.filename)
+ matches=[i for i in infos if not i.is_dir() and (i.filename=='vector-generate-route.ndjson' or i.filename.endswith('/vector-generate-route.ndjson'))]
+ if len(matches)!=1 or matches[0].file_size>64*1024*1024: raise ValueError('missing, ambiguous, or oversized route record')
+ digest=hashlib.sha256(); cases={}
+ with z.open(matches[0]) as stream:
+  for raw in stream:
+   if len(raw)>2*1024*1024: raise ValueError('oversized route line')
+   digest.update(raw); record=json.loads(raw); job=record.get('job') or {}; result=job.get('result') or {}; evidence=result.get('terminalEvidence') or job.get('terminalEvidence')
+   if evidence is not None:
+    case_id=record.get('case_id')
+    if not isinstance(case_id,str): raise ValueError('route case lacks identity')
+    cases[case_id]={k:evidence.get(k) for k in ['accepted','finishReason','generatedTokens','generatedBytes','rejectionStage','rejectionCode','rejectionReason','providerId','backend','modelId','modelRepository','modelRevision']}
+ print(json.dumps({'sha256':digest.hexdigest(),'size':matches[0].file_size,'cases':cases},separators=(',',':'))) `;
+  try {
+    return JSON.parse((await execFile(python(), ["-c", program, archive], { maxBuffer: 8 * 1024 * 1024 })).stdout);
+  } catch (error) {
+    fail(`cannot inspect failed execution route: ${error.message}`);
+  }
+}
 const parseRecord = (records, name) => {
   try { return JSON.parse(records[name]); } catch { fail(`invalid failed execution ${name}`); }
 };
@@ -92,6 +120,21 @@ export async function validateNativeExecutionArchives(value, archives) {
   if (provenance.campaign_run_id !== value.campaign_id || provenance.inference_revision !== value.inference_revision || provenance.permanent_pin !== value.inference_revision || provenance.tuple !== expected.tuple || String(provenance.workflow_run_id) !== value.workflow.run_id || provenance.workflow_run_attempt !== value.workflow.run_attempt || provenance.service?.sceneworks_revision !== value.sceneworks_revision || provenance.service?.inference_revision !== value.inference_revision || provenance.service?.tuple !== expected.tuple || provenance.service?.worker?.model_id !== expected.model_id || provenance.service?.worker?.provider_id !== "mlx-starvector-1b" || provenance.service?.models?.["starvector-1b"]?.revision !== expected.model_revision) fail("native preflight provenance differs from failed execution");
   const controller = parseRecord(rawRecords, "controller-failure.json");
   if (controller.campaign_run_id !== value.campaign_id || controller.permanent_pin !== value.inference_revision || controller.tuple !== expected.tuple || controller.status !== "failed") fail("native controller failure identity differs");
+  if (expected.code === "native_quality_budget_underprovisioned") {
+    const rawRoute = await boundedRouteSummary(archives.raw), combinedRoute = await boundedRouteSummary(archives.combined);
+    if (rawRoute.sha256 !== combinedRoute.sha256 || rawRoute.size !== combinedRoute.size) fail("combined archive substituted vector route evidence");
+    const quality = Object.entries(rawRoute.cases).filter(([caseId]) => /^quality-v1-(?:0|[1-9]|1[0-9])$/.test(caseId));
+    const accepted = quality.filter(([, item]) => item.accepted === true);
+    const rejected = quality.filter(([, item]) => item.accepted === false);
+    const tokenLimits = rejected.filter(([, item]) => item.finishReason === "token_limit" && item.rejectionStage === "generation_limit" && item.rejectionCode === "token_limit" && item.generatedTokens === expected.configured_max_new_tokens);
+    const sanitizer = rejected.filter(([, item]) => item.finishReason === "complete_root" && item.rejectionStage === "sanitizer");
+    if (quality.length !== expected.observed_quality_cases || accepted.length !== expected.accepted_quality_cases || rejected.length !== expected.rejected_quality_cases || tokenLimits.length !== expected.token_limit_quality_cases || sanitizer.length !== expected.sanitizer_quality_cases || accepted.length + (120 - quality.length) !== expected.max_possible_accepted_quality_cases || expected.required_accepted_quality_cases !== 114 || expected.required_max_new_tokens !== 7933) fail("native route does not prove the declared underprovisioned quality budget");
+    if (quality.some(([, item]) => item.providerId !== "mlx-starvector-1b" || item.backend !== "mlx" || item.modelId !== expected.model_id || item.modelRepository !== expected.model_repository || item.modelRevision !== expected.model_revision)) fail("native route provider/model identity differs from failed execution");
+    if (!/^[a-f0-9]{64}$/.test(expected.controller_failure_sha256 ?? "") || sha(rawRecords["controller-failure.json"]) !== expected.controller_failure_sha256) fail("native controller failure bytes differ from the declared execution");
+    const budgets = tuple?.image_quality?.map((row) => row.detailBudget);
+    if (budgets?.length !== 120 || budgets.some((budget) => budget?.maxNewTokens !== expected.configured_max_new_tokens || budget.maxSvgBytes !== 262144 || budget.maxWallTimeMs !== 120000)) fail("native case bundle does not prove the declared underprovisioned budget");
+    return value;
+  }
   const logRecords = rawRecords["product-service-worker.stdout.log"].toString("utf8").trim().split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { fail("invalid native worker evidence log"); } });
   const exactError = `vector_model_unavailable: exact receipt-backed snapshot ${expected.model_repository}@${expected.model_revision} is missing or unproven`;
   const failures = logRecords.filter((record) => record.event === "utility_job_failed");
@@ -157,7 +200,9 @@ export function validateExecutionPredecessor(config, run, artifact, jobs) {
     }
     return value;
   }
-  if (value.failure?.code !== "native_model_receipt_unproven" || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b" || value.failure.evidence_schema_version !== 1 || value.failure.model_id !== "starvector_1b" || value.failure.model_repository !== "starvector/starvector-1b-im2svg" || !/^[a-f0-9]{40}$/.test(value.failure.model_revision ?? "")) fail("invalid native execution failure identity");
+  const receiptFailure = value.failure?.code === "native_model_receipt_unproven";
+  const budgetFailure = value.failure?.code === "native_quality_budget_underprovisioned" && value.failure.configured_max_new_tokens === 4000 && value.failure.required_max_new_tokens === 7933 && value.failure.observed_quality_cases === 20 && value.failure.accepted_quality_cases === 11 && value.failure.rejected_quality_cases === 9 && value.failure.token_limit_quality_cases === 7 && value.failure.sanitizer_quality_cases === 2 && value.failure.required_accepted_quality_cases === 114 && value.failure.max_possible_accepted_quality_cases === 111 && /^[a-f0-9]{64}$/.test(value.failure.controller_failure_sha256 ?? "");
+  if ((!receiptFailure && !budgetFailure) || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b" || value.failure.evidence_schema_version !== 1 || value.failure.model_id !== "starvector_1b" || value.failure.model_repository !== "starvector/starvector-1b-im2svg" || !/^[a-f0-9]{40}$/.test(value.failure.model_revision ?? "")) fail("invalid native execution failure identity");
   const expectedRoles = ["upstream", "raw", "combined"], inputs = value.source_artifacts, artifacts = Array.isArray(artifact) ? artifact : [];
   if (!Array.isArray(inputs) || inputs.length !== expectedRoles.length || artifacts.length !== expectedRoles.length) fail("native execution artifact census differs");
   for (const [index, role] of expectedRoles.entries()) {
@@ -165,7 +210,8 @@ export function validateExecutionPredecessor(config, run, artifact, jobs) {
     const name = role === "upstream" ? `starvector-upstream-${value.campaign_id}` : role === "raw" ? `starvector-terminal-mlx-1b-${value.campaign_id}` : `starvector-terminal-receipt-${value.campaign_id}`;
     if (expected?.role !== role || !/^[1-9][0-9]*$/.test(expected.id ?? "") || expected.name !== name || !Number.isSafeInteger(expected.size) || expected.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(expected.digest ?? "") || String(observed?.id) !== expected.id || observed.name !== expected.name || observed.size_in_bytes !== expected.size || observed.digest !== expected.digest || observed.expired !== false || String(observed.workflow_run?.id) !== workflow.run_id || observed.workflow_run?.head_sha !== workflow.head_sha) fail(`authenticated native ${role} artifact differs`);
   }
-  for (const [stage, conclusion] of [["upstream-reference", "success"], ["mlx-1b", "failure"], ["mlx-8b", "skipped"], ["cuda-1b", "skipped"], ["cuda-8b", "skipped"], ["seal-receipt", "failure"]]) {
+  const expectedConclusions = receiptFailure ? [["upstream-reference", "success"], ["mlx-1b", "failure"], ["mlx-8b", "skipped"], ["cuda-1b", "skipped"], ["cuda-8b", "skipped"], ["seal-receipt", "failure"]] : [["upstream-reference", "success"], ["mlx-1b", "cancelled"], ["mlx-8b", "cancelled"], ["cuda-1b", "cancelled"], ["cuda-8b", "cancelled"], ["seal-receipt", "failure"]];
+  for (const [stage, conclusion] of expectedConclusions) {
     const matches = jobs.jobs.filter(job => job.name === stage || job.name.endsWith(` / ${stage}`));
     if (matches.length !== 1 || matches[0].head_sha !== workflow.head_sha || matches[0].conclusion !== conclusion) fail(`native execution predecessor did not leave ${stage} in the required state`);
   }

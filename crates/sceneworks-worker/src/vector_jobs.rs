@@ -1995,6 +1995,10 @@ fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
                             "provider SVG dc:format metadata is not recognized".to_owned(),
                         ));
                     }
+                } else if current == Some(RawSvgElementKind::Metadata) {
+                    // Exporters such as potrace place inert provenance text directly in the
+                    // metadata container. The entire container is omitted from canonical output;
+                    // its children and attributes still pass the strict metadata classifiers.
                 } else if matches!(
                     current,
                     Some(RawSvgElementKind::Title | RawSvgElementKind::DcTitle)
@@ -4425,7 +4429,18 @@ mod tests {
             assert!(!canonical.svg.contains(discarded));
         }
 
+        let potrace = sanitize_svg(concat!(
+            "<svg><metadata>",
+            "Created by potrace 1.11, written by Peter Selinger 2001-2013",
+            "</metadata><g><path d=\"M0 0H1V1Z\"/></g></svg>",
+        ))
+        .expect("exact inert potrace provenance metadata");
+        assert!(potrace.svg.contains("<path"));
+        assert!(!potrace.svg.contains("Created by potrace"));
+
         for malicious in [
+            "<svg>Created by potrace 1.11, written by Peter Selinger 2001-2013<path d=\"M0 0H1V1Z\"/></svg>",
+            "<svg><g>Created by potrace 1.11, written by Peter Selinger 2001-2013</g></svg>",
             "<svg><metadata><script/></metadata></svg>",
             "<svg><metadata><foreignObject/></metadata></svg>",
             "<svg><metadata><rdf:rdf><cc:work rdf:about=\"\"><dc:creator/></cc:work></rdf:rdf></metadata></svg>",

@@ -41,7 +41,7 @@ use sceneworks_core::time::utc_now;
 use serde_json::{json, Map as JsonObject, Value};
 use tokio::time::Instant;
 
-use crate::film_harness::{sha256_hex, ApiTransport, HarnessError, HostFacts};
+use crate::film_harness::{sha256_hex, ApiTransport, HarnessError, HostFacts, PlanCatalog};
 
 /// Repair rounds the planner takes by default when a draft is refused. Small on purpose: a local
 /// 8B refiner that has not satisfied the validator in two corrections is not converging, and every
@@ -427,26 +427,69 @@ pub struct PlannerArtifacts {
 async fn resolve_envelope(
     transport: &dyn ApiTransport,
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     require_installed: bool,
     facts: &HostFacts,
-) -> Result<(JsonObject<String, Value>, PlannerCapabilities), HarnessError> {
-    let entry = crate::film_harness::model_entry_for(transport, &brief.model.id).await?;
+) -> Result<(PlanCatalog, PlannerCapabilities), HarnessError> {
+    // The reference partition is RESOLVED unconditionally here (sc-23402): the draft this envelope
+    // is about to produce does not exist yet, so whether any shot will bind reference roles is not
+    // knowable from the draft, and having the entry in hand costs one catalog read.
+    let catalog = crate::film_harness::plan_catalog_for(transport, &brief.model.id, true).await?;
+    // The lane follows the API HOST's platform, not this process's: `--api` may be another machine.
+    let lane = facts.lane();
+    // Whether this planning run will offer reference conditioning at all is decided from TWO facts
+    // and neither of them is install state (sc-23405):
+    //
+    //   * the catalog SERVES the family's reference partition — an envelope built on an entry the
+    //     API does not hold would offer a mode whose every use is refused per shot; and
+    //   * the pack approves at least one reference the shots could bind — references are OPTIONAL
+    //     (E1), and a user who supplies none gets the phase-1 envelope and the base path.
+    //
+    // Install state is deliberately NOT one of them: what the planner writes must not depend on
+    // which weights happen to be on this disk, or the same brief and pack would produce a
+    // different film on two machines. It is GATED below instead, exactly as `validate` and `run`
+    // gate the partition a selected shot resolves to — a refusal in seconds, naming the partition,
+    // rather than twenty-five minutes of decoding a plan that could never render. A host that
+    // wants the plan anyway passes `--skip-install-check`.
+    let caps = {
+        let base = catalog.base_entry();
+        let widened = base.map(|entry| {
+            let caps = capabilities_for(&brief.model, entry, lane);
+            match catalog.reference_entry() {
+                Some((_, reference)) => caps.with_reference_partition(reference),
+                None => caps,
+            }
+        });
+        widened.map(|caps| caps.narrowed_to_pack(pack))
+    };
+    // The installed step-distill accelerators, offered unless the brief opted out (sc-23406).
+    // Install state IS the filter here — unlike the reference partition's, which is deliberately
+    // host-independent — because an adapter whose weights are not on the render host's disk is a
+    // 400 at enqueue, so offering one would teach the planner an unreachable answer.
+    let caps = match caps {
+        Some(caps) if !brief.prefer_quality => {
+            let installed = crate::film_harness::installed_lora_ids(transport).await?;
+            Some(caps.with_installed_turbo_loras(&installed))
+        }
+        other => other,
+    };
+    let gate_reference = caps
+        .as_ref()
+        .is_some_and(PlannerCapabilities::offers_references);
     // The SAME entry-level gate the dispatch path runs — catalog presence, video type, install
     // state, and the route's own platform-reachability check — rather than a second copy of it.
-    let findings = crate::film_harness::model_entry_findings(
-        &brief.model.id,
-        entry.as_ref(),
+    let findings = crate::film_harness::catalog_entry_findings(
+        &catalog,
         brief.model.tier.as_deref(),
         require_installed,
         facts,
+        gate_reference,
     );
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    let entry = entry.expect("findings are empty only with an entry");
-    // The lane follows the API HOST's platform, not this process's: `--api` may be another machine.
-    let caps = capabilities_for(&brief.model, &entry, facts.lane());
-    Ok((entry, caps))
+    let caps = caps.expect("findings are empty only with an entry");
+    Ok((catalog, caps))
 }
 
 /// Refuse before the first decode when no registered worker can run an LLM job. Without this the
@@ -523,7 +566,7 @@ async fn prepare(
     (
         ProductionBrief,
         ReferencePack,
-        JsonObject<String, Value>,
+        PlanCatalog,
         PlannerCapabilities,
         HostFacts,
     ),
@@ -552,9 +595,15 @@ async fn prepare(
         return Err(HarnessError::Validation(findings));
     }
     let facts = crate::film_harness::host_facts_for(transport).await?;
-    let (entry, caps) =
-        resolve_envelope(transport, &brief, options.require_installed, &facts).await?;
-    let findings = brief_model_findings(&brief, &entry, facts.lane());
+    let (catalog, caps) =
+        resolve_envelope(transport, &brief, &pack, options.require_installed, &facts).await?;
+    let findings = brief_model_findings(
+        &brief,
+        catalog
+            .base_entry()
+            .expect("resolve_envelope refuses without an entry"),
+        facts.lane(),
+    );
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
@@ -568,7 +617,7 @@ async fn prepare(
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    Ok((brief, pack, entry, caps, facts))
+    Ok((brief, pack, catalog, caps, facts))
 }
 
 /// The PLAN-level half of [`film_plan::validate_plan_against_model`], run against the brief's own
@@ -597,7 +646,13 @@ fn brief_model_findings(
         sound: film_plan::PlanSound::default(),
         shots: Vec::new(),
     };
-    film_plan::validate_plan_against_model(&probe, entry, lane)
+    // The probe has NO shots, so no shot can resolve to a partition: a single-entry view is the
+    // whole truth for the plan-level rules this runs.
+    film_plan::validate_plan_against_model(
+        &probe,
+        &film_plan::ModelEntries::single(&brief.model.id, entry),
+        lane,
+    )
 }
 
 fn pack_dir(pack_path: &Path) -> PathBuf {
@@ -614,7 +669,10 @@ pub async fn generate(
     llm: &dyn PlannerLlm,
     options: &PlannerOptions,
 ) -> Result<PlannerArtifacts, HarnessError> {
-    let (brief, pack, entry, caps, facts) = prepare(transport, options).await?;
+    let (brief, pack, catalog, caps, facts) = prepare(transport, options).await?;
+    let entries = catalog
+        .entries()
+        .expect("prepare refuses without a catalog entry");
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
     let mut last_reply;
@@ -645,7 +703,8 @@ pub async fn generate(
                     &plan,
                     &pack,
                     Some(&pack_dir(&options.reference_pack_path)),
-                    Some((&entry, facts.lane())),
+                    Some((&entries, facts.lane())),
+                    Some(&caps),
                 );
                 if findings.is_empty() {
                     break plan;
@@ -702,7 +761,7 @@ pub async fn generate(
         options,
         &plan,
         &pack,
-        &entry,
+        &entries,
         facts.lane(),
         &plan_bytes,
         cost,
@@ -741,34 +800,51 @@ pub async fn compile_existing(
         return Err(HarnessError::Validation(findings));
     }
     let facts = crate::film_harness::host_facts_for(transport).await?;
-    let entry = crate::film_harness::model_entry_for(transport, &plan.model.id).await?;
-    let mut findings = crate::film_harness::model_entry_findings(
+    // Both partitions, when this plan's shots need the reference one (sc-23402).
+    let catalog = crate::film_harness::plan_catalog_for(
+        transport,
         &plan.model.id,
-        entry.as_ref(),
+        plan.shots
+            .iter()
+            .any(|shot| !shot.conditioning.reference_roles.is_empty()),
+    )
+    .await?;
+    // Compile has no shot selection: every shot of this plan is compiled, so the reference
+    // partition is gated exactly when some shot resolves to it (the same condition that decided
+    // whether to resolve it at all, above).
+    let mut findings = crate::film_harness::catalog_entry_findings(
+        &catalog,
         plan.model.tier.as_deref(),
         options.require_installed,
         &facts,
+        plan.shots
+            .iter()
+            .any(|shot| !shot.conditioning.reference_roles.is_empty()),
     );
     if findings.is_empty() {
-        let entry = entry.as_ref().expect("entry present when findings empty");
+        let entries = catalog
+            .entries()
+            .expect("entry present when findings empty");
         findings.extend(film_plan::validate_all(
             &plan,
             &pack,
             Some(&pack_dir(&options.reference_pack_path)),
-            Some((entry, facts.lane())),
+            Some((&entries, facts.lane())),
         ));
     }
     if !findings.is_empty() {
         return Err(HarnessError::Validation(findings));
     }
-    let entry = entry.expect("entry present when findings empty");
+    let entries = catalog
+        .entries()
+        .expect("entry present when findings empty");
     // A brief is not required to recompile a hand-authored plan. When one is available AND the plan
     // carries the beat ids a generated plan records, the coverage is re-checked by identity so a
     // hand edit cannot quietly delete a required beat.
     if let Some(brief) =
         sibling_brief(plan_path, &options.brief_path).map_err(HarnessError::Validation)?
     {
-        let coverage = plan_coverage_findings(&brief, &plan);
+        let coverage = plan_coverage_findings(&brief, &plan, &pack);
         if !coverage.is_empty() {
             return Err(HarnessError::Validation(coverage));
         }
@@ -785,7 +861,7 @@ pub async fn compile_existing(
         options,
         &plan,
         &pack,
-        &entry,
+        &entries,
         facts.lane(),
         &plan_bytes,
         PlannerCost::default(),
@@ -891,7 +967,7 @@ async fn compile_and_write(
     options: &PlannerOptions,
     plan: &ProductionPlan,
     pack: &ReferencePack,
-    entry: &JsonObject<String, Value>,
+    entries: &film_plan::ModelEntries<'_>,
     lane: ModelLane,
     plan_bytes: &[u8],
     mut cost: PlannerCost,
@@ -901,7 +977,9 @@ async fn compile_and_write(
     let mut refined = BTreeMap::new();
     if options.refine_prompts {
         // Read once, not once per shot: the guide is the same for every rewrite in this compile.
-        let guide = resolve_prompt_guide(options, entry)?;
+        // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
+        // even when some shots dispatch on the reference partition (sc-23402).
+        let guide = resolve_prompt_guide(options, entries.base_entry())?;
         for shot in &plan.shots {
             // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
             // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
@@ -925,7 +1003,7 @@ async fn compile_and_write(
         plan,
         pack,
         &CompileInputs {
-            model_entry: entry,
+            entries,
             lane: lane.manifest_key(),
             plan_sha256: &sha256_hex(plan_bytes),
             compiled_at: &utc_now(),
@@ -1161,7 +1239,18 @@ mod tests {
             }]
         }))
         .unwrap();
-        let findings = plan_coverage_findings(&brief, &plan);
+        // No beat here declares `requiredRoles`, so the pack only has to exist.
+        let pack: sceneworks_core::film_plan::ReferencePack =
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "id": "courier-refs",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "Blue jacket." }
+                ]
+            }))
+            .unwrap();
+        let findings = plan_coverage_findings(&brief, &plan, &pack);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings[0].message.contains("\"discovery\""),
@@ -1171,6 +1260,6 @@ mod tests {
         // A hand-authored plan carries no beat ids and answers to no brief.
         let mut hand_authored = plan.clone();
         hand_authored.shots[0].beat_id = None;
-        assert!(plan_coverage_findings(&brief, &hand_authored).is_empty());
+        assert!(plan_coverage_findings(&brief, &hand_authored, &pack).is_empty());
     }
 }

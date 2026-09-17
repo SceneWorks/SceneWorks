@@ -8,6 +8,10 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-fullscreen",
+    "allow-get-update-status",
+    "allow-download-app-update",
+    "allow-install-app-update",
+    "allow-discard-app-update",
     "allow-start-setup",
     "allow-get-session-logs",
     "allow-get-app-settings",

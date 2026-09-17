@@ -19,12 +19,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonObject, Value};
 
 use crate::film_plan::{
-    shot_resolution, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
+    is_reference_partition_id, plan_lora_payload_entries, plan_loras_for_partition,
+    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
 };
+use crate::minimax_h3_turbo::resolve_turbo_recipe;
+use crate::video_request::effective_reference_image_short_edge;
 use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 1;
+///
+/// **2** (sc-23402): `CompiledRequest::model` is the RESOLVED partition id rather than the plan's
+/// declared family model, and `partitionReason` says why. The document's semantics changed, so a v1
+/// document is refused BY VERSION. Without the bump `partitionReason`'s `#[serde(default)]` would
+/// let a v1 document parse with an empty reason and then fail [`request_differences`] as
+/// hand-edited, which blames the operator for a schema migration. The remedy either way is
+/// `film-harness compile`.
+/// **3** (sc-23406): a request carries the LoRAs it dispatches with and the step count it renders
+/// at. Both are DERIVED fields [`request_differences`] compares, so a v2 document read under this
+/// build would default them to "none / unknown" and then be blamed as hand-edited — the same
+/// migration trap the v2 bump above exists to avoid. The remedy is the same one line:
+/// `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 3;
 
 /// How far apart one shot's successive attempts are seeded (sc-22715).
 ///
@@ -65,7 +80,51 @@ pub struct CompiledRequest {
     pub shot_id: String,
     pub beat: String,
     pub mode: String,
+    /// The catalog model id this request DISPATCHES as: the partition the shot resolved to, which
+    /// on a split family (MiniMax-H3's `minimax_h3` / `minimax_h3_ref`) is not the plan's declared
+    /// model (sc-23402). [`CompiledRequest::to_job_body_with`] writes exactly this into the job
+    /// body's `model`, so `compiled.json` and the route agree by construction.
     pub model: String,
+    /// The short edge this request's image references are encoded at, in pixels, when the plan asked
+    /// for one (`model.advanced.referenceImageShortEdge`, sc-23402).
+    ///
+    /// Written ONLY for a request that resolved to the family's reference partition: the base
+    /// partition encodes no reference, so carrying the knob there would dispatch a field the
+    /// checkpoint has nothing to apply it to. Absent means the engine's own default, which
+    /// [`CompiledRequest::effective_reference_image_short_edge`] resolves for the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
+    /// The catalog LoRA ids this request dispatches with, resolved PER PARTITION from the plan's
+    /// one `model.loras` list (sc-23406).
+    ///
+    /// A step-distill adapter declares the partitions it was distilled for, so the same plan-level
+    /// list produces the ref2v turbo on a `minimax_h3_ref` request and the fl2v turbo on a
+    /// `minimax_h3` one — and neither on a request whose partition has no compatible entry, which
+    /// is an empty list rather than a silent substitution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
+    /// `model.advanced.steps`, when the plan set one — the value DISPATCHED as `advanced.steps`.
+    /// `None` leaves the step count to the recipe or the model default, which is what
+    /// [`CompiledRequest::effective_steps`] records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    /// The model-evaluation count this request will actually render at: `steps` above, else the
+    /// selected turbo recipe's own count, else the partition's declared `defaults.steps`.
+    ///
+    /// Resolved HERE rather than on read because only the compile holds all three inputs at once —
+    /// the plan's override, the partition this shot resolved to, and that partition's catalog
+    /// entry. The attempt record copies it, so the document and the record state one number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_steps: Option<u32>,
+    /// The video sigma shift the selected turbo recipe imposes, when one applies to this request's
+    /// partition. Absent in the base regime, where the engine's own constant governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_scheduler_shift: Option<f64>,
+    /// Why this request resolved to `model` and not the family's other partition
+    /// ([`crate::film_plan::ShotPartition::reason`]). Derived, like every other field but the
+    /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
+    #[serde(default)]
+    pub partition_reason: String,
     /// The prompt the engine will receive.
     pub prompt: String,
     pub prompt_source: PromptSource,
@@ -141,6 +200,18 @@ pub struct PlannerCostRecord {
     pub planner_max_memory_gb: Option<f64>,
 }
 
+/// The model-evaluation count a catalog entry declares as its default (`defaults.steps`) — what
+/// the engine renders at when nothing names a count (sc-23406).
+fn default_steps(entry: &JsonObject<String, Value>) -> Option<u32> {
+    entry
+        .get("defaults")
+        .and_then(Value::as_object)
+        .and_then(|defaults| defaults.get("steps"))
+        .and_then(Value::as_u64)
+        .and_then(|steps| u32::try_from(steps).ok())
+        .filter(|steps| *steps > 0)
+}
+
 /// `advanced.mlxQuantize` for a tier — the shared convention the MLX lanes read.
 pub fn mlx_quantize_for_tier(tier: &str) -> Value {
     match tier {
@@ -152,8 +223,10 @@ pub fn mlx_quantize_for_tier(tier: &str) -> Value {
 
 /// Inputs the compile needs beyond the plan itself.
 pub struct CompileInputs<'a> {
-    /// The model's catalog entry, for fps and geometry defaults.
-    pub model_entry: &'a JsonObject<String, Value>,
+    /// The catalog entries the plan's shots resolve against: the declared model, plus the family's
+    /// reference partition when the catalog serves one. Each shot's geometry defaults come from the
+    /// entry it will actually dispatch as (sc-23402).
+    pub entries: &'a ModelEntries<'a>,
     pub lane: &'a str,
     pub plan_sha256: &'a str,
     pub compiled_at: &'a str,
@@ -172,7 +245,7 @@ pub fn compile_plan(
     inputs: &CompileInputs<'_>,
 ) -> Result<CompiledPlan, Vec<PlanDiagnostic>> {
     let mut findings = Vec::new();
-    let Some(fps) = crate::film_plan::plan_fps(plan, inputs.model_entry) else {
+    let Some(fps) = crate::film_plan::plan_fps(plan, inputs.entries.base_entry()) else {
         return Err(vec![PlanDiagnostic::plan(
             "model.fps",
             format!(
@@ -216,13 +289,27 @@ fn compile_shot(
     inputs: &CompileInputs<'_>,
     fps: u32,
 ) -> Result<CompiledRequest, Vec<PlanDiagnostic>> {
-    let Some((width, height)) = shot_resolution(plan, shot, inputs.model_entry) else {
+    // Which of the family's checkpoints this shot dispatches as, decided ONCE here and carried into
+    // the request, the job body and the attempt record (sc-23402). A shot that binds no reference
+    // roles stays on the plan's declared model: references are optional input, never a requirement.
+    let (partition, partition_entry) = inputs.entries.resolve_shot(shot);
+    let Some(partition_entry) = partition_entry else {
+        return Err(vec![PlanDiagnostic::shot(
+            &shot.id,
+            "conditioning.referenceRoles",
+            format!(
+                "{} is not in this API's model catalog, so this shot cannot be compiled ({})",
+                partition.model_id, partition.reason
+            ),
+        )]);
+    };
+    let Some((width, height)) = shot_resolution(plan, shot, partition_entry) else {
         return Err(vec![PlanDiagnostic::shot(
             &shot.id,
             "resolution",
             format!(
                 "{} declares no default resolution; set one on the plan or the shot",
-                plan.model.id
+                partition.model_id
             ),
         )]);
     };
@@ -249,11 +336,55 @@ fn compile_shot(
         }
         None => (shot.prompt.clone(), PromptSource::Authored, None),
     };
+    // A reference-only knob reaches a reference-only request (sc-23402). The plan declares it once
+    // on the family; the shots that resolve to the base partition encode no reference, so the field
+    // is not written onto them and never reaches their job body or their attempt record.
+    let reference_image_short_edge = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_short_edge)
+        .filter(|_| is_reference_partition_id(&partition.model_id));
+    // The plan's one LoRA list, resolved against the partition this shot ACTUALLY dispatches as
+    // (sc-23406). A shot whose partition has no compatible entry gets none — the empty list is the
+    // record of that, and `effective_steps` below then resolves to the model's own default.
+    let loras: Vec<String> = plan_loras_for_partition(&plan.model.loras, &partition.model_id)
+        .into_iter()
+        .map(|lora| lora.id.clone())
+        .collect();
+    // Resolved through the SAME resolver the worker calls, on the same payload shape, so the
+    // schedule this document promises is the schedule the engine runs. A conflict is refused by
+    // `validate_plan_structure` before a compile is attempted; reaching it here means the plan was
+    // compiled anyway, and a finding beats compiling a request with two schedules in it.
+    let payload_loras = plan_lora_payload_entries(&plan.model.loras, &partition.model_id);
+    let recipe = match resolve_turbo_recipe(&partition.model_id, &payload_loras) {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            return Err(vec![PlanDiagnostic::shot(&shot.id, "model.loras", error)]);
+        }
+    };
+    let steps = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+        .and_then(|steps| u32::try_from(steps).ok())
+        .filter(|steps| *steps > 0);
+    let effective_steps = steps
+        .or_else(|| recipe.map(|recipe| recipe.steps))
+        .or_else(|| default_steps(partition_entry));
+    let turbo_scheduler_shift = recipe.map(|recipe| f64::from(recipe.video_shift));
     Ok(CompiledRequest {
         shot_id: shot.id.clone(),
         beat: shot.beat.clone(),
         mode: shot.conditioning.mode.clone(),
-        model: plan.model.id.clone(),
+        model: partition.model_id,
+        reference_image_short_edge,
+        loras,
+        steps,
+        effective_steps,
+        turbo_scheduler_shift,
+        partition_reason: partition.reason,
         prompt,
         prompt_source,
         authored_prompt: authored,
@@ -296,6 +427,22 @@ pub struct ResolvedConditioning {
 }
 
 impl CompiledRequest {
+    /// The reference-image short edge this request will actually render at, for the attempt record
+    /// (sc-23402) — or `None` for a request that encodes no reference at all.
+    ///
+    /// `Some(requested)`, `Some(default)` and `None` are three different facts: a reference request
+    /// that named no value still renders at the engine's default, and recording that number is what
+    /// makes a run comparable against one that lowered it. A base-partition request has no reference
+    /// to size, so it records nothing rather than a number that never applied.
+    ///
+    /// The default comes from [`effective_reference_image_short_edge`], the local twin of gen-core's
+    /// `effective_reference_image_short_edge` (this crate has no gen-core dependency), so the
+    /// recorded value cannot drift from the value the engine resolved.
+    pub fn effective_reference_image_short_edge(&self) -> Option<u32> {
+        is_reference_partition_id(&self.model)
+            .then(|| effective_reference_image_short_edge(self.reference_image_short_edge))
+    }
+
     /// Resolve this request's reference roles against the imported assets. A role with no asset is
     /// a finding — the run never dispatches a keyframe shot with its keyframe quietly missing.
     pub fn resolve_conditioning(
@@ -357,6 +504,18 @@ impl CompiledRequest {
         if let Some(tier) = context.tier {
             advanced.insert("mlxQuantize".to_owned(), mlx_quantize_for_tier(tier));
         }
+        if let Some(steps) = self.steps {
+            // The plan-level override, dispatched on the same `advanced` convention the Video
+            // Studio uses and read by the same worker branch (`minimax_h3_sampling`), where it
+            // wins over a selected recipe's own count.
+            advanced.insert("steps".to_owned(), json!(steps));
+        }
+        if let Some(edge) = self.reference_image_short_edge {
+            // The same `advanced` convention as the tier (sc-23402): a request axis the engine reads
+            // off the job, not a document axis. Only ever present on a reference-partition request,
+            // because `compile_shot` is the only thing that writes the field.
+            advanced.insert("referenceImageShortEdge".to_owned(), json!(edge));
+        }
         let mut provenance = json!({
             "runId": context.run_id,
             "planId": context.plan_id,
@@ -366,6 +525,12 @@ impl CompiledRequest {
         });
         if let Some(key) = context.idempotency_key {
             provenance["idempotencyKey"] = json!(key);
+        }
+        if !self.partition_reason.is_empty() {
+            // The dispatched body says which of the family's checkpoints it asked for AND why
+            // (sc-23402): `model` above is the resolved id, and this is the sentence that explains
+            // it, so a job read back on its own carries the same two facts as the attempt record.
+            provenance["partitionReason"] = json!(self.partition_reason);
         }
         if self.prompt_source == PromptSource::Refined {
             provenance["promptSource"] = json!("refined");
@@ -396,6 +561,14 @@ impl CompiledRequest {
             "requestedGpu": "auto",
             "advanced": advanced,
         });
+        if !self.loras.is_empty() {
+            // `{ id, weight }` per entry — the exact shape `generationStudio.jsx` posts for a
+            // studio selection, so the route's `hydrate_lora_spec` hydrates it from the catalog the
+            // same way and the worker's `resolve_turbo_recipe` reads the same ids. The weight is
+            // the catalog's own `defaultWeight`, which is what the route would have filled in for
+            // an id alone; sending it explicitly keeps the body readable beside a studio job.
+            body["loras"] = json!(plan_lora_payload_entries(&self.loras, &self.model));
+        }
         if let Some(negative) = self.negative_prompt.as_deref() {
             body["negativePrompt"] = json!(negative);
         }
@@ -455,7 +628,8 @@ impl CompiledPlan {
                 "compiled.schemaVersion",
                 format!(
                     "unsupported compiled plan schema version {} (this build reads \
-                     {COMPILED_PLAN_SCHEMA_VERSION})",
+                     {COMPILED_PLAN_SCHEMA_VERSION}); re-run `film-harness compile` to rewrite \
+                     these requests",
                     self.schema_version
                 ),
             ));
@@ -512,9 +686,10 @@ impl CompiledPlan {
     pub fn conformance_findings(
         &self,
         plan: &ProductionPlan,
-        entry: &JsonObject<String, Value>,
+        entries: &ModelEntries<'_>,
         lane: ModelLane,
     ) -> Vec<PlanDiagnostic> {
+        let entry = entries.base_entry();
         let mut findings = Vec::new();
         if self.model.id != plan.model.id {
             findings.push(PlanDiagnostic::plan(
@@ -566,7 +741,7 @@ impl CompiledPlan {
         }
         let empty = BTreeMap::new();
         let inputs = CompileInputs {
-            model_entry: entry,
+            entries,
             lane: lane.manifest_key(),
             plan_sha256: &self.plan_sha256,
             compiled_at: &self.compiled_at,
@@ -601,6 +776,12 @@ fn request_differences(
         beat,
         mode,
         model,
+        reference_image_short_edge,
+        loras,
+        steps,
+        effective_steps,
+        turbo_scheduler_shift,
+        partition_reason,
         prompt: _,
         prompt_source: _,
         authored_prompt: _,
@@ -630,6 +811,36 @@ fn request_differences(
         }
     };
     differ("compiled.model", quoted(&actual.model), quoted(model));
+    differ(
+        "compiled.partitionReason",
+        quoted(&actual.partition_reason),
+        quoted(partition_reason),
+    );
+    differ(
+        "compiled.referenceImageShortEdge",
+        format!("{:?}", actual.reference_image_short_edge),
+        format!("{reference_image_short_edge:?}"),
+    );
+    differ(
+        "compiled.loras",
+        format!("{:?}", actual.loras),
+        format!("{loras:?}"),
+    );
+    differ(
+        "compiled.steps",
+        format!("{:?}", actual.steps),
+        format!("{steps:?}"),
+    );
+    differ(
+        "compiled.effectiveSteps",
+        format!("{:?}", actual.effective_steps),
+        format!("{effective_steps:?}"),
+    );
+    differ(
+        "compiled.turboSchedulerShift",
+        format!("{:?}", actual.turbo_scheduler_shift),
+        format!("{turbo_scheduler_shift:?}"),
+    );
     differ("compiled.beat", quoted(&actual.beat), quoted(beat));
     differ("compiled.mode", quoted(&actual.mode), quoted(mode));
     differ(
@@ -744,8 +955,21 @@ mod tests {
     fn entry() -> JsonObject<String, Value> {
         json!({
             "id": "minimax_h3",
-            "defaults": { "fps": 24, "resolution": "1344x768" },
+            // `steps` mirrors the shipped catalog: it is what the engine renders at when nothing
+            // names a count, and therefore what `effective_steps` records in the base regime.
+            "defaults": { "fps": 24, "resolution": "1344x768", "steps": 50 },
             "limits": { "resolutions": ["1344x768", "576x320"] }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
+    fn reference_entry() -> JsonObject<String, Value> {
+        json!({
+            "id": "minimax_h3_ref",
+            "defaults": { "fps": 24, "resolution": "1344x768", "steps": 50 },
+            "limits": { "resolutions": ["1344x768", "576x320"], "maxReferenceAssets": 9 }
         })
         .as_object()
         .cloned()
@@ -765,11 +989,12 @@ mod tests {
 
     fn compiled(refined: BTreeMap<String, String>) -> CompiledPlan {
         let plan = parse_plan(&plan_text()).unwrap();
+        let entry = entry();
         compile_plan(
             &plan,
             &pack(),
             &CompileInputs {
-                model_entry: &entry(),
+                entries: &ModelEntries::single("minimax_h3", &entry),
                 lane: "mlx",
                 plan_sha256: "abc123def456",
                 compiled_at: "2026-09-13T00:00:00Z",
@@ -1040,7 +1265,7 @@ mod tests {
                 &plan,
                 &pack(),
                 &CompileInputs {
-                    model_entry: &entry(),
+                    entries: &ModelEntries::single("minimax_h3", &entry()),
                     lane: "mlx",
                     plan_sha256: "abc",
                     compiled_at: "now",
@@ -1085,13 +1310,69 @@ mod tests {
             .any(|finding| finding.field == "compiled.planId"));
     }
 
+    /// sc-23402 review. A `compiled.json` written by a PRE-STORY build is refused by SCHEMA
+    /// VERSION, not blamed on the operator as a hand edit.
+    ///
+    /// Such a document has no `partitionReason` key at all. `#[serde(default)]` reads it back as
+    /// `""`, which `request_differences` would report as `compiled.partitionReason` — "the
+    /// compiled request asks for …, but the plan says …", a tampering message — so a phase-1 run
+    /// directory could no longer be resumed and the refusal named the wrong cause. The version
+    /// bump to 2 is what makes the first finding the true one, and it names the remedy.
+    #[test]
+    fn a_pre_story_compiled_document_is_refused_by_schema_version_not_as_tampered() {
+        let plan = parse_plan(&plan_text()).unwrap();
+        let entry = entry();
+        let entries = ModelEntries::single("minimax_h3", &entry);
+
+        // Exactly what a v1 document on disk deserializes to: version 1, and the key absent.
+        let mut v1 = compiled(BTreeMap::new());
+        v1.schema_version = 1;
+        for request in &mut v1.requests {
+            request.partition_reason = String::new();
+        }
+        let round_tripped: CompiledPlan =
+            serde_json::from_value(serde_json::to_value(&v1).unwrap()).unwrap();
+        assert_eq!(round_tripped.schema_version, 1);
+        assert!(round_tripped.requests[0].partition_reason.is_empty());
+
+        let findings = round_tripped.staleness_findings(&plan, "abc123def456");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].field, "compiled.schemaVersion", "{findings:?}");
+        assert!(
+            findings[0].message.contains("schema version 1")
+                && findings[0].message.contains("film-harness compile"),
+            "the refusal must name the version AND the remedy: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "compiled.partitionReason"),
+            "a schema migration must never be reported as a hand edit: {findings:?}"
+        );
+
+        // And this is the finding the bump replaced: at the CURRENT version the same empty
+        // `partitionReason` is (correctly) a tampering report, which is why v1 had to be refused
+        // by version rather than left to fall through to conformance.
+        let mut current = round_tripped;
+        current.schema_version = COMPILED_PLAN_SCHEMA_VERSION;
+        assert!(current.staleness_findings(&plan, "abc123def456").is_empty());
+        assert!(
+            current
+                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .iter()
+                .any(|finding| finding.field == "compiled.partitionReason"),
+            "without the bump a v1 document lands here instead"
+        );
+    }
+
     #[test]
     fn a_hand_edited_request_is_refused_even_when_it_pins_the_right_plan() {
         let plan = parse_plan(&plan_text()).unwrap();
         let entry = entry();
+        let entries = ModelEntries::single("minimax_h3", &entry);
         let clean = compiled(BTreeMap::new());
         assert!(clean
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
         // The compile's own output is exempt: a refined prompt is why the document exists.
         let refined = compiled(
@@ -1100,7 +1381,7 @@ mod tests {
                 .collect(),
         );
         assert!(refined
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
 
         // Every other field is a transcription of the plan, and an edit to one is named.
@@ -1121,6 +1402,11 @@ mod tests {
                 "compiled.model",
                 |request| request.model = "ltx_2_5".to_owned(),
                 "ltx_2_5",
+            ),
+            (
+                "compiled.partitionReason",
+                |request| request.partition_reason = "because I said so".to_owned(),
+                "because I said so",
             ),
             ("compiled.fps", |request| request.fps = 30, "30 fps"),
             (
@@ -1168,7 +1454,7 @@ mod tests {
         for (field, edit, expected) in cases {
             let mut tampered = clean.clone();
             edit(&mut tampered.requests[0]);
-            let findings = tampered.conformance_findings(&plan, &entry, ModelLane::Mlx);
+            let findings = tampered.conformance_findings(&plan, &entries, ModelLane::Mlx);
             assert_eq!(findings.len(), 1, "{field}: {findings:?}");
             assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{field}");
             assert_eq!(findings[0].field, field, "{findings:?}");
@@ -1184,7 +1470,7 @@ mod tests {
         tampered.model.tier = Some("q8".to_owned());
         tampered.model.fps = 30;
         let fields: Vec<String> = tampered
-            .conformance_findings(&plan, &entry, ModelLane::Candle)
+            .conformance_findings(&plan, &entries, ModelLane::Candle)
             .into_iter()
             .map(|finding| finding.field)
             .collect();
@@ -1200,8 +1486,487 @@ mod tests {
         let mut short = clean;
         short.requests.retain(|request| request.shot_id != "SH020");
         assert!(short
-            .conformance_findings(&plan, &entry, ModelLane::Mlx)
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
             .is_empty());
+    }
+
+    /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402, AC1).
+    fn mixed_plan_text() -> String {
+        serde_json::to_string(&json!({
+            "schemaVersion": 1,
+            "id": "courier-workshop",
+            "version": 2,
+            "title": "Courier",
+            "model": { "id": "minimax_h3", "tier": "q4", "fps": 24, "resolution": "576x320" },
+            "limits": { "maxRunSeconds": 3600, "maxShotSeconds": 1800, "maxAttemptsPerShot": 1, "maxMemoryGb": 96 },
+            "shots": [
+                {
+                    "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "conditioning": {
+                        "mode": "reference_to_video",
+                        // Both BINDABLE kinds (character, prop): a `plate` is refused in this
+                        // slot by `validate_plan_against_pack`.
+                        "referenceRoles": ["courier", "red_parcel"]
+                    },
+                    "continuityRoles": ["courier"]
+                },
+                {
+                    "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "conditioning": { "mode": "text_to_video" },
+                    "continuityRoles": ["courier", "red_parcel"]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// The mixed plan with `model.advanced.referenceImageShortEdge` set, compiled against both
+    /// partitions.
+    fn mixed_compiled_with_short_edge(edge: Option<u32>) -> CompiledPlan {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        if let Some(edge) = edge {
+            document["model"]["advanced"] = json!({ "referenceImageShortEdge": edge });
+        }
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::with_reference_partition(
+                    "minimax_h3",
+                    &base,
+                    Some(("minimax_h3_ref", &reference)),
+                ),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles")
+    }
+
+    fn short_edge_context<'a>(assets: &'a BTreeMap<String, String>) -> DispatchContext<'a> {
+        DispatchContext {
+            project_id: "proj_1",
+            run_id: "run_abc",
+            plan_id: "courier-workshop",
+            plan_version: 2,
+            attempt: 1,
+            tier: Some("q4"),
+            idempotency_key: Some("run_abc:SH010:a1"),
+            role_assets: assets,
+        }
+    }
+
+    /// The mixed plan with a turbo selection and, optionally, a `model.advanced.steps` override.
+    fn mixed_compiled_with_turbo(loras: Value, steps: Option<i64>) -> CompiledPlan {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["loras"] = loras;
+        if let Some(steps) = steps {
+            document["model"]["advanced"] = json!({ "steps": steps });
+        }
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::with_reference_partition(
+                    "minimax_h3",
+                    &base,
+                    Some(("minimax_h3_ref", &reference)),
+                ),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the turbo plan compiles")
+    }
+
+    /// 🔴 sc-23406. ONE plan-level LoRA list, resolved PER PARTITION — into the compiled request,
+    /// into the dispatched body, and into the schedule each request records.
+    ///
+    /// Every assertion here is a silent failure if it goes the other way: the ref2v adapter on the
+    /// base checkpoint folds cleanly at the wrong quality, and an fl2v adapter on the reference one
+    /// does the same in the other direction (sc-19563). The step count and the shift are asserted
+    /// as VALUES rather than as "not the default", because 4/12.0 is what the catalog declares for
+    /// both of these files and 50/absent is what the base regime is.
+    #[test]
+    fn the_plans_loras_resolve_per_partition_into_the_request_and_the_body() {
+        let compiled = mixed_compiled_with_turbo(
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]),
+            None,
+        );
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(plain.loras, vec!["minimax_h3_turbo_4step_v01"]);
+        // The schedule each one will actually run, from the catalog's own declaration.
+        assert_eq!(referenced.effective_steps, Some(4));
+        assert_eq!(referenced.turbo_scheduler_shift, Some(12.0));
+        assert_eq!(plain.effective_steps, Some(4));
+        assert_eq!(plain.turbo_scheduler_shift, Some(12.0));
+        assert_eq!(referenced.steps, None, "no plan-level override was set");
+
+        // The body: `{ id, weight }`, the shape `generationStudio.jsx` posts, on the partition it
+        // belongs to and NOWHERE else.
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        let referenced_body = referenced.to_job_body(&context).expect("SH010 body");
+        let plain_body = plain.to_job_body(&context).expect("SH020 body");
+        assert_eq!(
+            referenced_body["loras"],
+            json!([{ "id": "minimax_h3_ref2v_turbo_4step", "weight": 1.0 }])
+        );
+        assert_eq!(
+            plain_body["loras"],
+            json!([{ "id": "minimax_h3_turbo_4step_v01", "weight": 1.0 }])
+        );
+        assert!(
+            referenced_body["advanced"].get("steps").is_none(),
+            "no override ⇒ no advanced.steps; the recipe governs: {}",
+            referenced_body["advanced"]
+        );
+
+        // A plan that names ONLY the ref2v adapter leaves the base shot with none — an empty list,
+        // recorded as such, rather than the ref2v file quietly attaching to the wrong checkpoint.
+        let compiled = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), None);
+        let plain = compiled.request("SH020").unwrap();
+        assert!(plain.loras.is_empty());
+        assert_eq!(
+            plain.effective_steps,
+            Some(50),
+            "no recipe applies, so the model's declared default governs"
+        );
+        assert_eq!(plain.turbo_scheduler_shift, None);
+        let body = plain.to_job_body(&context).expect("SH020 body");
+        assert!(
+            body.get("loras").is_none(),
+            "an empty list writes no field: {body}"
+        );
+    }
+
+    /// `model.advanced.steps` overrides the recipe's own count — the plan-level twin of the knob
+    /// `minimax_h3_sampling` already honours — and rides `advanced.steps` on every partition,
+    /// including the one no accelerator reached.
+    #[test]
+    fn a_plan_level_steps_override_wins_over_the_recipe_and_rides_the_body() {
+        let compiled = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), Some(6));
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.steps, Some(6));
+        assert_eq!(
+            referenced.effective_steps,
+            Some(6),
+            "the override wins over the recipe's 4"
+        );
+        assert_eq!(
+            referenced.turbo_scheduler_shift,
+            Some(12.0),
+            "the SHIFT is not overridable: a distilled checkpoint keeps its trained shift"
+        );
+        assert_eq!(
+            plain.effective_steps,
+            Some(6),
+            "the override wins over the model's 50 as well"
+        );
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        for request in [referenced, plain] {
+            let body = request.to_job_body(&context).expect("body");
+            assert_eq!(body["advanced"]["steps"], json!(6), "{}", request.shot_id);
+        }
+    }
+
+    /// A plan that declares no LoRAs compiles exactly as it did before the field existed, and a
+    /// hand edit to any of the four new derived fields is caught as a hand edit.
+    #[test]
+    fn a_plan_without_loras_compiles_unchanged_and_the_derived_fields_are_conformance_checked() {
+        let compiled = mixed_compiled_with_turbo(json!([]), None);
+        for request in &compiled.requests {
+            assert!(request.loras.is_empty(), "{}", request.shot_id);
+            assert_eq!(request.steps, None, "{}", request.shot_id);
+            assert_eq!(request.effective_steps, Some(50), "{}", request.shot_id);
+            assert_eq!(request.turbo_scheduler_shift, None, "{}", request.shot_id);
+        }
+        let document = serde_json::to_value(&compiled).expect("serializes");
+        assert!(
+            document["requests"][0].get("loras").is_none()
+                && document["requests"][0].get("turboSchedulerShift").is_none(),
+            "absent values write no fields: {}",
+            document["requests"][0]
+        );
+
+        // Conformance: each derived field is compared, so a hand-edited compiled document is
+        // refused by the field that was edited rather than dispatched.
+        let mut plan_document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        plan_document["model"]["loras"] = json!(["minimax_h3_ref2v_turbo_4step"]);
+        let plan = parse_plan(&plan_document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let clean = mixed_compiled_with_turbo(json!(["minimax_h3_ref2v_turbo_4step"]), None);
+        type Tamper = fn(&mut CompiledRequest);
+        let cases: Vec<(&str, Tamper)> = vec![
+            ("compiled.loras", |request| request.loras.clear()),
+            ("compiled.steps", |request| request.steps = Some(9)),
+            ("compiled.effectiveSteps", |request| {
+                request.effective_steps = Some(50)
+            }),
+            ("compiled.turboSchedulerShift", |request| {
+                request.turbo_scheduler_shift = None
+            }),
+        ];
+        for (field, edit) in cases {
+            let mut tampered = clean.clone();
+            edit(&mut tampered.requests[0]);
+            let fields: Vec<String> = tampered
+                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .into_iter()
+                .map(|finding| finding.field)
+                .collect();
+            assert!(fields.contains(&field.to_owned()), "{field}: {fields:?}");
+        }
+    }
+
+    /// sc-23402. The plan declares the short edge ONCE on the family; it reaches only the request
+    /// that resolved to the reference partition, and only that request's job body.
+    #[test]
+    fn the_reference_short_edge_reaches_only_the_reference_partitions_request() {
+        let compiled = mixed_compiled_with_short_edge(Some(1536));
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.reference_image_short_edge, Some(1536));
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(
+            plain.reference_image_short_edge, None,
+            "the base partition encodes no reference, so it carries no short edge"
+        );
+
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        let body = referenced.to_job_body(&context).unwrap();
+        assert_eq!(body["advanced"]["referenceImageShortEdge"], json!(1536));
+        let body = plain.to_job_body(&context).unwrap();
+        assert!(
+            body["advanced"].get("referenceImageShortEdge").is_none(),
+            "{}",
+            body["advanced"]
+        );
+
+        // The document survives a conformance check, and a hand-edited value is caught by name —
+        // the compiled document, not the plan, is what becomes the job body.
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["advanced"] = json!({ "referenceImageShortEdge": 1536 });
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        assert!(compiled
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .is_empty());
+        let mut tampered = compiled.clone();
+        tampered.requests[0].reference_image_short_edge = Some(1024);
+        let fields: Vec<String> = tampered
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["compiled.referenceImageShortEdge".to_owned()],
+            "{fields:?}"
+        );
+    }
+
+    /// A plan that names no short edge compiles and dispatches exactly what it did before sc-23402,
+    /// and the EFFECTIVE value a reference attempt records is the engine's own default — 2048, the
+    /// same number `sceneworks_gen_core::effective_reference_image_short_edge` resolves (this crate
+    /// has no gen-core dependency, so the rule is applied locally).
+    #[test]
+    fn an_absent_short_edge_dispatches_nothing_and_records_the_default_2048() {
+        let compiled = mixed_compiled_with_short_edge(None);
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(referenced.reference_image_short_edge, None);
+        assert_eq!(plain.reference_image_short_edge, None);
+
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        for request in [referenced, plain] {
+            let body = request.to_job_body(&context).unwrap();
+            assert!(
+                body["advanced"].get("referenceImageShortEdge").is_none(),
+                "an absent knob dispatches no key: {}",
+                body["advanced"]
+            );
+        }
+
+        assert_eq!(
+            referenced.effective_reference_image_short_edge(),
+            Some(2048),
+            "a reference request with no value still renders at the engine's default"
+        );
+        assert_eq!(
+            plain.effective_reference_image_short_edge(),
+            None,
+            "a base-partition request records no short edge at all"
+        );
+        let asked = mixed_compiled_with_short_edge(Some(1024));
+        assert_eq!(
+            asked
+                .request("SH010")
+                .unwrap()
+                .effective_reference_image_short_edge(),
+            Some(1024),
+            "a requested value is recorded verbatim"
+        );
+        assert_eq!(
+            asked
+                .request("SH020")
+                .unwrap()
+                .effective_reference_image_short_edge(),
+            None
+        );
+    }
+
+    #[test]
+    fn each_shot_compiles_to_the_partition_its_own_conditioning_needs() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &entries,
+                lane: "mlx",
+                plan_sha256: "abc123def456",
+                compiled_at: "2026-09-14T00:00:00Z",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("compiles");
+        // The plan still declares the FAMILY once; only the requests differ.
+        assert_eq!(compiled.model.id, "minimax_h3");
+
+        let referenced = compiled.request("SH010").unwrap();
+        assert_eq!(referenced.model, "minimax_h3_ref");
+        assert_eq!(referenced.mode, "reference_to_video");
+        assert_eq!(
+            referenced.reference_roles,
+            vec!["courier".to_owned(), "red_parcel".to_owned()]
+        );
+        assert!(
+            referenced.partition_reason.contains("minimax_h3_ref")
+                && referenced.partition_reason.contains("2 reference role"),
+            "{}",
+            referenced.partition_reason
+        );
+
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(plain.model, "minimax_h3");
+        assert_eq!(plain.mode, "text_to_video");
+        assert!(plain.reference_roles.is_empty());
+        assert!(
+            plain.partition_reason.contains("no reference roles"),
+            "{}",
+            plain.partition_reason
+        );
+
+        // Both partitions reach the route under their own id, in role ORDER, and the reason rides
+        // the payload beside it.
+        let assets = role_assets();
+        let context = DispatchContext {
+            project_id: "proj_1",
+            run_id: "run_abc",
+            plan_id: "courier-workshop",
+            plan_version: 2,
+            attempt: 1,
+            tier: Some("q4"),
+            idempotency_key: Some("run_abc:SH010:a1"),
+            role_assets: &assets,
+        };
+        let body = referenced.to_job_body(&context).unwrap();
+        assert_eq!(body["model"], "minimax_h3_ref");
+        assert_eq!(body["mode"], "reference_to_video");
+        assert_eq!(
+            body["referenceAssetIds"],
+            json!(["asset_courier", "asset_parcel"])
+        );
+        assert_eq!(
+            body["advanced"]["filmHarness"]["partitionReason"],
+            json!(referenced.partition_reason)
+        );
+        let body = plain.to_job_body(&context).unwrap();
+        assert_eq!(body["model"], "minimax_h3");
+        assert!(body.get("referenceAssetIds").is_none());
+
+        // Re-compiling the same plan says the same thing, so a conformance check on this document
+        // is clean — and a document whose reference shot was re-pointed at the base checkpoint is
+        // not.
+        assert!(compiled
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .is_empty());
+        let mut tampered = compiled.clone();
+        tampered.requests[0].model = "minimax_h3".to_owned();
+        let fields: Vec<String> = tampered
+            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert_eq!(fields, vec!["compiled.model".to_owned()], "{fields:?}");
+    }
+
+    #[test]
+    fn a_reference_shot_refuses_to_compile_when_the_partition_is_not_in_the_catalog() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let findings = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &ModelEntries::single("minimax_h3", &base),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect_err("refuses");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert!(
+            findings[0].message.contains("minimax_h3_ref")
+                && findings[0]
+                    .message
+                    .contains("not in this API's model catalog"),
+            "{findings:?}"
+        );
     }
 
     #[test]

@@ -1906,8 +1906,8 @@ export function implementationVerdict({
  *
  * Nothing else may enter: not a record, not a plan row, not a geometry, not a campaign, not a
  * currency digest. Anchor CURRENCY is reported on the cell beside the state (sc-22511 makes it a
- * report, never a gate) and deliberately does not move it — a staled loader closure means the
- * anchor needs re-extraction, not that the rung stopped existing.
+ * report, never a gate) and deliberately does not move it — a staled loader closure reports
+ * historical provenance, not that the rung stopped existing.
  *
  * The state vocabulary that replaces Missing / Implemented-unverified / Runtime-verified / Verified:
  *
@@ -2808,8 +2808,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               id: anchor.id,
               tier: anchor.tier,
               source: `config/memory-anchors.json#${anchor.id}`,
-              // sc-22511: REPORTED, never gated. A staled loader closure means the anchor needs
-              // re-extraction; it does not mean the rung stopped existing, so it may not — and by
+              // sc-22511: REPORTED, never gated. A staled loader closure reports historical provenance
+              // for optional review; it does not mean the rung stopped existing, so it may not — and by
               // `cellState`'s signature cannot — move the state.
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
@@ -3124,9 +3124,9 @@ export function renderMarkdown(matrix) {
     "",
     `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
-    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a differing loader closure is advisory provenance, never a CI failure or an automatic requirement to remeasure (sc-23692).`,
     "",
-    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation is bounded to the one revision it names: the next pin bump that moves the loader closure past it stales the anchor again.",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation records the review at the revision it names. Later pin or closure changes may report historical currency, but require no renewal and do not block CI.",
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
@@ -3134,7 +3134,7 @@ export function renderMarkdown(matrix) {
     "",
     "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell.",
     "",
-    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers behind the widened margin — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
+    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers with unchanged runtime admission — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
     "",
     "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
     "| --- | --- | --- | --- | --- | ---: | --- |",
@@ -3201,7 +3201,7 @@ export function renderMarkdown(matrix) {
     }`;
     const attested = anchor.currencyAttestation;
     const current = !anchor.current
-      ? "no — re-extract"
+      ? "no — advisory"
       : attested
         ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
         : "yes";

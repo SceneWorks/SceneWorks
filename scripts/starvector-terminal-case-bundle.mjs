@@ -12,6 +12,7 @@ import { loadUpstreamReference, verifyUpstreamExecution } from "./lib/starvector
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
+const shippingMaxNewTokens = Object.freeze({ "1b": 7933, "8b": 15422 });
 
 async function bindLocalFile(root, relative, expected, label) {
   if (!relative || path.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) die(`${label} path is unsafe`);
@@ -24,7 +25,7 @@ async function bindLocalFile(root, relative, expected, label) {
 export async function materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath, hostileGenerator = null, upstreamRoot = process.env.STARVECTOR_TERMINAL_UPSTREAM_ROOT ?? (process.env.RUNNER_TEMP ? path.join(process.env.RUNNER_TEMP, "starvector-upstream") : undefined) }) {
   if (permanentPin !== INFERENCE_REVISION) die("permanent pin must equal the exact inference corpus revision");
   const corpus = await json(corpusPath), index = await json(path.join(assetsRoot, "starvector-terminal-row-index-v1.json")), binding = await json(bindingPath);
-  if (index.inference_revision !== INFERENCE_REVISION || index.row_identity_sha256 !== corpus.upstream_image_quality_cases.row_identity_sha256 || !Array.isArray(index.rows) || index.rows.length !== 120) die("pre-provisioned corpus row index identity/count mismatch");
+  if (index.schema_version !== 2 || index.inference_revision !== INFERENCE_REVISION || index.row_identity_sha256 !== corpus.upstream_image_quality_cases.row_identity_sha256 || !Array.isArray(index.rows) || index.rows.length !== 120) die("pre-provisioned corpus row index identity/count mismatch");
   const rows = [];
   for (const [position, row] of index.rows.entries()) {
     if (row.case_index !== position || !row.filename || !/^[a-f0-9]{64}$/.test(row.svg_sha256) || !/^[a-f0-9]{64}$/.test(row.png_sha256) || !/^[a-f0-9]{64}$/.test(row.reference_png_sha256)) die("corpus row record is not immutable");
@@ -34,10 +35,14 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   if (rowHash !== corpus.upstream_image_quality_cases.row_identity_sha256) die("corpus source row identities drifted");
   if (!binding?.project_id || !Array.isArray(binding.assets) || binding.assets.length !== 120) die("tuple-local API project/asset binding is missing");
   const imported = new Map(binding.assets.map((item) => [item.case_index, item]));
-  const route = (row, suffix, tier = "1b") => { const asset = imported.get(row.case_index); if (!asset?.asset_id || asset.input_png_sha256 !== row.input_png.sha256) die("imported project asset identity mismatches source row"); return { case_id: `quality-v1-${row.case_index}${suffix}`, projectId: binding.project_id, sourceAssetId: asset.asset_id, model: tier === "8b" ? "starvector_8b" : "starvector_1b", source_svg: row.svg.path, source_svg_sha256: row.svg.sha256, input_png: row.input_png.path, input_png_sha256: row.input_png.sha256, reference_png: row.reference.path, reference_png_sha256: row.reference.sha256, sampling: row.sampling, detailBudget: row.detail_budget }; };
+  const route = (row, suffix, tier = "1b") => { const asset = imported.get(row.case_index), detailBudget = row.detail_budgets?.[tier]; if (!asset?.asset_id || asset.input_png_sha256 !== row.input_png.sha256) die("imported project asset identity mismatches source row"); if (detailBudget?.maxNewTokens !== shippingMaxNewTokens[tier] || detailBudget.maxSvgBytes !== 262144 || detailBudget.maxWallTimeMs !== 120000) die(`corpus row lacks the ${tier} shipping Detail budget`); return { case_id: `quality-v1-${row.case_index}${suffix}`, projectId: binding.project_id, sourceAssetId: asset.asset_id, model: tier === "8b" ? "starvector_8b" : "starvector_1b", source_svg: row.svg.path, source_svg_sha256: row.svg.sha256, input_png: row.input_png.path, input_png_sha256: row.input_png.sha256, reference_png: row.reference.path, reference_png_sha256: row.reference.sha256, sampling: row.sampling, detailBudget }; };
   const routeScenarios = (records, label, tier) => {
     if (!Array.isArray(records)) die(`pre-provisioned ${label} cases are missing`);
-    return records.map((record, index) => ({ ...route(rows[index % rows.length], `-${label}`, tier), ...record }));
+    return records.map((record, index) => {
+      const scenario = {};
+      for (const key of ["case_id", "case_index", "operation", "finish_reason", "sampling", "detailBudget", "cancel_after_create"]) if (record[key] !== undefined) scenario[key] = record[key];
+      return { ...route(rows[index % rows.length], `-${label}`, tier), ...scenario };
+    });
   };
   const parityRows = corpus.upstream_image_quality_cases.sources.flatMap((_, sourceIndex) => rows.slice(sourceIndex * 30, sourceIndex * 30 + 5));
   if (parityRows.length !== 20) die("pinned corpus must select five deterministic parity rows from each of four sources");

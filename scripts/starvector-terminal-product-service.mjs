@@ -18,7 +18,9 @@ const execFile = promisify(execFileCallback);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (value) => { throw new Error(`starvector terminal service: ${value}`); };
 export function productServiceBuildArgs(platform = process.platform) {
-  const args = ["build", "--locked", "-p", "sceneworks-rust-api"];
+  // Latency and admission measure the optimized shipping path, including host
+  // tokenization and Candle dispatch; a dev binary cannot certify those gates.
+  const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api"];
   if (platform === "win32") args.push("--features", "backend-candle");
   return args;
 }
@@ -54,6 +56,15 @@ export function terminalProductWorkerId(tuple, instanceToken) {
   if (!TERMINAL_PRODUCT_WORKERS[tuple] || !/^[a-f0-9]{64}$/.test(instanceToken ?? "")) die("exact tuple and instance token are required for worker identity");
   return `starvector-terminal-${tuple.replace(/[^a-z0-9]+/gi, "-")}-${instanceToken}`;
 }
+
+export function assertTerminalCudaWorkerGpuIdentity(worker, physicalGpu) {
+  const totalMb = physicalGpu?.total_bytes / (1024 * 1024);
+  if (!worker || !physicalGpu || !Number.isSafeInteger(totalMb) || totalMb <= 0) die("CUDA worker identity inputs are malformed");
+  const expectedName = `${physicalGpu.name} (${totalMb} MB)`;
+  if (physicalGpu.index !== worker.gpu_id || worker.gpu_name !== expectedName) die("registered worker and selected physical GPU differ");
+  return worker;
+}
+
 export function validateTerminalProductWorkerReadiness(workers, models, contract, expectedWorkerId) {
   if (!Array.isArray(workers) || !Array.isArray(models) || !contract || typeof expectedWorkerId !== "string" || expectedWorkerId.length === 0) die("worker readiness response is malformed");
   const matching = workers.filter((worker) => worker?.id === expectedWorkerId);
@@ -405,7 +416,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
   // this contract.  It never downloads model weights; the controller separately
   // rejects any model acquisition at job time.
   await execFile("cargo", productServiceBuildArgs(), { cwd: root });
-  const binary = path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  const binary = path.join(root, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const common = { cwd: root, detached: true }, stateRoot = productServiceStateRoot(output);
   if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
   const logPaths = productServiceLogPaths(output), instanceToken = randomBytes(32).toString("hex"), workerId = terminalProductWorkerId(tuple, instanceToken);
@@ -458,7 +469,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
     const selectedWorker = await waitForTerminalProductWorker(url, tuple, workerId, assertRunning);
     if (gpuBinding.backend === "candle") {
       const current = await probeTerminalCuda(gpuBinding.uuid, { expectedUuid: gpuBinding.uuid });
-      if (current.index !== selectedWorker.gpu_id || current.name !== selectedWorker.gpu_name) die("registered worker and selected physical GPU differ");
+      assertTerminalCudaWorkerGpuIdentity(selectedWorker, current);
     }
     assertRunning();
     const record = { ...identity, ...weights, tuple, gpu_binding: gpuBinding, instance_token: instanceToken, api_url: url, api_host: endpoint.host, api_port: endpoint.port, state_root: path.relative(output, stateRoot), api_binary: path.relative(root, binary), worker_binary: path.relative(root, binary), api_binary_sha256: binarySha256, api_pid: api.pid, worker_pid: worker.pid, worker: selectedWorker, logs: Object.fromEntries(Object.entries(logPaths).map(([name, file]) => [name, path.relative(output, file)])), health, offline: { hf_home: path.relative(output, hfHome), hf_hub_offline: serviceEnv.HF_HUB_OFFLINE, transformers_offline: serviceEnv.TRANSFORMERS_OFFLINE, library_relocation: { adopted: relocation.adopted, hf_home: path.relative(output, relocation.hf_home), library_root: path.relative(output, relocation.library_root), probe_status: relocation.probe_status } }, started_at: startedAt };
@@ -546,7 +557,7 @@ export async function reloadOwnedWorker(root, output, { waitReady = waitForTermi
   const previousPid = owned.history.events.at(-1).previous_worker_pid;
   const identity = await serviceIdentity(root, owned.record.inference_revision);
   if (identity.sceneworks_revision !== owned.record.sceneworks_revision) die("worker reload source revision changed");
-  const binary = path.resolve(root, owned.record.worker_binary), expectedBinary = path.join(path.resolve(root), "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  const binary = path.resolve(root, owned.record.worker_binary), expectedBinary = path.join(path.resolve(root), "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const info = await lstat(binary);
   if (binary !== expectedBinary || info.isSymbolicLink() || !info.isFile() || await fileSha256(binary) !== owned.record.api_binary_sha256) die("worker reload binary differs from initial provenance");
   const hfHome = path.join(owned.stateRoot, "hf");

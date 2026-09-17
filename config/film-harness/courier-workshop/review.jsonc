@@ -33,10 +33,33 @@
   // counts as a CONTRADICTION, so "No, this is not a cluttered woodworking workshop" can no longer
   // score a match on the bare word "workshop". An answer carrying an "I cannot tell" marker, or
   // matching neither list, is UNOBSERVED and carries no value at all. Silence is not agreement.
+  // ---------------------------------------------------------------------------------------------
+  // ONE SHARED WORKSHOP (sc-23405, epic 23401). This file reviews BOTH courier plans — the
+  // phase-1 `plan.jsonc` baseline and the reference-conditioned `plan.v2.jsonc` — and the shot
+  // ids, the `dependsOn` edges and the intended states are the same in each, so it validates
+  // against either.
+  //
+  // What changed with plan.v2 is the PREMISE. In phase 1 each shot invented its own room and the
+  // cut questions could only ask whether two renders happened to agree; the documented miss of the
+  // first smoke was exactly that — both sides answered "a woodworking workshop" while rendering
+  // two different ones. In plan.v2 every shot binds the pack's `workshop_location` and
+  // `workbench_table` plates as reference conditioning, so there is ONE approved room and ONE
+  // approved bench behind every cut, and the questions below are written against the features that
+  // room and that bench DECLARE: the pegboard of hanging hand tools, the raw timber stacked
+  // against the walls, the long sawdust-covered wooden bench. (The generated pack repeats that
+  // description verbatim in every plate's prompt — `references.spec.jsonc`.)
+  //
+  // Each `acrossCut` question therefore names, in its `intended`, the approved role both sides of
+  // the cut are conditioned on, and asks about a feature of THAT reference. Where the room is in
+  // frame the shared feature is the workshop's pegboard; on the two close-ups, where it is not,
+  // the shared feature is the parcel — a frame cannot be asked about a wall it does not contain,
+  // and a question the model cannot see is an `unobserved` flag rather than evidence.
   "schemaVersion": 1,
   "id": "courier-workshop-review",
-  "version": 2,
-  "description": "Character, costume, location, parcel identity/custody, action completion and cut continuity for the courier/workshop sequence, as closed questions with declared answer vocabularies.",
+  // 3 (sc-23405): the location and cut-continuity questions now assume the one shared workshop the
+  // reference pack approves, and each cut question names the role both sides bind.
+  "version": 3,
+  "description": "Character, costume, location, parcel identity/custody, action completion and cut continuity for the courier/workshop sequence, against the one shared workshop the reference pack approves, as closed questions with declared answer vocabularies.",
 
   // Three frames per take: the opening state, the middle, and the end state the plan's `endState`
   // describes. Strictly increasing fractions of the take's own duration.
@@ -71,7 +94,7 @@
       "questions": [
         {
           "id": "sh010_location", "topic": "location", "frames": "all",
-          "intended": "A cluttered woodworking workshop with a long wooden workbench.",
+          "intended": "The approved workshop (`workshop_location`): cluttered, woodworking, a long wooden workbench through the centre.",
           "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
           "expect": ["workshop"],
           "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
@@ -118,7 +141,7 @@
       "questions": [
         {
           "id": "sh020_location", "topic": "location", "frames": "all",
-          "intended": "The same cluttered woodworking workshop as SH010.",
+          "intended": "The same approved workshop (`workshop_location`) every shot of this sequence is conditioned on.",
           "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
           "expect": ["workshop"],
           "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
@@ -164,17 +187,17 @@
           // continuous, different answers = a jump, either side unclear = unobserved.
           //
           // The feature has to be one a single frame cannot fake and the model can name in one
-          // word. SH010's workshop has a pegboard of hanging hand tools behind the bench; a
+          // word. The approved workshop has a pegboard of hanging hand tools behind the bench; a
           // different workshop will not. The PREVIOUS version of this question asked each frame
           // independently whether it was "a woodworking workshop" — both sides answered yes, and
-          // the real, visible fact that SH020 renders a DIFFERENT workshop was reported as a clean
-          // cut (the documented miss in the first smoke).
+          // the real, visible fact that SH020 rendered a DIFFERENT workshop was reported as a
+          // clean cut (the documented miss in the first smoke).
           //
           // `frames: "last"` rather than "first": the first frame of an image-conditioned shot is
           // the approved conditioning plate, which carries no scene of its own, so the comparable
           // evidence is where the shot settles.
           "id": "sh020_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
-          "intended": "SH020 continues SH010's workshop — the same room, with the same pegboard of hand tools behind the bench.",
+          "intended": "SH010 and SH020 are both conditioned on the approved `workshop_location`, so this cut is one room: the same pegboard of hand tools behind the bench.",
           "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
           "expect": ["yes"],
           "contradict": ["no"]
@@ -186,7 +209,7 @@
       "questions": [
         {
           "id": "sh030_bench", "topic": "location", "frames": "all",
-          "intended": "Close on the sawdust-covered wooden workbench.",
+          "intended": "Close on the approved workbench (`workbench_table`): sawdust-covered, wooden.",
           "ask": "What is the surface in this frame made of? Answer with exactly one word: wood, stone, metal, fabric, or unclear.",
           "expect": ["wood", "wooden"],
           "contradict": ["stone", "metal", "fabric", "plastic", "carpet", "tile"]
@@ -223,11 +246,12 @@
           "contradict": ["yes"]
         },
         {
-          // COMPARATIVE against SH020's selected take: a close-up cannot see the room, so the
-          // feature that carries across this cut is the PROP — the parcel SH020 brought to the
-          // bench is the one SH030 sets down.
+          // COMPARATIVE against SH020's selected take. A close-up cannot see the room, so the
+          // shared reference this cut is graded on is the PROP, not the workshop: both shots are
+          // conditioned on the approved `red_parcel`, and the parcel SH020 brought to the bench is
+          // the one SH030 sets down.
           "id": "sh030_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
-          "intended": "SH030 sets down the same red parcel SH020 carried to the bench.",
+          "intended": "SH020 and SH030 are both conditioned on the approved `red_parcel`, so this cut sets down the same parcel it carried in.",
           "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
           "expect": ["red"],
           "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]
@@ -239,7 +263,7 @@
       "questions": [
         {
           "id": "sh040_location", "topic": "location", "frames": "all",
-          "intended": "The same workshop, wide, matching SH010's setup.",
+          "intended": "The same approved workshop (`workshop_location`), wide, matching SH010's setup.",
           "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
           "expect": ["workshop"],
           "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
@@ -266,8 +290,11 @@
           "contradict": ["open"]
         },
         {
+          // SH030 is the close-up, so the shared feature graded here is the room SH040 opens out
+          // to: both shots bind the approved `workshop_location`, and its pegboard is what a wide
+          // frame can be asked about.
           "id": "sh040_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
-          "intended": "SH040 is the same room SH030 left the parcel in — the same pegboard of hand tools behind the bench.",
+          "intended": "SH030 and SH040 are both conditioned on the approved `workshop_location`, so the parcel is left in the one room: the same pegboard of hand tools behind the bench.",
           "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
           "expect": ["yes"],
           "contradict": ["no"]
@@ -279,7 +306,7 @@
       "questions": [
         {
           "id": "sh050_location", "topic": "location", "frames": "all",
-          "intended": "The same workshop.",
+          "intended": "The same approved workshop (`workshop_location`).",
           "ask": "What kind of room is in this frame? Answer with exactly one word from this list: workshop, kitchen, office, bedroom, outdoors, studio, or unclear.",
           "expect": ["workshop"],
           "contradict": ["kitchen", "office", "bedroom", "outdoors", "studio", "bathroom", "garage", "street"]
@@ -325,7 +352,7 @@
         },
         {
           "id": "sh050_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
-          "intended": "SH050 is the same room SH040 closed the door on — the same pegboard of hand tools behind the bench.",
+          "intended": "SH040 and SH050 are both conditioned on the approved `workshop_location`, so the recipient walks into the room the courier left: the same pegboard of hand tools behind the bench.",
           "ask": "Is there a pegboard with hand tools hanging on the wall in this frame? Answer with exactly one word: yes, no, or unclear.",
           "expect": ["yes"],
           "contradict": ["no"]
@@ -337,7 +364,7 @@
       "questions": [
         {
           "id": "sh060_bench", "topic": "location", "frames": "all",
-          "intended": "Close on the sawdust-covered wooden workbench.",
+          "intended": "Close on the approved workbench (`workbench_table`): sawdust-covered, wooden.",
           "ask": "What is the surface in this frame made of? Answer with exactly one word: wood, stone, metal, fabric, or unclear.",
           "expect": ["wood", "wooden"],
           "contradict": ["stone", "metal", "fabric", "plastic", "carpet", "tile"]
@@ -371,8 +398,10 @@
           "contradict": ["sealed", "closed", "shut", "taped"]
         },
         {
+          // The last cut is a close-up again, so — as at SH030 — the shared reference graded here
+          // is the approved `red_parcel` rather than the room.
           "id": "sh060_cut", "topic": "cut_continuity", "frames": "last", "acrossCut": true,
-          "intended": "SH060 opens the same red parcel SH050 found sealed on the bench.",
+          "intended": "SH050 and SH060 are both conditioned on the approved `red_parcel`, so the parcel opened is the one found sealed on the bench.",
           "ask": "What colour is the parcel or box in this frame? Answer with exactly one colour word, the word none if there is no parcel or box, or the word unclear.",
           "expect": ["red"],
           "contradict": ["none", "blue", "brown", "green", "white", "black", "yellow", "grey", "gray", "orange"]

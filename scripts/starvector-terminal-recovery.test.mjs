@@ -5,22 +5,29 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateExecutionPredecessor, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
+import { bindRecoveryLineage, checkedRecoveryFile, prepareRecovery, safeRecoveryPath, stable, validateExecutionPredecessor, validateNativeExecutionArchives, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+// Hosted Windows recovery receives this exact workflow-owned interpreter.  The
+// local archive fixture also needs an interpreter because recovery validates
+// ZIP contents with Python; use the installed command only when the workflow
+// value is absent from a native Windows test process.
+if (process.platform === "win32" && !process.env.STARVECTOR_TERMINAL_METRICS_PYTHON) {
+  process.env.STARVECTOR_TERMINAL_METRICS_PYTHON = "python";
+}
 async function writeZip(root, id, files) {
   const source = path.join(root, `zip-${id}`);
   for (const [relative, content] of Object.entries(files)) {
     const file = path.join(source, relative); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content);
   }
   const archive = path.join(root, `${id}.zip`);
-  execFileSync("python3", ["-c", "import os,sys,zipfile\nroot,out=sys.argv[1:]\nwith zipfile.ZipFile(out,'w') as z:\n for base,_,names in os.walk(root):\n  for name in names:\n   p=os.path.join(base,name); z.write(p,os.path.relpath(p,root))", source, archive]);
+  execFileSync(process.env.STARVECTOR_TERMINAL_METRICS_PYTHON ?? "python3", ["-c", "import os,sys,zipfile\nroot,out=sys.argv[1:]\nwith zipfile.ZipFile(out,'w') as z:\n for base,_,names in os.walk(root):\n  for name in names:\n   p=os.path.join(base,name); z.write(p,os.path.relpath(p,root))", source, archive]);
   return readFile(archive);
 }
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-recovery-test-")); t.after(() => rm(root, { recursive: true, force: true }));
   const archive = path.join(root, "77.zip");
-  execFileSync("python3", ["-c", "import sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],'w') as z:\n z.writestr('hostile-inputs/0.svg','noise-0<svg/>'); z.writestr('service.stderr.log',''); z.writestr('transcript.json','historical transcript bytes')", archive]);
+  execFileSync(process.env.STARVECTOR_TERMINAL_METRICS_PYTHON ?? "python3", ["-c", "import sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],'w') as z:\n z.writestr('hostile-inputs/0.svg','noise-0<svg/>'); z.writestr('service.stderr.log',''); z.writestr('transcript.json','historical transcript bytes')", archive]);
   const bytes = await readFile(archive), content = '{"campaign_run_id":"retired","permanent_pin":"' + "a".repeat(40) + '"}\n';
   const marker = { path: "campaign.json", size: Buffer.byteLength(content), sha256: sha(content), content };
   const config = { schema_version: 1, campaign_id: "retired", inference_revision: "a".repeat(40), sceneworks_revision: "b".repeat(40), workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/server-candle-linux.yml", run_id: "100", run_attempt: 1, head_sha: "b".repeat(40), conclusion: "cancelled" }, failure: { code: "worker_cpu_fallback", phase: "execution", tuple: "mlx:1b" }, markers: { campaign: marker, tuple: { ...marker, path: "tuple.json" } }, source_artifacts: [{ role: "raw", repository: "SceneWorks/SceneWorks", workflow_run_id: "100", workflow_run_attempt: 1, head_sha: "b".repeat(40), api_workflow_run: { id: "100", head_sha: "b".repeat(40) }, id: "77", name: "raw-retired", size: bytes.length, digest: `sha256:${sha(bytes)}` }], authority: { reason: "Corrected worker identity; historical bytes cannot serve current execution" } };
@@ -191,4 +198,32 @@ test("authenticated native failure retains upstream, raw, and combined archives 
   await expectSemanticFailure("raw+combined", { ...records, "preflight-provenance.json": JSON.stringify({ ...JSON.parse(records["preflight-provenance.json"]), tuple: "mlx:8b" }) }, /preflight provenance/);
   await expectSemanticFailure("raw+combined", { ...records, "product-service-worker.stdout.log": JSON.stringify({ event: "utility_job_failed", error: "generic infrastructure error" }) }, /receipt rejection/);
   await expectSemanticFailure("combined", { ...records, "case-bundle.json": JSON.stringify({ schema_version: 1, inference_revision: value.inference_revision, tuples: {} }) }, /combined archive substituted case-bundle/);
+});
+
+test("underprovisioned native campaign is bound to exact budgets and terminal outcomes", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-budget-recovery-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const value = { campaign_id: "failed-budget", inference_revision: "c".repeat(40), sceneworks_revision: "d".repeat(40), workflow: { run_id: "101", run_attempt: 1 }, failure: { code: "native_quality_budget_underprovisioned", phase: "execution", tuple: "mlx:1b", evidence_schema_version: 1, model_id: "starvector_1b", model_repository: "starvector/starvector-1b-im2svg", model_revision: "e".repeat(40), configured_max_new_tokens: 4000, required_max_new_tokens: 7933, observed_quality_cases: 20, accepted_quality_cases: 11, rejected_quality_cases: 9, token_limit_quality_cases: 7, sanitizer_quality_cases: 2, required_accepted_quality_cases: 114, max_possible_accepted_quality_cases: 111 } };
+  const upstream = { "upstream-controller.json": JSON.stringify({ schema_version: 1, campaign_run_id: value.campaign_id, inference_revision: value.inference_revision, sceneworks_revision: value.sceneworks_revision, workflow_run_id: value.workflow.run_id, workflow_run_attempt: 1 }) };
+  const evidence = (index) => ({ accepted: index < 11, finishReason: index < 11 || index >= 18 ? "complete_root" : "token_limit", generatedTokens: index < 11 ? 100 : index >= 18 ? 200 : 4000, generatedBytes: 100, rejectionStage: index < 11 ? null : index >= 18 ? "sanitizer" : "generation_limit", rejectionCode: index < 11 || index >= 18 ? null : "token_limit", rejectionReason: index < 11 ? null : index >= 18 ? "SVG policy rejection" : "native StarVector stopped at the token_limit", providerId: "mlx-starvector-1b", backend: "mlx", modelId: value.failure.model_id, modelRepository: value.failure.model_repository, modelRevision: value.failure.model_revision });
+  const route = Array.from({ length: 20 }, (_, index) => JSON.stringify({ case_id: `quality-v1-${index}`, job: { result: { terminalEvidence: evidence(index) } } })).join("\n") + "\n";
+  const bundle = { schema_version: 1, inference_revision: value.inference_revision, tuples: { "mlx:1b": { image_quality: Array.from({ length: 120 }, () => ({ model: value.failure.model_id, detailBudget: { maxNewTokens: 4000, maxSvgBytes: 262144, maxWallTimeMs: 120000 } })), deterministic_parity: [], upstream_reference: { checkpoint_revision: value.failure.model_revision } } } };
+  const records = { "controller-failure.json": JSON.stringify({ campaign_run_id: value.campaign_id, permanent_pin: value.inference_revision, tuple: value.failure.tuple, status: "failed" }), "preflight-provenance.json": JSON.stringify({ campaign_run_id: value.campaign_id, inference_revision: value.inference_revision, permanent_pin: value.inference_revision, tuple: value.failure.tuple, workflow_run_id: value.workflow.run_id, workflow_run_attempt: 1, service: { sceneworks_revision: value.sceneworks_revision, inference_revision: value.inference_revision, tuple: value.failure.tuple, models: { "starvector-1b": { revision: value.failure.model_revision } }, worker: { model_id: value.failure.model_id, provider_id: "mlx-starvector-1b" } } }), "case-bundle.json": JSON.stringify(bundle), "product-service-worker.stdout.log": "", "vector-generate-route.ndjson": route };
+  value.failure.controller_failure_sha256 = sha(records["controller-failure.json"]);
+  const writeArchives = async (suffix, rawRecords = records, combinedRecords = rawRecords) => ({ upstream: path.join(root, `upstream-${suffix}.zip`), raw: path.join(root, `raw-${suffix}.zip`), combined: path.join(root, `combined-${suffix}.zip`), ...await (async () => { await writeZip(root, `upstream-${suffix}`, upstream); await writeZip(root, `raw-${suffix}`, rawRecords); await writeZip(root, `combined-${suffix}`, Object.fromEntries(Object.entries(combinedRecords).map(([name, content]) => [`evidence/${name}`, content]))); return {}; })() });
+  const archives = await writeArchives("valid"); await validateNativeExecutionArchives(value, archives);
+  const wrongRoute = { ...records, "vector-generate-route.ndjson": route.replace('"generatedTokens":4000', '"generatedTokens":3999') };
+  const routeArchives = await writeArchives("route", wrongRoute);
+  await assert.rejects(() => validateNativeExecutionArchives(value, routeArchives), /underprovisioned quality budget/);
+  const wrongBundle = structuredClone(bundle); wrongBundle.tuples["mlx:1b"].image_quality[0].detailBudget.maxNewTokens = 7933;
+  const wrongBudget = { ...records, "case-bundle.json": JSON.stringify(wrongBundle) };
+  const budgetArchives = await writeArchives("budget", wrongBudget);
+  await assert.rejects(() => validateNativeExecutionArchives(value, budgetArchives), /underprovisioned budget/);
+  const substituteArchives = await writeArchives("substitute", records, wrongRoute);
+  await assert.rejects(() => validateNativeExecutionArchives(value, substituteArchives), /substituted vector route/);
+  const wrongProvider = { ...records, "vector-generate-route.ndjson": route.replace('"providerId":"mlx-starvector-1b"', '"providerId":"other-provider"') };
+  const wrongProviderArchives = await writeArchives("provider", wrongProvider);
+  await assert.rejects(() => validateNativeExecutionArchives(value, wrongProviderArchives), /provider\/model identity/);
+  const wrongController = { ...records, "controller-failure.json": JSON.stringify({ campaign_run_id: value.campaign_id, permanent_pin: value.inference_revision, tuple: value.failure.tuple, status: "failed", error: "different failure" }) };
+  const wrongControllerArchives = await writeArchives("controller", wrongController);
+  await assert.rejects(() => validateNativeExecutionArchives(value, wrongControllerArchives), /controller failure bytes/);
 });

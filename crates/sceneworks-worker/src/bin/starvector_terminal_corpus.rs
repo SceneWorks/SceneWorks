@@ -7,6 +7,49 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn shipping_detail_budgets() -> Result<Value, Box<dyn std::error::Error>> {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .ok_or_else(|| fail("builtin.models.jsonc is not compiled into SceneWorks"))?;
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))?;
+    let models = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| fail("builtin.models.jsonc has no models array"))?;
+    let mut budgets = serde_json::Map::new();
+    for (tier, model_id) in [("1b", "starvector_1b"), ("8b", "starvector_8b")] {
+        let matches = models
+            .iter()
+            .filter(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(fail(format!(
+                "shipping manifest must contain one {model_id}"
+            )));
+        }
+        let vector = matches[0]
+            .get("vector")
+            .and_then(Value::as_object)
+            .ok_or_else(|| fail(format!("{model_id} lacks vector limits")))?;
+        let max_tokens = vector.get("maxNewTokens").and_then(Value::as_u64);
+        let max_bytes = vector.get("maxSvgBytes").and_then(Value::as_u64);
+        let max_time = vector.get("maxWallTimeMs").and_then(Value::as_u64);
+        if !matches!(max_tokens, Some(1..=16384))
+            || !matches!(max_bytes, Some(1..=1_048_576))
+            || !matches!(max_time, Some(1..=3_600_000))
+        {
+            return Err(fail(format!("{model_id} has invalid vector limits")));
+        }
+        budgets.insert(
+            tier.to_owned(),
+            json!({"maxNewTokens": max_tokens, "maxSvgBytes": max_bytes, "maxWallTimeMs": max_time}),
+        );
+    }
+    Ok(Value::Object(budgets))
+}
+
 struct StagingDir(PathBuf);
 
 impl Drop for StagingDir {
@@ -109,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(fail("model and inference identities are incomplete"));
     }
     let corpus: Value = serde_json::from_slice(&fs::read(&corpus_path)?)?;
+    let detail_budgets = shipping_detail_budgets()?;
     let sources = corpus
         .pointer("/upstream_image_quality_cases/sources")
         .and_then(Value::as_array)
@@ -183,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "input_png_path": input_relative, "png_sha256": digest(&png),
                 "reference_png": reference_relative, "reference_png_sha256": digest(&png),
                 "sampling": {"temperature": 0.0, "topP": 1.0, "topK": 1, "repetitionPenalty": 1.0, "seed": 7},
-                "detail_budget": {"maxNewTokens": 4000, "maxSvgBytes": 262144, "maxWallTimeMs": 120000}
+                "detail_budgets": detail_budgets
             }));
         }
     }
@@ -291,7 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "expected_raster_revision": raster_revision, "expected_vector_revision": "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
             "raster_inventory_sha256": raster_inventory, "seed": case_index, "width": 512, "height": 512,
             "sampling": {"temperature": 0.0, "topP": 1.0, "topK": 1, "repetitionPenalty": 1.0, "seed": case_index},
-            "detail_budget": {"maxNewTokens": 4000, "maxSvgBytes": 262144, "maxWallTimeMs": 120000}})
+            "detail_budget": detail_budgets["8b"]})
     }).collect::<Vec<_>>();
     let prompt_identity = digest(
         prompts
@@ -308,7 +352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if prompt_identity != expected_prompts {
         return Err(fail("generated prompt identity mismatches corpus"));
     }
-    let index = json!({"schema_version": 1, "inference_revision": inference_revision, "row_identity_sha256": expected_rows,
+    let index = json!({"schema_version": 2, "inference_revision": inference_revision, "row_identity_sha256": expected_rows,
         "rows": rows, "lifecycle_cases": lifecycle, "limit_cases": limits, "prompt_composition": prompts});
     fs::write(
         assets_root.join("starvector-terminal-row-index-v1.json"),
@@ -317,4 +361,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::rename(&assets_root, &final_assets_root)?;
     drop(staging);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shipping_detail_budgets;
+
+    #[test]
+    fn terminal_detailed_budgets_come_from_the_embedded_shipping_manifest() {
+        let budgets = shipping_detail_budgets().unwrap();
+        assert_eq!(budgets["1b"]["maxNewTokens"], 7933);
+        assert_eq!(budgets["8b"]["maxNewTokens"], 15422);
+        for tier in ["1b", "8b"] {
+            assert_eq!(budgets[tier]["maxSvgBytes"], 262144);
+            assert_eq!(budgets[tier]["maxWallTimeMs"], 120000);
+        }
+    }
 }

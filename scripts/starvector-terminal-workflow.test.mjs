@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provision.mjs";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
-import { assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalCudaWorkerGpuIdentity, assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -54,8 +54,20 @@ async function productServiceFixture({ tamperRelocation = false, tuple = process
   const runtime = path.join(sandbox, "fake-service.cjs");
   await writeFile(runtime, `const http = require("node:http");
 const path = require("node:path");
-if ((process.argv[1] ?? "").startsWith("--id=")) { process.stdout.write("0, GPU-12345678-1234-1234-1234-123456789abc, NVIDIA Fixture GPU, 580.0, 32768, 30000, 2768\\n"); process.exit(0); }
-if (path.basename(process.argv[1] ?? "") === "build") process.exit(0);
+// Node parses --id before loading preloads, so aliasing node.exe to nvidia-smi.exe
+// cannot serve as a Windows executable fixture. Intercept only the device probe.
+const childProcess = require("node:child_process");
+const originalExecFile = childProcess.execFile;
+childProcess.execFile = function(file, ...args) {
+  if (file !== "nvidia-smi") return originalExecFile.call(this, file, ...args);
+  const callback = args.at(-1);
+  process.nextTick(() => callback(null, "0, GPU-12345678-1234-1234-1234-123456789abc, NVIDIA Fixture GPU, 580.0, 32768, 30000, 2768\\n", ""));
+};
+childProcess.execFile[require("node:util").promisify.custom] = (...args) => new Promise((resolve, reject) => {
+  childProcess.execFile(...args, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
+});
+require("node:module").syncBuiltinESMExports();
+if (path.basename(process.argv[1] ?? "") === "build") process.exit(process.argv.includes("--release") ? 0 : 1);
 if (process.argv.length === 1 && process.env.SCENEWORKS_GPU_CHECK === "1") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
@@ -93,7 +105,7 @@ if (process.argv.length === 1) {
         const mlx = process.env.SCENEWORKS_GPU_ID === "mlx";
         const capabilities = mlx ? ["gpu", "vector_image_to_svg"] : ["gpu", "nvidia", "candle", "vector_image_to_svg"];
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU", status: "idle", currentJobId: null, capabilities }]));
+        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU (32768 MB)", status: "idle", currentJobId: null, capabilities }]));
         return;
       }
       if (request.method === "GET" && request.url === "/api/v1/models") {
@@ -116,8 +128,7 @@ if (process.argv.length === 1) {
 }
 `);
   await executableAlias(path.join(shimRoot, process.platform === "win32" ? "cargo.exe" : "cargo"));
-  if (process.platform === "win32") await executableAlias(path.join(shimRoot, "nvidia-smi.exe"));
-  await executableAlias(path.join(root, "target", "debug", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
+  await executableAlias(path.join(root, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
   await writeFile(path.join(weightsRoot, "app", "receipt.json"), "receipt");
   await writeFile(path.join(weightsRoot, "hf", "weights.bin"), "weights");
   const manifest = {
@@ -135,7 +146,7 @@ if (process.argv.length === 1) {
   const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
   const contract = terminalProductWorkerContract(tuple);
-  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime.replaceAll("\\", "/")}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
   const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
   return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript };
 }
@@ -157,7 +168,7 @@ async function forceFixtureCleanup(fixture, record) {
     await runProductServiceCli(fixture, "stop", 0).catch(() => {});
     for (const pid of [record.worker_pid, record.api_pid]) { try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ } }
   }
-  await rm(fixture.sandbox, { recursive: true, force: true });
+  await rm(fixture.sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 test("terminal workflow is dispatch-only, serial, and seals raw evidence", () => {
@@ -208,7 +219,7 @@ test("terminal workflow has no install or model download step", () => {
 });
 
 test("source-built product service enables the native backend for each campaign host", () => {
-  assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--locked", "-p", "sceneworks-rust-api"]);
+  assert.deepEqual(productServiceBuildArgs("darwin"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api"]);
   assert.deepEqual(productServiceBackendEnv("darwin"), {
     SCENEWORKS_BACKEND_MLX_ENABLED: "true",
     SCENEWORKS_BACKEND_CANDLE_ENABLED: "false",
@@ -216,7 +227,7 @@ test("source-built product service enables the native backend for each campaign 
     SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce",
     SCENEWORKS_CANDLE_REQUIRED: "0",
   });
-  assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
+  assert.deepEqual(productServiceBuildArgs("win32"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
   assert.deepEqual(productServiceBackendEnv("win32"), {
     SCENEWORKS_BACKEND_MLX_ENABLED: "false",
     SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",
@@ -270,6 +281,27 @@ test("terminal product worker readiness binds each tuple to its native provider,
   }
   assert.throws(() => terminalProductWorkerContract("mlx:1b", "win32"), /requires darwin/);
   assert.throws(() => terminalProductWorkerId("mlx:1b", "short"), /exact tuple and instance token/);
+});
+
+test("terminal CUDA worker identity binds the same physical index, name, and memory", () => {
+  const physical = {
+    index: "0",
+    uuid: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+    name: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    total_bytes: 97887 * 1024 * 1024,
+  };
+  const worker = { gpu_id: "0", gpu_name: `${physical.name} (97887 MB)` };
+  assert.equal(assertTerminalCudaWorkerGpuIdentity(worker, physical), worker);
+  for (const mutate of [
+    (candidate) => { candidate.gpu_id = "1"; },
+    (candidate) => { candidate.gpu_name = "NVIDIA GeForce RTX 4090 (24564 MB)"; },
+    (candidate) => { candidate.gpu_name = `${physical.name} (97886 MB)`; },
+  ]) {
+    const candidate = structuredClone(worker);
+    mutate(candidate);
+    assert.throws(() => assertTerminalCudaWorkerGpuIdentity(candidate, physical), /selected physical GPU differ/);
+  }
+  assert.throws(() => assertTerminalCudaWorkerGpuIdentity(worker, { ...physical, total_bytes: physical.total_bytes + 1 }), /inputs are malformed/);
 });
 
 test("terminal product worker readiness rejects CPU-only, stale, wrong-backend, and unavailable-provider sets", () => {
@@ -635,20 +667,24 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   await mkdir(path.join(inference, "release"), { recursive: true }); await mkdir(path.join(inference, "scripts", "release"), { recursive: true }); await mkdir(assets);
   for (const [name, bytes] of [["source.svg", "svg"], ["input.png", "input"], ["reference.png", "reference"]]) await writeFile(path.join(assets, name), bytes);
   const sources = Array.from({ length: 4 }, (_, index) => ({ dataset: `starvector/dataset-${index}`, revision: String(index + 1).repeat(40), row_identity_sha256: "", parquet_path: "data/test-00000-of-00001.parquet", parquet_sha256: hash("parquet") }));
-  const rows = Array.from({ length: 120 }, (_, case_index) => ({ case_index, dataset: sources[Math.floor(case_index / 30)].dataset, revision: sources[Math.floor(case_index / 30)].revision, row_index: case_index % 30, filename: `${case_index}.svg`, svg_path: "source.svg", svg_sha256: hash("svg"), input_png_path: "input.png", png_sha256: hash("input"), reference_png: "reference.png", reference_png_sha256: hash("reference") }));
+  const detail_budgets = { "1b": { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 }, "8b": { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 120000 } };
+  const rows = Array.from({ length: 120 }, (_, case_index) => ({ case_index, dataset: sources[Math.floor(case_index / 30)].dataset, revision: sources[Math.floor(case_index / 30)].revision, row_index: case_index % 30, filename: `${case_index}.svg`, svg_path: "source.svg", svg_sha256: hash("svg"), input_png_path: "input.png", png_sha256: hash("input"), reference_png: "reference.png", reference_png_sha256: hash("reference"), detail_budgets: structuredClone(detail_budgets) }));
   const record = (row) => JSON.stringify({ dataset: row.dataset, revision: row.revision, row_index: row.row_index, filename: row.filename, svg_sha256: row.svg_sha256 });
   sources.forEach((source, index) => { source.row_identity_sha256 = hash(`${rows.slice(index * 30, index * 30 + 30).map(record).join("\n")}\n`); });
   const rowIdentity = hash(`${rows.map(record).join("\n")}\n`);
   const parityIdentity = hash(`${sources.flatMap((_, index) => rows.slice(index * 30, index * 30 + 5)).map(record).join("\n")}\n`);
-  const prompts = Array.from({ length: 60 }, (_, case_index) => { const prompt = `prompt-${case_index}`; return { case_index, case_id: `prompt-v1-${case_index}`, prompt, prompt_sha256: hash(prompt), raster_model: "raster", vector_model: "starvector_8b", expected_raster_revision: "raster-revision", expected_vector_revision: "vector-revision" }; });
+  const prompts = Array.from({ length: 60 }, (_, case_index) => { const prompt = `prompt-${case_index}`; return { case_index, case_id: `prompt-v1-${case_index}`, prompt, prompt_sha256: hash(prompt), raster_model: "raster", vector_model: "starvector_8b", expected_raster_revision: "raster-revision", expected_vector_revision: "vector-revision", detail_budget: detail_budgets["8b"] }; });
   const corpus = { upstream_image_quality_cases: { row_identity_sha256: rowIdentity, sources }, deterministic_parity_cases: { row_identity_sha256: parityIdentity }, sceneworks_owned_suites: { prompt_composition: { content_identity_sha256: hash(prompts.map((entry) => entry.prompt_sha256).join("\n")) } } };
   await writeFile(path.join(inference, "release", "corpus.json"), JSON.stringify(corpus));
   await writeFile(path.join(inference, "scripts", "release", "starvector_terminal_evidence.mjs"), `import { createHash } from "node:crypto"; export function validatePlan(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }\n`);
   const lifecycle = ["load", "unload", "reload", "memory_reported"], limits = ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"];
-  const index = { inference_revision: pin, row_identity_sha256: rowIdentity, rows, lifecycle_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, lifecycle.map((operation) => ({ case_id: `${tuple}-${operation}`, operation }))])), limit_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, limits.map((finish_reason) => ({ case_id: `${tuple}-${finish_reason}`, finish_reason }))])), prompt_composition: prompts };
+  const index = { schema_version: 2, inference_revision: pin, row_identity_sha256: rowIdentity, rows, lifecycle_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, lifecycle.map((operation) => ({ case_id: `${tuple}-${operation}`, operation }))])), limit_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, limits.map((finish_reason) => ({ case_id: `${tuple}-${finish_reason}`, finish_reason }))])), prompt_composition: prompts };
   await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
   const result = await validateCorpusAssets(inference, "release/corpus.json", assets, pin);
   assert.equal(result.asset_file_references, 360); assert.equal(result.prompt_sha256, corpus.sceneworks_owned_suites.prompt_composition.content_identity_sha256);
+  index.rows[0].detail_budgets["1b"].maxNewTokens = 4000; await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
+  await assert.rejects(() => validateCorpusAssets(inference, "release/corpus.json", assets, pin), /1b shipping Detail budget/);
+  index.rows[0].detail_budgets = structuredClone(detail_budgets); await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
   let requests = 0;
   const parquetRoot = path.join(root, "parquet");
   const options = { inferenceRoot: inference, corpusRelative: "release/corpus.json", assetsRoot: assets, permanentPin: pin, parquetRoot };

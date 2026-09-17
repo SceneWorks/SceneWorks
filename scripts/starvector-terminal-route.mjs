@@ -34,6 +34,8 @@ export function validateBundle(bundle, tuple) {
   for (const [name, count] of [["image_quality", 120], ["deterministic_parity", 20], ["lifecycle", 4], ["limits", 6]]) {
     if (!Array.isArray(entry[name]) || entry[name].length !== count) die(`${tuple} must carry exactly ${count} ${name} records`);
   }
+  const expectedModel = tuple.endsWith(":8b") ? "starvector_8b" : "starvector_1b";
+  for (const [name, records] of Object.entries(entry)) if (["image_quality", "deterministic_parity", "lifecycle", "limits"].includes(name) && records.some((record) => record?.model !== expectedModel || !record.projectId || !record.sourceAssetId)) die(`${tuple} ${name} route identity differs from the selected tuple`);
   const kinds = new Set(entry.limits.map((record) => record.finish_reason));
   if (kinds.size !== finishReasons.size || [...finishReasons].some((kind) => !kinds.has(kind))) die(`${tuple} must exercise every typed finish reason`);
   if (tuple === "candle-cuda:8b") for (const [name, count] of [["hostile_sanitizer", 200], ["prompt_composition", 60]]) if (!Array.isArray(bundle[name]) || bundle[name].length !== count) die(`terminal bundle must carry exactly ${count} ${name} records`);
@@ -71,17 +73,17 @@ export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = 
   die(`vector_generate job ${created.id} did not finish within two hours`);
 }
 
-async function runCases(baseUrl, records, transcript, fetchOptions, suite) {
+async function runCases(baseUrl, records, transcript, fetchOptions, suite, output) {
   const completed = [];
-  for (const record of records) completed.push({ case_id: record.case_id, suite, request: vectorRequest(record), job: await submitAndPoll(baseUrl, record, transcript, fetchOptions) });
+  for (const record of records) { const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions); await preserveTerminalDiagnostics(output, suite, record.case_id, job); completed.push({ case_id: record.case_id, suite, request: vectorRequest(record), job }); }
   return completed;
 }
-async function runParityCases(baseUrl, records, transcript, fetchOptions) {
+async function runParityCases(baseUrl, records, transcript, fetchOptions, output) {
   const completed = [];
-  for (const record of records) completed.push({ case_id: record.case_id, seed: record.seed, job: await submitAndPoll(baseUrl, record, transcript, fetchOptions) });
+  for (const record of records) { const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions); await preserveTerminalDiagnostics(output, "deterministic_parity", record.case_id, job); completed.push({ case_id: record.case_id, seed: record.seed, job }); }
   return completed;
 }
-export async function runLifecycle(baseUrl, records, transcript, fetchOptions, { unload, reload, submit = submitAndPoll }) {
+export async function runLifecycle(baseUrl, records, transcript, fetchOptions, { unload, reload, submit = submitAndPoll, preserve = null }) {
   const observed = [];
   for (const record of records) {
     if (!["load", "unload", "reload", "memory_reported"].includes(record.operation)) die("lifecycle record has unknown operation");
@@ -100,6 +102,7 @@ export async function runLifecycle(baseUrl, records, transcript, fetchOptions, {
       await appendFile(transcript, JSON.stringify({ phase: "owned_worker_reloaded", case_id: record.case_id, result: transition }) + "\n");
     }
     const job = await submit(baseUrl, record, transcript, fetchOptions);
+    if (preserve) await preserve(record, job);
     const value = job?.result?.terminalEvidence ?? job?.terminalEvidence;
     if (!value || value.accepted !== true || !["complete_root", "eos"].includes(value.finishReason)) die(`product worker did not complete lifecycle ${record.operation}`);
     if (record.operation === "memory_reported" && (!job.terminalMetrics || typeof job.terminalMetrics.peakMemoryBytes !== "number")) die("product worker did not report memory for lifecycle observation");
@@ -163,6 +166,35 @@ async function materializeArtifact(evidenceRoot, relative, source, expected) {
     await writeFile(destination, bytes, { flag: "wx" });
   }
   const copied = await lstat(destination); if (!copied.isFile() || copied.isSymbolicLink() || sha(await readFile(destination)) !== expected) die(`canonical copy hash mismatch: ${relative}`);
+}
+
+// Copy rejected provider bytes while the owned worker still exists. These
+// files are evidence only: they are never returned by the product API or
+// promoted into a project asset.
+export async function preserveTerminalDiagnostics(output, suite, caseId, job) {
+  const item = job?.result?.terminalEvidence ?? job?.terminalEvidence;
+  if (!item || item.accepted === true) return null;
+  if (!output || !["image_quality", "deterministic_parity", "lifecycle", "limits", "prompt_composition"].includes(suite) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(caseId ?? "")) die("rejected terminal diagnostic identity is invalid");
+  if (!item.providerTranscriptPath || !/^[a-f0-9]{64}$/.test(item.providerTranscriptSha256 ?? "")) die("rejected terminal result lacks a sealed provider transcript");
+  const transcriptInfo = await lstat(item.providerTranscriptPath);
+  if (transcriptInfo.size > 2 * 1024 * 1024) die("rejected provider transcript exceeds the evidence bound");
+  const prefix = `terminal-diagnostics/${suite}/${caseId}`;
+  await materializeArtifact(output, `${prefix}/provider-transcript.json`, item.providerTranscriptPath, item.providerTranscriptSha256);
+  const artifacts = [{ role: "provider_transcript", path: portableRelative(`${prefix}/provider-transcript.json`), size: transcriptInfo.size, sha256: item.providerTranscriptSha256 }];
+  const hasRejectedPath = item.rejectedSvgPath !== undefined && item.rejectedSvgPath !== null;
+  const hasRejectedHash = item.rejectedSvgSha256 !== undefined && item.rejectedSvgSha256 !== null;
+  if (hasRejectedPath !== hasRejectedHash) die("rejected terminal result has incomplete raw SVG identity");
+  if (item.rejectionStage === "sanitizer" && !hasRejectedPath) die("sanitizer rejection lacks sealed raw SVG evidence");
+  if (hasRejectedPath) {
+    if (typeof item.rejectedSvgPath !== "string" || !/^[a-f0-9]{64}$/.test(item.rejectedSvgSha256)) die("rejected terminal result has invalid raw SVG identity");
+    const svgInfo = await lstat(item.rejectedSvgPath);
+    if (svgInfo.size > 262144) die("rejected SVG exceeds the terminal byte bound");
+    await materializeArtifact(output, `${prefix}/rejected-output.svg`, item.rejectedSvgPath, item.rejectedSvgSha256);
+    artifacts.push({ role: "rejected_svg", path: portableRelative(`${prefix}/rejected-output.svg`), size: svgInfo.size, sha256: item.rejectedSvgSha256 });
+  }
+  const record = { schema_version: 1, suite, case_id: caseId, outcome: "rejected", finish_reason: item.finishReason, rejection_stage: item.rejectionStage, rejection_code: item.rejectionCode ?? null, rejection_reason: item.rejectionReason, artifacts };
+  await appendFile(path.join(output, "terminal-diagnostics.ndjson"), JSON.stringify(record) + "\n");
+  return record;
 }
 
 async function materializeRunArtifacts(output, tuple, entry, events, run) {
@@ -324,13 +356,14 @@ async function main() {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   try {
     events = { tuple,
-      image_quality: await runCases(baseUrl, cases.image_quality, transcript, bundle.fetch ?? {}, "image_quality"),
-      deterministic_parity: await runParityCases(baseUrl, cases.deterministic_parity, transcript, bundle.fetch ?? {}),
+      image_quality: await runCases(baseUrl, cases.image_quality, transcript, bundle.fetch ?? {}, "image_quality", output),
+      deterministic_parity: await runParityCases(baseUrl, cases.deterministic_parity, transcript, bundle.fetch ?? {}, output),
       lifecycle: await runLifecycle(baseUrl, cases.lifecycle, transcript, bundle.fetch ?? {}, {
         unload: async () => { let result; await sampler.transition(async () => { result = await unloadOwnedWorker(output); service.worker_pid = null; }); return result; },
         reload: async () => { let result; await sampler.transition(async () => { result = await reloadOwnedWorker(root, output); service.worker_pid = result.worker_pid; service.worker = result.worker; }); return result; },
+        preserve: (record, job) => preserveTerminalDiagnostics(output, "lifecycle", record.case_id, job),
       }),
-      limits: await runCases(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, "limits"),
+      limits: await runCases(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, "limits", output),
     };
   } finally { observation = await sampler.stop(); }
   // Optional raster composition is a different workload and cannot author the
@@ -338,7 +371,7 @@ async function main() {
   if (tuple === "candle-cuda:8b") {
     events.hostile_sanitizer = await runHostileSanitizer(bundle.hostile_sanitizer, output, transcript);
     events.prompt_composition = [];
-    for (const record of bundle.prompt_composition) { const workflow = await submitPromptWorkflow(baseUrl, record, transcript, bundle.fetch ?? {}); events.prompt_composition.push({ case_id: record.case_id, suite: "prompt_composition", job: workflow, workflow }); }
+    for (const record of bundle.prompt_composition) { const workflow = await submitPromptWorkflow(baseUrl, record, transcript, bundle.fetch ?? {}); await preserveTerminalDiagnostics(output, "prompt_composition", record.case_id, workflow); events.prompt_composition.push({ case_id: record.case_id, suite: "prompt_composition", job: workflow, workflow }); }
   }
   const eventsPath = path.join(output, "route-events.json"); await writeFile(eventsPath, JSON.stringify(events, null, 2) + "\n");
   const runtime = await liveRuntime(output, tuple, events, observation, service);

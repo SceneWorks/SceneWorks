@@ -2,7 +2,7 @@
   "schema_version": 1,
   "inference_contract": {
     "repository": "SceneWorks/inference",
-    "revision": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+    "revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
     "receipt_schema": "release/starvector-terminal-receipt-v2-outcome-parity.schema.json",
     "receipt_schema_sha256": "fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35",
     "corpus": "release/starvector-terminal-corpus-v1.json"
@@ -15,14 +15,14 @@
       "path": ".github/workflows/real-weights.yml",
       "event": "workflow_dispatch"
     },
-    "workflow_run_id": "34884997565",
+    "workflow_run_id": "35221039669",
     "workflow_run_attempt": 1,
-    "head_sha": "252e6a7a0fee08d2e07b0e8652234e4cea28aa59",
+    "head_sha": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
     "artifact": {
-      "id": 10364257599,
-      "name": "starvector-terminal-preflight-252e6a7a0fee08d2e07b0e8652234e4cea28aa59-34884997565-1",
-      "size_in_bytes": 6465,
-      "digest": "sha256:171f81322f1f0b1fabfd3586749f60d3b6d8a27df892ae4f2cd8668fc0eb3884"
+      "id": 10496822721,
+      "name": "starvector-terminal-preflight-8e2d9671fd28ab1b34aa22c8fc49de221d43b000-35221039669-1",
+      "size_in_bytes": 6459,
+      "digest": "sha256:752f3b77b0f6e3d8a8b47e0347dd7e3e54e9872a2ff37f549dd06377248c8326"
     },
     "inventory_artifacts": [
       {
@@ -41,25 +41,25 @@
         "backend": "mlx",
         "tier": "1b",
         "path": "hooks/mlx-starvector-1b.log",
-        "sha256": "2bc1d8a23addf18c3349fa214cd4514b81a8463b6409e3294e864d535d88b330"
+        "sha256": "0027d409a27bfab43fd3c3ff4941c970454b6627601c21c67c6e942e1ff7aa3e"
       },
       {
         "backend": "mlx",
         "tier": "8b",
         "path": "hooks/mlx-starvector-8b.log",
-        "sha256": "4e1034f18cf7550216a46a3936b1100dc068bef747d7c635f2a101d66a896916"
+        "sha256": "9dfde3aacbdc2ffa07537c63b6512b9a89d351adcd074fd5fd87b1a9d76189c8"
       },
       {
         "backend": "candle-cuda",
         "tier": "1b",
         "path": "hooks/candle-cuda-starvector-1b.log",
-        "sha256": "9d717c7c3e224ebd586af5d337cca16603b879f5c2340a0bad156ae48d8f339c"
+        "sha256": "faa875b86b8fb7e2b5a70ccfb9d329f9e9a7b9a545e27d8fd671a182da4cb10c"
       },
       {
         "backend": "candle-cuda",
         "tier": "8b",
         "path": "hooks/candle-cuda-starvector-8b.log",
-        "sha256": "e1a19eed34f95e2be93949d520a67140980641159e565390fe1e9658796e7bdf"
+        "sha256": "eeed1af79447ee9e12b12d45d36dcc66556b38710043cb38aafe80872017fe46"
       }
     ]
   },

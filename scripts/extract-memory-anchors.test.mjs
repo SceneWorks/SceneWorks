@@ -9,7 +9,6 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
   ANALYTIC_BASES,
-  ANCHOR_LOADER_CLOSURES_PATH,
   CONTRACT_LADDER_BACKENDS,
   MANIFEST_PATH,
   stagedResidencyExemptLanes,
@@ -193,26 +192,17 @@ test("the checked-in store is what the extractor produces", async () => {
 
 test("an anchor's currency key is carried forward, never re-derived at the pin", async () => {
   const committed = JSON.parse(await readFile(path.join(ROOT, STORE_PATH), "utf8"));
-  const closures = JSON.parse(
-    await readFile(path.join(ROOT, ANCHOR_LOADER_CLOSURES_PATH), "utf8"),
-  );
   assert.ok(store.anchors.length > 0);
   for (const anchor of store.anchors) {
     const recorded = committed.anchors.find((entry) => entry.id === anchor.id);
     assert.ok(recorded, `${anchor.id}: must already exist in the committed store`);
     assert.equal(anchor.source.loaderClosureDigest, recorded.source.loaderClosureDigest);
   }
-  // THE POINT: the key records the loader AT MEASUREMENT, so it is NOT simply the pin's declared
-  // digest. A store where the two always agreed would be one where currency compares a value with
-  // itself and can never report a moved loader.
-  const declaredAtPin = store.anchors.map(
-    (anchor) => closures.models[`${anchor.modelId}:${anchor.backend}`]?.digest,
-  );
-  assert.ok(
-    store.anchors.some((anchor, index) => anchor.source.loaderClosureDigest !== declaredAtPin[index]),
-    "at least one packaged anchor must be measured against a loader the pin has since moved — " +
-      "otherwise this generator is stamping the pin and currency means nothing",
-  );
+  // Controlled historical key: the extractor must preserve it even if every packaged
+  // anchor happens to be current. Never require a particular live currency population.
+  const fixture = structuredClone(committed);
+  fixture.anchors[0].source.loaderClosureDigest = "a".repeat(64);
+  assert.equal(loaderClosureDigestFor(fixture, fixture.anchors[0].id), "a".repeat(64));
   // A new anchor with nothing to carry forward fails LOUDLY rather than borrowing the pin's digest.
   assert.throws(
     () => loaderClosureDigestFor(committed, "brand:new:anchor:id"),

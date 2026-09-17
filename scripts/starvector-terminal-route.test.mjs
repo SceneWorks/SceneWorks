@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
-import { assembleParityRecord, assembleRun, assembleSuites, validateBundle, vectorRequest } from "./starvector-terminal-route.mjs";
+import { assembleParityRecord, assembleRun, assembleSuites, preserveTerminalDiagnostics, validateBundle, vectorRequest } from "./starvector-terminal-route.mjs";
+
+const hash = (value) => createHash("sha256").update(value).digest("hex");
 
 test("route runner can only construct the typed project-owned vector_generate request", () => {
   const request = vectorRequest({ projectId: "project", sourceAssetId: "asset", model: "starvector_1b", prompt: "icon" });
@@ -8,11 +11,29 @@ test("route runner can only construct the typed project-owned vector_generate re
   assert.throws(() => vectorRequest({ projectId: "project", model: "starvector_1b" }), /sourceAssetId/);
 });
 
+test("rejected provider bytes are copied and sealed before worker cleanup", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-rejected-evidence-"));
+  try {
+    const transcript = path.join(root, "provider.json"), svg = path.join(root, "raw.svg"), output = path.join(root, "output");
+    await writeFile(transcript, "provider evidence"); await writeFile(svg, "<svg baseProfile=\"tiny\"/>");
+    const record = await preserveTerminalDiagnostics(output, "image_quality", "quality-v1-14", { result: { terminalEvidence: { accepted: false, finishReason: "complete_root", rejectionStage: "sanitizer", rejectionReason: "attribute rejected", providerTranscriptPath: transcript, providerTranscriptSha256: hash("provider evidence"), rejectedSvgPath: svg, rejectedSvgSha256: hash("<svg baseProfile=\"tiny\"/>") } } });
+    assert.equal(record.artifacts.length, 2);
+    await rm(transcript); await rm(svg);
+    assert.equal(await readFile(path.join(output, record.artifacts[0].path), "utf8"), "provider evidence");
+    assert.match(await readFile(path.join(output, "terminal-diagnostics.ndjson"), "utf8"), /quality-v1-14/);
+    const limited = await preserveTerminalDiagnostics(output, "image_quality", "quality-v1-5", { terminalEvidence: { accepted: false, finishReason: "token_limit", rejectionStage: "generation_limit", rejectionCode: "token_limit", rejectionReason: "bounded", providerTranscriptPath: path.join(output, record.artifacts[0].path), providerTranscriptSha256: hash("provider evidence"), rejectedSvgPath: path.join(output, record.artifacts[1].path), rejectedSvgSha256: hash("<svg baseProfile=\"tiny\"/>") } });
+    assert.equal(limited.artifacts.at(-1).role, "rejected_svg");
+    await assert.rejects(() => preserveTerminalDiagnostics(output, "image_quality", "quality-v1-orphan", { terminalEvidence: { accepted: false, finishReason: "token_limit", rejectionStage: "generation_limit", providerTranscriptPath: path.join(output, record.artifacts[0].path), providerTranscriptSha256: hash("provider evidence"), rejectedSvgPath: path.join(output, record.artifacts[1].path) } }), /incomplete raw SVG identity/);
+    await assert.rejects(() => preserveTerminalDiagnostics(output, "image_quality", "bad/escape", { terminalEvidence: { accepted: false } }), /identity is invalid/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("route refuses a count-only or incomplete terminal bundle before product calls", () => {
   process.env.STARVECTOR_TERMINAL_PERMANENT_PIN = "81fda3bd5a9d5920ad9cdc62796df3305be96742";
   const records = (count, prefix) => Array.from({ length: count }, (_, index) => ({ case_id: `${prefix}-${index}`, projectId: "p", sourceAssetId: `a-${index}`, model: "starvector_8b" }));
   const bundle = { schema_version: 1, inference_revision: process.env.STARVECTOR_TERMINAL_PERMANENT_PIN, corpus_sha256: "a".repeat(64), tuples: { "candle-cuda:8b": { image_quality: records(120, "quality"), deterministic_parity: records(20, "parity"), lifecycle: records(4, "lifecycle"), limits: ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"].map((finish_reason, index) => ({ ...records(1, "limit")[0], case_id: `limit-${index}`, finish_reason })) } }, hostile_sanitizer: records(200, "hostile"), prompt_composition: records(60, "prompt") };
   assert.equal(validateBundle(bundle, "candle-cuda:8b"), bundle.tuples["candle-cuda:8b"]);
+  bundle.tuples["candle-cuda:8b"].limits[0].model = "starvector_1b"; assert.throws(() => validateBundle(bundle, "candle-cuda:8b"), /route identity differs/); bundle.tuples["candle-cuda:8b"].limits[0].model = "starvector_8b";
   bundle.hostile_sanitizer.pop(); assert.throws(() => validateBundle(bundle, "candle-cuda:8b"), /200 hostile/);
 });
 
@@ -58,7 +79,7 @@ test("terminal suite identities come from the same-run controller and observed w
 });
 
 // Host observations must not inherit the provider's accelerator-only metric.
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { observeTerminalMemory, startTerminalMemorySampler, terminalHardwareFromSamples } from "./lib/starvector-terminal-memory.mjs";

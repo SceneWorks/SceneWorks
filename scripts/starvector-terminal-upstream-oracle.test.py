@@ -248,6 +248,17 @@ class OracleTests(unittest.TestCase):
         incomplete, reason = oracle.classify_generation('<svg>', {'generated_tokens': 1}, 3, 10)
         self.assertEqual((incomplete, reason), ('<svg>', 'complete'))
 
+    def test_diagnostic_outcome_distinguishes_bounded_root_from_early_eos(self):
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg><path/></svg>', 'complete'),
+            {'structural_complete_root': True, 'diagnostic_outcome': 'bounded_complete_root'})
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg><path/>', 'complete'),
+            {'structural_complete_root': False, 'diagnostic_outcome': 'early_eos_incomplete'})
+        self.assertEqual(
+            oracle.diagnostic_generation_outcome('<svg>', 'token_limit'),
+            {'structural_complete_root': False, 'diagnostic_outcome': 'token_limit'})
+
     def test_complete_svg_prefix_is_quote_comment_and_nesting_aware(self):
         for value, expected in [
             (' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>', ' <svg viewBox="0 > 0 1"><!-- </svg> --><g/></svg>'),
@@ -427,19 +438,21 @@ class OracleTests(unittest.TestCase):
             path.write_bytes(('distinct PNG fixture %s' % index).encode())
             rows.append({'case_index': index, 'input_png_path': path.name, 'png_sha256': oracle.digest(path),
                          'sampling': {'temperature': 0.0, 'topP': 1.0, 'topK': 1, 'repetitionPenalty': 1.0, 'seed': index},
-                         'detail_budget': {'maxNewTokens': 4000, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}})
+                         'detail_budgets': {'1b': {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000},
+                                            '8b': {'maxNewTokens': 15422, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}}})
         self.save_rows(rows)
         return rows
 
     def save_rows(self, rows):
-        (self.root / 'starvector-terminal-row-index-v1.json').write_text(json.dumps({'rows': rows}))
+        (self.root / 'starvector-terminal-row-index-v1.json').write_text(json.dumps({'schema_version': 2, 'rows': rows}))
 
     def test_exact_balanced_twenty_rows_and_seed_identity(self):
         self.rows()
-        result = oracle.select_rows(self.root)
+        result = oracle.select_rows(self.root, '1b')
         self.assertEqual([r['source_case_index'] for r in result], [*range(5), *range(30, 35), *range(60, 65), *range(90, 95)])
         self.assertEqual([r['seed'] for r in result], list(range(20)))
-        self.assertEqual(result[10]['detail_budget']['maxNewTokens'], 4000)
+        self.assertEqual(result[10]['detail_budget']['maxNewTokens'], 7933)
+        self.assertEqual(oracle.select_rows(self.root, '8b')[10]['detail_budget']['maxNewTokens'], 15422)
 
     def test_duplicate_images_are_rejected_across_distinct_source_rows(self):
         rows = self.rows()
@@ -447,33 +460,74 @@ class OracleTests(unittest.TestCase):
         rows[30]['png_sha256'] = rows[0]['png_sha256']
         self.save_rows(rows)
         with self.assertRaisesRegex(ValueError, 'distinct'):
-            oracle.select_rows(self.root)
+            oracle.select_rows(self.root, '1b')
 
     def test_changed_input_bytes_are_rejected(self):
         self.rows()
         (self.root / '60.png').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
-            oracle.select_rows(self.root)
+            oracle.select_rows(self.root, '1b')
 
     def test_non_greedy_and_unsupported_sampling_are_rejected(self):
         for key, value in [('temperature', 0.1), ('topK', 2), ('topP', 0.9), ('repetitionPenalty', 1.1)]:
             rows = self.rows(); rows[0]['sampling'][key] = value; self.save_rows(rows)
             with self.assertRaisesRegex(ValueError, 'greedy'):
-                oracle.select_rows(self.root)
+                oracle.select_rows(self.root, '1b')
 
     def test_bad_budget_and_row_order_are_rejected(self):
-        rows = self.rows(); rows[0]['detail_budget']['maxNewTokens'] = True; self.save_rows(rows)
-        with self.assertRaisesRegex(ValueError, 'token budget'):
-            oracle.select_rows(self.root)
+        rows = self.rows(); rows[0]['detail_budgets']['1b']['maxNewTokens'] = True; self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, 'shipping new-token budget'):
+            oracle.select_rows(self.root, '1b')
         rows[0], rows[1] = rows[1], rows[0]; self.save_rows(rows)
         with self.assertRaisesRegex(ValueError, 'ordered'):
-            oracle.select_rows(self.root)
+            oracle.select_rows(self.root, '1b')
+
+    def legacy_diagnostic_rows(self):
+        rows = []
+        for index in range(120):
+            path = self.root / ('legacy-%s.png' % index)
+            path.write_bytes(('legacy PNG fixture %s' % index).encode())
+            rows.append({'case_index': index, 'dataset': 'fixture/data', 'revision': 'a' * 40,
+                         'row_index': index, 'filename': str(index), 'svg_sha256': 'b' * 64,
+                         'input_png_path': path.name, 'png_sha256': oracle.digest(path),
+                         'sampling': dict(oracle.DIAGNOSTIC_SAMPLING),
+                         'detail_budget': {'maxNewTokens': 4000, 'maxSvgBytes': 262144,
+                                           'maxWallTimeMs': 120000}})
+        row_identity = oracle.source_rows_sha256(rows)
+        value = {'schema_version': 1, 'row_identity_sha256': row_identity, 'rows': rows}
+        index_path = self.root / 'starvector-terminal-row-index-v1.json'
+        index_path.write_text(json.dumps(value))
+        return rows, index_path, row_identity
+
+    def test_fixed_case_9_diagnostic_authenticates_legacy_corpus_without_relabeling(self):
+        rows, index_path, row_identity = self.legacy_diagnostic_rows()
+        with patch.object(oracle, 'DIAGNOSTIC_CORPUS_SHA256', oracle.digest(index_path)), \
+             patch.object(oracle, 'DIAGNOSTIC_ROWS_SHA256', row_identity):
+            selected = oracle.select_diagnostic_case_9(self.root, '1b')
+        self.assertEqual((selected['case_index'], selected['source_case_index'], selected['seed']),
+                         (9, 9, 7))
+        self.assertEqual(selected['input_png_sha256'], rows[9]['png_sha256'])
+        self.assertEqual(selected['sampling'], oracle.DIAGNOSTIC_SAMPLING)
+        self.assertEqual(selected['detail_budget'], oracle.DIAGNOSTIC_BUDGET)
+        self.assertEqual(rows[9]['detail_budget']['maxNewTokens'], 4000,
+                         'the retired corpus row must not be rewritten as a shipping-budget row')
+
+    def test_fixed_case_9_diagnostic_rejects_tamper_and_other_tiers(self):
+        _, index_path, row_identity = self.legacy_diagnostic_rows()
+        authenticated = oracle.digest(index_path)
+        with patch.object(oracle, 'DIAGNOSTIC_CORPUS_SHA256', authenticated), \
+             patch.object(oracle, 'DIAGNOSTIC_ROWS_SHA256', row_identity):
+            with self.assertRaisesRegex(ValueError, 'fixed to StarVector 1B'):
+                oracle.select_diagnostic_case_9(self.root, '8b')
+            index_path.write_text(index_path.read_text() + '\n')
+            with self.assertRaisesRegex(ValueError, 'authenticated readiness input'):
+                oracle.select_diagnostic_case_9(self.root, '1b')
 
     def test_path_escape_and_symlink_are_rejected(self):
         (self.root / 'real').write_text('bytes')
         (self.root / 'link').symlink_to(self.root / 'real')
         for path in ['../real', '/real', 'link', 'a\\b']:
-            with self.assertRaises(ValueError):
+            with self.subTest(path=path), self.assertRaises(ValueError):
                 oracle.local_file(self.root, path)
 
     def test_inventory_matches_native_json_byte_order(self):
@@ -517,7 +571,7 @@ class OracleTests(unittest.TestCase):
 
     def test_source_hash_binds_actual_checkout_and_rejects_extra_python(self):
         directory = self.root / 'starvector'; directory.mkdir()
-        (directory / 'source.py').write_text('def upstream(): return 1\n')
+        (directory / 'source.py').write_bytes(b'def upstream(): return 1\n')
         entries = [{'path': 'starvector/source.py', 'sha256': oracle.digest(directory / 'source.py')}]
         lock = {'implementation_revision': 'a' * 40, 'python_source_sha256': hashlib.sha256(oracle.canonical(entries)).hexdigest()}
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
@@ -528,7 +582,7 @@ class OracleTests(unittest.TestCase):
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             with self.assertRaisesRegex(ValueError, 'expected=' + lock['python_source_sha256'] + ' actual=' + changed_hash + ' files=1'):
                 oracle.source_identity(self.root, lock)
-        (directory / 'source.py').write_text('def upstream(): return 1\n')
+        (directory / 'source.py').write_bytes(b'def upstream(): return 1\n')
         (directory / 'injected.py').write_text('raise RuntimeError()')
         with patch.object(oracle.subprocess, 'check_output', side_effect=['a' * 40, 'starvector/source.py\n']):
             with self.assertRaisesRegex(ValueError, 'untracked'):
