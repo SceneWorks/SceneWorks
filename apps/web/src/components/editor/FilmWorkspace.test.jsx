@@ -232,6 +232,71 @@ describe("FilmWorkspace", () => {
     expect(saveTimeline).not.toHaveBeenCalled();
   });
 
+  it("defaults review to the newest run, preserves an explicit older choice, and leaves a dirty timeline selected", async () => {
+    vi.useFakeTimers();
+    const film = draft({ originalScript: "A courier enters." });
+    const makeRun = (id, timelineId, outcome) => ({
+      locator: { id, draftId: "film_1" },
+      controllerActive: false,
+      record: { state: "finished", outcome, timeline: { timelineId, revision: 1 }, shots: [] },
+    });
+    const newest = makeRun("filmrun_new", "timeline_new", "completed");
+    const older = makeRun("filmrun_old", "timeline_old", "failed");
+    let runReads = 0;
+    const reviewRequests = [];
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve(runReads++ === 0 ? [older] : [newest, older]);
+      if (path.endsWith("/film-runs/filmrun_new/review")) {
+        reviewRequests.push("filmrun_new");
+        return Promise.resolve({ run: newest, takeAssets: [], observations: [], selections: [], assistiveNotice: "Newest review" });
+      }
+      if (path.endsWith("/film-runs/filmrun_old/review")) {
+        reviewRequests.push("filmrun_old");
+        return Promise.resolve({ run: older, takeAssets: [], observations: [], selections: [], assistiveNotice: "Older review" });
+      }
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const refreshTimelines = vi.fn(async () => ({ ok: true, value: [] }));
+    const saveTimeline = vi.fn();
+    const setSelectedTimelineId = vi.fn();
+
+    await renderWorkspace({
+      activeTimeline: { id: "timeline_user", name: "Unsaved user cut", revision: 7 },
+      refreshTimelines,
+      saveTimeline,
+      setSelectedTimelineId,
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+
+    const selector = container.querySelector('select[aria-label="Review run"]');
+    expect([...selector.options].map((option) => option.value)).toEqual(["filmrun_new", "filmrun_old"]);
+    expect(selector.value).toBe("filmrun_new");
+    const reviewTab = [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Review & Edit");
+    await act(async () => { reviewTab.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(reviewRequests).toContain("filmrun_new");
+
+    await act(async () => {
+      changeValue(selector, "filmrun_old");
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(selector.value).toBe("filmrun_old");
+    expect(reviewRequests.at(-1)).toBe("filmrun_old");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(selector.value).toBe("filmrun_old");
+    expect(reviewRequests.at(-1)).toBe("filmrun_old");
+    expect(setSelectedTimelineId).not.toHaveBeenCalled();
+    expect(saveTimeline).not.toHaveBeenCalled();
+
+    const openSavedCut = [...container.querySelectorAll("button")].find((button) => button.textContent === "Open saved cut");
+    await act(async () => { openSavedCut.click(); await Promise.resolve(); });
+    expect(setSelectedTimelineId).toHaveBeenLastCalledWith("timeline_old");
+    expect(saveTimeline).not.toHaveBeenCalled();
+  });
+
   it("creates, edits, saves, and reopens a project film draft without JSON authoring", async () => {
     const created = draft();
     const saved = draft({ revision: 2, title: "Workshop delivery" });

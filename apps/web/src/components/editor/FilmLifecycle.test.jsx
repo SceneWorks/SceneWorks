@@ -23,16 +23,43 @@ afterEach(() => {
   container.remove();
 });
 
-async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn()) {
+async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn(), props = {}) {
   root = createRoot(container);
   await act(async () => {
-    root.render(<FilmLifecycle draftId="film_1" onRunChange={onRunChange} projectId="project_1" setNotice={setNotice} token="token" />);
+    root.render(<FilmLifecycle draftId="film_1" onRunChange={onRunChange} projectId="project_1" setNotice={setNotice} token="token" {...props} />);
     await Promise.resolve();
   });
   return { onRunChange, setNotice };
 }
 
 describe("FilmLifecycle", () => {
+  it("lists newest and older runs and selects either durable record explicitly", async () => {
+    const newest = {
+      locator: { id: "filmrun_new", draftId: "film_1" }, controllerActive: false,
+      record: { state: "finished", outcome: "completed" },
+    };
+    const older = {
+      locator: { id: "filmrun_old", draftId: "film_1" }, controllerActive: false,
+      record: { state: "finished", outcome: "failed" },
+    };
+    apiFetchMock.mockImplementation((url) => url.endsWith("/planning")
+      ? Promise.reject(new Error("no planning operation"))
+      : Promise.resolve([newest, older]));
+    const { onRunChange } = await renderLifecycle(vi.fn(), vi.fn(), { selectedRunId: "filmrun_new" });
+
+    expect(onRunChange).toHaveBeenCalledWith(newest, { latest: true, select: false });
+    expect(onRunChange).toHaveBeenCalledWith(older, { latest: false, select: false });
+    const selector = container.querySelector('select[aria-label="Review run"]');
+    expect([...selector.options].map((option) => option.value)).toEqual(["filmrun_new", "filmrun_old"]);
+    expect(selector.value).toBe("filmrun_new");
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(selector, "filmrun_old");
+      selector.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onRunChange).toHaveBeenLastCalledWith(older, { select: true });
+  });
+
   it("rediscovers running planning and render operations and requests bounded cancellation", async () => {
     apiFetchMock.mockImplementation((url, _token, options) => {
       if (url.endsWith("/planning")) return Promise.resolve({ status: "running", stage: "generating", progress: 0.4 });

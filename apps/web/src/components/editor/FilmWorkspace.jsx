@@ -81,6 +81,7 @@ export function FilmWorkspace() {
   const selectedDraftId = useRef("");
   const activeTimelineId = useRef("");
   const discoveredTimeline = useRef("");
+  const selectedRunExplicit = useRef(false);
   const plannerAvailabilityRequest = useRef(0);
   const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
   const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
@@ -90,14 +91,19 @@ export function FilmWorkspace() {
   selectedDraftId.current = draft?.id ?? "";
   activeTimelineId.current = activeTimeline?.id ?? "";
 
-  const acceptRunSnapshot = useCallback((run, { select = false } = {}) => {
+  const acceptRunSnapshot = useCallback((run, { latest = false, select = false } = {}) => {
     const draftId = selectedDraftId.current;
     if (!draftId || run?.locator?.draftId !== draftId) return;
+    if (select) selectedRunExplicit.current = true;
     setLastRun((current) => {
-      if (select || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
+      if (select || (latest && !selectedRunExplicit.current) || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
       return current;
     });
   }, []);
+
+  useEffect(() => {
+    selectedRunExplicit.current = false;
+  }, [activeProject?.id, draft?.id]);
 
   useEffect(() => {
     const projectId = activeProject?.id;
@@ -260,6 +266,7 @@ export function FilmWorkspace() {
       setPreflight(null);
       setPlanningOperation(null);
       setLastRun(null);
+      selectedRunExplicit.current = false;
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -284,6 +291,7 @@ export function FilmWorkspace() {
       setPreflight(null);
       setPlanningOperation(null);
       setLastRun(null);
+      selectedRunExplicit.current = false;
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -402,6 +410,7 @@ export function FilmWorkspace() {
       }
       const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds }) });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
+      selectedRunExplicit.current = true;
       setLastRun(run);
       setNotice(`Rendering ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"} in this project.`);
       while (run.controllerActive) {
@@ -527,6 +536,7 @@ export function FilmWorkspace() {
             draftId={draft.id}
             onRunChange={acceptRunSnapshot}
             projectId={activeProject.id}
+            selectedRunId={lastRun?.locator?.id}
             setNotice={setNotice}
             token={token}
           />
