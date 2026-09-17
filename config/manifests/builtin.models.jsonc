@@ -24626,6 +24626,12 @@
       // implement the Qwen3.6 (`qwen3_5`) architecture on MLX and Candle. This entry only makes the
       // upstream weights explicitly installable and availability-readable. It is never selected or
       // downloaded automatically: a new film draft continues to use prompt_refine_anubis_8b.
+      //
+      // The first published pin held only README.md and .gitattributes. A whole-repo `files: []`
+      // claim consequently made that 1.5 KB metadata snapshot look installed. Pin the first complete
+      // official snapshot and name the loader's required files so no metadata-only revision can ever
+      // advertise as usable. `breaking` applies specifically to that unusable old receipt: it must
+      // not preserve the README-only revision through the normal usable-stale path.
       "id": "film_planner_qwen3_6_27b",
       "autoDownload": false,
       "macOnly": false,
@@ -24639,8 +24645,16 @@
         {
           "provider": "huggingface",
           "repo": "Qwen/Qwen3.6-27B",
-          "revision": "70215ea87f5a6ae62bb56822396c1b42f1a18e0b",
-          "files": [],
+          "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "breaking": true,
           "estimatedSizeBytes": 57000000000
         }
       ],
