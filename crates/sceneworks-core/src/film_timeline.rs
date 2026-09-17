@@ -79,10 +79,27 @@ fn picture_duration(timeline: &Value) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Extend a run-owned sequence bed only when its placement and source trim still describe the
-/// complete pre-delivery cut. Gain, mute, fades and item volume are independent editor controls and
-/// deliberately do not participate in this test. An explicit placement or duration edit prevents
-/// automatic extension, preserving the editor's chosen bounds.
+fn stamp_sequence_bed_alignment(item: &mut Value) {
+    if !matches!(field(item, "role"), "ambience" | "music" | "sfx")
+        || !field(item, "shotId").is_empty()
+    {
+        return;
+    }
+    let timeline_start = number(item, "timelineStart");
+    let timeline_end = number(item, "timelineEnd");
+    let source_in = number(item, "sourceIn");
+    let source_out = number(item, "sourceOut");
+    item["filmHarness"]["alignedTimelineStart"] = json!(timeline_start);
+    item["filmHarness"]["alignedTimelineEnd"] = json!(timeline_end);
+    item["filmHarness"]["alignedSourceIn"] = json!(source_in);
+    item["filmHarness"]["alignedSourceOut"] = json!(source_out);
+}
+
+/// Extend a run-owned sequence bed only while its placement and source trim still match the last
+/// harness alignment. The stamp is independent of the current picture duration: trimming picture
+/// must not make an untouched bed look edited before the next shot arrives. Gain, mute, fades and
+/// item volume are independent editor controls and deliberately do not participate in this test.
+/// An explicit bed placement or duration edit prevents automatic extension.
 fn extend_unedited_sequence_beds(
     timeline: &mut Value,
     incoming: &Value,
@@ -126,9 +143,27 @@ fn extend_unedited_sequence_beds(
                         && field(candidate, "role") == role
                         && field(candidate, "shotId").is_empty()
                 });
-            let untouched = close(number(item, "timelineStart"), declared_start)
-                && close(number(item, "timelineEnd"), old_duration)
-                && close(number(item, "sourceOut") - source_in, expected_span);
+            let alignment = (
+                item["filmHarness"]["alignedTimelineStart"].as_f64(),
+                item["filmHarness"]["alignedTimelineEnd"].as_f64(),
+                item["filmHarness"]["alignedSourceIn"].as_f64(),
+                item["filmHarness"]["alignedSourceOut"].as_f64(),
+            );
+            let untouched = match alignment {
+                (Some(timeline_start), Some(timeline_end), Some(aligned_in), Some(aligned_out)) => {
+                    close(number(item, "timelineStart"), timeline_start)
+                        && close(number(item, "timelineEnd"), timeline_end)
+                        && close(source_in, aligned_in)
+                        && close(number(item, "sourceOut"), aligned_out)
+                }
+                // A durable run created before alignment stamps existed keeps the former
+                // conservative rule. It is never guessed back to "unedited" after a restart.
+                _ => {
+                    close(number(item, "timelineStart"), declared_start)
+                        && close(number(item, "timelineEnd"), old_duration)
+                        && close(number(item, "sourceOut") - source_in, expected_span)
+                }
+            };
             let desired_is_full_cut = desired.is_some_and(|desired| {
                 close(number(desired, "timelineStart"), declared_start)
                     && close(number(desired, "timelineEnd"), new_duration)
@@ -140,6 +175,7 @@ fn extend_unedited_sequence_beds(
             if untouched && desired_is_full_cut {
                 item["timelineEnd"] = json!(new_duration);
                 item["sourceOut"] = json!(source_in + (new_duration - declared_start));
+                stamp_sequence_bed_alignment(item);
             }
         }
     }
@@ -509,6 +545,7 @@ pub fn deliver(
                 audio["timelineStart"] = json!(start);
                 audio["timelineEnd"] = json!(start + length);
             }
+            stamp_sequence_bed_alignment(&mut audio);
             let tracks = timeline["tracks"].as_array_mut().unwrap();
             let t = match tracks.iter().position(|t| t["id"] == track["id"]) {
                 Some(i) => i,
@@ -670,7 +707,11 @@ mod tests {
                     {"id":"room","assetId":"room","timelineStart":0,"timelineEnd":bed_end,"sourceIn":0,
                      "sourceOut":bed_end,"volume":1,"fadeInSeconds":1,"fadeOutSeconds":1.5,
                      "filmHarness":{"role":"ambience","runId":"run_test","startSeconds":0}}]},
-                {"id":"music","kind":"audio","role":"music","gain":0.2,"muted":false,"items":[]}
+                {"id":"music","kind":"audio","role":"music","gain":0.2,"muted":false,"items":[
+                    {"id":"score","assetId":"score","timelineStart":1,"timelineEnd":bed_end,
+                     "sourceIn":0.5,"sourceOut":bed_end - 0.5,"volume":1,"fadeInSeconds":0.5,
+                     "fadeOutSeconds":0.5,
+                     "filmHarness":{"role":"music","runId":"run_test","startSeconds":1}}]}
             ]}})
         };
 
@@ -693,7 +734,14 @@ mod tests {
         ambience["items"][0]["volume"] = json!(0.4);
         ambience["items"][0]["fadeInSeconds"] = json!(0.25);
 
-        deliver(&mut saved, delivery("B", 3.0, 7.0, true), |_| Ok(3.0)).unwrap();
+        // The editor trims the first picture without touching either bed. Their ends still match
+        // their delivered alignment (4s), rather than the now-shorter 3s picture cut.
+        let before_picture_trim = saved.clone();
+        saved["tracks"][0]["items"][0]["sourceOut"] = json!(3.0);
+        saved["tracks"][0]["items"][0]["timelineEnd"] = json!(3.0);
+        reconcile_cut(&before_picture_trim, &mut saved, 2);
+
+        deliver(&mut saved, delivery("B", 3.0, 6.0, true), |_| Ok(3.0)).unwrap();
         let ambience = saved["tracks"]
             .as_array()
             .unwrap()
@@ -704,8 +752,16 @@ mod tests {
         assert_eq!(ambience["muted"], true);
         assert_eq!(ambience["items"][0]["volume"], 0.4);
         assert_eq!(ambience["items"][0]["fadeInSeconds"], 0.25);
-        assert_eq!(ambience["items"][0]["timelineEnd"], 7.0);
-        assert_eq!(ambience["items"][0]["sourceOut"], 7.0);
+        assert_eq!(ambience["items"][0]["timelineEnd"], 6.0);
+        assert_eq!(ambience["items"][0]["sourceOut"], 6.0);
+        let music = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["id"] == "music")
+            .unwrap();
+        assert_eq!(music["items"][0]["timelineEnd"], 6.0);
+        assert_eq!(music["items"][0]["sourceOut"], 5.5);
         let ids = saved["tracks"]
             .as_array()
             .unwrap()
@@ -720,9 +776,26 @@ mod tests {
             .iter_mut()
             .find(|track| track["id"] == "ambience")
             .unwrap();
-        ambience["items"][0]["timelineEnd"] = json!(6.0);
-        ambience["items"][0]["sourceOut"] = json!(6.0);
-        deliver(&mut saved, delivery("C", 2.0, 9.0, false), |_| Ok(2.0)).unwrap();
+        ambience["items"][0]["timelineEnd"] = json!(5.0);
+        ambience["items"][0]["sourceOut"] = json!(5.0);
+        let music = saved["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|track| track["id"] == "music")
+            .unwrap();
+        music["items"][0]["timelineEnd"] = json!(4.5);
+        music["items"][0]["sourceOut"] = json!(4.0);
+
+        // Reorder the two completed pictures before the final delivery. Neither the order nor an
+        // unrelated ambience edit can cause the explicitly trimmed music bed to be regenerated.
+        let before_reorder = saved.clone();
+        saved["tracks"][0]["items"][0]["timelineStart"] = json!(3.0);
+        saved["tracks"][0]["items"][0]["timelineEnd"] = json!(6.0);
+        saved["tracks"][0]["items"][1]["timelineStart"] = json!(0.0);
+        saved["tracks"][0]["items"][1]["timelineEnd"] = json!(3.0);
+        reconcile_cut(&before_reorder, &mut saved, 3);
+        deliver(&mut saved, delivery("C", 2.0, 8.0, false), |_| Ok(2.0)).unwrap();
         let ambience = saved["tracks"]
             .as_array()
             .unwrap()
@@ -730,9 +803,17 @@ mod tests {
             .find(|track| track["id"] == "ambience")
             .unwrap();
         assert_eq!(
-            ambience["items"][0]["timelineEnd"], 6.0,
+            ambience["items"][0]["timelineEnd"], 5.0,
             "an explicit bed trim is preserved when a later shot arrives"
         );
-        assert_eq!(ambience["items"][0]["sourceOut"], 6.0);
+        assert_eq!(ambience["items"][0]["sourceOut"], 5.0);
+        let music = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["id"] == "music")
+            .unwrap();
+        assert_eq!(music["items"][0]["timelineEnd"], 4.5);
+        assert_eq!(music["items"][0]["sourceOut"], 4.0);
     }
 }
