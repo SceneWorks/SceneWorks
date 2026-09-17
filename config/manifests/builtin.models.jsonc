@@ -26594,7 +26594,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
+            "inferenceRevision": "c5c8c2a73bc5fe9517200c32389c20bf4a670e3d",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
