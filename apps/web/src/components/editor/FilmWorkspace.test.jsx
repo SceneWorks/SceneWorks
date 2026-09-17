@@ -79,6 +79,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 async function renderWorkspace(context = {}) {
@@ -269,6 +270,114 @@ describe("FilmWorkspace", () => {
     expect(container.textContent).toContain("no download starts automatically");
     expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(true);
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/models/"))).toBe(false);
+  });
+
+  it("tracks an explicit Qwen install to completion and refreshes availability without starting planning", async () => {
+    vi.useFakeTimers();
+    const film = draft({
+      originalScript: "A courier enters.",
+      planning: { provider: "native", modelId: "film_planner_qwen3_6_27b", thinkingMode: "enabled", refinePrompts: false },
+    });
+    let plannerReads = 0;
+    let jobReads = 0;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) {
+        plannerReads += 1;
+        return Promise.resolve({ providers: [
+          { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },
+          { provider: "native", modelId: "film_planner_qwen3_6_27b", available: plannerReads > 1 },
+        ] });
+      }
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/models/film_planner_qwen3_6_27b/download") && options.method === "POST") {
+        return Promise.resolve({ id: "job_qwen", type: "model_download", status: "queued", progress: 0 });
+      }
+      if (path === "/api/v1/jobs/job_qwen") {
+        jobReads += 1;
+        return Promise.resolve(jobReads === 1
+          ? { id: "job_qwen", type: "model_download", status: "running", progress: 0.4 }
+          : { id: "job_qwen", type: "model_download", status: "completed", progress: 1 });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+
+    await renderWorkspace();
+    const install = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Install Qwen3.6-27B"));
+    await act(async () => { install.click(); await Promise.resolve(); });
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("native");
+    expect(container.textContent).toContain("download queued. Planning will not start automatically");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(container.textContent).toContain("Qwen3.6-27B download: running");
+    expect(container.querySelector('progress[aria-label="Qwen3.6-27B download progress"]').value).toBe(0.4);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(container.textContent).toContain("Qwen3.6-27B is installed and available");
+    expect(container.textContent).toContain("download completed. Planning did not start automatically");
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("native");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent.includes("Install Qwen3.6-27B"))).toBe(false);
+    expect(apiFetchMock.mock.calls.some(([path, , request]) => path.endsWith("/planning") && request?.method === "POST")).toBe(false);
+  });
+
+  it("shows an explicit Qwen install failure and allows retry without changing provider", async () => {
+    vi.useFakeTimers();
+    const film = draft({
+      originalScript: "A courier enters.",
+      planning: { provider: "native", modelId: "film_planner_qwen3_6_27b", thinkingMode: "enabled", refinePrompts: false },
+    });
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [{ provider: "native", modelId: "film_planner_qwen3_6_27b", available: false }] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/models/film_planner_qwen3_6_27b/download") && options.method === "POST") {
+        return Promise.resolve({ id: "job_failed", type: "model_download", status: "queued" });
+      }
+      if (path === "/api/v1/jobs/job_failed") return Promise.resolve({ id: "job_failed", type: "model_download", status: "failed", error: "Snapshot did not contain model weights." });
+      throw new Error(`Unexpected request ${path}`);
+    });
+
+    await renderWorkspace();
+    const install = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Install Qwen3.6-27B"));
+    await act(async () => { install.click(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+
+    expect(container.textContent).toContain("Qwen3.6-27B download: failed");
+    expect(container.textContent).toContain("Snapshot did not contain model weights.");
+    expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("native");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Install Qwen3.6-27B")).disabled).toBe(false);
+  });
+
+  it("stops polling an explicit Qwen install after unmount", async () => {
+    vi.useFakeTimers();
+    const film = draft({
+      originalScript: "A courier enters.",
+      planning: { provider: "native", modelId: "film_planner_qwen3_6_27b", thinkingMode: "enabled", refinePrompts: false },
+    });
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [{ provider: "native", modelId: "film_planner_qwen3_6_27b", available: false }] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/models/film_planner_qwen3_6_27b/download") && options.method === "POST") {
+        return Promise.resolve({ id: "job_unmount", type: "model_download", status: "queued" });
+      }
+      if (path === "/api/v1/jobs/job_unmount") return Promise.resolve({ id: "job_unmount", type: "model_download", status: "running" });
+      throw new Error(`Unexpected request ${path}`);
+    });
+
+    await renderWorkspace();
+    const install = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Install Qwen3.6-27B"));
+    await act(async () => { install.click(); await Promise.resolve(); });
+    act(() => root.unmount());
+    root = null;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(apiFetchMock.mock.calls.some(([path]) => path === "/api/v1/jobs/job_unmount")).toBe(false);
   });
 
   it("saves, tests, and selects an OpenAI-compatible planner with explicit disclosure", async () => {

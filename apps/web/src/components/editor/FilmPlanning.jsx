@@ -1,13 +1,15 @@
 import React, { lazy, Suspense } from "react";
+import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
-export function FilmPlanning({ draft, availability, operation, disabled, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
+export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
   const candidate = operation?.candidatePlan;
+  const installActive = installJob && !terminalStatuses.has(installJob.status);
   const videoModels = models.filter((model) => model.type === "video" && model.usable !== false);
   function setProvider(provider) {
     onChange((next) => {
@@ -56,14 +58,24 @@ export function FilmPlanning({ draft, availability, operation, disabled, models 
       </details>
       <p className="ve-film-provider-state">
         {planning.provider === "native"
-          ? (qwen?.available ? "Qwen3.6-27B is installed and available." : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
+          ? (availability == null
+            ? "Checking Qwen3.6-27B availability. No download starts automatically."
+            : qwen?.available
+              ? "Qwen3.6-27B is installed and available."
+              : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
           : planning.provider === "openai_compatible"
             ? "External planning runs only when explicitly selected. Configured credentials never change the local planner route."
           : "New drafts use the built-in prompt refiner. Qwen3.6-27B is not required."}
       </p>
-      {planning.provider === "native" && !qwen?.available ? (
-        <button disabled={disabled} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
+      {planning.provider === "native" && availability != null && !qwen?.available ? (
+        <button disabled={disabled || installActive} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
       ) : null}
+      {installJob ? <div aria-live="polite" className={`ve-film-operation is-${installJob.status}`}>
+        <strong>Qwen3.6-27B download: {installJob.status}</strong>
+        {Number.isFinite(installJob.progress) ? <progress aria-label="Qwen3.6-27B download progress" max="1" value={installJob.progress} /> : null}
+        {errorStatuses.has(installJob.status) && (installJob.message || installJob.error) ? <span>{installJob.message || installJob.error}</span> : null}
+        {installError ? <span role="alert">Status refresh failed: {installError}. Retrying.</span> : null}
+      </div> : null}
       <div className="ve-film-actions">
         <button className="ve-generate" disabled={disabled || active || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={onStart} type="button">Generate candidate plan</button>
         {active ? <button disabled={operation.status === "canceling"} onClick={onCancel} type="button">Cancel planning</button> : null}

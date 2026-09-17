@@ -11,8 +11,8 @@ export function parseFilmScript(projectId, draftId, script, token) {
   });
 }
 
-export function getFilmPlannerAvailability(projectId, draftId, token) {
-  return apiFetch(`${base(projectId, draftId)}/planners`, token);
+export function getFilmPlannerAvailability(projectId, draftId, token, options = {}) {
+  return apiFetch(`${base(projectId, draftId)}/planners`, token, options);
 }
 
 export function getFilmPlanning(projectId, draftId, token) {
