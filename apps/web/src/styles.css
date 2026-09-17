@@ -10835,6 +10835,31 @@ details[open] > summary.lora-scope-group-heading::before,
   padding: 8px 16px;
 }
 .ve-film > summary { cursor: pointer; font-weight: 650; }
+.ve-film-view-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ve-film-view-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+.ve-film-view-tabs button.selected {
+  background: color-mix(in oklch, var(--accent) 12%, var(--surface-2));
+  color: var(--text);
+}
+.ve-film-view-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ve-film [role="tabpanel"][hidden] { display: none; }
 .ve-film-toolbar,
 .ve-film-actions { display: flex; align-items: end; gap: 10px; margin-top: 10px; }
 .ve-film-form {
@@ -10932,6 +10957,15 @@ details[open] > summary.lora-scope-group-heading::before,
   flex-wrap: wrap;
 }
 .ve-film-section-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-advanced {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-advanced > summary { cursor: pointer; padding: 10px; font-weight: 650; }
+.ve-film-advanced > .ve-film-grid { margin: 0; padding: 0 10px 10px; }
+.ve-film-advanced > fieldset { margin: 0 10px 10px; }
 .ve-film-plan-controls,
 .ve-film-inspector-fields {
   min-width: 0;
@@ -10941,6 +10975,8 @@ details[open] > summary.lora-scope-group-heading::before,
   border-radius: var(--r-sm);
 }
 .ve-film-plan-controls > .ve-film-form { margin-top: 0; }
+.ve-film-plan-controls { padding: 0; }
+.ve-film-plan-controls > fieldset { min-width: 0; padding: 10px; border: 0; }
 .ve-film-capability-summary { color: var(--text-muted); font-size: 12px; }
 .ve-film-shot-layout {
   display: grid;

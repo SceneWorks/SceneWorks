@@ -72,13 +72,14 @@ afterEach(() => {
   container.remove();
 });
 
-async function renderWorkspace() {
+async function renderWorkspace(context = {}) {
   root = createRoot(container);
   await act(async () => {
     root.render(
       <AppContext.Provider value={{
         activeProject: { id: "project_1", name: "Project" }, token: "",
         refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn(),
+        ...context,
       }}>
         <FilmWorkspace />
       </AppContext.Provider>,
@@ -99,6 +100,62 @@ function changeValue(element, value) {
 }
 
 describe("FilmWorkspace", () => {
+  it("keeps unsaved work mounted across three keyboard-navigable views and collapses advanced controls", async () => {
+    const film = draft({ originalScript: "A courier enters." });
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+
+    await renderWorkspace({
+      models: [
+        { id: "minimax_h3", name: "MiniMax-H3", type: "video", installState: "installed" },
+        { id: "wan_2_2", name: "Wan 2.2", type: "video", installState: "installed" },
+      ],
+    });
+
+    const tabs = [...container.querySelectorAll('[role="tab"]')];
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Brief", "Shots", "Review & Edit"]);
+    expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#film-view-brief").hidden).toBe(false);
+    expect(container.querySelector("#film-view-shots").hidden).toBe(true);
+    expect(container.querySelector("#film-view-review").hidden).toBe(true);
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Render selected shots")).toBe(false);
+    const planningVideoModel = container.querySelector('select[aria-label="Planning target video model"]');
+    expect(planningVideoModel).not.toBeNull();
+    expect(planningVideoModel.value).toBe("minimax_h3");
+    expect([...container.querySelectorAll("details")]
+      .find((item) => item.querySelector(":scope > summary")?.textContent === "Advanced planning settings").open).toBe(false);
+
+    const script = container.querySelector('textarea[aria-label="Original prose or screenplay"]');
+    await act(async () => {
+      changeValue(script, "Unsaved courier revision.");
+      changeValue(planningVideoModel, "wan_2_2");
+    });
+    await act(async () => { tabs[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
+    expect(document.activeElement).toBe(tabs[1]);
+    expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#film-view-shots").hidden).toBe(false);
+    expect(container.querySelector('select[aria-label="Video model"]').value).toBe("wan_2_2");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Render selected shots")).toBe(true);
+
+    const advanced = [...container.querySelectorAll("details")]
+      .find((item) => item.querySelector(":scope > summary")?.textContent.startsWith("Advanced video and budget settings"));
+    expect(advanced.open).toBe(false);
+    await act(async () => { advanced.querySelector("summary").click(); });
+    expect(advanced.open).toBe(true);
+
+    await act(async () => { tabs[2].click(); });
+    expect(container.querySelector("#film-view-review").hidden).toBe(false);
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Export current cut")).toBe(true);
+    await act(async () => { tabs[0].click(); });
+    expect(container.querySelector('textarea[aria-label="Original prose or screenplay"]').value).toBe("Unsaved courier revision.");
+    expect(advanced.open).toBe(true);
+  });
+
   it("creates, edits, saves, and reopens a project film draft without JSON authoring", async () => {
     const created = draft();
     const saved = draft({ revision: 2, title: "Workshop delivery" });

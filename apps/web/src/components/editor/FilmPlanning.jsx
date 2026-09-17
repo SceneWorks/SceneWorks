@@ -3,11 +3,12 @@ import React, { lazy, Suspense } from "react";
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
-export function FilmPlanning({ draft, availability, operation, disabled, onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
+export function FilmPlanning({ draft, availability, operation, disabled, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, token }) {
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
   const candidate = operation?.candidatePlan;
+  const videoModels = models.filter((model) => model.type === "video" && model.usable !== false);
   function setProvider(provider) {
     onChange((next) => {
       next.planning = {
@@ -31,22 +32,28 @@ export function FilmPlanning({ draft, availability, operation, disabled, onChang
             <option value="openai_compatible">Saved OpenAI-compatible connection</option>
           </select>
         </label>
-        <label>Video model<input aria-label="Planning target video model" disabled value={draft.productionPlan.model.id} /></label>
-        {planning.provider !== "prompt_refiner" ? (
-          <label>Thinking
-            <select aria-label="Planner thinking mode" disabled={disabled || active} value={planning.thinkingMode ?? "enabled"} onChange={(event) => onChange((next) => { next.planning.thinkingMode = event.target.value; })}>
-              <option value="enabled">Enabled (stored separately)</option>
-              <option value="disabled">Disabled</option>
-              <option value="auto">Model default</option>
-            </select>
-          </label>
-        ) : null}
+        <label>Video model{videoModels.length ? <select aria-label="Planning target video model" disabled={disabled || active} value={draft.productionPlan.model.id} onChange={(event) => onChange((next) => { next.productionPlan.model.id = event.target.value; })}>{videoModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}{model.installState === "missing" ? " (not installed)" : ""}</option>)}</select> : <input aria-label="Planning target video model" disabled={disabled || active} value={draft.productionPlan.model.id} onChange={(event) => onChange((next) => { next.productionPlan.model.id = event.target.value; })} />}</label>
       </div>
       {planning.provider === "openai_compatible" ? (
         <Suspense fallback={<p>Loading connection settings…</p>}>
           <FilmPlannerConnection active={active} disabled={disabled} onChange={onChange} onNotice={onNotice} planning={planning} token={token} />
         </Suspense>
       ) : null}
+      <details className="ve-film-advanced">
+        <summary>Advanced planning settings</summary>
+        <div className="ve-film-grid">
+          {planning.provider !== "prompt_refiner" ? (
+            <label>Thinking
+              <select aria-label="Planner thinking mode" disabled={disabled || active} value={planning.thinkingMode ?? "enabled"} onChange={(event) => onChange((next) => { next.planning.thinkingMode = event.target.value; })}>
+                <option value="enabled">Enabled (stored separately)</option>
+                <option value="disabled">Disabled</option>
+                <option value="auto">Model default</option>
+              </select>
+            </label>
+          ) : null}
+          <label className="ve-film-reference-check"><input checked={Boolean(planning.refinePrompts)} disabled={disabled || active} onChange={(event) => onChange((next) => { next.planning.refinePrompts = event.target.checked; })} type="checkbox" /> Run model-specific prompt refinement when compiling shots</label>
+        </div>
+      </details>
       <p className="ve-film-provider-state">
         {planning.provider === "native"
           ? (qwen?.available ? "Qwen3.6-27B is installed and available." : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")

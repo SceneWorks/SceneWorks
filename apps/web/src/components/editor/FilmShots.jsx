@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const CONDITIONING_MODES = ["text_to_video", "image_to_video", "first_last_frame", "reference_to_video"];
 const DEPENDENCY_KINDS = ["conditioning", "continuity"];
@@ -57,6 +57,7 @@ function exportJson(name, value) {
 
 export function FilmShots({ capabilities, compiled, disabled, draft, findings = [], models = [], onChange, onImportError, selectedShotIds, setSelectedShotIds }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const planInput = useRef(null);
   const compiledInput = useRef(null);
   const shots = draft.productionPlan.shots;
@@ -104,6 +105,10 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
   }
 
   const advanced = draft.productionPlan.model.advanced ?? {};
+  const advancedFindings = findings.filter((finding) => finding.shotId == null && (finding.field === "model" || finding.field.startsWith("model.") || finding.field === "limits" || finding.field.startsWith("limits.")));
+  useEffect(() => {
+    if (advancedFindings.length) setAdvancedOpen(true);
+  }, [advancedFindings.length]);
   return (
     <section aria-labelledby="film-shots-heading" className="ve-film-section ve-film-shots">
       <div className="ve-film-section-heading">
@@ -120,9 +125,11 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
         </div>
       </div>
 
-      <fieldset className="ve-film-plan-controls" disabled={disabled}>
-        <legend>Video and budgets</legend>
-        <div className="ve-film-form">
+      <details className="ve-film-advanced ve-film-plan-controls" onToggle={(event) => setAdvancedOpen(event.currentTarget.open)} open={advancedOpen}>
+        <summary>Advanced video and budget settings{advancedFindings.length ? ` · ${advancedFindings.length} finding${advancedFindings.length === 1 ? "" : "s"}` : ""}</summary>
+        <fieldset disabled={disabled}>
+          <legend>Video and budgets</legend>
+          <div className="ve-film-form">
           <label>Video model{videoModels.length ? <select aria-label="Video model" value={draft.productionPlan.model.id} onChange={(event) => onChange((next) => { next.productionPlan.model.id = event.target.value; })}>{videoModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}{model.installState === "missing" ? " (not installed)" : ""}</option>)}</select> : <input aria-label="Video model" value={draft.productionPlan.model.id} onChange={(event) => onChange((next) => { next.productionPlan.model.id = event.target.value; })} />}</label>
           <label>Tier{tiers.length ? <select aria-label="Video model tier" value={draft.productionPlan.model.tier ?? ""} onChange={(event) => onChange((next) => setOptional(next.productionPlan.model, "tier", event.target.value))}><option value="">Model default</option>{tiers.map((tier) => <option key={tier}>{tier}</option>)}</select> : <input aria-label="Video model tier" value={draft.productionPlan.model.tier ?? ""} onChange={(event) => onChange((next) => setOptional(next.productionPlan.model, "tier", event.target.value))} />}</label>
           <NumberInput label="Frames per second" min="1" onChange={(value) => onChange((next) => setOptionalNumber(next.productionPlan.model, "fps", value))} value={draft.productionPlan.model.fps} />
@@ -137,10 +144,11 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
           <NumberInput label="Attempts per shot" min="1" onChange={(value) => onChange((next) => { next.productionPlan.limits.maxAttemptsPerShot = Number(value); })} value={draft.productionPlan.limits.maxAttemptsPerShot} />
           <NumberInput label="Execution memory budget (GB)" min="0.1" step="0.1" onChange={(value) => onChange((next) => { next.productionPlan.limits.maxMemoryGb = Number(value); })} value={draft.productionPlan.limits.maxMemoryGb} />
           <NumberInput label="Planner memory budget (GB)" min="0.1" step="0.1" onChange={(value) => onChange((next) => setOptionalNumber(next.productionPlan.limits, "plannerMaxMemoryGb", value))} value={draft.productionPlan.limits.plannerMaxMemoryGb} />
-        </div>
-        <Finding field="model" findings={findings} /><Finding field="limits" findings={findings} />
-        {capabilities ? <p className="ve-film-capability-summary">Available modes: {capabilities.modes.join(", ") || "none"}. Durations: {capabilities.durations.join(", ") || "model-defined"}. Reference slots: {capabilities.maxReferenceImages}. Installed compatible adapters: {capabilities.turboLoras.map((item) => `${item.name} (${item.steps} steps)`).join(", ") || "none"}.</p> : null}
-      </fieldset>
+          </div>
+          <Finding field="model" findings={findings} /><Finding field="limits" findings={findings} />
+          {capabilities ? <p className="ve-film-capability-summary">Available modes: {capabilities.modes.join(", ") || "none"}. Durations: {capabilities.durations.join(", ") || "model-defined"}. Reference slots: {capabilities.maxReferenceImages}. Installed compatible adapters: {capabilities.turboLoras.map((item) => `${item.name} (${item.steps} steps)`).join(", ") || "none"}.</p> : null}
+        </fieldset>
+      </details>
 
       <div className="ve-film-shot-layout">
         <ol aria-label="Ordered shots" className="ve-film-shot-list">
