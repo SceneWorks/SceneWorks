@@ -1037,3 +1037,132 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{stale}");
     assert!(stale["detail"].as_str().unwrap().contains("changed after"));
 }
+
+#[tokio::test]
+async fn film_render_refuses_an_authorized_revision_changed_by_another_session() {
+    let temporary = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temporary);
+    let app = create_app(settings).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Revision"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title":"Revision"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let authorized_revision = draft["revision"].clone();
+    draft["productionPlan"]["shots"][0]["prompt"] = json!("Another session changed the prompt");
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for suffix in ["preflight", "runs"] {
+        let (status, refusal) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project_id}/films/{draft_id}/{suffix}"),
+            json!({"expectedDraftRevision": authorized_revision, "selectedShotIds":["SH010"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        assert!(refusal.to_string().contains("revision conflict"));
+    }
+    let (_, runs) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(runs, json!([]));
+    let directory = std::path::Path::new(project["path"].as_str().unwrap()).join("films/runs");
+    assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jobs, json!([]));
+}
+
+#[tokio::test]
+async fn film_render_store_pin_rechecks_revision_after_route_validation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temporary)).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Pin race"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap().to_owned();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title":"Pin race"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["productionPlan"]["shots"][0]["prompt"] =
+        json!("A courier walks across a quiet workshop.");
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    let (validated, resume) = crate::films::film_pin_barrier(&draft_id);
+    let app_request = app.clone();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/runs");
+    let revision = saved["revision"].clone();
+    let rendering = tokio::spawn(async move {
+        request(
+            app_request,
+            "POST",
+            &route,
+            json!({"expectedDraftRevision":revision, "selectedShotIds":["SH010"]}),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), validated)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut concurrent = saved;
+    concurrent["productionPlan"]["shots"][0]["prompt"] = json!("Changed after route validation");
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        concurrent,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    resume.send(()).unwrap();
+    let (status, conflict) = rendering.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert!(conflict.to_string().contains("revision conflict"));
+    let (_, runs) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/film-runs"),
+        Value::Null,
+    )
+    .await;
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(runs, json!([]));
+    assert_eq!(jobs, json!([]));
+}

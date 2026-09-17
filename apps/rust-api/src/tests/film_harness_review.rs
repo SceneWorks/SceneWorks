@@ -2698,3 +2698,129 @@ fn every_cut_question_compares_a_reference_both_sides_of_the_cut_bind() {
         );
     }
 }
+
+#[tokio::test]
+async fn review_refuses_missing_questions_before_acceptance_and_persists_later_failure() {
+    let _env = isolate_hf_cache();
+    let harness = Harness::start_http(true, fast(&["SH010", "SH020"])).await;
+    seed_review_models(&harness);
+    let (plan, pack) = sound_free_documents(&harness);
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(plan, pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .unwrap();
+    let (project_id, run_id) = register_run_for_routes(&harness, &record);
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project_id, &run_id)
+        .unwrap();
+    let route = format!("/api/v1/projects/{project_id}/film-runs/{run_id}/review");
+    let mut review_plan = serde_json::to_value(shipped_review_plan()).unwrap();
+    review_plan["shots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("SH020");
+    std::fs::write(
+        &files.review_plan,
+        serde_json::to_vec(&review_plan).unwrap(),
+    )
+    .unwrap();
+    let jobs_before = harness.jobs().await.len();
+    let (status, refusal) = request(
+        harness.app.clone(),
+        "POST",
+        &route,
+        serde_json::json!({"shotIds":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(refusal
+        .to_string()
+        .contains("asks no questions about shot SH020"));
+    assert_eq!(harness.jobs().await.len(), jobs_before);
+    let (_, refused_after_reload) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(
+        refused_after_reload["reviewOperation"]["status"],
+        "rejected"
+    );
+    assert!(refused_after_reload["reviewOperation"]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("SH020"));
+    // Valid authoring is accepted, then the bounded extraction times out after dispatch.
+    review_plan["limits"]["maxSeconds"] = serde_json::json!(1);
+    review_plan["limits"]["maxAnswerSeconds"] = serde_json::json!(1);
+    std::fs::write(
+        &files.review_plan,
+        serde_json::to_vec(&review_plan).unwrap(),
+    )
+    .unwrap();
+    harness.script.lock().frame_delay = Some(Duration::from_secs(3));
+    let (status, accepted) = request(
+        harness.app.clone(),
+        "POST",
+        &route,
+        serde_json::json!({"shotIds":["SH010"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let mut terminal = Value::Null;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, current) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+        if current["run"]["controllerActive"] == false
+            && current["reviewOperation"]["status"] == "failed"
+        {
+            terminal = current;
+            break;
+        }
+    }
+    assert_eq!(
+        terminal["reviewOperation"]["status"], "failed",
+        "{terminal}"
+    );
+    assert!(terminal["reviewOperation"]["detail"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let saved: Value = serde_json::from_slice(
+        &std::fs::read(files.directory.join(review::REVIEW_OPERATION_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved, terminal["reviewOperation"]);
+    let (_, reloaded) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(reloaded["reviewOperation"], saved);
+}
+
+#[tokio::test]
+async fn reconciled_default_questions_review_both_newly_authored_shots_without_control_edits() {
+    let (harness, record) = rendered_two_shots().await;
+    let mut draft =
+        sceneworks_core::film_workspace::FilmDraft::manual_one_shot("project", "film", "Defaults");
+    draft.production_plan =
+        sceneworks_core::film_plan::read_plan_file(&PathBuf::from(&record.plan.path)).unwrap();
+    // Production plan application never touches the review controls. Defaults become real here.
+    draft.reconcile_review_plan();
+    let pinned = draft.review_plan_for_run();
+    let path = harness.out_dir().join("default-review.json");
+    std::fs::write(&path, serde_json::to_vec(&pinned).unwrap()).unwrap();
+    let mut options = review_options(&harness, &["SH010", "SH020"]);
+    options.review_plan_path = Some(path);
+    review::validate_review_request(&options).unwrap();
+    let vision = ScriptedVision::new();
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .unwrap();
+    for id in ["SH010", "SH020"] {
+        let summary = reviewed.shot(id).unwrap().latest_review().unwrap();
+        assert!(summary.stop.is_none(), "{summary:?}");
+        assert_eq!(summary.observations, 1);
+    }
+    let operation: Value = serde_json::from_slice(
+        &std::fs::read(harness.out_dir().join(review::REVIEW_OPERATION_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(operation["status"], "completed");
+}

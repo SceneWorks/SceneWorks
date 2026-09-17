@@ -18,7 +18,7 @@ import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
 import { FilmRenderOptions } from "./FilmRenderOptions.jsx";
-import { FilmReview } from "./FilmReview.jsx";
+import { FilmReview, normalizedPlan } from "./FilmReview.jsx";
 import { FilmShots } from "./FilmShots.jsx";
 
 const FilmSound = lazy(() => import("./FilmSound.jsx").then((module) => ({ default: module.FilmSound })));
@@ -304,6 +304,7 @@ export function FilmWorkspace() {
     setDraft((current) => {
       const next = structuredClone(current);
       mutator(next);
+      next.reviewPlan = normalizedPlan(next);
       return next;
     });
   }
@@ -312,7 +313,7 @@ export function FilmWorkspace() {
     if (!draft) return null;
     const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${draft.id}`, token, {
       method: "PUT",
-      body: JSON.stringify(draft),
+      body: JSON.stringify({ ...draft, reviewPlan: normalizedPlan(draft) }),
     });
     if (updateLocal) {
       setDraft(saved);
@@ -404,13 +405,13 @@ export function FilmWorkspace() {
     setNotice("");
     try {
       const saved = await saveDraft();
-      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token);
+      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token, saved.revision);
       setPreflight(inspected);
       if (!inspected.valid) {
         setNotice("Preflight found fields that must be corrected before rendering.");
         return;
       }
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds }) });
+      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds, expectedDraftRevision: saved.revision }) });
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
       selectedRunExplicit.current = true;
       setLastRun(run);
@@ -478,7 +479,7 @@ export function FilmWorkspace() {
     setNotice("");
     try {
       const saved = await saveDraft();
-      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token);
+      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token, saved.revision);
       setPreflight(inspected);
       setNotice(inspected.valid ? "Preflight passed. Review the effective requests before rendering." : "Preflight found fields that need attention.");
     } catch (error) {

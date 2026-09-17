@@ -44,10 +44,10 @@ export function installFilmPlanner(modelId, token) {
   });
 }
 
-export function preflightFilm(projectId, draftId, selectedShotIds, token) {
+export function preflightFilm(projectId, draftId, selectedShotIds, token, expectedDraftRevision) {
   return apiFetch(`${base(projectId, draftId)}/preflight`, token, {
     method: "POST",
-    body: JSON.stringify({ selectedShotIds }),
+    body: JSON.stringify({ selectedShotIds, expectedDraftRevision }),
   });
 }
 

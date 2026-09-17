@@ -1654,6 +1654,8 @@ fn compiled_for_run(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FilmDocumentPreflight {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_revision: Option<u32>,
     pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<PlannerCapabilities>,
@@ -1674,6 +1676,7 @@ pub(crate) async fn preflight_documents(
     findings.extend(selection_findings(plan, selection));
     if !findings.is_empty() {
         return Ok(FilmDocumentPreflight {
+            draft_revision: None,
             valid: false,
             capabilities: None,
             compiled: None,
@@ -1716,6 +1719,7 @@ pub(crate) async fn preflight_documents(
     });
     if !findings.is_empty() {
         return Ok(FilmDocumentPreflight {
+            draft_revision: None,
             valid: false,
             capabilities,
             compiled: None,
@@ -1730,12 +1734,14 @@ pub(crate) async fn preflight_documents(
         .expect("model findings are empty only with a catalog entry");
     match compiled_for_run(plan, pack, &entries, lane, &plan_sha256, supplied) {
         Ok(compiled) => Ok(FilmDocumentPreflight {
+            draft_revision: None,
             valid: true,
             capabilities,
             compiled: Some(compiled),
             findings: Vec::new(),
         }),
         Err(HarnessError::Validation(findings)) => Ok(FilmDocumentPreflight {
+            draft_revision: None,
             valid: false,
             capabilities,
             compiled: None,
@@ -5087,6 +5093,15 @@ impl Session<'_> {
                 .is_some_and(|stop| stop.resumable && stop.reason == "export_failed");
         match prior {
             (outcome, Some(stop))
+                if !stop.resumable && replacement_succeeded && self.stop.is_none() =>
+            {
+                self.record.outcome = outcome;
+                self.record.stop = Some(stop);
+                self.record.state = RunState::Finished;
+                self.record.finished_at = Some(utc_now());
+                self.persist()
+            }
+            (outcome, Some(stop))
                 if stop.resumable && (!outstanding.is_empty() || export_still_owed) =>
             {
                 self.note_decision(
@@ -5495,14 +5510,24 @@ async fn continue_run(
         transport,
         control: &options.control,
     };
-    // A resume dispatches exactly the shots the first controller selected, so the reference
-    // partition's install gate follows the RECORD's selection, not the whole plan (sc-23402).
+    // Admission follows the saved operation's scope. A replacement never requires another
+    // pending shot's partition, and its saved export choice survives API startup adoption.
+    let selection = record
+        .active_take_operation
+        .as_ref()
+        .map(|operation| std::slice::from_ref(&operation.shot_id))
+        .unwrap_or(&record.selected_shot_ids);
+    let export = record
+        .active_take_operation
+        .as_ref()
+        .map(|operation| operation.export)
+        .unwrap_or(options.export);
     let prepared = prepare(
         &client,
         &plan,
-        options.export,
+        export,
         options.require_installed,
-        Some(&record.selected_shot_ids),
+        Some(selection),
     )
     .await?
     .map_err(HarnessError::Validation)?;
@@ -5637,6 +5662,10 @@ pub(crate) async fn resume_with_lease(
 ) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
+    if continued.record.active_take_operation.is_some() {
+        clear_cancel_request(&options.out_dir)?;
+        return recover_take_operation(transport, options, continued, started).await;
+    }
     if !continued.record.is_resumable() {
         let detail = continued
             .record
@@ -5711,8 +5740,26 @@ pub(crate) async fn replace_take_with_lease(
     reason: &str,
     _lease: ControllerLease,
 ) -> Result<RunRecord, HarnessError> {
+    replace_take_operation_with_lease(transport, options, shot_id, reason, "replacement", _lease)
+        .await
+}
+
+pub(crate) async fn replace_take_operation_with_lease(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    shot_id: &str,
+    reason: &str,
+    kind: &str,
+    _lease: ControllerLease,
+) -> Result<RunRecord, HarnessError> {
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
+    if continued.record.active_take_operation.is_some() {
+        return Err(HarnessError::Refused(
+            "A saved take operation must be resumed before requesting another replacement"
+                .to_owned(),
+        ));
+    }
     if continued.record.project_id.is_none() {
         return Err(HarnessError::Refused(format!(
             "run {} never created a project, so it has no take to replace",
@@ -5833,7 +5880,6 @@ pub(crate) async fn replace_take_with_lease(
             _ => format!("no take to reject; rendering one: {reason}"),
         },
     );
-    session.persist()?;
 
     // Exactly one attempt, marked as the human decision it is so it never spends the plan's cap.
     let number = session.record.shots[index].next_attempt_number();
@@ -5863,12 +5909,103 @@ pub(crate) async fn replace_take_with_lease(
         rejection: None,
         human_requested: true,
     });
+    session.record.active_take_operation = Some(film_plan::TakeOperation {
+        kind: kind.to_owned(),
+        shot_id: shot_id.to_owned(),
+        attempt: number,
+        idempotency_key: idempotency_key(&session.record.run_id, shot_id, number),
+        prior_outcome: prior_verdict.0,
+        prior_stop: prior_verdict.1.clone(),
+        reason: reason.to_owned(),
+        export: options.export,
+        max_shot_seconds: session.plan.limits.max_shot_seconds,
+    });
     session.persist()?;
     let attempt_index = session.record.shots[index].attempts.len() - 1;
     session
         .work_attempt(&shot, index, attempt_index, true)
         .await?;
 
+    complete_take_operation(session, index, shot_id, reason, prior_verdict).await
+}
+
+async fn recover_take_operation(
+    transport: &dyn ApiTransport,
+    options: &ResumeOptions,
+    continued: Continued,
+    started: Instant,
+) -> Result<RunRecord, HarnessError> {
+    let operation = continued
+        .record
+        .active_take_operation
+        .clone()
+        .expect("checked by caller");
+    let shot = continued
+        .plan
+        .shots
+        .iter()
+        .find(|shot| shot.id == operation.shot_id)
+        .cloned()
+        .ok_or_else(|| HarnessError::Refused("Saved take operation has no plan shot".to_owned()))?;
+    let mut session = session_from(transport, options, continued, started, None);
+    session.export = operation.export;
+    session.plan.limits.max_shot_seconds = operation.max_shot_seconds;
+    let index = session
+        .record
+        .shots
+        .iter()
+        .position(|shot| shot.shot_id == operation.shot_id)
+        .ok_or_else(|| {
+            HarnessError::Refused("Saved take operation has no recorded shot".to_owned())
+        })?;
+    let attempt_index = session.record.shots[index]
+        .attempts
+        .iter()
+        .position(|attempt| {
+            attempt.attempt == operation.attempt
+                && attempt.idempotency_key == operation.idempotency_key
+                && attempt.human_requested
+        })
+        .ok_or_else(|| {
+            HarnessError::Refused(
+                "Saved take operation has no matching authorized attempt".to_owned(),
+            )
+        })?;
+    session.note_decision(
+        "resume_take_operation",
+        Some(&operation.shot_id),
+        format!(
+            "recovering {} attempt {} under its original human bounds",
+            operation.kind, operation.attempt
+        ),
+    );
+    session.persist()?;
+    if !TERMINAL_ATTEMPT_STATUSES.contains(
+        &session.record.shots[index].attempts[attempt_index]
+            .status
+            .as_str(),
+    ) {
+        session
+            .work_attempt(&shot, index, attempt_index, false)
+            .await?;
+    }
+    complete_take_operation(
+        session,
+        index,
+        &operation.shot_id,
+        &operation.reason,
+        (operation.prior_outcome, operation.prior_stop),
+    )
+    .await
+}
+
+async fn complete_take_operation(
+    mut session: Session<'_>,
+    index: usize,
+    shot_id: &str,
+    reason: &str,
+    prior_verdict: (RunOutcome, Option<RunStop>),
+) -> Result<RunRecord, HarnessError> {
     let replaced = session.record.shots[index].selected_attempt.is_some();
     session.record.shots[index].outcome = if replaced {
         ShotOutcome::Rendered
@@ -5939,6 +6076,7 @@ pub(crate) async fn replace_take_with_lease(
     } else {
         replaced
     };
+    session.record.active_take_operation = None;
     session.finish_replacement(export_ok, shot_id, prior_verdict)?;
     Ok(session.record)
 }
@@ -6089,6 +6227,7 @@ fn base_record(
         decisions: Vec::new(),
         elapsed_seconds: 0.0,
         human_requested_elapsed_seconds: 0.0,
+        active_take_operation: None,
     }
 }
 
@@ -6182,6 +6321,7 @@ fn rejected_record(
         decisions: Vec::new(),
         elapsed_seconds: seconds_since(started),
         human_requested_elapsed_seconds: 0.0,
+        active_take_operation: None,
     }
 }
 

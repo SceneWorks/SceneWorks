@@ -33,6 +33,8 @@ pub(crate) struct ReferencePackUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FilmPreflightRequest {
     #[serde(default)]
+    pub expected_draft_revision: Option<u32>,
+    #[serde(default)]
     pub selected_shot_ids: Vec<String>,
 }
 
@@ -506,6 +508,31 @@ fn validate_planning_selection(draft: &FilmDraft) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[cfg(test)]
+type FilmPinBarrier = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(test)]
+static FILM_PIN_BARRIERS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, FilmPinBarrier>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) fn film_pin_barrier(
+    draft_id: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (validated_tx, validated_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    FILM_PIN_BARRIERS
+        .lock()
+        .insert(draft_id.to_owned(), (validated_tx, resume_rx));
+    (validated_rx, resume_tx)
+}
+
 pub(crate) async fn create_film_run(
     State(state): State<AppState>,
     Path((project_id, draft_id)): Path<(String, String)>,
@@ -518,6 +545,12 @@ pub(crate) async fn create_film_run(
         move |store| store.get_film_draft(&project_id, &draft_id)
     })
     .await?;
+    if payload
+        .expected_draft_revision
+        .is_some_and(|expected| expected != draft.revision)
+    {
+        return Err(ApiError::conflict("Film draft revision conflict: the saved draft changed; reload and preflight before rendering"));
+    }
     let selected = effective_selection(&draft, payload.selected_shot_ids)?;
     let mut findings =
         film_plan::validate_all(&draft.production_plan, &draft.reference_pack, None, None);
@@ -531,10 +564,18 @@ pub(crate) async fn create_film_run(
         return Err(invalid_film_document(findings));
     }
 
+    #[cfg(test)]
+    {
+        let barrier = FILM_PIN_BARRIERS.lock().remove(&draft_id);
+        if let Some((validated, resume)) = barrier {
+            let _ = validated.send(());
+            let _ = resume.await;
+        }
+    }
     let locator_id = format!("filmrun_{}", Uuid::new_v4().simple());
-    let compiled = draft.compiled_plan;
+    let revision = draft.revision;
     let locator = project_call(state, move |store| {
-        store.create_film_run(&project_id, &locator_id, &draft_id, selected, compiled)
+        store.create_film_run_at_revision(&project_id, &locator_id, &draft_id, revision, selected)
     })
     .await?;
     Ok((
@@ -559,6 +600,12 @@ pub(crate) async fn preflight_film_draft(
         store.get_film_draft(&project_id, &draft_id)
     })
     .await?;
+    if payload
+        .expected_draft_revision
+        .is_some_and(|expected| expected != draft.revision)
+    {
+        return Err(ApiError::conflict("Film draft revision conflict: the saved draft changed; reload and preflight before rendering"));
+    }
     let selected = effective_selection(&draft, payload.selected_shot_ids)?;
     Ok(Json(run_preflight(&state, &draft, &selected).await?))
 }
@@ -617,6 +664,7 @@ async fn run_preflight(
         preflight.compiled = None;
         preflight.findings.extend(regime_findings);
     }
+    preflight.draft_revision = Some(draft.revision);
     Ok(preflight)
 }
 

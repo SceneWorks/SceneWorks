@@ -269,20 +269,41 @@ impl FilmDraft {
         }
     }
 
-    /// The review document pinned into a run. Early film drafts carried the placeholder
-    /// `{schemaVersion, questions}` shape; turn only that known legacy seam into the typed plan so
-    /// reopening an old draft does not make review unavailable. Authored modern documents remain
-    /// byte-for-byte inputs, including invalid ones that review should report by field.
-    pub fn review_plan_for_run(&self) -> Value {
+    /// Add defaults only for missing shot entries. Keep explicit and detached questions in the
+    /// editable draft, including questions for a shot replaced by a generated plan.
+    pub fn reconcile_review_plan(&mut self) {
         if self.review_plan.is_null()
             || (self.review_plan.get("questions").is_some()
                 && self.review_plan.get("sampling").is_none()
                 && self.review_plan.get("shots").is_none())
         {
-            default_review_plan(&self.id, &self.production_plan.shots)
-        } else {
-            self.review_plan.clone()
+            self.review_plan = default_review_plan(&self.id, &self.production_plan.shots);
         }
+        let defaults = default_review_plan(&self.id, &self.production_plan.shots);
+        if let Some(shots) = self
+            .review_plan
+            .get_mut("shots")
+            .and_then(Value::as_object_mut)
+        {
+            for (id, spec) in defaults["shots"].as_object().expect("default shots") {
+                shots.entry(id.clone()).or_insert_with(|| spec.clone());
+            }
+        }
+    }
+
+    /// Pin questions for the immutable run's shots. Detached authoring stays in the draft;
+    /// malformed questions/limits for current shots remain visible to review validation.
+    pub fn review_plan_for_run(&self) -> Value {
+        let mut draft = self.clone();
+        draft.reconcile_review_plan();
+        if let Some(shots) = draft
+            .review_plan
+            .get_mut("shots")
+            .and_then(Value::as_object_mut)
+        {
+            shots.retain(|id, _| self.production_plan.shots.iter().any(|shot| &shot.id == id));
+        }
+        draft.review_plan
     }
 }
 

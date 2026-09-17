@@ -119,6 +119,13 @@ only after a separate opt-in. The planner selection is independent of the plan's
 and provider failure never falls back to another provider. See [film-editor.md](film-editor.md) for
 the operator flow.
 
+The workspace sends the saved `expectedDraftRevision` with preflight and run creation.
+Preflight returns `draftRevision`; creation checks the expected revision again under the project
+lock that pins the plan, references, questions, compiled requests and shot selection. A concurrent
+save returns HTTP 409 and creates no run or job. Older clients may omit the expected revision;
+the route still pins only the exact snapshot it validated, and CLI store callers validate any
+supplied compiled document against the snapshot held under that same lock.
+
 ### 2. Long-running and resumable: `run`, `resume`
 
 Hours. The CLI `run` (`apps/rust-api/src/film_harness.rs:4823`) can create a project, import
@@ -146,9 +153,24 @@ out-of-process equivalent is `request_cancel` (`:322`), which writes a cancel re
 directory, and `clear_cancel_request` (`:338`). A hosted task would use the former for a UI cancel
 button and keep the latter working for a shell.
 
+An interrupted replacement or repair carries `activeTakeOperation` in `run.json`: its kind,
+target shot, attempt/idempotency identity, original shot bound, export choice and prior run verdict.
+The linked attempt owns the job ID. API startup and CLI resume recover that one operation outside
+the automatic run budget, adopt its existing job, and preserve the prior whole-run stop. They do
+not authorize another take or resume unrelated pending shots.
+
 ### 3. Human decisions and bounded edits
 
 Short, and all but one of them touch the API very little.
+
+Draft saving and generated-plan application materialize missing review questions. Shot renames in
+the editor carry existing questions; custom questions for detached shots remain editable in the
+draft and are excluded from a run whose plan no longer contains those shots. Only the current
+plan's questions are pinned. Review validates the requested shots and questions before HTTP 202.
+`review-operation.json`, exposed as `reviewOperation` in the review response, retains running,
+completed, rejected and failed status with actionable detail. Later transport errors and partial
+reviews stopped by a limit remain visible after reload; existing observations remain advisory.
+
 
 | verb | library entry | API cost |
 | --- | --- | --- |

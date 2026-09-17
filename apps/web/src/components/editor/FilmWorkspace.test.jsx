@@ -704,4 +704,58 @@ describe("FilmWorkspace", () => {
     await act(async () => { save.click(); await Promise.resolve(); });
     expect(savedBody.productionPlan.sound.sfx).toEqual([{ role: "door_close", gain: 1, muted: false, startSeconds: 0, sourceInSeconds: 0, fadeInSeconds: 0, fadeOutSeconds: 0 }]);
   });
+  it("persists displayed questions for additions and carries custom questions through rename without review edits", async () => {
+    const film = draft();
+    film.reviewPlan = { schemaVersion: 1, id: "review", version: 1, shots: { SH010: { questions: [{ id: "custom", topic: "identity", intended: "Courier", ask: "Is it the courier?", expect: ["yes"], contradict: ["no"], frames: "last", mustObserve: true }] } } };
+    const original = structuredClone(film.reviewPlan.shots.SH010);
+    let savedBody;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/films/film_1") && options.method === "PUT") {
+        savedBody = JSON.parse(options.body);
+        return Promise.resolve({ ...savedBody, revision: 2 });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    await act(async () => changeValue(container.querySelector('input[aria-label="Shot ID"]'), "OPENING"));
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Add shot").click());
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Save draft").click());
+    expect(savedBody.reviewPlan.shots.OPENING).toEqual(original);
+    expect(savedBody.reviewPlan.shots.SH010).not.toEqual(original);
+    const addedId = savedBody.productionPlan.shots[1].id;
+    expect(savedBody.reviewPlan.shots[addedId].questions).toHaveLength(1);
+    expect(savedBody.reviewPlan.shots[addedId].questions[0].ask).toBe(container.querySelector(`textarea[aria-label="${addedId} review question 1"]`).value);
+  });
+
+  it("carries the saved draft revision through preflight and run creation", async () => {
+    const film = draft();
+    const posts = [];
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.endsWith("/films/film_1") && options.method === "PUT") return Promise.resolve({ ...JSON.parse(options.body), revision: 7 });
+      if (options.method === "POST" && (path.endsWith("/preflight") || path.endsWith("/runs"))) {
+        posts.push([path, JSON.parse(options.body)]);
+        if (path.endsWith("/preflight")) return Promise.resolve({ valid: true, draftRevision: 7, findings: [] });
+        return Promise.reject(new Error("Film draft revision conflict: another session saved"));
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Shots").click());
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Render selected shots").click());
+    expect(posts).toHaveLength(2);
+    expect(posts.map(([, body]) => body.expectedDraftRevision)).toEqual([7, 7]);
+    expect(container.textContent).toContain("Film draft revision conflict");
+    expect(apiFetchMock.mock.calls.some(([path]) => path.endsWith("/start"))).toBe(false);
+  });
+
 });
