@@ -23,7 +23,7 @@ use crate::film_harness::review::{
 };
 use crate::film_harness::{self, RunControl};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
-use crate::tests::support::{request, StatusCode};
+use crate::tests::support::{huggingface_repo_cache_path, isolate_hf_cache, request, StatusCode};
 
 const REVIEW_PLAN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -59,6 +59,66 @@ fn sound_free_documents(harness: &Harness) -> (PathBuf, PathBuf) {
 fn shipped_review_plan() -> ReviewPlan {
     parse_review_plan(&std::fs::read_to_string(REVIEW_PLAN).expect("review plan reads"))
         .expect("review plan parses")
+}
+
+/// Seed the smallest structurally complete SenseNova tier and the MiniMax partition needed by a
+/// routed repair. Review tests exercise routing and lifecycle with a scripted CPU worker; they
+/// must not borrow a developer's installed weights or become red when CI supplies both HF cache
+/// variables as empty directories.
+fn seed_review_models(harness: &Harness) {
+    let write = |path: &std::path::Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("fixture model directory");
+        std::fs::write(path, bytes).expect("fixture model file");
+    };
+    let review_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/sensenova-u1-8b-mlx",
+    )
+    .expect("fixture repo path")
+    .join("snapshots/fixture/q4");
+    for file in ["model.safetensors", "config.json", "tokenizer.json"] {
+        write(&review_root.join(file), b"fixture");
+    }
+    let tier_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/minimax-h3-mlx",
+    )
+    .expect("fixture video repo path")
+    .join("snapshots/fixture/q4");
+    let index = br#"{"weight_map":{"fixture":"model-00001-of-00001.safetensors"}}"#;
+    for partition in ["transformer", "transformer_ref"] {
+        write(&tier_root.join(partition).join("config.json"), b"{}");
+        write(
+            &tier_root
+                .join(partition)
+                .join("diffusion_pytorch_model.safetensors.index.json"),
+            index,
+        );
+        write(
+            &tier_root
+                .join(partition)
+                .join("model-00001-of-00001.safetensors"),
+            b"fixture",
+        );
+    }
+    write(&tier_root.join("text_encoder/config.json"), b"{}");
+    write(
+        &tier_root.join("text_encoder/model.safetensors.index.json"),
+        index,
+    );
+
+    let shared_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "MiniMaxAI/MiniMax-H3",
+    )
+    .expect("fixture video shared repo path")
+    .join("snapshots/fixture");
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_FILES {
+        write(&shared_root.join(file), b"fixture");
+    }
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+        write(&shared_root.join("FL2VA/audio_vae").join(file), b"fixture");
+    }
 }
 
 /// A run of SH010 + SH020 that completed, ready to review.
@@ -1076,7 +1136,20 @@ fn a_review_plan_that_declares_more_questions_than_it_budgets_for_is_refused_up_
 
 #[tokio::test]
 async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without_auto_acceptance() {
+    let _env = isolate_hf_cache();
     let harness = Harness::start_http(true, fast(&["SH010", "SH020"])).await;
+    seed_review_models(&harness);
+    let (status, models) = request(harness.app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    for model_id in ["minimax_h3", "sensenova_u1_8b"] {
+        let model = models
+            .as_array()
+            .expect("model catalog")
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .unwrap_or_else(|| panic!("missing {model_id}: {models}"));
+        assert_eq!(model["installState"], "installed", "{model}");
+    }
     let (plan, pack) = sound_free_documents(&harness);
     let record = film_harness::run(
         &harness.transport,
@@ -1173,7 +1246,7 @@ async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without
     assert_eq!(
         shot["attempts"].as_array().expect("attempt history").len(),
         original_attempts + 1,
-        "repair appends exactly one attempt"
+        "repair appends exactly one attempt: {settled}"
     );
     assert!(
         shot.get("humanDecision").is_none(),

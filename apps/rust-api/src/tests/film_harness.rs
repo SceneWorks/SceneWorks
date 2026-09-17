@@ -156,7 +156,7 @@ async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     assert_eq!(timeline.items.len(), 1);
     let project_id = record.project_id.as_deref().expect("project");
     let saved = saved_timeline(&harness.app, project_id, &timeline.timeline_id).await;
-    assert_eq!(saved["revision"], 1);
+    assert_eq!(saved["revision"], 2);
     assert_eq!(
         saved["filmAssembly"]["runs"][&record.run_id]["shotOrder"],
         json!(["SH010"])
@@ -251,13 +251,19 @@ impl ApiTransport for RouterTransport {
 
 #[tokio::test]
 async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_compile() {
+    let _env = crate::tests::support::isolate_hf_cache();
     let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(
+        harness.app.clone(),
+        "/api/v1/models",
+        only_the_base_partition_is_installed,
+    );
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-preflight", "Preflight");
     draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
     let selected = vec!["SH010".to_owned()];
 
     let ready = film_harness::preflight_documents(
-        &harness.transport,
+        &transport,
         &draft.production_plan,
         &draft.reference_pack,
         None,
@@ -279,7 +285,7 @@ async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_com
     draft.production_plan.shots[0].prompt =
         "The edited prompt must invalidate the compile.".to_owned();
     let stale = film_harness::preflight_documents(
-        &harness.transport,
+        &transport,
         &draft.production_plan,
         &draft.reference_pack,
         Some(compiled),
@@ -7434,9 +7440,9 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
             "requires at least one reference role",
         ),
         (
-            "chain as the only anchor",
+            "chain cannot replace required continuity roles",
             draft_text(&unanchored),
-            "the only continuity this shot declares is the chain",
+            "into SH0040's continuityRoles",
         ),
         (
             "missing reference asset",

@@ -1204,7 +1204,7 @@ async fn compile_and_write(
     // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
     // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
     // would read as a measured cost.
-    if !cost.executions.is_empty() || repair_rounds > 0 {
+    if !cost.job_ids.is_empty() || !cost.executions.is_empty() || repair_rounds > 0 {
         compiled.planner = Some(cost.into_record(repair_rounds, plan.limits.planner_max_memory_gb));
     }
     let compiled_path = options.compiled_path();

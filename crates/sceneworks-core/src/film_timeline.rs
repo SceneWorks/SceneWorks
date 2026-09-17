@@ -68,6 +68,83 @@ fn pictures(timeline: &Value) -> Vec<&Value> {
         .collect()
 }
 
+fn picture_duration(timeline: &Value) -> f64 {
+    timeline["tracks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|track| track["kind"] == "video")
+        .flat_map(|track| track["items"].as_array().into_iter().flatten())
+        .map(|item| number(item, "timelineEnd"))
+        .fold(0.0, f64::max)
+}
+
+/// Extend a run-owned sequence bed only when its placement and source trim still describe the
+/// complete pre-delivery cut. Gain, mute, fades and item volume are independent editor controls and
+/// deliberately do not participate in this test. An explicit placement or duration edit prevents
+/// automatic extension, preserving the editor's chosen bounds.
+fn extend_unedited_sequence_beds(
+    timeline: &mut Value,
+    incoming: &Value,
+    run: &str,
+    old_duration: f64,
+    new_duration: f64,
+) {
+    if new_duration <= old_duration {
+        return;
+    }
+    let close = |left: f64, right: f64| (left - right).abs() <= 0.000_001;
+    for track in timeline["tracks"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .filter(|track| track["kind"] == "audio")
+    {
+        for item in track["items"].as_array_mut().into_iter().flatten() {
+            let role = field(item, "role");
+            if field(item, "runId") != run
+                || !matches!(role, "ambience" | "music" | "sfx")
+                || !field(item, "shotId").is_empty()
+            {
+                continue;
+            }
+            let declared_start = item["filmHarness"]["startSeconds"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .max(0.0);
+            let source_in = number(item, "sourceIn");
+            let expected_span = (old_duration - declared_start).max(0.0);
+            let item_id = field(item, "id");
+            let desired = incoming["tracks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|track| track["items"].as_array().into_iter().flatten())
+                .find(|candidate| {
+                    field(candidate, "runId") == run
+                        && field(candidate, "id") == item_id
+                        && field(candidate, "role") == role
+                        && field(candidate, "shotId").is_empty()
+                });
+            let untouched = close(number(item, "timelineStart"), declared_start)
+                && close(number(item, "timelineEnd"), old_duration)
+                && close(number(item, "sourceOut") - source_in, expected_span);
+            let desired_is_full_cut = desired.is_some_and(|desired| {
+                close(number(desired, "timelineStart"), declared_start)
+                    && close(number(desired, "timelineEnd"), new_duration)
+                    && close(
+                        number(desired, "sourceOut") - number(desired, "sourceIn"),
+                        (new_duration - declared_start).max(0.0),
+                    )
+            });
+            if untouched && desired_is_full_cut {
+                item["timelineEnd"] = json!(new_duration);
+                item["sourceOut"] = json!(source_in + (new_duration - declared_start));
+            }
+        }
+    }
+}
+
 /// Saving a cut is also the durable deletion/restore and ordering operation. CAS has already
 /// established that this user actually edited the current document, not a pre-delivery snapshot.
 pub fn reconcile_cut(previous: &Value, next: &mut Value, next_revision: u64) {
@@ -300,6 +377,7 @@ pub fn deliver(
                 conflicts.remove(&shot);
             }
         } else {
+            let old_duration = picture_duration(timeline);
             let order = timeline["filmAssembly"]["runs"][&run]["shotOrder"]
                 .as_array()
                 .cloned()
@@ -366,8 +444,29 @@ pub fn deliver(
                     }
                 }
             }
+            let new_duration = picture_duration(timeline);
+            extend_unedited_sequence_beds(timeline, &incoming, &run, old_duration, new_duration);
         }
         timeline["filmAssembly"]["runs"][&run]["appliedDeliveries"][&delivery_id] = json!(true);
+    }
+    // Establish harness-owned lanes in their declared order even when a lane has no clip in the
+    // first incremental delivery. Later dialogue then lands in its deterministic default position;
+    // an existing lane is never moved, preserving an editor's track order.
+    for track in incoming["tracks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|track| track["kind"] == "audio")
+    {
+        let Some(id) = track["id"].as_str().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let tracks = timeline["tracks"].as_array_mut().unwrap();
+        if !tracks.iter().any(|existing| existing["id"] == id) {
+            let mut empty = track.clone();
+            empty["items"] = json!([]);
+            tracks.push(empty);
+        }
     }
     // Add each owned audio item once; its subsequent trim, gain, placement or deletion belongs
     // to the editor. Repeated assembly must never regenerate the user's audio track.
@@ -528,5 +627,91 @@ mod tests {
         send(&mut saved, "B", 1, 2.0);
         assert_eq!(saved["tracks"][0]["items"][0]["filmHarness"]["shotId"], "C");
         assert_eq!(saved["tracks"][0]["items"][2]["timelineStart"], 7.0);
+    }
+
+    #[test]
+    fn later_delivery_extends_only_untrimmed_beds_and_keeps_lane_and_mix_edits() {
+        let mut saved = cut();
+        let delivery = |shot: &str, shot_length: f64, bed_end: f64, dialogue: bool| {
+            let dialogue_items = if dialogue {
+                json!([{"id":"line_b","trackId":"dialogue","assetId":"line","timelineStart":4.2,
+                    "timelineEnd":5.2,"sourceIn":0,"sourceOut":1,
+                    "filmHarness":{"role":"dialogue","runId":"run_test","shotId":"B","offsetSeconds":0.2}}])
+            } else {
+                json!([])
+            };
+            json!({"runId":"run_test","shotOrder":["A","B","C"],"timeline":{"tracks":[
+                {"id":"main","kind":"video","items":[{"id":"take","assetId":format!("asset_{shot}_1"),
+                    "filmHarness":{"role":"picture","runId":"run_test","shotId":shot,"attempt":1},
+                    "sourceIn":0,"sourceOut":shot_length,"timelineStart":0,"timelineEnd":shot_length,"speed":1}]},
+                {"id":"dialogue","kind":"audio","role":"dialogue","gain":1,"muted":false,"items":dialogue_items},
+                {"id":"ambience","kind":"audio","role":"ambience","gain":0.35,"muted":false,"items":[
+                    {"id":"room","assetId":"room","timelineStart":0,"timelineEnd":bed_end,"sourceIn":0,
+                     "sourceOut":bed_end,"volume":1,"fadeInSeconds":1,"fadeOutSeconds":1.5,
+                     "filmHarness":{"role":"ambience","runId":"run_test","startSeconds":0}}]},
+                {"id":"music","kind":"audio","role":"music","gain":0.2,"muted":false,"items":[]}
+            ]}})
+        };
+
+        deliver(&mut saved, delivery("A", 4.0, 4.0, false), |_| Ok(4.0)).unwrap();
+        let ids = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|track| track["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["main", "sound", "dialogue", "ambience", "music"]);
+        let ambience = saved["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|track| track["id"] == "ambience")
+            .unwrap();
+        ambience["gain"] = json!(0.6);
+        ambience["muted"] = json!(true);
+        ambience["items"][0]["volume"] = json!(0.4);
+        ambience["items"][0]["fadeInSeconds"] = json!(0.25);
+
+        deliver(&mut saved, delivery("B", 3.0, 7.0, true), |_| Ok(3.0)).unwrap();
+        let ambience = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["id"] == "ambience")
+            .unwrap();
+        assert_eq!(ambience["gain"], 0.6);
+        assert_eq!(ambience["muted"], true);
+        assert_eq!(ambience["items"][0]["volume"], 0.4);
+        assert_eq!(ambience["items"][0]["fadeInSeconds"], 0.25);
+        assert_eq!(ambience["items"][0]["timelineEnd"], 7.0);
+        assert_eq!(ambience["items"][0]["sourceOut"], 7.0);
+        let ids = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|track| track["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids[2..], ["dialogue", "ambience", "music"]);
+
+        let ambience = saved["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|track| track["id"] == "ambience")
+            .unwrap();
+        ambience["items"][0]["timelineEnd"] = json!(6.0);
+        ambience["items"][0]["sourceOut"] = json!(6.0);
+        deliver(&mut saved, delivery("C", 2.0, 9.0, false), |_| Ok(2.0)).unwrap();
+        let ambience = saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|track| track["id"] == "ambience")
+            .unwrap();
+        assert_eq!(
+            ambience["items"][0]["timelineEnd"], 6.0,
+            "an explicit bed trim is preserved when a later shot arrives"
+        );
+        assert_eq!(ambience["items"][0]["sourceOut"], 6.0);
     }
 }
