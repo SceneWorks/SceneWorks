@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../../api.js";
 import {
   applyFilmPlanning,
@@ -78,12 +78,56 @@ export function FilmWorkspace() {
   const [lastRun, setLastRun] = useState(null);
   const [activeView, setActiveView] = useState("brief");
   const viewTabs = useRef([]);
+  const selectedDraftId = useRef("");
+  const activeTimelineId = useRef("");
+  const discoveredTimeline = useRef("");
   const plannerAvailabilityRequest = useRef(0);
   const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
   const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
   const plannerInstallJob = activeQueuePlannerInstallJob?.id !== requestedPlannerInstallJob?.id
     ? (activeQueuePlannerInstallJob ?? requestedPlannerInstallJob ?? queuePlannerInstallJob)
     : (requestedPlannerInstallJob ?? activeQueuePlannerInstallJob ?? queuePlannerInstallJob);
+  selectedDraftId.current = draft?.id ?? "";
+  activeTimelineId.current = activeTimeline?.id ?? "";
+
+  const acceptRunSnapshot = useCallback((run, { select = false } = {}) => {
+    const draftId = selectedDraftId.current;
+    if (!draftId || run?.locator?.draftId !== draftId) return;
+    setLastRun((current) => {
+      if (select || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
+      return current;
+    });
+  }, []);
+
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const draftId = draft?.id;
+    const runId = lastRun?.locator?.id;
+    const runDraftId = lastRun?.locator?.draftId;
+    const timelineId = lastRun?.record?.timeline?.timelineId;
+    if (!projectId || !draftId || runDraftId !== draftId || !runId || !timelineId) return undefined;
+    const discoveryKey = `${projectId}:${draftId}:${runId}:${timelineId}`;
+    if (discoveredTimeline.current === discoveryKey) return undefined;
+    let canceled = false;
+    let timer = null;
+    const controller = new AbortController();
+    async function discover(attempt = 0) {
+      const result = await refreshTimelines(projectId, { signal: controller.signal });
+      if (canceled || selectedDraftId.current !== draftId) return;
+      if (result?.ok === false) {
+        if (attempt < 2) timer = window.setTimeout(() => discover(attempt + 1), 1000);
+        return;
+      }
+      discoveredTimeline.current = discoveryKey;
+      if (!activeTimelineId.current) setSelectedTimelineId(timelineId);
+    }
+    discover();
+    return () => {
+      canceled = true;
+      controller.abort();
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeProject?.id, draft?.id, lastRun?.locator?.draftId, lastRun?.locator?.id, lastRun?.record?.timeline?.timelineId, refreshTimelines, setSelectedTimelineId]);
 
   useEffect(() => {
     let canceled = false;
@@ -360,17 +404,10 @@ export function FilmWorkspace() {
       let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
       setLastRun(run);
       setNotice(`Rendering ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"} in this project.`);
-      let shownTimelineId = null;
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
         setLastRun(run);
-        const readyTimelineId = run.record?.timeline?.timelineId;
-        if (readyTimelineId && readyTimelineId !== shownTimelineId) {
-          await refreshTimelines(activeProject.id);
-          setSelectedTimelineId(readyTimelineId);
-          shownTimelineId = readyTimelineId;
-        }
         const shotProgress = describeActiveFilmShots(run);
         if (shotProgress) setNotice(shotProgress);
       }
@@ -380,8 +417,6 @@ export function FilmWorkspace() {
       }
       const timelineId = run.record?.timeline?.timelineId;
       if (timelineId) {
-        await refreshTimelines(activeProject.id);
-        setSelectedTimelineId(timelineId);
         setNotice("Shot ready in its film timeline. Export remains a separate editor action.");
       } else {
         const detail = run.record?.diagnostics?.map((item) => item.message).join(" ");
@@ -490,6 +525,7 @@ export function FilmWorkspace() {
           </div>
           <FilmLifecycle
             draftId={draft.id}
+            onRunChange={acceptRunSnapshot}
             projectId={activeProject.id}
             setNotice={setNotice}
             token={token}
@@ -569,6 +605,7 @@ export function FilmWorkspace() {
               onChange={updateDraft}
               projectId={activeProject.id}
               refreshTimelines={refreshTimelines}
+              runControllerActive={Boolean(lastRun?.controllerActive)}
               runLocatorId={lastRun?.locator?.id}
               setNotice={setNotice}
               setSelectedTimelineId={setSelectedTimelineId}

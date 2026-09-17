@@ -121,6 +121,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 function mount() {
@@ -222,6 +223,45 @@ describe("useTimelines dirty tracking (sc-11967)", () => {
     await settle();
 
     expect(get().api.isActiveTimelineDirty()).toBe(false);
+  });
+});
+
+describe("useTimelines film delivery polling", () => {
+  it("adopts a later clip on the same timeline revision stream without losing dirty edits or selection", async () => {
+    vi.useFakeTimers();
+    const get = mount();
+    const first = makeTimeline({
+      revision: 1,
+      filmAssembly: { runId: "run_1" },
+      tracks: [{ id: "track_main", name: "Main", items: [{ id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 }] }],
+    });
+    await loadSelected(get, first);
+    act(() => get().api.setActiveTimeline({ ...get().api.activeTimeline, name: "Unsaved title" }));
+    await settle();
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+
+    const delivered = makeTimeline({
+      revision: 2,
+      filmAssembly: { runId: "run_1" },
+      tracks: [{ id: "track_main", name: "Main", items: [
+        { id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 },
+        { id: "item_2", assetId: "asset_2", type: "video", timelineStart: 4, timelineEnd: 8 },
+      ] }],
+    });
+    apiRouter = ({ method, path }) => {
+      if (method === "GET" && path.endsWith("/timelines/tl_1")) return delivered;
+      if (method === "GET" && path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      return delivered;
+    };
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    await settle();
+    expect(get().api.selectedTimelineId).toBe("tl_1");
+    expect(get().api.activeTimeline.name).toBe("Unsaved title");
+    expect(get().api.activeTimeline.revision).toBe(2);
+    expect(get().api.activeTimeline.tracks[0].items.map((item) => item.assetId)).toEqual(["asset_1", "asset_2"]);
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+    expect(apiCalls.some((call) => call.method === "PUT")).toBe(false);
   });
 });
 

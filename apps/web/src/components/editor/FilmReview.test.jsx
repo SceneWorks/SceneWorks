@@ -63,6 +63,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 async function renderReview({ view = reviewView(), onChange = vi.fn(), select = vi.fn(), refresh = vi.fn() } = {}) {
@@ -190,5 +191,70 @@ describe("FilmReview", () => {
     expect(button("Repair from findings").disabled).toBe(true);
     expect(button("Reject").title).toContain("api-repair:run_1 is active");
     expect(container.textContent).toContain("Actions unavailable");
+  });
+
+  it("refreshes a cached terminal view on Resume and polls the take delivered on the same timeline", async () => {
+    vi.useFakeTimers();
+    const base = reviewView();
+    const waiting = reviewView({
+      run: {
+        ...base.run,
+        controllerActive: false,
+        record: {
+          ...base.run.record,
+          timeline: null,
+          shots: base.run.record.shots.map((shot) => ({ ...shot, selectedAttempt: null, attempts: [] })),
+        },
+      },
+      takeAssets: [],
+      observations: [],
+      reviewTimelineId: null,
+      selections: [{ shotId: "SH010", state: "not_in_saved_cut" }],
+    });
+    const active = {
+      ...waiting,
+      run: { ...waiting.run, controllerActive: true, controllerOwner: "api-resume:run_1" },
+      actionDisabledReason: "api-resume:run_1 is active. Wait for it to stop or cancel it before changing takes.",
+    };
+    const delivered = reviewView({
+      run: {
+        ...base.run,
+        controllerActive: false,
+        record: { ...base.run.record, timeline: { ...base.run.record.timeline, revision: 2 } },
+      },
+    });
+    let response = waiting;
+    let reads = 0;
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs/run_1/review")) {
+        reads += 1;
+        return Promise.resolve(response);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    root = createRoot(container);
+    const render = async (runControllerActive) => {
+      await act(async () => {
+        root.render(<FilmReview active draft={draft()} onChange={vi.fn()} projectId="project_1" refreshTimelines={vi.fn()} runControllerActive={runControllerActive} runLocatorId="run_1" setNotice={vi.fn()} setSelectedTimelineId={vi.fn()} token="token" />);
+        await Promise.resolve(); await Promise.resolve();
+      });
+    };
+
+    await render(false);
+    expect(button("Analyze selected takes").disabled).toBe(false);
+    expect(button("Open saved cut").disabled).toBe(true);
+
+    response = active;
+    await render(true);
+    expect(button("Analyze selected takes").disabled).toBe(true);
+    expect(container.textContent).toContain("Actions unavailable: api-resume:run_1 is active");
+
+    response = delivered;
+    await render(false);
+    expect(button("Open saved cut").disabled).toBe(false);
+    expect(container.querySelectorAll("video")).toHaveLength(2);
+    const settledReads = reads;
+    await act(async () => { await vi.advanceTimersByTimeAsync(2400); });
+    expect(reads).toBe(settledReads);
   });
 });

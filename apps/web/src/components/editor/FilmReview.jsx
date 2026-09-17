@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../../api.js";
 import { assetCanRenderAsVideo, assetDisplayUrl, posterUrl } from "../assetMedia.jsx";
 import {
@@ -56,20 +56,23 @@ function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ active = true, draft, onChange, projectId, refreshTimelines, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
   const [view, setView] = useState(null);
   const [pending, setPending] = useState(false);
   const [reasons, setReasons] = useState({});
+  const refreshRequest = useRef(0);
   const plan = useMemo(() => normalizedPlan(draft), [draft]);
 
   const refresh = useCallback(async () => {
     if (!projectId || !draft.id) return;
+    const requestId = ++refreshRequest.current;
     try {
       let locatorId = runLocatorId;
       if (!locatorId) {
         const runs = await apiFetch(`/api/v1/projects/${projectId}/film-runs`, token);
         const latest = runs.find((item) => item.locator.draftId === draft.id && item.record);
+        if (refreshRequest.current !== requestId) return;
         if (!latest) {
           setRunId("");
           setView(null);
@@ -77,21 +80,34 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
         }
         locatorId = latest.locator.id;
       }
+      const next = await getFilmReview(projectId, locatorId, token);
+      if (refreshRequest.current !== requestId) return;
       setRunId(locatorId);
-      setView(await getFilmReview(projectId, locatorId, token));
+      setView(next);
     } catch (error) {
-      setNotice(error.message);
+      if (refreshRequest.current === requestId) setNotice(error.message);
     }
   }, [draft.id, projectId, runLocatorId, setNotice, token]);
 
   // The three workspace panels stay mounted to preserve unsaved edits. Refresh when Review becomes
-  // visible so a run created while this hidden panel held an empty view becomes reviewable.
-  useEffect(() => { if (active) refresh(); }, [active, refresh]);
+  // visible or its durable controller transitions, so Resume cannot leave a terminal cached view.
+  useEffect(() => { if (active) refresh(); }, [active, refresh, runControllerActive]);
+  const pollingActive = Boolean(runControllerActive || view?.run?.controllerActive);
   useEffect(() => {
-    if (!active || !view?.run?.controllerActive) return undefined;
-    const timer = window.setTimeout(refresh, 800);
-    return () => window.clearTimeout(timer);
-  }, [active, refresh, view]);
+    if (!active || !pollingActive) return undefined;
+    let canceled = false;
+    let timer = null;
+    async function poll() {
+      await refresh();
+      if (!canceled) timer = window.setTimeout(poll, 800);
+    }
+    timer = window.setTimeout(poll, 800);
+    return () => {
+      canceled = true;
+      refreshRequest.current += 1;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [active, pollingActive, refresh]);
 
   function changePlan(mutator) {
     onChange((next) => {

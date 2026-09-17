@@ -190,6 +190,48 @@ describe("FilmWorkspace", () => {
     expect(advanced.open).toBe(true);
   });
 
+  it("discovers a resumed run timeline once without stealing another timeline or saving user edits", async () => {
+    vi.useFakeTimers();
+    const film = draft({ originalScript: "A courier enters." });
+    let runReads = 0;
+    const run = (revision) => ({
+      locator: { id: "filmrun_resumed", draftId: "film_1" },
+      controllerActive: true,
+      controllerOwner: "api-resume:filmrun_resumed",
+      record: { state: "running", timeline: { timelineId: "timeline_film", revision }, shots: [] },
+    });
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([run(++runReads)]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const refreshTimelines = vi.fn(async () => ({ ok: true, value: [{ id: "timeline_film" }] }));
+    const setSelectedTimelineId = vi.fn();
+    const saveTimeline = vi.fn();
+
+    await renderWorkspace({
+      activeTimeline: { id: "timeline_user", name: "Unsaved user cut", revision: 4 },
+      refreshTimelines,
+      saveTimeline,
+      setSelectedTimelineId,
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(refreshTimelines).toHaveBeenCalledTimes(1);
+    expect(refreshTimelines).toHaveBeenCalledWith("project_1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(setSelectedTimelineId).not.toHaveBeenCalled();
+    expect(saveTimeline).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(runReads).toBeGreaterThanOrEqual(2);
+    expect(refreshTimelines).toHaveBeenCalledTimes(1);
+    expect(setSelectedTimelineId).not.toHaveBeenCalled();
+    expect(saveTimeline).not.toHaveBeenCalled();
+  });
+
   it("creates, edits, saves, and reopens a project film draft without JSON authoring", async () => {
     const created = draft();
     const saved = draft({ revision: 2, title: "Workshop delivery" });
