@@ -648,6 +648,103 @@ def bounded_completion(value, tokens, now, deadline, max_bytes):
     return {}
 
 
+class IncrementalGpt2Decode:
+    """Decode append-only GPT-2 token prefixes without rebuilding old tokens."""
+
+    def __init__(self, tokenizer, prefix_token_ids=()):
+        byte_decoder = getattr(tokenizer, 'byte_decoder', None)
+        if not isinstance(byte_decoder, dict) or not byte_decoder:
+            fail('upstream tokenizer is not an auditable GPT-2 byte decoder')
+        self.tokenizer = tokenizer
+        self.byte_decoder = byte_decoder
+        self.errors = getattr(tokenizer, 'errors', 'replace')
+        self.processed = 0
+        self.sub_texts = []
+        self.current_bytes = bytearray()
+        added = set(getattr(tokenizer, '_added_tokens_encoder', {}).keys())
+        special = set(getattr(tokenizer, 'all_special_tokens', []))
+        self.legacy_added_tokens = added - special
+        for token in getattr(tokenizer, 'additional_special_tokens', []):
+            if tokenizer.convert_tokens_to_ids(token) >= tokenizer.vocab_size:
+                self.legacy_added_tokens.add(token)
+        self.prefix_token_ids = list(prefix_token_ids)
+        if self.prefix_token_ids:
+            self._append(self.prefix_token_ids)
+
+    def _current_text(self):
+        current = self.current_bytes.decode('utf-8', errors=self.errors)
+        values = [*self.sub_texts]
+        if current:
+            values.append(current)
+        return ' '.join(values)
+
+    def _append(self, pending):
+        tokens = self.tokenizer.convert_ids_to_tokens(pending, skip_special_tokens=True)
+        if isinstance(tokens, str):
+            tokens = [tokens]
+        for token in tokens:
+            if token in self.legacy_added_tokens:
+                current = self.current_bytes.decode('utf-8', errors=self.errors)
+                if current:
+                    self.sub_texts.append(current)
+                self.current_bytes.clear()
+                self.sub_texts.append(token)
+                continue
+            try:
+                self.current_bytes.extend(self.byte_decoder[char] for char in token)
+            except KeyError:
+                fail('upstream GPT-2 token is outside the pinned byte decoder')
+
+    def decode_prefix(self, token_ids):
+        length = len(token_ids)
+        if length < self.processed:
+            fail('upstream generation token prefix moved backwards')
+        pending = token_ids[self.processed:length]
+        pending = pending.tolist() if hasattr(pending, 'tolist') else list(pending)
+        self._append(pending)
+        self.processed = length
+        return self._current_text()
+
+    def finish(self, token_ids):
+        value = self.decode_prefix(token_ids)
+        ids = token_ids.tolist() if hasattr(token_ids, 'tolist') else list(token_ids)
+        expected = self.tokenizer.decode([*self.prefix_token_ids, *ids], skip_special_tokens=True,
+                                         clean_up_tokenization_spaces=False)
+        if value != expected:
+            fail('incremental upstream decode differs from the pinned tokenizer')
+        return value
+
+
+class BoundedGpt2Completion:
+    """Apply the existing token/byte/wall/root contract to an exact token stream."""
+
+    def __init__(self, tokenizer, prompt_token_ids, deadline, max_bytes, observation, clock=time.monotonic):
+        if not isinstance(prompt_token_ids, (list, tuple)) or not prompt_token_ids:
+            fail('upstream generation prompt token IDs are missing')
+        self.tokenizer = tokenizer
+        self.decoder = IncrementalGpt2Decode(tokenizer, prompt_token_ids)
+        self.deadline = deadline
+        self.max_bytes = max_bytes
+        self.observation = observation
+        self.clock = clock
+
+    def __call__(self, input_ids, scores=None, **kwargs):
+        tokens = int(input_ids.shape[-1]) if hasattr(input_ids, 'shape') else len(input_ids[0])
+        row = input_ids[0]
+        now = self.clock()
+        value = self.decoder.decode_prefix(row)
+        bounded = bounded_completion(value, tokens, now, self.deadline, self.max_bytes)
+        self.observation.update(bounded)
+        return bool(bounded.get('complete_root') or bounded.get('byte_exceeded')
+                    or bounded.get('deadline_exceeded'))
+
+    def finish(self, token_ids):
+        value = self.decoder.finish(token_ids)
+        self.observation['stream_decode_verified'] = True
+        return (self.tokenizer.clean_up_tokenization(value)
+                if self.tokenizer.clean_up_tokenization_spaces else value)
+
+
 def classify_generation(raw, observation, budget, max_bytes):
     end = complete_svg_prefix(raw)
     completed = observation.get('complete_root') is True
@@ -698,27 +795,26 @@ def generate(model, row, device):
     deadline = time.monotonic() + row['detail_budget']['maxWallTimeMs'] / 1000
     from transformers import StoppingCriteria, StoppingCriteriaList
     tokenizer = getattr(model.model.processor, 'tokenizer', None)
+    completion = None
     class BoundedCompletion(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):
             now = time.monotonic()
-            if tokenizer is not None:
-                decoded = tokenizer.decode(input_ids[0], skip_special_tokens=True,
-                                           clean_up_tokenization_spaces=False)
-                bounded = bounded_completion(decoded, int(input_ids.shape[-1]), now, deadline,
-                                              row['detail_budget']['maxSvgBytes'])
-                observation.update(bounded)
-                if bounded.get('complete_root'):
-                    return True
-                if bounded.get('byte_exceeded') or bounded.get('deadline_exceeded'):
-                    return True
-            if tokenizer is None and now > deadline:
+            if completion is not None:
+                return completion(input_ids, scores, **kwargs)
+            if now > deadline:
                 observation['deadline_exceeded'] = True
                 return True
             return False
     def bounded_generate(**kwargs):
+        nonlocal completion
         if kwargs.get('do_sample') is not False or kwargs.get('num_beams') != 1:
             fail('upstream wrapper did not select greedy decoding')
         observation['prefix_length'] = int(kwargs['inputs_embeds'].shape[1])
+        prompt = model.model.svg_transformer.prompt
+        if tokenizer is not None:
+            prompt_ids = tokenizer(prompt, add_special_tokens=False)['input_ids']
+            completion = BoundedGpt2Completion(tokenizer, prompt_ids, deadline,
+                                               row['detail_budget']['maxSvgBytes'], observation)
         kwargs.pop('max_length', None)
         kwargs['max_new_tokens'] = budget
         kwargs['stopping_criteria'] = StoppingCriteriaList([*kwargs.get('stopping_criteria', []), BoundedCompletion()])
@@ -726,12 +822,17 @@ def generate(model, row, device):
         observation['generated_tokens'] = int(output.shape[1])
         if observation['generated_tokens'] > budget:
             fail('upstream exceeded the native new-token budget')
+        if completion is not None:
+            observation['stream_value'] = completion.finish(output[0])
         return output
     with torch.inference_mode(), patch.object(lm, 'generate', bounded_generate):
         result = model.generate_im2svg({'image': pixels}, use_nucleus_sampling=False, num_beams=1,
                                       max_length=budget, repetition_penalty=row['sampling'].get('repetitionPenalty', 1.0))
     if not isinstance(result, list) or len(result) != 1 or not isinstance(result[0], str):
         fail('upstream generation returned an invalid batch')
+    streamed = observation.pop('stream_value', None)
+    if streamed is not None and streamed != result[0]:
+        fail('incremental upstream decode differs from final model output')
     raw, finish_reason = classify_generation(result[0], observation, budget, row['detail_budget']['maxSvgBytes'])
     generated_bytes = len(raw.encode())
     observation['generated_bytes'] = generated_bytes
