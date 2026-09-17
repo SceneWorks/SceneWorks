@@ -9,11 +9,11 @@ describe("film render options API", () => {
   beforeEach(() => apiFetchMock.mockReset());
 
   it("starts planning with the author's repair-round limit", () => {
-    startFilmPlanning("project_1", "film_1", 4, "token");
+    startFilmPlanning("project_1", "film_1", 4, 75, "token");
 
     expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/projects/project_1/films/film_1/planning", "token", {
       method: "POST",
-      body: JSON.stringify({ maxRepairRounds: 4 }),
+      body: JSON.stringify({ maxRepairRounds: 4, llmTimeoutSeconds: 75 }),
     });
   });
 

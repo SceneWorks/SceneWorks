@@ -231,6 +231,65 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
 }
 
 #[tokio::test]
+async fn local_planning_persists_a_positive_timeout_and_rejects_zero_before_dispatch() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Bounded local planner"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Bounded local planner"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    draft["originalScript"] = json!("A courier enters a quiet workshop.");
+    draft["renderRegime"] = json!("custom");
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/planning");
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({"maxRepairRounds": 0, "llmTimeoutSeconds": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .unwrap()
+        .contains("at least 1 second"));
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs, json!([]), "invalid timeout must dispatch nothing");
+
+    let (status, operation) = request(
+        app,
+        "POST",
+        &route,
+        json!({"maxRepairRounds": 0, "llmTimeoutSeconds": 37}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{operation}");
+    assert_eq!(operation["llmTimeoutSeconds"], 37);
+    assert_eq!(operation["maxRepairRounds"], 0);
+}
+
+#[tokio::test]
 async fn invalid_manual_shot_is_reported_before_any_run_or_video_job_exists() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
@@ -657,7 +716,7 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/films/{draft_id}/planning"),
-        json!({"maxRepairRounds": 2}),
+        json!({"maxRepairRounds": 2, "llmTimeoutSeconds": 37}),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{operation}");
@@ -669,6 +728,7 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
         .contains("not installed"));
     assert_eq!(operation["plannerModel"], "Qwen/Qwen3.6-27B");
     assert_eq!(operation["videoModelId"], "minimax_h3");
+    assert_eq!(operation["llmTimeoutSeconds"], 37);
 
     let (_, reopened) = request(
         app.clone(),
@@ -849,7 +909,7 @@ async fn saved_external_connection_keeps_credentials_out_of_projects_and_fails_c
         app,
         "POST",
         &format!("/api/v1/projects/{project_id}/films/{draft_id}/planning"),
-        json!({"maxRepairRounds": 1}),
+        json!({"maxRepairRounds": 1, "llmTimeoutSeconds": 0}),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{operation}");

@@ -27,6 +27,10 @@ pub(crate) struct ParseFilmScriptRequest {
 pub(crate) struct StartFilmPlanningRequest {
     #[serde(default)]
     max_repair_rounds: Option<u32>,
+    /// Local prompt-refiner/native planner deadline, matching film-harness
+    /// `--llm-timeout-seconds`. External connections keep their own timeout setting.
+    #[serde(default)]
+    llm_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +59,8 @@ pub(crate) struct FilmPlanningOperation {
     thinking_mode: String,
     #[serde(default = "default_max_repair_rounds")]
     max_repair_rounds: u32,
+    #[serde(default = "default_llm_timeout_seconds")]
+    llm_timeout_seconds: u64,
     #[serde(default)]
     refine_prompts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +79,30 @@ pub(crate) struct FilmPlanningOperation {
     detail: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+fn default_llm_timeout_seconds() -> u64 {
+    DEFAULT_LLM_JOB_TIMEOUT.as_secs()
+}
+
+fn local_planner_timeout(seconds: Option<u64>) -> Result<(u64, Duration), ApiError> {
+    let seconds = seconds.unwrap_or_else(default_llm_timeout_seconds);
+    if seconds == 0 {
+        return Err(ApiError::bad_request(
+            "Local planner job timeout must be at least 1 second",
+        ));
+    }
+    let timeout = Duration::from_secs(seconds);
+    if std::time::Instant::now().checked_add(timeout).is_none() {
+        return Err(ApiError::bad_request(
+            "Local planner job timeout is too large for this host",
+        ));
+    }
+    Ok((seconds, timeout))
+}
+
+fn operation_llm_timeout(operation: &FilmPlanningOperation) -> Duration {
+    Duration::from_secs(operation.llm_timeout_seconds)
 }
 
 #[derive(Debug, Serialize)]
@@ -195,6 +225,11 @@ pub(crate) async fn start_film_planning(
             "Paste prose or screenplay text before planning",
         ));
     }
+    let (llm_timeout_seconds, llm_timeout) = if draft.planning.provider == "openai_compatible" {
+        (default_llm_timeout_seconds(), DEFAULT_LLM_JOB_TIMEOUT)
+    } else {
+        local_planner_timeout(payload.llm_timeout_seconds)?
+    };
     let render_options = crate::films::apply_selected_render_regime(&state, &mut draft).await?;
     if draft.render_regime == Some(FilmRenderRegime::RecommendedTurbo)
         && !render_options.recommended_turbo.available
@@ -275,6 +310,7 @@ pub(crate) async fn start_film_planning(
         video_model_id: draft.production_plan.model.id.clone(),
         thinking_mode: draft.planning.thinking_mode.clone(),
         max_repair_rounds: payload.max_repair_rounds.unwrap_or(2),
+        llm_timeout_seconds,
         refine_prompts: draft.planning.refine_prompts,
         active_job_id: None,
         job_ids: Vec::new(),
@@ -407,7 +443,7 @@ pub(crate) async fn start_film_planning(
         api_url: base_url.clone(),
         force: false,
         poll_interval: Duration::from_millis(350),
-        job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
+        job_timeout: llm_timeout,
     };
     let model_override = (draft.planning.provider == "native").then(|| planner_model.clone());
     let thinking_mode = draft.planning.thinking_mode.clone();
@@ -737,7 +773,7 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         api_url: state.settings.mcp_api_url.clone(),
                         force: false,
                         poll_interval: Duration::from_millis(350),
-                        job_timeout: DEFAULT_LLM_JOB_TIMEOUT,
+                        job_timeout: operation_llm_timeout(&operation),
                     };
                     let callback_path = latest_path.clone();
                     let callback_operation_id = operation.id.clone();
@@ -971,6 +1007,54 @@ mod tests {
     use sceneworks_core::film_workspace::{FilmDraft, FilmRenderRegime};
 
     #[test]
+    fn native_operation_roundtrip_keeps_timeout_for_startup_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        let operation = FilmPlanningOperation {
+            schema_version: OPERATION_SCHEMA_VERSION,
+            id: "planning_native_timeout".to_owned(),
+            project_id: "project_1".to_owned(),
+            draft_id: draft.id.clone(),
+            draft_revision: draft.revision,
+            status: "running".to_owned(),
+            stage: "generating".to_owned(),
+            progress: Some(0.25),
+            provider: "native".to_owned(),
+            planner_model_id: Some(QWEN36_FILM_PLANNER_MODEL_ID.to_owned()),
+            planner_model: QWEN36_FILM_PLANNER_REPO.to_owned(),
+            video_model_id: draft.production_plan.model.id.clone(),
+            thinking_mode: "enabled".to_owned(),
+            max_repair_rounds: 1,
+            llm_timeout_seconds: 37,
+            refine_prompts: false,
+            active_job_id: Some("job_native_timeout".to_owned()),
+            job_ids: vec!["job_native_timeout".to_owned()],
+            findings: Vec::new(),
+            executions: Vec::new(),
+            candidate_plan: None,
+            compiled: None,
+            detail: Some("Native planner is running".to_owned()),
+            created_at: "2026-09-17T00:00:00Z".to_owned(),
+            updated_at: "2026-09-17T00:00:00Z".to_owned(),
+        };
+        write_latest_operation(temp.path(), &operation).expect("write operation");
+
+        let recovered = read_operation(&temp.path().join("latest.json")).expect("read operation");
+        assert_eq!(recovered.llm_timeout_seconds, 37);
+        assert_eq!(operation_llm_timeout(&recovered), Duration::from_secs(37));
+
+        let mut legacy = serde_json::to_value(operation).expect("serialize operation");
+        legacy.as_object_mut().unwrap().remove("llmTimeoutSeconds");
+        let legacy: FilmPlanningOperation =
+            serde_json::from_value(legacy).expect("legacy operation remains readable");
+        assert_eq!(
+            operation_llm_timeout(&legacy),
+            DEFAULT_LLM_JOB_TIMEOUT,
+            "pre-timeout operations recover with the prior 1200-second behavior"
+        );
+    }
+
+    #[test]
     fn external_orphan_is_preserved_and_interrupted_without_constructing_a_transport() {
         let temp = tempfile::tempdir().expect("tempdir");
         let draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
@@ -990,6 +1074,7 @@ mod tests {
             video_model_id: draft.production_plan.model.id.clone(),
             thinking_mode: "disabled".to_owned(),
             max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
             refine_prompts: false,
             active_job_id: Some("remote_request_1".to_owned()),
             job_ids: vec!["remote_request_1".to_owned()],
@@ -1049,6 +1134,7 @@ mod tests {
             video_model_id: draft.production_plan.model.id.clone(),
             thinking_mode: "disabled".to_owned(),
             max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
             refine_prompts: false,
             active_job_id: None,
             job_ids: Vec::new(),
@@ -1188,6 +1274,7 @@ mod tests {
             video_model_id: "minimax_h3".to_owned(),
             thinking_mode: "enabled".to_owned(),
             max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
             refine_prompts: false,
             active_job_id: None,
             job_ids: Vec::new(),
@@ -1343,6 +1430,7 @@ mod tests {
             video_model_id: "minimax_h3".to_owned(),
             thinking_mode: "disabled".to_owned(),
             max_repair_rounds: 2,
+            llm_timeout_seconds: 1200,
             refine_prompts: false,
             active_job_id: None,
             job_ids: Vec::new(),

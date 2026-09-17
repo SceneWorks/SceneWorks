@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 describe("FilmPlanning", () => {
-  it("starts with the authored bounded planner repair limit", async () => {
+  it("starts local planning with authored repair and timeout limits", async () => {
     const onStart = vi.fn();
     const draft = {
       originalScript: "A courier enters.",
@@ -67,12 +67,63 @@ describe("FilmPlanning", () => {
     />));
 
     const rounds = container.querySelector('input[aria-label="Maximum planner repair rounds"]');
+    const timeout = container.querySelector('input[aria-label="Local planner job timeout seconds"]');
     act(() => changeValue(rounds, "4"));
+    act(() => changeValue(timeout, "75"));
     act(() => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").click());
-    expect(onStart).toHaveBeenCalledWith(4);
+    expect(onStart).toHaveBeenCalledWith(4, 75);
 
     act(() => changeValue(rounds, "6"));
     expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").disabled).toBe(true);
+
+    act(() => changeValue(rounds, "2"));
+    act(() => changeValue(timeout, "0"));
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").disabled).toBe(true);
+  });
+
+  it("keeps external connection timeout separate and shows a durable local effective timeout", async () => {
+    const draft = {
+      originalScript: "A courier enters.",
+      planning: { provider: "native", thinkingMode: "enabled", refinePrompts: false },
+      productionPlan: { model: { id: "minimax_h3" } },
+    };
+    root = createRoot(container);
+    await act(async () => root.render(<FilmPlanning
+      availability={{ providers: [{ modelId: "film_planner_qwen3_6_27b", available: true }] }}
+      disabled={false}
+      draft={draft}
+      models={[]}
+      onApply={vi.fn()}
+      onCancel={vi.fn()}
+      onChange={vi.fn()}
+      onInstall={vi.fn()}
+      onNotice={vi.fn()}
+      onStart={vi.fn()}
+      operation={{ status: "failed", provider: "native", plannerModel: "Qwen/Qwen3.6-27B", videoModelId: "minimax_h3", maxRepairRounds: 1, llmTimeoutSeconds: 75, detail: "Timed out; the draft was preserved.", findings: [] }}
+      token=""
+    />));
+
+    expect(container.textContent).toContain("Local planner job timeout: 75 seconds per call");
+    act(() => changeValue(container.querySelector('input[aria-label="Local planner job timeout seconds"]'), "0"));
+
+    const externalStart = vi.fn();
+    await act(async () => root.render(<FilmPlanning
+      availability={{ providers: [] }}
+      disabled={false}
+      draft={{ ...draft, planning: { provider: "openai_compatible", connectionId: "remote", modelId: "model" } }}
+      models={[]}
+      onApply={vi.fn()}
+      onCancel={vi.fn()}
+      onChange={vi.fn()}
+      onInstall={vi.fn()}
+      onNotice={vi.fn()}
+      onStart={externalStart}
+      operation={null}
+      token=""
+    />));
+    expect(container.querySelector('input[aria-label="Local planner job timeout seconds"]')).toBeNull();
+    act(() => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").click());
+    expect(externalStart).toHaveBeenCalledWith(2, undefined);
   });
 
   it("renders long failed-plan findings as a labeled list with shot and field context", async () => {

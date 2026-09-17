@@ -19,10 +19,10 @@ export function getFilmPlanning(projectId, draftId, token) {
   return apiFetch(`${base(projectId, draftId)}/planning`, token);
 }
 
-export function startFilmPlanning(projectId, draftId, maxRepairRounds, token) {
+export function startFilmPlanning(projectId, draftId, maxRepairRounds, llmTimeoutSeconds, token) {
   return apiFetch(`${base(projectId, draftId)}/planning`, token, {
     method: "POST",
-    body: JSON.stringify({ maxRepairRounds }),
+    body: JSON.stringify({ maxRepairRounds, llmTimeoutSeconds }),
   });
 }
 

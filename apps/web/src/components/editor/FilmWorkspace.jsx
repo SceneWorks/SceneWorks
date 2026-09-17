@@ -343,12 +343,12 @@ export function FilmWorkspace() {
     }
   }
 
-  async function generatePlan(maxRepairRounds) {
+  async function generatePlan(maxRepairRounds, llmTimeoutSeconds) {
     setBusy(true);
     setNotice("");
     try {
       const saved = await saveDraft();
-      const operation = await startFilmPlanning(activeProject.id, saved.id, maxRepairRounds, token);
+      const operation = await startFilmPlanning(activeProject.id, saved.id, maxRepairRounds, llmTimeoutSeconds, token);
       setPlanningOperation(operation);
       setNotice(operation.status === "failed" ? operation.detail : "Planning started. Rendering will not start automatically.");
     } catch (error) {

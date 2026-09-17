@@ -1388,6 +1388,39 @@ mod tests {
         interrupted: bool,
     }
 
+    struct PendingTransport {
+        calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ApiTransport for PendingTransport {
+        fn call(
+            &self,
+            request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .push((request.method.to_owned(), request.path.clone()));
+                let body = match (request.method, request.path.as_str()) {
+                    ("POST", "/api/v1/prompts/refine") => json!({"id": "job_pending"}),
+                    ("GET", "/api/v1/jobs/job_pending") => {
+                        json!({"id": "job_pending", "status": "running"})
+                    }
+                    ("POST", "/api/v1/jobs/job_pending/cancel") => {
+                        json!({"id": "job_pending", "status": "cancel_requested"})
+                    }
+                    other => panic!("unexpected pending planner request: {other:?}"),
+                };
+                Ok(crate::film_harness::ApiResponse { status: 200, body })
+            })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("planner timeout must not fetch files") })
+        }
+    }
+
     impl ApiTransport for AdoptTransport {
         fn call(
             &self,
@@ -1445,6 +1478,51 @@ mod tests {
             .await
             .expect_err("the cancellation is reported");
         assert!(format!("{error}").contains("canceled before"));
+    }
+
+    #[tokio::test]
+    async fn local_job_timeout_cancels_once_without_provider_fallback() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = PendingTransport {
+            calls: calls.clone(),
+        };
+        let llm = SceneWorksLlm::new(
+            &transport,
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+        )
+        .with_planner_model(Some("Qwen/Qwen3.6-27B".to_owned()), "enabled");
+        let error = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect_err("the running local job must time out");
+        assert!(error.to_string().contains("was canceled"), "{error}");
+        let calls = calls.lock();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| { method == "POST" && path == "/api/v1/prompts/refine" })
+                .count(),
+            1,
+            "the selected native provider is dispatched exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| {
+                    method == "POST" && path == "/api/v1/jobs/job_pending/cancel"
+                })
+                .count(),
+            1,
+            "the timed-out job is canceled exactly once"
+        );
     }
 
     #[tokio::test]

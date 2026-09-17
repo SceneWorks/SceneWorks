@@ -93,13 +93,16 @@ Reference metadata and image pixels are separate for external planning. See the 
 This is the default for every new draft. It uses local Anubis weights through the existing
 `prompt_refine` worker path. Qwen is not required. If the required local weights or worker are
 missing, planning stops with an actionable error; SceneWorks does not switch providers.
+Advanced planning settings expose the same per-call local planner job timeout as the film harness
+`--llm-timeout-seconds` option (1200 seconds by default), along with the bounded repair count.
 
 ### Native Qwen3.6-27B
 
 Select **Native Qwen3.6-27B (optional)** only when you intend to use and, if necessary, install the
 large local model. Thinking is a separate planner setting and is recorded separately from the
 candidate text. Selecting native Qwen does not change the target video model and does not create a
-remote request.
+remote request. The local planner job timeout also applies to Qwen and is retained by a recovered
+planning operation.
 
 ### Saved OpenAI-compatible connection
 

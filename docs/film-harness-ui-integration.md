@@ -106,8 +106,10 @@ not silently post a second planner request: startup reconciles the recorded oper
 - `compile_existing` (`apps/rust-api/src/film_planner.rs:783`) rebuilds `compiled.json` from an
   edited plan. One `prompt_refine` call per shot unless `--no-refine`, so tens of seconds to minutes.
 - `generate` (`apps/rust-api/src/film_planner.rs:667`) is the long one of the three: one full decode
-  plus one per repair round plus one rewrite per shot, bounded by `DEFAULT_LLM_JOB_TIMEOUT` of 1200 s
-  per job (`:57`). Minutes on the dev Mac.
+  plus one per repair round plus one rewrite per shot. Local planner jobs default to the
+  `DEFAULT_LLM_JOB_TIMEOUT` bound of 1200 s per job (`:57`); the Film workspace exposes that same
+  positive-seconds setting and persists its effective value with the durable operation. Minutes on
+  the dev Mac.
 
 The workspace starts new drafts with the built-in `prompt_refine_anubis_8b` planner. Qwen3.6-27B is
 an optional local planner that must be explicitly installed and selected; it is never downloaded or
