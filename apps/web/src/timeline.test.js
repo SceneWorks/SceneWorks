@@ -19,7 +19,6 @@ describe("audioPreviewState", () => {
       afterPlacement: false,
       beforePlacement: false,
       currentTime: 0.75,
-      hasPositiveGain: true,
       muted: false,
       playbackRate: 1,
       volume: 0.2,
@@ -32,12 +31,5 @@ describe("audioPreviewState", () => {
     expect(audioPreviewState(item, track, 3, { ambience: true }).muted).toBe(false);
     expect(audioPreviewState(item, track, 1.5).muted).toBe(true);
     expect(audioPreviewState(item, track, 6).muted).toBe(true);
-  });
-
-  it("distinguishes an intentional zero gain from a zero-volume fade boundary", () => {
-    expect(audioPreviewState({ ...item, volume: 0 }, track, 3).hasPositiveGain).toBe(false);
-    expect(audioPreviewState(item, { ...track, gain: 0 }, 3).hasPositiveGain).toBe(false);
-    expect(audioPreviewState(item, track, item.timelineStart).hasPositiveGain).toBe(true);
-    expect(audioPreviewState(item, track, item.timelineStart).volume).toBe(0);
   });
 });

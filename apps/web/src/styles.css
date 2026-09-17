@@ -10823,11 +10823,16 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
 }
 .ve-film {
+  flex: 0 1 auto;
+  max-height: min(42vh, 360px);
+  min-height: 0;
+  overflow-y: auto;
   width: 100%;
   box-sizing: border-box;
   border-bottom: 1px solid var(--border);
@@ -11329,8 +11334,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-upper {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr) 350px;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 0 240px;
+  min-height: 240px;
 }
 
 /* Media bin */

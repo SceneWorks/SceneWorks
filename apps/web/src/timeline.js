@@ -45,7 +45,6 @@ export function audioPreviewState(item, track, playheadSeconds, trackSoloed = {}
     afterPlacement,
     beforePlacement,
     currentTime: sourceTimestampAtPlayhead(item, playhead),
-    hasPositiveGain: clipGain * trackGain > 0,
     muted: Boolean(track?.muted) || (anySoloed && !trackSoloed[track?.id]) || beforePlacement || afterPlacement,
     playbackRate: Math.max(0.01, Number(item.speed) || 1),
     volume: Math.min(1, clipGain * trackGain * fadeInGain * fadeOutGain),
