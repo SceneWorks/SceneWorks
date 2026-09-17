@@ -53,12 +53,40 @@ Every one already exists and is used by other clients:
 | jobs | `POST /api/v1/video/jobs`, `POST /api/v1/audio/jobs`, `POST /api/v1/image/jobs`, `POST /api/v1/image/vqa/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/metrics`, job cancel |
 | capability | `GET /api/v1/host-capabilities`, `GET /api/v1/models`, `GET /api/v1/loras`, `GET /api/v1/workers` |
 | LLM | `POST /api/v1/prompts/refine` |
-| film drafts | `/api/v1/projects/:project_id/films/...`: draft, reference pack, sound, brief parse, planner availability, planning, preflight, run creation |
+| film drafts | `/api/v1/projects/:project_id/films/...`: draft, render options, reference pack, sound, brief parse, planner availability, planning, preflight, run creation |
 | film runs | `/api/v1/projects/:project_id/film-runs/...`: read/list/progress, start/resume/cancel, review decisions and bounded take mutations, explicit export |
 | external planners | `/api/v1/film-planner-connections/...`: non-secret connection settings, connection test, optional model listing |
 
 Route strings are in `apps/rust-api/src/film_harness.rs`,
 `apps/rust-api/src/film_harness/{references,review}.rs` and `apps/rust-api/src/film_planner.rs`.
+
+### Render regime contract
+
+`FilmDraft.renderRegime` persists `recommended_turbo`, `quality`, or `custom`. A missing field is a
+legacy draft and preserves its current `productionPlan.model.loras` and
+`productionPlan.model.advanced.steps` without migration-time rewrites.
+
+`GET /api/v1/projects/:project_id/films/:draft_id/render-options` resolves the saved document.
+Editors preview unsaved model, resolution, conditioning, or reference changes with `POST` to the
+same route:
+
+```json
+{
+  "draftRevision": 3,
+  "productionPlan": { "...": "the edited production plan" },
+  "referencePack": { "...": "the edited reference pack" },
+  "renderRegime": "recommended_turbo"
+}
+```
+
+The response carries `selectedRegime`, `recommendedTurbo`, `quality`, and `effective`.
+`recommendedTurbo` includes `available`, concrete `adapterIds`, `effectiveSteps`, and, when it is
+unavailable, one stable reason: `model_unavailable`, `no_installed_compatible_adapter`,
+`incomplete_partition_coverage`, or `incompatible_resolution`. POST is read-only and rejects a
+stale `draftRevision`; older clients may omit `renderRegime`, which previews the legacy Custom
+semantics rather than opting the draft into Turbo. PUT of the draft remains the persistence
+boundary. Saving `recommended_turbo` materializes the live compatible recipe, saving `quality`
+clears adapters and step overrides, and saving `custom` leaves both fields exactly as authored.
 
 ## The three operation shapes
 

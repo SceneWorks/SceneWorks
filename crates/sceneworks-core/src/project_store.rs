@@ -875,9 +875,29 @@ impl ProjectStore {
         draft_id: &str,
         title: &str,
     ) -> ProjectStoreResult<FilmDraft> {
+        self.create_film_draft_document(
+            project_id,
+            FilmDraft::manual_one_shot(project_id, draft_id, title),
+        )
+    }
+
+    /// Persist a freshly constructed draft without a revision bump. The API uses this after it has
+    /// resolved host-dependent render defaults; ordinary edits still go through
+    /// [`Self::save_film_draft`] and optimistic revision checks.
+    pub fn create_film_draft_document(
+        &self,
+        project_id: &str,
+        draft: FilmDraft,
+    ) -> ProjectStoreResult<FilmDraft> {
+        let draft_id = draft.id.as_str();
         if !is_safe_id(draft_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid film draft ID".to_owned(),
+            ));
+        }
+        if draft.project_id != project_id || draft.revision != 1 {
+            return Err(ProjectStoreError::BadRequest(
+                "New film draft identity or revision does not match its project".to_owned(),
             ));
         }
         let (project_path, _guard) = self.lock_project(project_id)?;
@@ -889,7 +909,6 @@ impl ProjectStore {
                 "Film draft already exists".to_owned(),
             ));
         }
-        let draft = FilmDraft::manual_one_shot(project_id, draft_id, title);
         write_json(&path, &draft)?;
         Ok(draft)
     }

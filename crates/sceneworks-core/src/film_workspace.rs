@@ -19,6 +19,53 @@ pub const DEFAULT_FILM_PLANNING_PROVIDER: &str = "prompt_refiner";
 pub const QWEN36_FILM_PLANNER_MODEL_ID: &str = "film_planner_qwen3_6_27b";
 pub const QWEN36_FILM_PLANNER_REPO: &str = "Qwen/Qwen3.6-27B";
 
+/// How the film's plan-level adapters and step count are chosen.
+///
+/// Legacy drafts omit this field. Their existing `model.loras` and `model.advanced.steps` remain
+/// authoritative until the user explicitly chooses one of these regimes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmRenderRegime {
+    RecommendedTurbo,
+    Quality,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmTurboUnavailableReason {
+    ModelUnavailable,
+    NoInstalledCompatibleAdapter,
+    IncompletePartitionCoverage,
+    IncompatibleResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmRenderChoice {
+    pub adapter_ids: Vec<String>,
+    pub effective_steps: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmRecommendedTurbo {
+    pub available: bool,
+    pub adapter_ids: Vec<String>,
+    pub effective_steps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<FilmTurboUnavailableReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmRenderOptions {
+    pub selected_regime: FilmRenderRegime,
+    pub recommended_turbo: FilmRecommendedTurbo,
+    pub quality: FilmRenderChoice,
+    pub effective: FilmRenderChoice,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilmPlanningSelection {
@@ -115,6 +162,8 @@ pub struct FilmDraft {
     pub structured_brief: FilmBriefDocument,
     #[serde(default)]
     pub planning: FilmPlanningSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_regime: Option<FilmRenderRegime>,
     pub production_plan: ProductionPlan,
     /// Last explicitly imported or planner-produced compile. Edits intentionally leave this in
     /// place so preflight can explain that it is stale instead of silently replacing refined
@@ -129,6 +178,12 @@ pub struct FilmDraft {
 }
 
 impl FilmDraft {
+    /// Missing means a legacy draft. Preserve its authored adapter/step fields exactly instead of
+    /// retroactively opting it into a newly introduced default.
+    pub fn effective_render_regime(&self) -> FilmRenderRegime {
+        self.render_regime.unwrap_or(FilmRenderRegime::Custom)
+    }
+
     pub fn manual_one_shot(project_id: &str, draft_id: &str, title: &str) -> Self {
         let now = utc_now();
         let title = title.trim();
@@ -174,6 +229,7 @@ impl FilmDraft {
             brief: String::new(),
             structured_brief: FilmBriefDocument::default(),
             planning: FilmPlanningSelection::default(),
+            render_regime: Some(FilmRenderRegime::RecommendedTurbo),
             production_plan: ProductionPlan {
                 schema_version: PLAN_SCHEMA_VERSION,
                 id: draft_id.to_owned(),
@@ -397,6 +453,10 @@ mod tests {
         let mut draft = FilmDraft::manual_one_shot("project_1", "film_1", "Film");
         draft.production_plan.shots[0].prompt = "A courier enters a workshop.".to_owned();
         assert_eq!(draft.planning.provider, DEFAULT_FILM_PLANNING_PROVIDER);
+        assert_eq!(
+            draft.render_regime,
+            Some(FilmRenderRegime::RecommendedTurbo)
+        );
         assert!(draft.reference_pack.references.is_empty());
         assert!(draft.production_plan.shots[0]
             .conditioning
@@ -406,6 +466,32 @@ mod tests {
         assert!(validate_reference_pack(&draft.reference_pack).is_empty());
         assert!(
             validate_plan_against_pack(&draft.production_plan, &draft.reference_pack).is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_draft_without_a_render_regime_preserves_authored_controls() {
+        let mut document =
+            serde_json::to_value(FilmDraft::manual_one_shot("project_1", "film_1", "Film"))
+                .expect("draft serializes");
+        document.as_object_mut().unwrap().remove("renderRegime");
+        document["productionPlan"]["model"]["loras"] = json!(["minimax_h3_turbo_8step"]);
+        document["productionPlan"]["model"]["advanced"] = json!({ "steps": 7 });
+        let draft: FilmDraft = serde_json::from_value(document).expect("legacy draft parses");
+        assert_eq!(draft.render_regime, None);
+        assert_eq!(draft.effective_render_regime(), FilmRenderRegime::Custom);
+        assert_eq!(
+            draft.production_plan.model.loras,
+            vec!["minimax_h3_turbo_8step"]
+        );
+        assert_eq!(
+            draft
+                .production_plan
+                .model
+                .advanced
+                .as_ref()
+                .and_then(|advanced| advanced.steps),
+            Some(7)
         );
     }
 

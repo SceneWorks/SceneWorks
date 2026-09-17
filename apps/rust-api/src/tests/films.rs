@@ -1,6 +1,134 @@
 use super::support::*;
 
 #[tokio::test]
+async fn film_render_options_are_previewable_and_preserve_explicit_or_legacy_controls() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Render choices"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (status, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Render choices"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{draft}");
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        draft["renderRegime"], "quality",
+        "the empty test catalog cannot honestly select Turbo"
+    );
+
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/render-options");
+    let (status, options) = request(app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["selectedRegime"], "quality");
+    assert_eq!(options["recommendedTurbo"]["available"], false);
+    assert_eq!(
+        options["recommendedTurbo"]["unavailableReason"],
+        "model_unavailable"
+    );
+    assert_eq!(options["quality"]["adapterIds"], json!([]));
+
+    let (status, stale) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 0,
+            "productionPlan": draft["productionPlan"],
+            "referencePack": draft["referencePack"],
+            "renderRegime": "custom"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+    let (status, preview) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 1,
+            "productionPlan": draft["productionPlan"],
+            "referencePack": draft["referencePack"],
+            "renderRegime": "custom"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["selectedRegime"], "custom");
+
+    let (status, legacy_preview) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 1,
+            "productionPlan": draft["productionPlan"],
+            "referencePack": draft["referencePack"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy_preview}");
+    assert_eq!(legacy_preview["selectedRegime"], "custom");
+
+    draft["renderRegime"] = json!("custom");
+    draft["productionPlan"]["model"]["loras"] = json!(["minimax_h3_turbo_8step"]);
+    draft["productionPlan"]["model"]["advanced"] = json!({"steps": 7});
+    let (status, mut custom) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        draft,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom}");
+    assert_eq!(
+        custom["productionPlan"]["model"]["loras"],
+        json!(["minimax_h3_turbo_8step"])
+    );
+    assert_eq!(custom["productionPlan"]["model"]["advanced"]["steps"], 7);
+
+    custom["renderRegime"] = json!("quality");
+    let (status, mut quality) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        custom,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{quality}");
+    assert!(quality["productionPlan"]["model"]["loras"].is_null());
+    assert!(quality["productionPlan"]["model"]["advanced"].is_null());
+
+    quality.as_object_mut().unwrap().remove("renderRegime");
+    quality["productionPlan"]["model"]["loras"] = json!(["minimax_h3_turbo_8step"]);
+    quality["productionPlan"]["model"]["advanced"] = json!({"steps": 9});
+    let (status, legacy) = request(
+        app,
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        quality,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy}");
+    assert!(legacy.get("renderRegime").is_none());
+    assert_eq!(
+        legacy["productionPlan"]["model"]["loras"],
+        json!(["minimax_h3_turbo_8step"])
+    );
+    assert_eq!(legacy["productionPlan"]["model"]["advanced"]["steps"], 9);
+}
+
+#[tokio::test]
 async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let settings = test_settings(&temporary);

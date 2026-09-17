@@ -265,6 +265,8 @@ pub struct PlannerCapabilities {
     pub resolutions: Vec<String>,
     /// The resolution every shot uses unless it overrides it (plan default, else model default).
     pub default_resolution: Option<String>,
+    /// Model evaluations used when neither a turbo recipe nor an authored step override applies.
+    pub default_steps: Option<u32>,
     /// `limits.maxReferenceAssets` — zero means the checkpoint has no reference conditioning.
     pub max_reference_images: usize,
     pub supports_negative_prompt: bool,
@@ -347,6 +349,12 @@ pub fn capabilities_for(
         fps: plan_model.fps.or_else(|| default_fps(entry)),
         resolutions,
         default_resolution,
+        default_steps: entry
+            .get("defaults")
+            .and_then(Value::as_object)
+            .and_then(|defaults| defaults.get("steps"))
+            .and_then(Value::as_u64)
+            .and_then(|steps| u32::try_from(steps).ok()),
         max_reference_images: reference_caps(entry).images,
         supports_negative_prompt: entry
             .get("video")
@@ -435,13 +443,11 @@ impl PlannerCapabilities {
     ///    partition in use ([`TurboRecipe::recipe_eq`]). A mixed film dispatches both partitions,
     ///    and sampling its two halves on two different schedules is the thing
     ///    `plan.v2.turbo.jsonc`'s header exists to avoid.
-    /// 2. **Training canvas.** The accelerator whose declared training short edge equals this
-    ///    plan's own. Undeclared is GENERIC: it neither matches nor loses, and no shipped entry
-    ///    declares one today (see [`TurboRecipe::training_short_edge`]), so this rule is currently
-    ///    inert on the shipped catalog and becomes live the moment a canvas is declared.
-    /// 3. **Fewest steps, then catalog order.** Fewest steps because that is what the accelerator
-    ///    is FOR, and catalog order — not the route's — as the tiebreak, so the answer does not
-    ///    move when a display name is edited.
+    /// 2. **Training canvas.** Among recipes that declare a training short edge, choose the nearest
+    ///    one to this plan's short edge. This keeps the 768p recipe on 768p plans and the 544p
+    ///    recipe on the shipped 576x320 film canvas. An undeclared canvas remains generic.
+    /// 3. **Fewest steps, then catalog order.** Break equal canvas distances by the fewest model
+    ///    evaluations, then by catalog order — never by the route's display-name sort.
     ///
     /// The REFERENCE partition is resolved first when it is offered, because it is the constrained
     /// end: exactly one shipped adapter distils the reference path, so resolving it first gives the
@@ -532,9 +538,15 @@ impl PlannerCapabilities {
             }
         }
         if let Some(edge) = plan_short_edge {
-            if let Some(index) = recipes
+            if let Some((index, _)) = recipes
                 .iter()
-                .position(|recipe| recipe.training_short_edge == Some(edge))
+                .enumerate()
+                .filter_map(|(index, recipe)| {
+                    recipe.training_short_edge.map(|training_edge| {
+                        (index, (training_edge.abs_diff(edge), recipe.steps, index))
+                    })
+                })
+                .min_by_key(|(_, key)| *key)
             {
                 return Some(index);
             }
@@ -1338,6 +1350,30 @@ pub fn lora_offer_findings(
     plan: &ProductionPlan,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
+    let brief_has_custom_steps = brief
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+        .is_some();
+    if !brief.prefer_quality
+        && brief.model.loras.is_empty()
+        && !brief_has_custom_steps
+        && plan.model.loras.is_empty()
+        && !caps.turbo_loras.is_empty()
+    {
+        findings.push(PlanDiagnostic::plan(
+            "model.loras",
+            format!(
+                "the planner omitted the default installed Turbo recipe; write exactly {}",
+                caps.turbo_loras
+                    .iter()
+                    .map(|offer| offer.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
     for id in &plan.model.loras {
         if caps.turbo_loras.iter().any(|offer| offer.id == *id) {
             continue;
@@ -2008,9 +2044,9 @@ mod tests {
     /// reference partition — can produce no shot that dispatches there, so the ref2v adapter is an
     /// id the planner would copy into a list that reaches no shot, and a second name to get wrong.
     ///
-    /// With no reference partition there is also no parity anchor, so the base offer falls to the
-    /// last tier: fewest steps, then CATALOG order — which is the 768p file, not the v0.1 one the
-    /// mixed envelope offers. Those are the same rule reaching two answers from two premises.
+    /// With no reference partition there is also no parity anchor, so the base offer follows the
+    /// plan canvas. The shipped 576x320 film canvas is nearer the 544p v0.1 recipe than the 768p
+    /// recipe and therefore keeps the same base adapter used by a mixed film.
     #[test]
     fn the_reference_accelerator_is_offered_only_when_references_are() {
         let offered = |caps: PlannerCapabilities| -> Vec<(String, String)> {
@@ -2023,7 +2059,7 @@ mod tests {
         let base_only = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx);
         assert!(!base_only.offers_references());
         let base_offer = vec![(
-            "minimax_h3_turbo_4step_768p".to_owned(),
+            "minimax_h3_turbo_4step_v01".to_owned(),
             "minimax_h3".to_owned(),
         )];
         assert_eq!(offered(base_only), base_offer);
@@ -2059,8 +2095,7 @@ mod tests {
     /// 🔴 The three tiers of the offer rule, driven directly so each one is asserted where it
     /// DECIDES rather than only where the shipped catalog happens to exercise it.
     ///
-    /// The canvas tier is the one the shipped catalog cannot reach — no entry declares a training
-    /// short edge — so without this it would be a rule nothing had ever run.
+    /// The canvas tier exercises both an exact match and a nearest-canvas choice.
     #[test]
     fn the_offer_rule_prefers_parity_then_canvas_then_fewest_steps() {
         let recipe = |id: &str, steps: u32, video_shift: f32, edge: Option<u32>| TurboRecipe {
@@ -2072,7 +2107,7 @@ mod tests {
             training_short_edge: edge,
         };
         let fast_768 = recipe("fast_768", 4, 6.0, Some(768));
-        let fast_544 = recipe("fast_544", 4, 12.0, None);
+        let fast_544 = recipe("fast_544", 4, 12.0, Some(544));
         let slow_320 = recipe("slow_320", 8, 12.0, Some(320));
         let candidates = [&fast_768, &fast_544, &slow_320];
 
@@ -2089,11 +2124,10 @@ mod tests {
             PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(320)),
             Some(2)
         );
-        // 3. Neither: fewest steps, then catalog order — `fast_544` ties `fast_768` and loses on
-        //    position. An undeclared canvas never matches, so it cannot win tier 2 by default.
+        // 3. Nearest canvas wins; equal distances then use steps and catalog order.
         assert_eq!(
             PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(544)),
-            Some(0)
+            Some(1)
         );
         assert_eq!(
             PlannerCapabilities::choose_turbo_offer(&candidates, None, None),
@@ -2135,6 +2169,43 @@ mod tests {
             Some(&turbo_caps()),
         );
         assert!(findings.is_empty(), "{:?}", messages(&findings));
+    }
+
+    #[test]
+    fn omitting_the_default_turbo_recipe_is_repairable_but_explicit_regimes_are_not() {
+        let caps = turbo_caps();
+        let draft = good_draft();
+        let default_brief = brief();
+        let plan = draft_to_plan(&default_brief, &draft);
+        let findings = messages(&lora_offer_findings(&caps, &default_brief, &plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("omitted the default installed Turbo recipe")
+                && findings[0].contains("minimax_h3_turbo_4step_v01")
+                && findings[0].contains("minimax_h3_ref2v_turbo_4step"),
+            "{}",
+            findings[0]
+        );
+
+        let mut quality_document = brief_json();
+        quality_document["preferQuality"] = json!(true);
+        let quality_brief: ProductionBrief =
+            serde_json::from_value(quality_document).expect("quality brief parses");
+        let quality_plan = draft_to_plan(&quality_brief, &draft);
+        assert!(
+            lora_offer_findings(&caps, &quality_brief, &quality_plan).is_empty(),
+            "Full quality explicitly opts out of Turbo"
+        );
+
+        let mut custom_document = brief_json();
+        custom_document["model"]["advanced"] = json!({"steps": 7});
+        let custom_brief: ProductionBrief =
+            serde_json::from_value(custom_document).expect("custom brief parses");
+        let custom_plan = draft_to_plan(&custom_brief, &draft);
+        assert!(
+            lora_offer_findings(&caps, &custom_brief, &custom_plan).is_empty(),
+            "a custom step count explicitly opts out of the default recipe"
+        );
     }
 
     /// 🔴 A draft naming an accelerator this host does NOT offer is refused BY NAME, and the

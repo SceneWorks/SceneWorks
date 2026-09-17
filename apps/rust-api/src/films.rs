@@ -2,9 +2,13 @@ use super::*;
 
 use sceneworks_core::film_compile::production_plan_sha256;
 use sceneworks_core::film_plan::{
-    self, validate_reference_pack, PlanDiagnostic, ReferencePack, RunRecord,
+    self, validate_reference_pack, PlanDiagnostic, ProductionPlan, ReferencePack, RunRecord,
 };
-use sceneworks_core::film_workspace::{FilmDraft, FilmRunLocator};
+use sceneworks_core::film_planner::{capabilities_for, PlannerCapabilities};
+use sceneworks_core::film_workspace::{
+    FilmDraft, FilmRecommendedTurbo, FilmRenderChoice, FilmRenderOptions, FilmRenderRegime,
+    FilmRunLocator, FilmTurboUnavailableReason,
+};
 use sceneworks_core::project_store::FilmSoundInput;
 
 use crate::film_harness::{
@@ -30,6 +34,16 @@ pub(crate) struct ReferencePackUpdate {
 pub(crate) struct FilmPreflightRequest {
     #[serde(default)]
     pub selected_shot_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FilmRenderOptionsRequest {
+    pub draft_revision: u32,
+    pub production_plan: ProductionPlan,
+    pub reference_pack: ReferencePack,
+    #[serde(default)]
+    pub render_regime: Option<FilmRenderRegime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,8 +73,17 @@ pub(crate) async fn create_film_draft(
     ApiJson(payload): ApiJson<CreateFilmDraftRequest>,
 ) -> Result<(StatusCode, Json<FilmDraft>), ApiError> {
     let draft_id = format!("film_{}", Uuid::new_v4().simple());
+    let mut draft = FilmDraft::manual_one_shot(&project_id, &draft_id, &payload.title);
+    let options = apply_selected_render_regime(&state, &mut draft).await?;
+    if !options.recommended_turbo.available {
+        // A new draft can only default to a recipe this host can actually run. Persist quality as
+        // the honest effective choice; the render-options response still carries the exact reason
+        // Turbo was unavailable, and installing an adapter never rewrites an existing draft.
+        draft.render_regime = Some(FilmRenderRegime::Quality);
+        apply_selected_render_regime(&state, &mut draft).await?;
+    }
     let draft = project_call(state, move |store| {
-        store.create_film_draft(&project_id, &draft_id, &payload.title)
+        store.create_film_draft_document(&project_id, draft)
     })
     .await?;
     Ok((StatusCode::CREATED, Json(draft)))
@@ -81,15 +104,289 @@ pub(crate) async fn get_film_draft(
 pub(crate) async fn update_film_draft(
     State(state): State<AppState>,
     Path((project_id, draft_id)): Path<(String, String)>,
-    ApiJson(draft): ApiJson<FilmDraft>,
+    ApiJson(mut draft): ApiJson<FilmDraft>,
 ) -> Result<Json<FilmDraft>, ApiError> {
     validate_planning_selection(&draft)?;
+    apply_selected_render_regime(&state, &mut draft).await?;
     Ok(Json(
         project_call(state, move |store| {
             store.save_film_draft(&project_id, &draft_id, draft)
         })
         .await?,
     ))
+}
+
+pub(crate) async fn get_film_render_options(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+) -> Result<Json<FilmRenderOptions>, ApiError> {
+    let draft = project_call(state.clone(), move |store| {
+        store.get_film_draft(&project_id, &draft_id)
+    })
+    .await?;
+    Ok(Json(resolve_film_render_options(&state, &draft).await?))
+}
+
+pub(crate) async fn preview_film_render_options(
+    State(state): State<AppState>,
+    Path((project_id, draft_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<FilmRenderOptionsRequest>,
+) -> Result<Json<FilmRenderOptions>, ApiError> {
+    let mut draft = project_call(state.clone(), move |store| {
+        store.get_film_draft(&project_id, &draft_id)
+    })
+    .await?;
+    if draft.revision != payload.draft_revision {
+        return Err(ApiError::conflict(format!(
+            "Film draft revision conflict: expected {}, got {}",
+            draft.revision, payload.draft_revision
+        )));
+    }
+    draft.production_plan = payload.production_plan;
+    draft.reference_pack = payload.reference_pack;
+    // Absence is the legacy contract: preserve the caller's exact adapters and step override as
+    // Custom. It must never opt an older draft into Turbo merely because Turbo is now available.
+    draft.render_regime = payload.render_regime;
+    Ok(Json(resolve_film_render_options(&state, &draft).await?))
+}
+
+pub(crate) async fn resolve_film_render_options(
+    state: &AppState,
+    draft: &FilmDraft,
+) -> Result<FilmRenderOptions, ApiError> {
+    let selected_regime = draft.effective_render_regime();
+    let custom_steps = draft
+        .production_plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+        .and_then(|steps| u32::try_from(steps).ok())
+        .filter(|steps| *steps > 0);
+    let effective_from_plan = |default_steps: Option<u32>| FilmRenderChoice {
+        adapter_ids: draft.production_plan.model.loras.clone(),
+        effective_steps: custom_steps
+            .or_else(|| {
+                let mut steps = draft.production_plan.model.loras.iter().filter_map(|id| {
+                    sceneworks_core::minimax_h3_turbo::turbo_recipe_for_lora_id(id)
+                        .map(|recipe| recipe.steps)
+                });
+                let first = steps.next()?;
+                steps.all(|step| step == first).then_some(first)
+            })
+            .or(default_steps),
+    };
+
+    let models = crate::models::model_catalog(state).await?;
+    let Some(base) = models.iter().find(|entry| {
+        entry.get("id").and_then(Value::as_str) == Some(draft.production_plan.model.id.as_str())
+    }) else {
+        return Ok(unavailable_render_options(
+            selected_regime,
+            FilmTurboUnavailableReason::ModelUnavailable,
+            effective_from_plan(None),
+            None,
+        ));
+    };
+    if base.get("installState").and_then(Value::as_str) != Some("installed") {
+        let default_steps = model_default_steps(base);
+        return Ok(unavailable_render_options(
+            selected_regime,
+            FilmTurboUnavailableReason::ModelUnavailable,
+            effective_from_plan(default_steps),
+            default_steps,
+        ));
+    }
+    let Some(base) = base.as_object() else {
+        return Err(ApiError::internal(
+            "Film model catalog entry is not an object",
+        ));
+    };
+    let mut capabilities = capabilities_for(
+        &draft.production_plan.model,
+        base,
+        film_plan::ModelLane::for_current_platform(),
+    );
+    let default_steps = capabilities.default_steps;
+    let reference_requested = draft.reference_pack.references.iter().any(|reference| {
+        reference.approved && film_plan::BINDABLE_REFERENCE_KINDS.contains(&reference.kind.as_str())
+    });
+    if reference_requested {
+        if let Some(reference_id) = film_plan::reference_partition_for(&capabilities.model_id) {
+            let reference = models.iter().find(|entry| {
+                entry.get("id").and_then(Value::as_str) == Some(reference_id)
+                    && entry.get("installState").and_then(Value::as_str) == Some("installed")
+            });
+            let Some(reference) = reference.and_then(Value::as_object) else {
+                return Ok(unavailable_render_options(
+                    selected_regime,
+                    FilmTurboUnavailableReason::IncompletePartitionCoverage,
+                    effective_from_plan(default_steps),
+                    default_steps,
+                ));
+            };
+            capabilities = capabilities.with_reference_partition(reference);
+        }
+    }
+    capabilities = capabilities.narrowed_to_pack(&draft.reference_pack);
+    let installed_lora_ids = crate::loras::lora_catalog(state, Some(&draft.project_id))
+        .await?
+        .into_iter()
+        .filter(|entry| entry.get("installState").and_then(Value::as_str) == Some("installed"))
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    let resolutions = render_resolutions(&draft.production_plan, &capabilities);
+    let recommended_turbo = recommended_turbo_for(&capabilities, &installed_lora_ids, &resolutions);
+    Ok(FilmRenderOptions {
+        selected_regime,
+        recommended_turbo,
+        quality: FilmRenderChoice {
+            adapter_ids: Vec::new(),
+            effective_steps: default_steps,
+        },
+        effective: effective_from_plan(default_steps),
+    })
+}
+
+fn recommended_turbo_for(
+    capabilities: &PlannerCapabilities,
+    installed_lora_ids: &[String],
+    resolutions: &[String],
+) -> FilmRecommendedTurbo {
+    if resolutions.is_empty() {
+        return unavailable_turbo(FilmTurboUnavailableReason::IncompatibleResolution);
+    }
+    let expected_partitions = 1 + usize::from(capabilities.offers_references());
+    let mut recommended: Option<Vec<sceneworks_core::film_planner::PlannerTurboLora>> = None;
+    for resolution in resolutions {
+        let mut for_resolution = capabilities.clone();
+        for_resolution.default_resolution = Some(resolution.clone());
+        let offers = for_resolution
+            .with_installed_turbo_loras(installed_lora_ids)
+            .turbo_loras;
+        if offers.len() < expected_partitions {
+            return unavailable_turbo(if offers.is_empty() {
+                FilmTurboUnavailableReason::NoInstalledCompatibleAdapter
+            } else {
+                FilmTurboUnavailableReason::IncompletePartitionCoverage
+            });
+        }
+        if recommended.as_ref().is_some_and(|current| {
+            current
+                .iter()
+                .map(|offer| &offer.id)
+                .ne(offers.iter().map(|offer| &offer.id))
+        }) {
+            return unavailable_turbo(FilmTurboUnavailableReason::IncompatibleResolution);
+        }
+        recommended = Some(offers);
+    }
+    let recommended = recommended.unwrap_or_default();
+    let effective_steps = recommended
+        .first()
+        .map(|offer| offer.steps)
+        .filter(|first| recommended.iter().all(|offer| offer.steps == *first));
+    FilmRecommendedTurbo {
+        available: !recommended.is_empty() && effective_steps.is_some(),
+        adapter_ids: recommended.iter().map(|offer| offer.id.clone()).collect(),
+        effective_steps,
+        unavailable_reason: None,
+    }
+}
+
+fn unavailable_turbo(reason: FilmTurboUnavailableReason) -> FilmRecommendedTurbo {
+    FilmRecommendedTurbo {
+        available: false,
+        adapter_ids: Vec::new(),
+        effective_steps: None,
+        unavailable_reason: Some(reason),
+    }
+}
+
+pub(crate) async fn apply_selected_render_regime(
+    state: &AppState,
+    draft: &mut FilmDraft,
+) -> Result<FilmRenderOptions, ApiError> {
+    let options = resolve_film_render_options(state, draft).await?;
+    match draft.render_regime {
+        Some(FilmRenderRegime::RecommendedTurbo) if options.recommended_turbo.available => {
+            draft.production_plan.model.loras = options.recommended_turbo.adapter_ids.clone();
+            clear_step_override(&mut draft.production_plan);
+        }
+        Some(FilmRenderRegime::Quality) => {
+            draft.production_plan.model.loras.clear();
+            clear_step_override(&mut draft.production_plan);
+        }
+        Some(FilmRenderRegime::RecommendedTurbo) | Some(FilmRenderRegime::Custom) | None => {}
+    }
+    resolve_film_render_options(state, draft).await
+}
+
+fn unavailable_render_options(
+    selected_regime: FilmRenderRegime,
+    reason: FilmTurboUnavailableReason,
+    effective: FilmRenderChoice,
+    default_steps: Option<u32>,
+) -> FilmRenderOptions {
+    FilmRenderOptions {
+        selected_regime,
+        recommended_turbo: FilmRecommendedTurbo {
+            available: false,
+            adapter_ids: Vec::new(),
+            effective_steps: None,
+            unavailable_reason: Some(reason),
+        },
+        quality: FilmRenderChoice {
+            adapter_ids: Vec::new(),
+            effective_steps: default_steps,
+        },
+        effective,
+    }
+}
+
+fn model_default_steps(entry: &Value) -> Option<u32> {
+    entry
+        .get("defaults")
+        .and_then(|defaults| defaults.get("steps"))
+        .and_then(Value::as_u64)
+        .and_then(|steps| u32::try_from(steps).ok())
+}
+
+fn render_resolutions(plan: &ProductionPlan, capabilities: &PlannerCapabilities) -> Vec<String> {
+    let fallback = plan
+        .model
+        .resolution
+        .clone()
+        .or_else(|| capabilities.default_resolution.clone());
+    let mut resolutions = Vec::new();
+    for shot in &plan.shots {
+        if let Some(resolution) = shot.resolution.as_ref().or(fallback.as_ref()) {
+            if film_plan::parse_resolution(resolution).is_none() {
+                return Vec::new();
+            }
+            if !resolutions.contains(resolution) {
+                resolutions.push(resolution.clone());
+            }
+        }
+    }
+    if plan.shots.is_empty() {
+        if let Some(resolution) = fallback {
+            if film_plan::parse_resolution(&resolution).is_none() {
+                return Vec::new();
+            }
+            resolutions.push(resolution);
+        }
+    }
+    resolutions
+}
+
+fn clear_step_override(plan: &mut ProductionPlan) {
+    if let Some(advanced) = plan.model.advanced.as_mut() {
+        advanced.steps = None;
+        if advanced.reference_image_short_edge.is_none() {
+            plan.model.advanced = None;
+        }
+    }
 }
 
 pub(crate) async fn get_reference_pack(
@@ -224,6 +521,7 @@ pub(crate) async fn create_film_run(
     let selected = effective_selection(&draft, payload.selected_shot_ids)?;
     let mut findings =
         film_plan::validate_all(&draft.production_plan, &draft.reference_pack, None, None);
+    findings.extend(render_regime_findings(&state, &draft).await?);
     if let Some(compiled) = draft.compiled_plan.as_ref() {
         let sha = production_plan_sha256(&draft.production_plan)
             .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -300,7 +598,7 @@ async fn run_preflight(
     let token = state.settings.access_token.clone();
     let transport = HttpTransport::new(&base_url, Some(token.clone()))
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    preflight_documents(
+    let mut preflight = preflight_documents(
         &transport,
         &draft.production_plan,
         &draft.reference_pack,
@@ -312,7 +610,80 @@ async fn run_preflight(
     .map_err(|error| match error {
         HarnessError::Validation(findings) => invalid_film_document(findings),
         other => ApiError::internal(other.to_string()),
-    })
+    })?;
+    let regime_findings = render_regime_findings(state, draft).await?;
+    if !regime_findings.is_empty() {
+        preflight.valid = false;
+        preflight.compiled = None;
+        preflight.findings.extend(regime_findings);
+    }
+    Ok(preflight)
+}
+
+async fn render_regime_findings(
+    state: &AppState,
+    draft: &FilmDraft,
+) -> Result<Vec<PlanDiagnostic>, ApiError> {
+    let options = resolve_film_render_options(state, draft).await?;
+    let mut findings = Vec::new();
+    match draft.render_regime {
+        Some(FilmRenderRegime::RecommendedTurbo) => {
+            if !options.recommended_turbo.available {
+                findings.push(PlanDiagnostic::plan(
+                    "renderRegime",
+                    format!(
+                        "recommended Turbo is unavailable: {}. Choose Full quality or install a compatible adapter",
+                        turbo_unavailable_code(options.recommended_turbo.unavailable_reason)
+                    ),
+                ));
+            } else if draft.production_plan.model.loras != options.recommended_turbo.adapter_ids
+                || draft
+                    .production_plan
+                    .model
+                    .advanced
+                    .as_ref()
+                    .and_then(|advanced| advanced.steps)
+                    .is_some()
+            {
+                findings.push(PlanDiagnostic::plan(
+                    "renderRegime",
+                    "the saved recommended Turbo selection is stale for this model, resolution, or reference conditioning; save the draft to apply the displayed adapter recipe",
+                ));
+            }
+        }
+        Some(FilmRenderRegime::Quality) => {
+            if !draft.production_plan.model.loras.is_empty()
+                || draft
+                    .production_plan
+                    .model
+                    .advanced
+                    .as_ref()
+                    .and_then(|advanced| advanced.steps)
+                    .is_some()
+            {
+                findings.push(PlanDiagnostic::plan(
+                    "renderRegime",
+                    "Full quality requires no adapters or step override; save the draft to apply the quality recipe",
+                ));
+            }
+        }
+        Some(FilmRenderRegime::Custom) | None => {}
+    }
+    Ok(findings)
+}
+
+pub(crate) fn turbo_unavailable_code(reason: Option<FilmTurboUnavailableReason>) -> &'static str {
+    match reason {
+        Some(FilmTurboUnavailableReason::ModelUnavailable) => "model_unavailable",
+        Some(FilmTurboUnavailableReason::NoInstalledCompatibleAdapter) => {
+            "no_installed_compatible_adapter"
+        }
+        Some(FilmTurboUnavailableReason::IncompletePartitionCoverage) => {
+            "incomplete_partition_coverage"
+        }
+        Some(FilmTurboUnavailableReason::IncompatibleResolution) => "incompatible_resolution",
+        None => "unknown",
+    }
 }
 
 pub(crate) async fn get_film_run(
@@ -483,4 +854,138 @@ fn invalid_film_document(findings: Vec<PlanDiagnostic>) -> ApiError {
         .collect::<Vec<_>>()
         .join("; ");
     ApiError::bad_request(format!("Film draft is not ready to render: {detail}"))
+}
+
+#[cfg(test)]
+mod render_options_tests {
+    use super::*;
+    use sceneworks_core::film_plan::PlanModel;
+
+    fn entry(id: &str, reference: bool) -> serde_json::Map<String, Value> {
+        json!({
+            "id": id,
+            "type": "video",
+            "capabilities": if reference {
+                json!(["reference_to_video"])
+            } else {
+                json!(["text_to_video", "image_to_video", "first_last_frame"])
+            },
+            "defaults": { "fps": 24, "resolution": "1344x768", "steps": 50 },
+            "limits": {
+                "resolutions": ["1344x768", "576x320"],
+                "maxReferenceAssets": if reference { 9 } else { 0 }
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
+    fn capabilities(resolution: &str) -> PlannerCapabilities {
+        capabilities_for(
+            &PlanModel {
+                id: "minimax_h3".to_owned(),
+                tier: Some("q4".to_owned()),
+                loras: Vec::new(),
+                fps: Some(24),
+                resolution: Some(resolution.to_owned()),
+                advanced: None,
+            },
+            &entry("minimax_h3", false),
+            film_plan::ModelLane::Mlx,
+        )
+    }
+
+    fn installed() -> Vec<String> {
+        [
+            "minimax_h3_turbo_4step_768p",
+            "minimax_h3_turbo_8step",
+            "minimax_h3_turbo_4step_v01",
+            "minimax_h3_ref2v_turbo_4step",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    #[test]
+    fn recommendation_matches_canvas_and_required_partitions() {
+        let low = recommended_turbo_for(
+            &capabilities("576x320"),
+            &installed(),
+            &["576x320".to_owned()],
+        );
+        assert!(low.available);
+        assert_eq!(low.adapter_ids, vec!["minimax_h3_turbo_4step_v01"]);
+        assert_eq!(low.effective_steps, Some(4));
+
+        let high = recommended_turbo_for(
+            &capabilities("1344x768"),
+            &installed(),
+            &["1344x768".to_owned()],
+        );
+        assert_eq!(high.adapter_ids, vec!["minimax_h3_turbo_4step_768p"]);
+
+        let mixed_caps =
+            capabilities("576x320").with_reference_partition(&entry("minimax_h3_ref", true));
+        let mixed = recommended_turbo_for(&mixed_caps, &installed(), &["576x320".to_owned()]);
+        assert_eq!(
+            mixed.adapter_ids,
+            vec!["minimax_h3_turbo_4step_v01", "minimax_h3_ref2v_turbo_4step"]
+        );
+        assert_eq!(mixed.effective_steps, Some(4));
+    }
+
+    #[test]
+    fn recommendation_explains_missing_partition_and_mixed_canvas() {
+        let mixed_caps =
+            capabilities("576x320").with_reference_partition(&entry("minimax_h3_ref", true));
+        let partial = recommended_turbo_for(
+            &mixed_caps,
+            &["minimax_h3_turbo_4step_v01".to_owned()],
+            &["576x320".to_owned()],
+        );
+        assert_eq!(
+            partial.unavailable_reason,
+            Some(FilmTurboUnavailableReason::IncompletePartitionCoverage)
+        );
+
+        let incompatible = recommended_turbo_for(
+            &capabilities("576x320"),
+            &installed(),
+            &["576x320".to_owned(), "1344x768".to_owned()],
+        );
+        assert_eq!(
+            incompatible.unavailable_reason,
+            Some(FilmTurboUnavailableReason::IncompatibleResolution)
+        );
+
+        let missing = recommended_turbo_for(&capabilities("576x320"), &[], &["576x320".to_owned()]);
+        assert_eq!(
+            missing.unavailable_reason,
+            Some(FilmTurboUnavailableReason::NoInstalledCompatibleAdapter)
+        );
+    }
+
+    #[test]
+    fn resolution_recipe_follows_effective_shot_canvases() {
+        let mut plan = FilmDraft::manual_one_shot("project_1", "film_1", "Film").production_plan;
+        plan.model.resolution = Some("576x320".to_owned());
+        plan.shots[0].resolution = Some("1344x768".to_owned());
+        let caps = capabilities("576x320");
+        assert_eq!(
+            render_resolutions(&plan, &caps),
+            vec!["1344x768"],
+            "an unused plan fallback must not create a false mixed-recipe conflict"
+        );
+
+        let mut fallback_shot = plan.shots[0].clone();
+        fallback_shot.id = "SH020".to_owned();
+        fallback_shot.resolution = None;
+        plan.shots.push(fallback_shot);
+        assert_eq!(
+            render_resolutions(&plan, &caps),
+            vec!["1344x768", "576x320"]
+        );
+    }
 }

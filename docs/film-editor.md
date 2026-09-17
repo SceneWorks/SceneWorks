@@ -43,10 +43,23 @@ separate choice, and the planning operation records both identities.
 3. Add, remove, reorder, or edit shots under **Shots and render controls**. Each shot has a stable
    ID, beat, framing, prompt, intended start and end state, duration, conditioning mode, continuity
    roles, optional dependencies, and optional dialogue placement.
-4. Set the video model, tier, frame rate, resolution, adapters, steps, reference image short edge,
-   and finite run, shot, attempt, memory, and planner budgets. Model-specific menus and preflight
-   findings take precedence over values copied from another project.
-5. Use **Save draft** whenever you want the current document state to become durable.
+4. Choose a render regime. **Turbo (recommended)** resolves the installed adapter recipe for the
+   current model, output canvas, and reference-conditioned partitions and shows its concrete adapter
+   IDs and effective step count. **Full quality** explicitly clears accelerator and step overrides
+   and uses the model's declared default steps. **Custom** preserves the adapters and steps you enter
+   under advanced controls. When Turbo is unavailable, the editor states whether the model or a
+   compatible adapter is missing, partition coverage is incomplete, or the edited shot resolutions
+   require conflicting recipes; a new draft then starts in Full quality instead of naming an
+   adapter the host cannot run.
+5. Set the video model, tier, frame rate, resolution, reference image short edge, and finite run,
+   shot, attempt, memory, and planner budgets. Model-specific menus and preflight findings take
+   precedence over values copied from another project.
+6. Use **Save draft** whenever you want the current document state to become durable.
+
+The render regime is saved on the draft. Planning cannot silently replace recommended Turbo with a
+full-step plan when a planner omits adapters: the server pins the saved recipe outside the planner's
+answer. Drafts created before render regimes existed keep their exact adapter and step fields as a
+legacy custom selection until the operator chooses Turbo or Full quality.
 
 You can author a film without a planner by editing the initial manual shot. You can also import or
 export production plans, reference packs, and compiled plans. Imported documents are validated at

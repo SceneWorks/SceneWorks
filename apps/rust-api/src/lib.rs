@@ -304,8 +304,9 @@ use film_review::{
 };
 use films::{
     add_film_reference, add_film_sound, create_film_draft, create_film_run, export_film_run,
-    get_film_draft, get_film_run, get_reference_pack, list_film_drafts, preflight_film_draft,
-    start_film_run, update_film_draft, update_reference_pack,
+    get_film_draft, get_film_render_options, get_film_run, get_reference_pack, list_film_drafts,
+    preflight_film_draft, preview_film_render_options, start_film_run, update_film_draft,
+    update_reference_pack,
 };
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
@@ -1735,6 +1736,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/films/:draft_id/preflight",
             post(preflight_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/render-options",
+            get(get_film_render_options).post(preview_film_render_options),
         )
         .route(
             "/api/v1/projects/:project_id/films/:draft_id/brief/parse",

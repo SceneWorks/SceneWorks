@@ -4,7 +4,8 @@ use sceneworks_core::film_compile::{CompiledPlan, PlannerExecutionRecord};
 use sceneworks_core::film_plan::{PlanDiagnostic, ProductionPlan};
 use sceneworks_core::film_planner::{DurationWindow, ProductionBrief, RequiredBeat};
 use sceneworks_core::film_workspace::{
-    parse_film_script, FilmBriefDocument, QWEN36_FILM_PLANNER_MODEL_ID, QWEN36_FILM_PLANNER_REPO,
+    parse_film_script, FilmBriefDocument, FilmRenderRegime, QWEN36_FILM_PLANNER_MODEL_ID,
+    QWEN36_FILM_PLANNER_REPO,
 };
 
 use crate::film_harness::{ControllerLease, HarnessError, HttpTransport};
@@ -183,7 +184,7 @@ pub(crate) async fn start_film_planning(
     Path((project_id, draft_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<StartFilmPlanningRequest>,
 ) -> Result<(StatusCode, Json<FilmPlanningOperation>), ApiError> {
-    let draft = project_call(state.clone(), {
+    let mut draft = project_call(state.clone(), {
         let project_id = project_id.clone();
         let draft_id = draft_id.clone();
         move |store| store.get_film_draft(&project_id, &draft_id)
@@ -193,6 +194,17 @@ pub(crate) async fn start_film_planning(
         return Err(ApiError::bad_request(
             "Paste prose or screenplay text before planning",
         ));
+    }
+    let render_options = crate::films::apply_selected_render_regime(&state, &mut draft).await?;
+    if draft.render_regime == Some(FilmRenderRegime::RecommendedTurbo)
+        && !render_options.recommended_turbo.available
+    {
+        return Err(ApiError::bad_request(format!(
+            "The recommended Turbo render regime is unavailable ({}); choose Full quality or install a compatible adapter",
+            crate::films::turbo_unavailable_code(
+                render_options.recommended_turbo.unavailable_reason
+            )
+        )));
     }
     let root = planning_root(state.clone(), &project_id, &draft_id).await?;
     std::fs::create_dir_all(root.join("operations"))
@@ -564,7 +576,7 @@ fn production_brief(
             .beats
             .len()
             .clamp(1, sceneworks_core::film_planner::MAX_PLANNER_SHOTS),
-        prefer_quality: false,
+        prefer_quality: draft.effective_render_regime() == FilmRenderRegime::Quality,
     }
 }
 
@@ -922,7 +934,7 @@ fn update_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sceneworks_core::film_workspace::FilmDraft;
+    use sceneworks_core::film_workspace::{FilmDraft, FilmRenderRegime};
 
     #[test]
     fn external_orphan_is_preserved_and_interrupted_without_constructing_a_transport() {
@@ -995,5 +1007,22 @@ mod tests {
             .summary
             .contains("MARA: Put it down."));
         assert_eq!(draft.original_script, "MARA\nPut it down.");
+    }
+
+    #[test]
+    fn planner_brief_pins_the_saved_render_regime_outside_the_llm_answer() {
+        let mut draft = FilmDraft::manual_one_shot("project_1", "film_1", "Courier");
+        draft.original_script = "A courier enters.".to_owned();
+        draft.production_plan.model.loras = vec!["minimax_h3_turbo_4step_v01".to_owned()];
+        let structured = parse_film_script(&draft.original_script);
+        let recommended = production_brief(&draft, &structured);
+        assert!(!recommended.prefer_quality);
+        assert_eq!(recommended.model.loras, vec!["minimax_h3_turbo_4step_v01"]);
+
+        draft.render_regime = Some(FilmRenderRegime::Quality);
+        draft.production_plan.model.loras.clear();
+        let quality = production_brief(&draft, &structured);
+        assert!(quality.prefer_quality);
+        assert!(quality.model.loras.is_empty());
     }
 }
