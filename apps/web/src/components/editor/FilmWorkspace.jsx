@@ -16,6 +16,7 @@ import { FilmReferences } from "./FilmReferences.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
+import { FilmRenderOptions } from "./FilmRenderOptions.jsx";
 import { FilmReview } from "./FilmReview.jsx";
 import { FilmShots } from "./FilmShots.jsx";
 
@@ -413,6 +414,13 @@ export function FilmWorkspace() {
             />
           </div>
           <div aria-labelledby="film-view-tab-shots" hidden={activeView !== "shots"} id="film-view-shots" role="tabpanel">
+            <FilmRenderOptions
+              disabled={busy}
+              draft={draft}
+              onChange={updateDraft}
+              projectId={activeProject.id}
+              token={token}
+            />
             <FilmShots
               capabilities={preflight?.capabilities}
               compiled={preflight?.compiled}

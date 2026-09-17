@@ -10978,6 +10978,28 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-plan-controls { padding: 0; }
 .ve-film-plan-controls > fieldset { min-width: 0; padding: 10px; border: 0; }
 .ve-film-capability-summary { color: var(--text-muted); font-size: 12px; }
+.ve-film-render-regimes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+}
+.ve-film-render-regimes > legend { margin-bottom: 5px; font-size: 12px; font-weight: 650; }
+.ve-film-render-regimes > label {
+  align-content: start;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-render-regimes > label.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--bg-2)); }
+.ve-film-render-regimes > label > span { display: flex; align-items: center; gap: 6px; font-weight: 650; }
+.ve-film-render-regimes small { color: var(--text-muted); line-height: 1.35; }
+.ve-film-render-regimes .ve-film-render-recipe { color: var(--text); overflow-wrap: anywhere; }
+.ve-film-render-effective { margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
 .ve-film-shot-layout {
   display: grid;
   grid-template-columns: minmax(180px, .32fr) minmax(0, 1fr);
@@ -11045,6 +11067,7 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-audio-inspector { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
 .ve-audio-inspector label { display: grid; gap: 4px; font-size: 12px; }
 @media (max-width: 760px) {
+  .ve-film-render-regimes { grid-template-columns: 1fr; }
   .ve-film-shot-layout { grid-template-columns: 1fr; }
   .ve-film-dependency { grid-template-columns: 1fr; }
 }

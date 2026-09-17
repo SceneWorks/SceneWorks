@@ -10,7 +10,7 @@ const { apiFetchMock, loadCredentialsMock, saveCredentialMock } = vi.hoisted(() 
   loadCredentialsMock: vi.fn(),
   saveCredentialMock: vi.fn(),
 }));
-vi.mock("../../api.js", () => ({ apiFetch: apiFetchMock }));
+vi.mock("../../api.js", () => ({ apiFetch: apiFetchMock, isAbortError: (error) => error?.name === "AbortError" }));
 vi.mock("../../credentials.js", async (importOriginal) => ({
   ...(await importOriginal()),
   loadCredentials: loadCredentialsMock,
@@ -50,6 +50,15 @@ function draft(overrides = {}) {
     createdAt: "2026-09-16T00:00:00Z",
     updatedAt: "2026-09-16T00:00:00Z",
     ...overrides,
+  };
+}
+
+function renderOptions() {
+  return {
+    selectedRegime: "recommended_turbo",
+    recommendedTurbo: { available: true, adapterIds: ["minimax_h3_turbo_4step_v01"], effectiveSteps: 4 },
+    quality: { adapterIds: [], effectiveSteps: 30 },
+    effective: { adapterIds: ["minimax_h3_turbo_4step_v01"], effectiveSteps: 4 },
   };
 }
 
@@ -105,6 +114,7 @@ describe("FilmWorkspace", () => {
     apiFetchMock.mockImplementation((path) => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       throw new Error(`Unexpected request ${path}`);
@@ -164,6 +174,7 @@ describe("FilmWorkspace", () => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films" && options.method === "POST") return Promise.resolve(created);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve(lists++ === 0 ? [] : [saved]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path.endsWith("/films/film_1") && options.method === "PUT") return Promise.resolve(saved);
@@ -211,6 +222,7 @@ describe("FilmWorkspace", () => {
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([screenplay]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [
         { provider: "prompt_refiner", modelId: "prompt_refine_anubis_8b", available: true },
         { provider: "native", modelId: "film_planner_qwen3_6_27b", available: false },
@@ -264,6 +276,7 @@ describe("FilmWorkspace", () => {
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([external]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path === "/api/v1/film-planner-connections") return Promise.resolve([connection]);
@@ -315,6 +328,7 @@ describe("FilmWorkspace", () => {
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path.endsWith("/films/film_1") && options.method === "PUT") {
@@ -350,6 +364,7 @@ describe("FilmWorkspace", () => {
     apiFetchMock.mockImplementation((path, _token, options = {}) => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
       if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path.endsWith("/films/film_1") && options.method === "PUT") {

@@ -117,6 +117,7 @@ describe("FilmShots", () => {
     Object.defineProperty(planInput, "files", { configurable: true, value: [{ text: async () => JSON.stringify(importedPlan) }] });
     await act(async () => { planInput.dispatchEvent(new Event("change", { bubbles: true })); await Promise.resolve(); });
     expect(latest.draft.productionPlan.shots[0].prompt).toBe("Imported production prompt");
+    expect(latest.draft.renderRegime).toBe("custom");
 
     const importedCompiled = { schemaVersion: 3, planSha256: "hash", requests: [{ shotId: "SH010" }] };
     const compiledInput = container.querySelector('input[aria-label="Compiled plan file"]');
@@ -124,5 +125,21 @@ describe("FilmShots", () => {
     await act(async () => { compiledInput.dispatchEvent(new Event("change", { bubbles: true })); await Promise.resolve(); });
     expect(latest.draft.compiledPlan).toEqual(importedCompiled);
     expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Export compiled plan").disabled).toBe(false);
+  });
+
+  it("switches to custom when adapters or steps are edited manually", async () => {
+    await render();
+    const advanced = [...container.querySelectorAll("details")]
+      .find((item) => item.querySelector(":scope > summary")?.textContent.startsWith("Advanced video and budget settings"));
+    await act(async () => advanced.querySelector("summary").click());
+    await act(async () => change(container.querySelector('input[aria-label="Plan adapters"]'), "turbo"));
+    expect(latest.draft.renderRegime).toBe("custom");
+    expect(latest.draft.productionPlan.model.loras).toEqual(["turbo"]);
+
+    latest.draft.renderRegime = "quality";
+    const steps = [...container.querySelectorAll("label")].find((label) => label.textContent.startsWith("Steps")).querySelector("input");
+    await act(async () => change(steps, "8"));
+    expect(latest.draft.renderRegime).toBe("custom");
+    expect(latest.draft.productionPlan.model.advanced.steps).toBe(8);
   });
 });

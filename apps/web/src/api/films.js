@@ -51,6 +51,23 @@ export function preflightFilm(projectId, draftId, selectedShotIds, token) {
   });
 }
 
+export function getFilmRenderOptions(projectId, draftId, token, options = {}) {
+  return apiFetch(`${base(projectId, draftId)}/render-options`, token, options);
+}
+
+export function previewFilmRenderOptions(projectId, draftId, draft, token, options = {}) {
+  return apiFetch(`${base(projectId, draftId)}/render-options`, token, {
+    ...options,
+    method: "POST",
+    body: JSON.stringify({
+      draftRevision: draft.revision,
+      productionPlan: draft.productionPlan,
+      referencePack: draft.referencePack,
+      renderRegime: draft.renderRegime,
+    }),
+  });
+}
+
 export function addFilmSound(projectId, draftId, payload, token) {
   return apiFetch(`${base(projectId, draftId)}/sound`, token, {
     method: "POST",

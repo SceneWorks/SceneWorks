@@ -94,7 +94,10 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
       if (kind === "plan" && (!Array.isArray(document.shots) || !document.model)) throw new Error("Production plan must contain model and shots.");
       if (kind === "compiled" && (!Array.isArray(document.requests) || !document.planSha256)) throw new Error("Compiled document must contain planSha256 and requests.");
       onChange((next) => {
-        if (kind === "plan") next.productionPlan = document;
+        if (kind === "plan") {
+          next.productionPlan = document;
+          next.renderRegime = "custom";
+        }
         else next.compiledPlan = document;
       });
       if (kind === "plan") {
@@ -135,9 +138,9 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
           <NumberInput label="Frames per second" min="1" onChange={(value) => onChange((next) => setOptionalNumber(next.productionPlan.model, "fps", value))} value={draft.productionPlan.model.fps} />
           <label>Default resolution<input aria-label="Default resolution" list="film-resolution-options" value={draft.productionPlan.model.resolution ?? ""} onChange={(event) => onChange((next) => setOptional(next.productionPlan.model, "resolution", event.target.value))} /></label>
           <datalist id="film-resolution-options">{resolutions.map((value) => <option key={value} value={value} />)}</datalist>
-          <label>Adapters (comma separated)<input aria-label="Plan adapters" list="film-adapter-options" value={(draft.productionPlan.model.loras ?? []).join(", ")} onChange={(event) => onChange((next) => { next.productionPlan.model.loras = asList(event.target.value); })} /></label>
+          <label>Adapters (comma separated)<input aria-label="Plan adapters" list="film-adapter-options" value={(draft.productionPlan.model.loras ?? []).join(", ")} onChange={(event) => onChange((next) => { next.renderRegime = "custom"; next.productionPlan.model.loras = asList(event.target.value); })} /></label>
           <datalist id="film-adapter-options">{turboLoras.map((lora) => <option key={lora.id} value={lora.id}>{lora.name}</option>)}</datalist>
-          <NumberInput label="Steps" min="1" onChange={(value) => onChange((next) => { next.productionPlan.model.advanced ??= {}; setOptionalNumber(next.productionPlan.model.advanced, "steps", value); })} value={advanced.steps} />
+          <NumberInput label="Steps" min="1" onChange={(value) => onChange((next) => { next.renderRegime = "custom"; next.productionPlan.model.advanced ??= {}; setOptionalNumber(next.productionPlan.model.advanced, "steps", value); })} value={advanced.steps} />
           <NumberInput label="Reference image short edge" min="1" onChange={(value) => onChange((next) => { next.productionPlan.model.advanced ??= {}; setOptionalNumber(next.productionPlan.model.advanced, "referenceImageShortEdge", value); })} value={advanced.referenceImageShortEdge} />
           <NumberInput label="Maximum run seconds" min="1" onChange={(value) => onChange((next) => { next.productionPlan.limits.maxRunSeconds = Number(value); })} value={draft.productionPlan.limits.maxRunSeconds} />
           <NumberInput label="Maximum shot seconds" min="1" onChange={(value) => onChange((next) => { next.productionPlan.limits.maxShotSeconds = Number(value); })} value={draft.productionPlan.limits.maxShotSeconds} />
