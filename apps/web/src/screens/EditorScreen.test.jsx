@@ -448,6 +448,40 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(container.querySelector(".ve-play").title).toBe("Pause");
   });
 
+  it.each([
+    ["muted track", { muted: true, gain: 1 }, false, true],
+    ["solo-excluded track", { muted: false, gain: 1 }, true, true],
+    ["zero track gain", { muted: false, gain: 0 }, false, false],
+  ])("keeps %s silent while starting its transport", (_label, trackMix, soloOtherTrack, expectedMuted) => {
+    const audio = { id: "a1", type: "audio", displayName: "Room tone", url: "/room.wav", file: { mimeType: "audio/wav", duration: 8 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks.push({
+      id: "track_ambience",
+      name: "Ambience",
+      kind: "audio",
+      role: "ambience",
+      ...trackMix,
+      items: [{ id: "ambience", trackId: "track_ambience", assetId: "a1", type: "audio", displayName: "Ambience", sourceIn: 0.5, sourceOut: 4.5, timelineStart: 0.2, timelineEnd: 4.2, speed: 1, volume: 0.6, fadeInSeconds: 0.2 }],
+    });
+    if (soloOtherTrack) {
+      timeline.tracks.push({ id: "track_other", name: "Other", kind: "audio", role: "music", gain: 1, muted: false, items: [] });
+    }
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockImplementation(() => new Promise(() => {}));
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [audio], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+    act(() => container.querySelector(".ve-audio-clip").click());
+    if (soloOtherTrack) {
+      const solo = [...container.querySelectorAll('button[title="Solo"]')].find((button) => button.closest(".ve-track-head")?.textContent.includes("Other"));
+      act(() => solo.click());
+    }
+    act(() => container.querySelector(".ve-play").click());
+    const preview = container.querySelector(".ve-program audio");
+    expect(preview.volume).toBe(0);
+    expect(preview.muted).toBe(expectedMuted);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("places library audio, auditions it, and persists trim, placement, gain, fades, and mute", () => {
     const audio = { id: "asset_audio", type: "audio", displayName: "Recorded line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
     let latest;

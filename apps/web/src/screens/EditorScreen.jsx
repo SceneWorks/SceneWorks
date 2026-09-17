@@ -513,7 +513,9 @@ export function EditorScreen() {
       // animation frame raises the fade outside the click gesture. Use an imperceptible
       // positive bootstrap for an audible item; the preview effect applies the exact saved
       // fade curve immediately after playback starts.
-      media.volume = nextPreview.muted ? 0 : Math.max(nextPreview.volume, 0.0001);
+      media.volume = nextPreview.muted || !nextPreview.hasPositiveGain
+        ? 0
+        : Math.max(nextPreview.volume, 0.0001);
       media.playbackRate = nextPreview.playbackRate;
       media.muted = nextPreview.muted;
       audioPlayRequestedRef.current = true;
