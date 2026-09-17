@@ -1,16 +1,19 @@
-import React, { lazy, Suspense } from "react";
+import React, { lazy, Suspense, useState } from "react";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 
 const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
 export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, onRefreshAvailability, token }) {
+  const [maxRepairRounds, setMaxRepairRounds] = useState("2");
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
   const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
   const active = operation && ["running", "canceling"].includes(operation.status);
   const candidate = operation?.candidatePlan;
   const installActive = installJob && !terminalStatuses.has(installJob.status);
   const videoModels = models.filter((model) => model.type === "video" && model.usable !== false);
+  const parsedMaxRepairRounds = Number(maxRepairRounds);
+  const repairRoundsValid = Number.isInteger(parsedMaxRepairRounds) && parsedMaxRepairRounds >= 0 && parsedMaxRepairRounds <= 5;
   function setProvider(provider) {
     onChange((next) => {
       next.planning = {
@@ -55,6 +58,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
             </label>
           ) : null}
           <label className="ve-film-reference-check"><input checked={Boolean(planning.refinePrompts)} disabled={disabled || active} onChange={(event) => onChange((next) => { next.planning.refinePrompts = event.target.checked; })} type="checkbox" /> Run model-specific prompt refinement when compiling shots</label>
+          <label>Maximum planner repair rounds<input aria-label="Maximum planner repair rounds" disabled={disabled || active} max="5" min="0" onChange={(event) => setMaxRepairRounds(event.target.value)} step="1" type="number" value={maxRepairRounds} /></label>
         </div>
       </details>
       <p className="ve-film-provider-state">
@@ -78,7 +82,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
         {installError ? <span role="alert">Status refresh failed: {installError}. Retrying.</span> : null}
       </div> : null}
       <div className="ve-film-actions">
-        <button className="ve-generate" disabled={disabled || active || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={onStart} type="button">Generate candidate plan</button>
+        <button className="ve-generate" disabled={disabled || active || !repairRoundsValid || !draft.originalScript?.trim() || (planning.provider === "native" && !qwen?.available) || (planning.provider === "openai_compatible" && (!planning.connectionId || !planning.modelId?.trim()))} onClick={() => onStart(parsedMaxRepairRounds)} type="button">Generate candidate plan</button>
         {active ? <button disabled={operation.status === "canceling"} onClick={onCancel} type="button">Cancel planning</button> : null}
       </div>
       {operation ? (
@@ -87,6 +91,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
           <span>{operation.detail}</span>
           {Number.isFinite(operation.progress) ? <progress aria-label="Planning progress" max="1" value={operation.progress} /> : null}
           <span>Planner: {operation.plannerModel}; target video model: {operation.videoModelId}</span>
+          {Number.isInteger(operation.maxRepairRounds) ? <span>Maximum repair rounds: {operation.maxRepairRounds}</span> : null}
           {operation.executions?.length ? <span>Execution: {operation.executions.map((item) => `${item.backend ?? "native"} / ${item.model}`).join(", ")}</span> : null}
           {operation.findings?.length ? (
             <ul aria-label="Planning findings" className="ve-film-planning-findings">

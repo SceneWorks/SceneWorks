@@ -22,6 +22,12 @@ function declaration(body, property) {
   return match ? match[1].trim() : null;
 }
 
+function changeValue(element, value) {
+  Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 let container;
 let root;
 
@@ -37,6 +43,38 @@ afterEach(() => {
 });
 
 describe("FilmPlanning", () => {
+  it("starts with the authored bounded planner repair limit", async () => {
+    const onStart = vi.fn();
+    const draft = {
+      originalScript: "A courier enters.",
+      planning: { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false },
+      productionPlan: { model: { id: "minimax_h3" } },
+    };
+    root = createRoot(container);
+    await act(async () => root.render(<FilmPlanning
+      availability={{ providers: [] }}
+      disabled={false}
+      draft={draft}
+      models={[]}
+      onApply={vi.fn()}
+      onCancel={vi.fn()}
+      onChange={vi.fn()}
+      onInstall={vi.fn()}
+      onNotice={vi.fn()}
+      onStart={onStart}
+      operation={null}
+      token=""
+    />));
+
+    const rounds = container.querySelector('input[aria-label="Maximum planner repair rounds"]');
+    act(() => changeValue(rounds, "4"));
+    act(() => [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").click());
+    expect(onStart).toHaveBeenCalledWith(4);
+
+    act(() => changeValue(rounds, "6"));
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate candidate plan").disabled).toBe(true);
+  });
+
   it("renders long failed-plan findings as a labeled list with shot and field context", async () => {
     const referencePack = "film_a96f0c96c6a64e1da49bbbb6a5b9f976-references";
     const rejectedPath = `/Volumes/Models/codex/sc-23730/runtime/terminal/evidence/projects/example/films/planning/operations/filmplan_4af8883889984985823abb5c53ff7a0b/planner-rejected.txt`;
