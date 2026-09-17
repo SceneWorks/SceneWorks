@@ -1997,10 +1997,9 @@ fn a_rejection_whose_peak_exceeds_the_floor_beyond_the_margin_is_not_suppressed(
     assert_eq!(
         admitted_floor_bytes,
         floor_bytes
-            + ((FIXTURE_HEADROOM_GIB * GIB) as f64
-                * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE)
-                .ceil() as u64,
-        "the floor's allowance is charged on its activation term, not on its counted weights"
+            + (floor_bytes as f64 * crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD).ceil()
+                as u64,
+        "the floor includes active-peak uncertainty once"
     );
     // A host that comfortably holds the floor but not the fitted decode peak.
     let host_gb = 100.0;
@@ -2412,16 +2411,23 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
 /// must not reach it even on a host where it is the only rung that fits.
 #[test]
 fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
-    let eager = with_load_shape(
-        fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]),
-        LoadShape::EagerMaterialization,
-    );
+    let mut streamed = fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]);
+    streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
+        architecture: None,
+        staged_weights: gen_core::StagedWeightSchedule::TwoStage,
+        transformer_stream: Some(gen_core::StreamedWeightFacts {
+            resident_bytes: 0,
+            stacks: vec![vec![GIB; 16]],
+        }),
+        decoder_workspace: None,
+    });
+    let eager = with_load_shape(streamed.clone(), LoadShape::EagerMaterialization);
     // 20 GiB weights + 18 GiB headroom = a 38 GiB resident floor; rung 4 sheds the whole 16 GiB
     // transformer, so its floor is 22 GiB. Both carry the same 18 GiB activation term, so the
     // admitted ceilings (`mlx_widened_gb`) stay 16 GiB apart. A host 0.5 GiB above rung 4's
     // admitted floor can hold ONLY rung 4 — which is exactly why offering it here would be the
     // harm.
-    let host_gb = mlx_widened_gb(22, 0.5);
+    let host_gb = mlx_widened_gb(23, 0.5);
     assert!(host_gb < mlx_widened_gb(38, 0.0), "the window must exist");
     let (verdict, selections) = select_once(
         &eager,
@@ -2438,10 +2444,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
 
     // The SAME contract under the deferred shape the rung requires DOES reach it, so the
     // assertion above is about the prerequisite and not about the host being too small.
-    let deferred = with_load_shape(
-        fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]),
-        LoadShape::DeferredMaterialization,
-    );
+    let deferred = with_load_shape(streamed.clone(), LoadShape::DeferredMaterialization);
     let (reachable, _) = select_once(
         &deferred,
         budget(host_gb),
@@ -2571,7 +2574,7 @@ fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
 
 #[test]
 fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
-    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let contract = fixture_contract(40, 4, &[MemoryStrategy::StagedResidency]);
     let curves = fixture_curve_bundle();
     // The window, derived end to end from the same helpers production uses: the host sits between
     // the f121 and f145 FITTED admitted ceilings (so the frame count is the only thing that
@@ -2594,7 +2597,7 @@ fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
          host {host_gb}, f145 {f145_ceiling_gb}"
     );
     assert!(
-        host_gb < mlx_widened_gb(38, 0.0),
+        host_gb < mlx_widened_gb(58, 0.0),
         "the resident floor must not fit, or the frame count is not what decides"
     );
 
@@ -2742,7 +2745,7 @@ fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
 
 #[test]
 fn mutating_a_phase_residual_changes_the_admission_decision() {
-    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let contract = fixture_contract(40, 4, &[MemoryStrategy::StagedResidency]);
     let original = fixture_curve_bundle();
     let request = geometry(121, VideoGeometryRole::Requested);
     let mut grown = original.clone();
@@ -2759,7 +2762,7 @@ fn mutating_a_phase_residual_changes_the_admission_decision() {
          {shipped_ceiling_gb}, host {host_gb}, grown {grown_ceiling_gb}"
     );
     assert!(
-        host_gb < mlx_widened_gb(38, 0.0),
+        host_gb < mlx_widened_gb(58, 0.0),
         "the resident floor must not fit, or the residual is not what decides"
     );
     let original_verdict = select_once_with_curves(&contract, &original, budget(host_gb), request);
@@ -3167,7 +3170,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     // row and flip which row binds. At 32/16 the staged floor is 34 GiB raw, its admitted ceiling
     // sits back under the cap's, and the cap row is again the binding one — the premise this test
     // exists to exercise. The window assertions below check that ordering rather than assume it.
-    let contract = fixture_contract(32, 16, &[MemoryStrategy::StagedResidency]);
+    let contract = fixture_contract(90, 45, &[MemoryStrategy::StagedResidency]);
     let generator = fixture_generator(Some(contract.clone()));
     let mut curves = fixture_curve_bundle();
     // Structural fixture only: extend the copy to the 297-frame cap. Production remains bounded by
@@ -3259,7 +3262,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     // admitted behind the allowance on its 18 GiB activation term (`mlx_widened_gb`) — the
     // allowance is a fraction of the activation term, not a second copy of it.
     assert!(
-        host_gb < mlx_widened_gb(32 + FIXTURE_HEADROOM_GIB, 0.0),
+        host_gb < mlx_widened_gb(90 + FIXTURE_HEADROOM_GIB, 0.0),
         "the staged-not-resident window must exist: {host_gb}"
     );
 

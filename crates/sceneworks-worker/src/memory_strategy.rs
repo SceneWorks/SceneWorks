@@ -791,23 +791,29 @@ fn select_strategy_with_allowance_credit(
                 }
             }
         }
-        // sc-18096: any eligible MEASURED candidate at this rung supersedes every estimate at the
-        // rung. An estimate exists to cover a rung nobody measured; where a measurement exists it
-        // is authoritative in both directions, including "this rung's measured peak does not
-        // fit", which a synthesized guess must not overrule on a fatal-OOM lane.
-        let eligible = {
-            let rung_has_measured = eligible
-                .iter()
-                .any(|(_, grade, _)| *grade == CandidateGrade::Measured);
-            eligible
-                .iter()
-                .filter(|(_, grade, _)| match grade {
-                    CandidateGrade::Measured => true,
-                    CandidateGrade::Estimate => !rung_has_measured,
-                })
-                .copied()
-                .collect::<Vec<_>>()
-        };
+        // A measurement supersedes an estimate of the SAME execution. It cannot suppress
+        // a distinct staged composition or smaller tile/window that the measurement never ran.
+        let eligible = eligible
+            .iter()
+            .filter(|(candidate, grade, _)| {
+                *grade == CandidateGrade::Measured
+                    || !eligible.iter().any(|(measured, measured_grade, _)| {
+                        *measured_grade == CandidateGrade::Measured
+                            && {
+                                let mut measured_bounds = measured.selection.parameters;
+                                let mut estimated_bounds = candidate.selection.parameters;
+                                // Explicit staging and a staging prerequisite execute identically.
+                                // Composition below carries that fact; the override spelling does not.
+                                measured_bounds.stage_residency = None;
+                                estimated_bounds.stage_residency = None;
+                                measured_bounds == estimated_bounds
+                            }
+                            && measured.evidence.key.engaged_composition
+                                == candidate.evidence.key.engaged_composition
+                    })
+            })
+            .copied()
+            .collect::<Vec<_>>();
         if eligible.is_empty() {
             accumulate_reason(
                 &mut first_unknown,
@@ -831,8 +837,15 @@ fn select_strategy_with_allowance_credit(
             })
             .max_by(
                 |(left, left_grade, left_peak), (right, right_grade, right_peak)| {
-                    left_peak
-                        .cmp(right_peak)
+                    let unstaged = |candidate: &Candidate<'_>| {
+                        !contract.engages_selection(
+                            &candidate.selection,
+                            MemoryStrategy::StagedResidency,
+                        )
+                    };
+                    unstaged(left)
+                        .cmp(&unstaged(right))
+                        .then_with(|| left_peak.cmp(right_peak))
                         // The normative precedence breaks peak ties between distinct keys too
                         // (measured > estimate); on an all-measured set this arm is always `Equal`,
                         // so pre-sc-18095 selection is byte-for-byte unchanged.
@@ -898,9 +911,7 @@ fn select_strategy_with_allowance_credit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ladder_margin_policy::{
-        AdmissionTerm, CANDLE_RECAPTURE_SPREAD, FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
-    };
+    use crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
     use gen_core::{
         LoadShape, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
         MemoryCalibrationIdentity, MemoryConformanceState, MemoryEvidenceDimensions,
@@ -2193,6 +2204,7 @@ mod tests {
     /// Every parameter an engaged rung owns, for a selection at `strategy` on [`contract`].
     fn cumulative_params(strategy: MemoryStrategy) -> MemoryStrategyParameters {
         MemoryStrategyParameters {
+            stage_residency: None,
             decode_tile_edge: strategy
                 .engages(MemoryStrategy::BoundedDecode)
                 .then_some(512),
@@ -2985,11 +2997,9 @@ mod tests {
         assert!((image_admitted as f64) < raw as f64 * (1.0 + 0.5040734033902377));
     }
 
-    /// sc-22508 E3, at the selector seam: a FLOOR's allowance is charged against its declared
-    /// headroom term, so two floors with identical headroom and wildly different counted weights
-    /// receive the same allowance in bytes. No fraction-of-the-peak margin can satisfy this.
+    /// Active working-set uncertainty scales with the complete peak, without cached bytes.
     #[test]
-    fn a_floors_allowance_tracks_its_headroom_term_not_its_counted_weights() {
+    fn mlx_floor_uncertainty_tracks_active_peak_without_cache() {
         let provider = contract();
         let headroom_bytes = (6.0 * BYTES_PER_GIB) as u64;
         let small = (10.0 * BYTES_PER_GIB) as u64 + headroom_bytes;
@@ -3019,25 +3029,14 @@ mod tests {
         let small_allowance = admitted_peak_bytes(subject(&small_candidate), small) - small;
         let large_allowance = admitted_peak_bytes(subject(&large_candidate), large) - large;
 
-        assert_eq!(
-            crate::ladder_margin_policy::admission_allowance(subject(&small_candidate)).term,
-            AdmissionTerm::AllocatorEnvelopeOverActivation
-        );
-        assert_eq!(
-            small_allowance,
-            (headroom_bytes as f64 * FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE).ceil() as u64
-        );
-        assert_eq!(
-            small_allowance, large_allowance,
-            "a 10x larger weights term must not buy a larger allowance — the allowance belongs to \
-             the headroom, which is identical here"
-        );
-        // A whole-peak margin would have charged the big floor ~10x more; state that directly so
-        // reintroducing one cannot pass.
-        assert!(
-            large_allowance * 2 < large,
-            "the allowance must stay a term-sized number, not a fraction of a 106 GiB peak"
-        );
+        for (peak, allowance) in [(small, small_allowance), (large, large_allowance)] {
+            assert_eq!(
+                allowance,
+                (peak as f64 * crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD).ceil() as u64
+            );
+            assert!(allowance < peak / 5);
+        }
+        assert!(large_allowance > small_allowance);
     }
 
     /// sc-18096: a fully estimate-backed ladder walks down to rung 4 under pressure, exactly like

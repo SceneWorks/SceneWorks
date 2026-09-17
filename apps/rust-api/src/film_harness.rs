@@ -38,6 +38,7 @@
 //! outright when the directory already holds a run record, and `replace_take` refuses while the
 //! shot still has an unsettled attempt; neither is a substitute for not starting two at once.
 
+pub mod references;
 pub mod review;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,15 +50,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, DispatchContext, ResolvedConditioning,
+    compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
+    ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
-    HardwareRecord, IntendedState, ModelLane, ModelRecord, PlanDiagnostic, ProductionDecision,
-    ProductionPlan, ReferenceAssetRecord, ReferencePack, ReviewFlag, RunOutcome, RunRecord,
-    RunState, RunStop, ShotOutcome, ShotRunRecord, SoundBed, SoundBus, SourceDocument, TakeRecord,
-    TakeRejection, TimelineEditRecord, TimelineItemRecord, TimelineRecord, TimelineTrackRecord,
-    RUN_RECORD_SCHEMA_VERSION,
+    HardwareRecord, IntendedState, ModelEntries, ModelLane, ModelRecord, PlanDiagnostic,
+    ProductionDecision, ProductionPlan, ReferenceAssetRecord, ReferencePack, ReviewFlag,
+    RunOutcome, RunRecord, RunState, RunStop, ShotOutcome, ShotRunRecord, SoundBed, SoundBus,
+    SourceDocument, TakeRecord, TakeRejection, TimelineEditRecord, TimelineItemRecord,
+    TimelineRecord, TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
 };
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
@@ -97,7 +99,7 @@ const ASPECT_TIE_EPSILON: f64 = 1e-9;
 /// reports `memoryGb` as the worker's `memoryTotalMb / 1024`, and the manifests' `minMemoryGb` are
 /// written in the same base, so `limits.maxMemoryGb` is a GiB budget and an observed peak in bytes
 /// has to be divided by 1024^3 to be compared with it.
-const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+pub(crate) const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Tag every harness-imported APPROVED reference carries beside its role tag.
 const REFERENCE_TAG: &str = "film-harness-reference";
@@ -155,13 +157,37 @@ pub struct ApiResponse {
     pub body: Value,
 }
 
+/// The API's answer to a file request: HTTP status plus the raw body. A non-2xx body is kept as-is
+/// so a refusal's JSON detail can still be read out of it.
+#[derive(Debug, Clone)]
+pub struct BytesResponse {
+    pub status: u16,
+    pub bytes: Vec<u8>,
+}
+
 pub type TransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ApiResponse, HarnessError>> + Send + 'a>>;
+
+pub type BytesTransportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BytesResponse, HarnessError>> + Send + 'a>>;
 
 /// The harness's only dependency on the outside world. Implemented over `reqwest` for the binary
 /// and over an in-process `axum::Router` in tests.
 pub trait ApiTransport: Send + Sync {
     fn call(&self, request: ApiRequest) -> TransportFuture<'_>;
+
+    /// GET a file the API serves as BYTES rather than as JSON — a project's stored media
+    /// (`/api/v1/projects/:id/files/*path`). Two callers share it: `make-references` (sc-23403)
+    /// downloads a rendered plate into the pack directory, and a synthesized dialogue clip
+    /// (sc-23404) reaches the pack directory the same way.
+    ///
+    /// A separate method rather than a flag on [`ApiRequest`] because the two answers have
+    /// different shapes: [`ApiResponse`] parses its body as JSON, and neither a PNG nor a WAV is
+    /// JSON. It is the
+    /// download seam, so it must go through the transport like every other request: `--api` may
+    /// legitimately point at a SceneWorks API on another machine on the private network, whose
+    /// project directory this process cannot read.
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_>;
 }
 
 #[derive(Debug)]
@@ -505,22 +531,6 @@ pub(crate) async fn job_peak_memory_bytes(
         .await
         .and_then(|metrics| metrics.get("peakMemoryBytes").and_then(Value::as_u64))
         .filter(|bytes| *bytes > 0)
-}
-
-/// The catalog entry for `model_id`, against a bare transport.
-pub(crate) async fn model_entry_for(
-    transport: &dyn ApiTransport,
-    model_id: &str,
-) -> Result<Option<JsonObject<String, Value>>, HarnessError> {
-    let control = RunControl::new();
-    resolve_model_entry(
-        &Client {
-            transport,
-            control: &control,
-        },
-        model_id,
-    )
-    .await
 }
 
 /// The API host's facts, against a bare transport: the platform whose lane and reachability gate a
@@ -1082,8 +1092,206 @@ async fn resolve_model_entry(
         .cloned())
 }
 
+/// The catalog entries one plan's shots may dispatch as (sc-23402): the declared model, plus the
+/// family's reference partition when some shot of THIS plan binds reference roles.
+///
+/// It owns the entries because `Prepared` outlives the request that fetched them;
+/// [`PlanCatalog::entries`] is the borrowed view every validator and the compiler read.
+pub(crate) struct PlanCatalog {
+    model_id: String,
+    base: Option<JsonObject<String, Value>>,
+    /// The reference partition this plan needs, when it needs one. `Some(id)` with a `None`
+    /// `reference` is a partition the catalog does not serve — named per shot by the validator.
+    reference_id: Option<String>,
+    reference: Option<JsonObject<String, Value>>,
+}
+
+impl PlanCatalog {
+    /// The borrowed view, or `None` when the plan's own model is not in the catalog at all (which
+    /// [`model_entry_findings`] has already reported).
+    pub(crate) fn entries(&self) -> Option<ModelEntries<'_>> {
+        let base = self.base.as_ref()?;
+        Some(ModelEntries::with_reference_partition(
+            &self.model_id,
+            base,
+            self.reference_id.as_deref().zip(self.reference.as_ref()),
+        ))
+    }
+
+    pub(crate) fn base_entry(&self) -> Option<&JsonObject<String, Value>> {
+        self.base.as_ref()
+    }
+
+    /// The family's reference partition as the catalog actually SERVES it (sc-23405), or `None`
+    /// when this catalog was not asked for one or the API has no such entry.
+    ///
+    /// This is the fact the planner's capability envelope widens on: the reference entry's own
+    /// `capabilities` and `limits.maxReferenceAssets` are what a reference shot dispatches against,
+    /// and an envelope built from a partition the catalog does not serve would hand the planner a
+    /// mode whose every use is refused by `missing_partition_finding` on each repair round.
+    pub(crate) fn reference_entry(&self) -> Option<(&str, &JsonObject<String, Value>)> {
+        self.reference_id.as_deref().zip(self.reference.as_ref())
+    }
+}
+
+/// The entry-level gate — catalog presence, video type, install state, platform reachability.
+///
+/// The base partition is always gated. The reference partition is gated only when
+/// `gate_reference` says THIS invocation will load it (sc-23402): the reference DiT is a separate
+/// 18.78 GB download with its own install state, so a run that discovers it uninstalled at
+/// dispatch has already spent the base checkpoint's load — but references are OPTIONAL (E1), and a
+/// caller that will never load those weights must not be asked to have them on disk.
+///
+/// `validate`/`run` pass whether a SELECTED shot resolves to it. The planner (sc-23405) has no
+/// draft yet, so it passes the PACK-AND-CATALOG gate instead —
+/// `PlannerCapabilities::offers_references`, true only when the catalog serves a reference
+/// partition AND the chosen pack approves at least one reference the mode could bind
+/// ([`sceneworks_core::film_plan::BINDABLE_REFERENCE_KINDS`]). That is exactly the condition under
+/// which the envelope offers `reference_to_video` at all, so the weights are demanded only when
+/// the plan the planner is allowed to draft could need them.
+///
+/// A partition the catalog does not serve at all is deliberately NOT reported here: the per-shot
+/// validator names it together with the shot that needs it, which is the actionable form.
+pub(crate) fn catalog_entry_findings(
+    catalog: &PlanCatalog,
+    tier: Option<&str>,
+    require_installed: bool,
+    facts: &HostFacts,
+    gate_reference: bool,
+) -> Vec<PlanDiagnostic> {
+    let mut findings = model_entry_findings(
+        &catalog.model_id,
+        catalog.base_entry(),
+        tier,
+        require_installed,
+        facts,
+    );
+    if !gate_reference {
+        return findings;
+    }
+    if let (Some(reference_id), Some(reference)) =
+        (catalog.reference_id.as_deref(), catalog.reference.as_ref())
+    {
+        findings.extend(model_entry_findings(
+            reference_id,
+            Some(reference),
+            tier,
+            require_installed,
+            facts,
+        ));
+    }
+    findings
+}
+
+/// Whether some SELECTED shot resolves to the family's reference partition — which is what decides
+/// whether that partition's install state and platform reachability are gated (sc-23402 review).
+///
+/// Plan-level validation of the DOCUMENT stays whole-plan: a `--shots SH020` run is still refused
+/// for a malformed SH010, and the reference entry is still resolved so SH010's declared caps can be
+/// judged. Only the install gate follows the selection, because only the selected shots are
+/// dispatched and only their partitions are ever loaded.
+fn selection_needs_reference(plan: &ProductionPlan, selection: Option<&[String]>) -> bool {
+    plan.shots
+        .iter()
+        .filter(|shot| match selection {
+            Some(ids) => ids.iter().any(|id| id == &shot.id),
+            None => true,
+        })
+        .any(|shot| !shot.conditioning.reference_roles.is_empty())
+}
+
+/// Resolve the catalog entries a plan or brief on `model_id` may dispatch as, against a bare
+/// transport. `include_reference` asks for the family's reference partition too — what the PLANNER
+/// needs, since the draft it is about to produce may bind reference roles.
+pub(crate) async fn plan_catalog_for(
+    transport: &dyn ApiTransport,
+    model_id: &str,
+    include_reference: bool,
+) -> Result<PlanCatalog, HarnessError> {
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    resolve_catalog(&client, model_id, include_reference).await
+}
+
+/// The ids `GET /api/v1/loras` reports INSTALLED on the API host (sc-23406).
+///
+/// On the transport rather than off the local catalog for the same reason the model entries are:
+/// `--api` may point at another machine, and which adapters are on ITS disk is the only answer
+/// that decides whether a plan naming one will enqueue.
+pub(crate) async fn installed_lora_ids(
+    transport: &dyn ApiTransport,
+) -> Result<Vec<String>, HarnessError> {
+    let control = RunControl::new();
+    let client = Client {
+        transport,
+        control: &control,
+    };
+    let catalog = client.expect_ok("GET", "/api/v1/loras", None).await?;
+    Ok(catalog
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lora| lora.get("installState").and_then(Value::as_str) == Some("installed"))
+        .filter_map(|lora| lora.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The family's reference partition when THIS plan needs it: some shot binds reference roles and
+/// the declared model's family splits reference conditioning into a second catalog entry. A plan
+/// whose shots bind none never resolves it, so a run that needs only the base checkpoint neither
+/// demands the reference weights be installed nor prices their memory.
+fn plan_reference_partition(plan: &ProductionPlan) -> Option<String> {
+    if !plan
+        .shots
+        .iter()
+        .any(|shot| !shot.conditioning.reference_roles.is_empty())
+    {
+        return None;
+    }
+    film_plan::reference_partition_for(&plan.model.id).map(str::to_owned)
+}
+
+/// Resolve every catalog entry `plan` may dispatch as.
+async fn resolve_plan_catalog(
+    client: &Client<'_>,
+    plan: &ProductionPlan,
+) -> Result<PlanCatalog, HarnessError> {
+    resolve_catalog(
+        client,
+        &plan.model.id,
+        plan_reference_partition(plan).is_some(),
+    )
+    .await
+}
+
+async fn resolve_catalog(
+    client: &Client<'_>,
+    model_id: &str,
+    include_reference: bool,
+) -> Result<PlanCatalog, HarnessError> {
+    let base = resolve_model_entry(client, model_id).await?;
+    let reference_id = include_reference
+        .then(|| film_plan::reference_partition_for(model_id))
+        .flatten()
+        .map(str::to_owned);
+    let reference = match reference_id.as_deref() {
+        Some(id) => resolve_model_entry(client, id).await?,
+        None => None,
+    };
+    Ok(PlanCatalog {
+        model_id: model_id.to_owned(),
+        base,
+        reference_id,
+        reference,
+    })
+}
+
 /// Whether the catalog reports the requested tier (or, with no tier named, the model) installed.
-fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
+pub(crate) fn model_tier_installed(entry: &JsonObject<String, Value>, tier: Option<&str>) -> bool {
     if let Some(tier) = tier {
         if let Some(variants) = entry.get("variants").and_then(Value::as_array) {
             if let Some(variant) = variants
@@ -1128,6 +1336,38 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
     }))
 }
 
+/// [`primary_weights`] for EVERY partition the SELECTED shots resolve to, keyed by catalog model id
+/// (sc-23402 review).
+///
+/// `ModelRecord::weights` names the declared model's download row only, so on a mixed run nothing
+/// recorded the `transformer_ref` rows that produced the reference takes. Keyed by partition so a
+/// reader can pair a take's `model` with the files behind it. A partition the catalog does not
+/// serve contributes no entry — the run is already refused for it by name.
+fn partition_weights(
+    plan: &ProductionPlan,
+    entries: &ModelEntries<'_>,
+    tier: Option<&str>,
+    selection: &[String],
+) -> BTreeMap<String, Value> {
+    let mut weights = BTreeMap::new();
+    let selected = ProductionPlan {
+        shots: plan
+            .shots
+            .iter()
+            .filter(|shot| selection.iter().any(|id| id == &shot.id))
+            .cloned()
+            .collect(),
+        ..plan.clone()
+    };
+    for partition in entries.partitions_used(&selected) {
+        let (id, entry) = entries.resolve_shot_partition_entry(&partition);
+        if let Some(row) = entry.and_then(|entry| primary_weights(entry, tier)) {
+            weights.insert(id.to_owned(), row);
+        }
+    }
+    weights
+}
+
 /// The compiled requests this run dispatches: the document beside the plan when there is one, else
 /// the plan compiled in memory with its authored prompts (the hand-authored path). Either way the
 /// job bodies come from [`CompiledRequest::to_job_body`], so what a reviewer reads in
@@ -1135,7 +1375,7 @@ fn primary_weights(entry: &JsonObject<String, Value>, tier: Option<&str>) -> Opt
 fn compiled_for_run(
     plan: &ProductionPlan,
     pack: &ReferencePack,
-    entry: &JsonObject<String, Value>,
+    entries: &ModelEntries<'_>,
     lane: ModelLane,
     plan_sha256: &str,
     supplied: Option<CompiledPlan>,
@@ -1148,7 +1388,7 @@ fn compiled_for_run(
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
             let mut findings = compiled.staleness_findings(plan, plan_sha256);
             if findings.is_empty() {
-                findings = compiled.conformance_findings(plan, entry, lane);
+                findings = compiled.conformance_findings(plan, entries, lane);
             }
             if findings.is_empty() {
                 Ok(compiled)
@@ -1160,7 +1400,7 @@ fn compiled_for_run(
             plan,
             pack,
             &CompileInputs {
-                model_entry: entry,
+                entries,
                 lane: lane.manifest_key(),
                 plan_sha256,
                 compiled_at: &utc_now(),
@@ -1181,6 +1421,101 @@ fn compiled_for_run(
 /// enqueuing a second render for the same attempt.
 pub fn idempotency_key(run_id: &str, shot_id: &str, attempt: u32) -> String {
     format!("{run_id}:{shot_id}:a{attempt}")
+}
+
+/// The key one dialogue synthesis dispatches under (sc-23404).
+///
+/// Keyed on the CONTENT as well as the role — model, voice and the trimmed line — rather than on
+/// the role alone. A role-only key would be stable across restarts too, but it would also make
+/// re-casting a line (a new voice, a rewritten line) adopt the job that spoke the OLD one, and the
+/// film would quietly keep saying the wrong thing.
+///
+/// `attempt` is the retry axis, the render key's `a{n}` under a different name: a synthesis that
+/// FAILED must be re-dispatched by the next resume, and a key without it would find the failed job
+/// and re-read the same failure forever. Every part is stable across restarts — the run id is in
+/// the record, the content is in the pack, and the attempt is in the record.
+pub fn dialogue_idempotency_key(
+    run_id: &str,
+    role: &str,
+    model: &str,
+    voice: Option<&str>,
+    text: &str,
+    attempt: u32,
+) -> String {
+    let digest =
+        sha256_hex(format!("{model}\n{}\n{}", voice.unwrap_or(""), text.trim()).as_bytes());
+    format!("{run_id}:sound:{role}:{}:a{attempt}", &digest[..12])
+}
+
+/// Where a synthesized line's WAV lands in the pack directory when the entry pins no `file`.
+///
+/// Deterministic in the role and the line, so the same pack run twice writes the same name and a
+/// resume finds the clip it wrote — and so a changed line is a different file rather than a silent
+/// overwrite of the one the last export used.
+pub fn synthesized_sound_file(role: &str, text_sha256: &str) -> String {
+    let digest: String = text_sha256.chars().take(12).collect();
+    format!("sound/{role}.tts-{digest}.wav")
+}
+
+/// The `type: audio` asset one completed `audio_generate` job produced: its id and its
+/// project-relative media path.
+///
+/// Read off the job result the API rewrote from the worker's `assetWrites` (the same `assets` block
+/// [`take_from_result`] reads a render out of), not off the worker's own fact — the rewrite is what
+/// says the asset is actually persisted.
+fn audio_asset_from_result(result: &Value) -> Option<(String, String)> {
+    let asset = result.get("assets")?.as_array()?.first()?;
+    let id = asset.get("id")?.as_str()?.to_owned();
+    let path = asset.pointer("/file/path")?.as_str()?.to_owned();
+    (!path.is_empty()).then_some((id, path))
+}
+
+/// Download one of a project's stored media files over the API.
+///
+/// Through the transport, not off the disk: `--api` may point at a SceneWorks API elsewhere on the
+/// private network, whose project directory this process cannot read.
+async fn download_media(
+    transport: &dyn ApiTransport,
+    project_id: &str,
+    media_path: &str,
+) -> Result<Vec<u8>, HarnessError> {
+    if !is_safe_media_path(media_path) {
+        return Err(HarnessError::Transport(format!(
+            "the API reported the file at {media_path:?}, which is not a plain relative media \
+             path inside the project"
+        )));
+    }
+    let path = format!("/api/v1/projects/{project_id}/files/{media_path}");
+    let response = transport.get_bytes(path.clone()).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(HarnessError::Api {
+            method: "GET",
+            path,
+            status: response.status,
+            detail: api_detail(&serde_json::from_slice(&response.bytes).unwrap_or(Value::Null)),
+        });
+    }
+    if response.bytes.is_empty() {
+        return Err(HarnessError::Transport(format!(
+            "GET {path} returned an empty file"
+        )));
+    }
+    Ok(response.bytes)
+}
+
+/// A project-relative media path that is safe to interpolate into the file route: no absolute
+/// path, no `..`, no escaping or encoding needed.
+fn is_safe_media_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == ".."
+                || segment == "."
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
 }
 
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
@@ -1410,8 +1745,14 @@ pub async fn validate(
         // checked against and which platform the route's reachability gate is judged on, so the
         // model checks cannot run before it is known.
         let facts = discover_host(&client).await?;
-        let entry = resolve_model_entry(&client, &plan.model.id).await?;
-        let mut findings = model_findings(&plan, entry.as_ref(), options.require_installed, &facts);
+        let catalog = resolve_plan_catalog(&client, &plan).await?;
+        let mut findings = model_findings(
+            &plan,
+            &catalog,
+            options.require_installed,
+            &facts,
+            options.shot_ids.as_deref(),
+        );
         if findings.is_empty() {
             findings.extend(host_findings(&plan, &facts, options.export));
         }
@@ -1420,8 +1761,9 @@ pub async fn validate(
         // `execute_run` reads every field but the prompt straight out of it, so this is the only
         // place a hand-edited request meets the model's declared menus (sc-22713 review).
         if findings.is_empty() {
-            if let (Some((compiled, path)), Some(entry)) = (compiled.as_ref(), entry.as_ref()) {
-                let mut conformance = compiled.conformance_findings(&plan, entry, facts.lane());
+            if let (Some((compiled, path)), Some(entries)) = (compiled.as_ref(), catalog.entries())
+            {
+                let mut conformance = compiled.conformance_findings(&plan, &entries, facts.lane());
                 if !conformance.is_empty() {
                     findings.push(compiled_document_header(path));
                     findings.append(&mut conformance);
@@ -1523,13 +1865,20 @@ fn platform_reachability_finding(
 /// that depend on the PLAN — how many references a shot carries, and the model/mode spelling.
 fn reference_payload_findings(
     plan: &ProductionPlan,
-    entry: &JsonObject<String, Value>,
+    entries: &ModelEntries<'_>,
 ) -> Vec<PlanDiagnostic> {
-    let value = Value::Object(entry.clone());
     let mut findings = Vec::new();
     for shot in &plan.shots {
+        // The gate runs on the payload this shot will ACTUALLY produce, which on a split family
+        // names the resolved partition and carries that entry's caps (sc-23402). A shot whose
+        // partition is not in the catalog is already a finding from the validator.
+        let (partition, partition_entry) = entries.resolve_shot(shot);
+        let Some(partition_entry) = partition_entry else {
+            continue;
+        };
+        let value = Value::Object(partition_entry.clone());
         let mut payload = JsonObject::new();
-        payload.insert("model".to_owned(), json!(plan.model.id));
+        payload.insert("model".to_owned(), json!(partition.model_id));
         payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
         payload.insert(
             "referenceAssetIds".to_owned(),
@@ -1594,26 +1943,27 @@ pub(crate) fn model_entry_findings(
 
 fn model_findings(
     plan: &ProductionPlan,
-    entry: Option<&JsonObject<String, Value>>,
+    catalog: &PlanCatalog,
     require_installed: bool,
     facts: &HostFacts,
+    selection: Option<&[String]>,
 ) -> Vec<PlanDiagnostic> {
-    let mut findings = model_entry_findings(
-        &plan.model.id,
-        entry,
+    let mut findings = catalog_entry_findings(
+        catalog,
         plan.model.tier.as_deref(),
         require_installed,
         facts,
+        selection_needs_reference(plan, selection),
     );
-    let Some(entry) = entry else {
+    let Some(entries) = catalog.entries() else {
         return findings;
     };
     findings.extend(film_plan::validate_plan_against_model(
         plan,
-        entry,
+        &entries,
         facts.lane(),
     ));
-    findings.extend(reference_payload_findings(plan, entry));
+    findings.extend(reference_payload_findings(plan, &entries));
     findings
 }
 
@@ -1660,31 +2010,56 @@ fn host_findings(plan: &ProductionPlan, facts: &HostFacts, export: bool) -> Vec<
 
 /// The model entry, host facts and fps a run needs once the documents themselves are valid.
 struct Prepared {
-    entry: JsonObject<String, Value>,
+    catalog: PlanCatalog,
     facts: HostFacts,
     fps: u32,
 }
 
+impl Prepared {
+    /// The plan's declared model entry. Present by construction: `prepare` only builds a
+    /// `Prepared` once the model findings are empty, which needs the entry.
+    fn base_entry(&self) -> &JsonObject<String, Value> {
+        self.catalog
+            .base_entry()
+            .expect("model findings are empty only with an entry")
+    }
+
+    fn entries(&self) -> ModelEntries<'_> {
+        self.catalog
+            .entries()
+            .expect("model findings are empty only with an entry")
+    }
+}
+
 /// Resolve the catalog entry and the host facts and judge the plan against both. `Ok(Err(findings))`
 /// is a refusal: the caller writes a `rejected` record and creates nothing.
+///
+/// `selection` is the shots THIS controller will dispatch (`None` = the whole plan). It scopes the
+/// reference partition's install gate only — the plan itself is still judged whole (sc-23402).
 async fn prepare(
     client: &Client<'_>,
     plan: &ProductionPlan,
     export: bool,
     require_installed: bool,
+    selection: Option<&[String]>,
 ) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
     let facts = discover_host(client).await?;
-    let entry = resolve_model_entry(client, &plan.model.id).await?;
-    let mut findings = model_findings(plan, entry.as_ref(), require_installed, &facts);
+    let catalog = resolve_plan_catalog(client, plan).await?;
+    let mut findings = model_findings(plan, &catalog, require_installed, &facts, selection);
     if findings.is_empty() {
         findings.extend(host_findings(plan, &facts, export));
     }
     if !findings.is_empty() {
         return Ok(Err(findings));
     }
-    let entry = entry.expect("model findings are empty only with an entry");
-    let fps = film_plan::plan_fps(plan, &entry).expect("validated against the model");
-    Ok(Ok(Prepared { entry, facts, fps }))
+    let prepared = Prepared {
+        catalog,
+        facts,
+        fps: 0,
+    };
+    let fps =
+        film_plan::plan_fps(plan, prepared.base_entry()).expect("validated against the model");
+    Ok(Ok(Prepared { fps, ..prepared }))
 }
 
 /// One shot's selected take, resolved to everything the timeline needs.
@@ -1800,6 +2175,90 @@ struct Session<'a> {
 }
 
 impl Session<'_> {
+    /// The model id one shot dispatches as and why, read straight off the compiled request so the
+    /// attempt record, the job payload and `compiled.json` carry one string, not three derivations
+    /// of it (sc-23402). A shot with no compiled request cannot be dispatched at all, so the
+    /// fallback is only ever reached by a caller that is about to refuse.
+    fn resolved_partition(&self, shot_id: &str) -> (String, String) {
+        match self.compiled.request(shot_id) {
+            Some(request) => (request.model.clone(), request.partition_reason.clone()),
+            None => (self.plan.model.id.clone(), String::new()),
+        }
+    }
+
+    /// The EFFECTIVE reference-image short edge one shot dispatches at, or `None` for a shot that
+    /// encodes no reference (sc-23402). Read off the compiled request for the same reason
+    /// [`Session::resolved_partition`] is: the payload the route receives and the number the record
+    /// keeps are then one resolution, not two.
+    fn resolved_reference_short_edge(&self, shot_id: &str) -> Option<u32> {
+        self.compiled
+            .request(shot_id)
+            .and_then(CompiledRequest::effective_reference_image_short_edge)
+    }
+
+    /// The LoRAs one shot dispatches with, the step count it renders at, and the turbo video shift
+    /// that governs it (sc-23406) — all three read off the compiled request for the same reason
+    /// [`Session::resolved_partition`] is, so the payload the route receives and the numbers the
+    /// record keeps are one resolution rather than two.
+    fn resolved_sampling(&self, shot_id: &str) -> (Vec<String>, Option<u32>, Option<f64>) {
+        match self.compiled.request(shot_id) {
+            Some(request) => (
+                request.loras.clone(),
+                request.effective_steps,
+                request.turbo_scheduler_shift,
+            ),
+            None => (Vec::new(), None, None),
+        }
+    }
+
+    /// The partition one RECORDED attempt dispatched as, for the take it produced.
+    ///
+    /// A run record written before sc-23402 carries no `resolvedModelId` at all, and
+    /// `#[serde(default)]` reads that as `""` — so a resume that adopted such an attempt used to
+    /// record its take with `model: ""`, losing the only statement of which checkpoint made it.
+    /// An empty value falls back to this shot's resolved partition, which is exactly what the
+    /// first controller would have written, and the attempt row is BACKFILLED so the record
+    /// self-heals on the resume that touched it rather than staying blank forever.
+    fn dispatched_model_for(
+        &mut self,
+        shot_id: &str,
+        shot_index: usize,
+        attempt_index: usize,
+    ) -> String {
+        let recorded = self.record.shots[shot_index].attempts[attempt_index]
+            .resolved_model_id
+            .clone();
+        if !recorded.is_empty() {
+            return recorded;
+        }
+        let (model, reason) = self.resolved_partition(shot_id);
+        // Backfilled with the partition, and by the same rule (sc-23402): a pre-story record has no
+        // `referenceImageShortEdge` either, and the value this shot resolves to is what the first
+        // controller would have written. A base-partition shot resolves to `None`, so the absence
+        // stays an absence rather than becoming a number that never applied.
+        let short_edge = self.resolved_reference_short_edge(shot_id);
+        let sampling = self.resolved_sampling(shot_id);
+        let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
+        attempt.resolved_model_id = model.clone();
+        if attempt.partition_reason.is_empty() {
+            attempt.partition_reason = reason;
+        }
+        if attempt.reference_image_short_edge.is_none() {
+            attempt.reference_image_short_edge = short_edge;
+        }
+        // Same rule for the sampling provenance (sc-23406): a pre-story record carries none, and
+        // what this shot resolves to is what the first controller would have written.
+        if attempt.effective_steps.is_none() {
+            let (loras, steps, shift) = sampling;
+            if attempt.loras.is_empty() {
+                attempt.loras = loras;
+            }
+            attempt.effective_steps = steps;
+            attempt.turbo_scheduler_shift = shift;
+        }
+        model
+    }
+
     /// Total AUTOMATIC wall-clock this run has consumed, across every controller that has held it.
     /// A controller that does not charge the run budget contributes nothing here.
     fn elapsed(&self) -> f64 {
@@ -2093,7 +2552,7 @@ impl Session<'_> {
                     .filter_map(|shot| shot.dialogue_clip.as_ref().map(|clip| clip.role.clone())),
             )
             .collect();
-        let entries: Vec<film_plan::SoundEntry> = self
+        let mut entries: Vec<film_plan::SoundEntry> = self
             .pack
             .sound
             .iter()
@@ -2102,6 +2561,55 @@ impl Session<'_> {
             .collect();
         if entries.is_empty() {
             return Ok(());
+        }
+        // Speak every placed line that has no clip yet, BEFORE the listing below: synthesis creates
+        // assets and writes files, and the import pass that follows must see a pack directory that
+        // already holds them (sc-23404). Each entry comes back with the `file` synthesis wrote, so
+        // from here down a spoken line and a recorded one are the same thing.
+        //
+        // The worker preflight comes first and is scoped to the lines still OWED: a run whose clips
+        // are all already spoken needs no TTS worker at all (that is the `replace-take` case), and
+        // a run that does need one must be told so here rather than enqueue a job nobody claims and
+        // spend the whole per-job budget waiting for it. Same rule as the `video_generate` and
+        // `image_vqa` preflights — LIVE rows only.
+        let owed: Vec<&film_plan::SoundEntry> = entries
+            .iter()
+            .filter(|entry| entry.is_synthesized() && !self.line_already_spoken(entry))
+            .collect();
+        if !owed.is_empty() {
+            let roles: Vec<&str> = owed.iter().map(|entry| entry.role.as_str()).collect();
+            let workers = self
+                .client
+                .expect_ok("GET", "/api/v1/workers", None)
+                .await?;
+            let audio = live_worker_advertising(&workers, "audio_generate");
+            if audio.live.is_none() {
+                self.halt(
+                    RunOutcome::Failed,
+                    "no_audio_worker",
+                    format!(
+                        "the pack asks this run to speak {} ({}) but no live registered worker \
+                         advertises audio_generate{}; start a worker with the audio lane and \
+                         `film-harness resume` speaks them",
+                        roles.len(),
+                        roles.join(", "),
+                        stale_workers_detail(&audio.stale)
+                    ),
+                    true,
+                );
+                return Ok(());
+            }
+        }
+        for entry in &mut entries {
+            if !entry.is_synthesized() {
+                continue;
+            }
+            let Some(file) = self.synthesize_dialogue(&project_id, entry).await? else {
+                // Halted: the stop is recorded, the clips already spoken and imported stay where
+                // they are, and `drive_inner` stops before dispatching a render.
+                return Ok(());
+            };
+            entry.file = Some(file);
         }
         // ONE listing for the whole pass. It does double duty: it carries the stored duration of
         // every clip an earlier controller already imported, and the provenance that finds one it
@@ -2128,11 +2636,26 @@ impl Session<'_> {
                 .and_then(Value::as_f64)
                 .filter(|seconds| *seconds > 0.0)
         };
-        let recorded: BTreeMap<String, String> = self
+        // Keyed on (role, FILE), not on the role alone. `record.sound` is append-only and a role's
+        // clip is not immutable — a pack can re-cast a `dialogue` line or swap the recording a role
+        // points at — and a map keyed on the role alone would hand the bus back the asset made from
+        // the OLD file. The file is what the asset was made from, so it is what the adoption has to
+        // agree on.
+        //
+        // A GUARD rather than a live path: the pack-sha check in `open_session` means a changed
+        // pack is a new run, so today nothing can reach `ensure_sound` with a `record.sound` entry
+        // the entries disagree with. It costs one tuple and it means the adoption is correct on its
+        // own terms instead of correct only because something upstream refuses.
+        let recorded: BTreeMap<(String, String), String> = self
             .record
             .sound
             .iter()
-            .map(|clip| (clip.role.clone(), clip.asset_id.clone()))
+            .map(|clip| {
+                (
+                    (clip.role.clone(), clip.file.clone()),
+                    clip.asset_id.clone(),
+                )
+            })
             .collect();
         let pack_dir = self
             .pack_path
@@ -2140,7 +2663,16 @@ impl Session<'_> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         for entry in &entries {
-            if let Some(asset_id) = recorded.get(&entry.role) {
+            // Set on every entry by now: a recorded clip declares it, and a synthesized one was
+            // given it by `synthesize_dialogue` above. An entry with neither is a validation
+            // finding the run never gets past.
+            let file = entry.file.clone().ok_or_else(|| {
+                HarnessError::Transport(format!(
+                    "sound {:?} has no file to import; the pack declares neither `file` nor `text`",
+                    entry.role
+                ))
+            })?;
+            if let Some(asset_id) = recorded.get(&(entry.role.clone(), file.clone())) {
                 self.sound_assets.insert(
                     entry.role.clone(),
                     SoundAsset {
@@ -2150,7 +2682,7 @@ impl Session<'_> {
                 );
                 continue;
             }
-            let path = pack_dir.join(&entry.file);
+            let path = pack_dir.join(&file);
             let bytes = std::fs::read(&path)?;
             let sha256 = sha256_hex(&bytes);
             // A clip imported by THIS pass is not in the listing above (it was fetched before the
@@ -2163,7 +2695,7 @@ impl Session<'_> {
                         (asset_id, duration)
                     }
                     None => {
-                        self.import_sound(&project_id, entry, &path, &sha256)
+                        self.import_sound(&project_id, entry, &file, &path, &sha256)
                             .await?
                     }
                 };
@@ -2192,7 +2724,7 @@ impl Session<'_> {
             self.record.sound.push(ReferenceAssetRecord {
                 role: entry.role.clone(),
                 kind: entry.kind.clone(),
-                file: entry.file.clone(),
+                file: file.clone(),
                 sha256,
                 asset_id,
                 // A sound entry has no approval flag of its own: approval gates CONDITIONING, and
@@ -2204,6 +2736,395 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// Speak one `dialogue` entry's line through `POST /api/v1/audio/jobs` and leave the WAV in the
+    /// pack directory, so the import pass that follows treats it exactly as a pre-recorded clip
+    /// (sc-23404).
+    ///
+    /// Returns the pack-relative path the clip is at, or `None` when the run has HALTED — the job
+    /// failed, or it ran past a declared limit. A halt leaves everything already spoken and imported
+    /// in the record and stops `drive_inner` before the first render, so a resume picks the sequence
+    /// up where it is rather than re-speaking what is already there.
+    ///
+    /// Resume discipline is the renders': the idempotency key is stamped into the dispatched body's
+    /// `advanced.filmHarness` block and a controller that died between the POST and the record write
+    /// finds its OWN job by that key. What the key covers is model + voice + text + attempt, not
+    /// just the role — so a retry after a failure is a new job rather than a re-read of the same
+    /// failure.
+    ///
+    /// RE-CASTING a line is not something this run does: `resume` and `replace-take` refuse a pack
+    /// whose bytes no longer hash to what the run started from ("a changed reference pack is a new
+    /// run, not a resume"), so an edited line reaches this code only through a fresh `run`. The
+    /// content half of the key still earns its place inside ONE run: a line whose text or voice does
+    /// not match the record's is a new attempt rather than an adoption, which is what a record
+    /// carried over from an aborted earlier shape of the pack needs. When that happens the stale
+    /// `record.sound` entry is dropped with it — `record.sound` is append-only, and an entry naming
+    /// the old asset would otherwise be re-adopted by `ensure_sound` even where the pack pins
+    /// `file` and the clip's name never changed.
+    ///
+    /// The clip's filename is `<role>.<sha256(text)[..12]>.wav` unless the entry pins one with
+    /// `file`, in which case synthesis writes THERE — that is how a pack keeps a stable name for a
+    /// line it means to check in.
+    async fn synthesize_dialogue(
+        &mut self,
+        project_id: &str,
+        entry: &film_plan::SoundEntry,
+    ) -> Result<Option<String>, HarnessError> {
+        let role = entry.role.clone();
+        let text = entry
+            .synthesis_text()
+            .ok_or_else(|| {
+                HarnessError::Transport(format!("sound {role:?} declares an empty `text`"))
+            })?
+            .to_owned();
+        let model = entry.synthesis_model().to_owned();
+        let voice = entry.synthesis_voice().map(str::to_owned);
+        let text_sha256 = sha256_hex(text.as_bytes());
+        let file = entry
+            .file
+            .clone()
+            .unwrap_or_else(|| synthesized_sound_file(&role, &text_sha256));
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let destination = pack_dir.join(&file);
+
+        // 1. Adopt, continue, or start a new attempt. Exactly one record per role — the record says
+        //    what the film HAS, and two entries for one role would leave a reader guessing.
+        //
+        //    - The line this run already spoke, whose WAV is still where it was written: adopt it.
+        //      No second job, however many times the run is resumed.
+        //    - A record for the same line whose job has NOT ended: continue it under its own key,
+        //      which is the "died between the POST and the record write" window.
+        //    - A record whose job ENDED without a clip, or one made for a line the pack has since
+        //      re-cast: a NEW attempt under a NEW key. Re-polling the finished job under the old
+        //      key would make every resume re-read the same failure and never speak the line.
+        let existing = self
+            .record
+            .synthesized_sound
+            .iter()
+            .position(|line| line.role == role);
+        let continues = existing.is_some_and(|index| {
+            let line = &self.record.synthesized_sound[index];
+            line.matches(&model, voice.as_deref(), &text)
+        });
+        if continues {
+            let index = existing.expect("continues implies a record");
+            // Already IMPORTED: the clip is a project asset the dialogue bus is playing, so whether
+            // the WAV is still in the pack directory no longer matters — a cleaned pack, or a
+            // replacement running months later, must adopt rather than speak the line again.
+            let imported = self
+                .record
+                .sound
+                .iter()
+                .any(|clip| clip.role == role)
+                .then(|| self.record.synthesized_sound[index].file.clone())
+                .flatten();
+            if self.record.synthesized_sound[index].is_usable() {
+                if let Some(file) = imported {
+                    return Ok(Some(file));
+                }
+                if destination.is_file() {
+                    return Ok(Some(file));
+                }
+            }
+        }
+        let index = match existing {
+            Some(index) if continues && !self.record.synthesized_sound[index].is_terminal() => {
+                index
+            }
+            other => {
+                let attempt = other
+                    .map(|index| self.record.synthesized_sound[index].attempt + 1)
+                    .unwrap_or(1);
+                let fresh = film_plan::SynthesizedSoundRecord {
+                    role: role.clone(),
+                    text: text.clone(),
+                    text_sha256: text_sha256.clone(),
+                    model: model.clone(),
+                    voice: voice.clone(),
+                    attempt,
+                    idempotency_key: dialogue_idempotency_key(
+                        &self.record.run_id,
+                        &role,
+                        &model,
+                        voice.as_deref(),
+                        &text,
+                        attempt,
+                    ),
+                    job_id: None,
+                    status: "dispatching".to_owned(),
+                    asset_id: None,
+                    file: None,
+                    error: None,
+                    started_at: utc_now(),
+                    finished_at: None,
+                };
+                let index = match other {
+                    Some(index) => {
+                        self.record.synthesized_sound[index] = fresh;
+                        index
+                    }
+                    None => {
+                        self.record.synthesized_sound.push(fresh);
+                        self.record.synthesized_sound.len() - 1
+                    }
+                };
+                // A fresh attempt means the clip this film will play is NEW — a line this record
+                // does not match, or a retry after one that failed. `record.sound` is append-only,
+                // so an entry left from an earlier attempt still names the OLD asset and the import
+                // pass in `ensure_sound` would adopt it: the bus would go on saying the old thing
+                // in the old voice. Dropping it here is the half the (role, file) key cannot do,
+                // because a pack that PINS `file` re-casts a line without the clip's NAME ever
+                // changing — what changed is the `text_sha256` this record was just rewritten with.
+                //
+                // A GUARD, like that key: `open_session` refuses a pack whose bytes moved, so a
+                // re-cast is a new run and nothing today reaches this line with a stale clip. It is
+                // two statements, and it means the record cannot describe a film that says one
+                // thing and plays another.
+                self.record.sound.retain(|clip| clip.role != role);
+                self.sound_assets.remove(&role);
+                // Persisted BEFORE the job exists, exactly as an attempt is: that is what makes the
+                // key findable by the controller that comes back.
+                self.persist()?;
+                index
+            }
+        };
+        let key = self.record.synthesized_sound[index].idempotency_key.clone();
+        if self.canceled() {
+            self.halt(
+                RunOutcome::Canceled,
+                "canceled",
+                format!("canceled before the dialogue line for {role:?} was synthesized"),
+                true,
+            );
+            return Ok(None);
+        }
+
+        // 2. The job. Adopt one already created under this key before creating anything.
+        let mut job_id = self.record.synthesized_sound[index].job_id.clone();
+        if job_id.is_none() {
+            job_id = self
+                .client
+                .find_job_by_idempotency_key(project_id, &key)
+                .await?;
+        }
+        let created_here = job_id.is_none();
+        if job_id.is_none() {
+            let mut body = json!({
+                "projectId": project_id,
+                "prompt": text,
+                "model": model,
+                "requestedGpu": "auto",
+                "advanced": {
+                    "filmHarness": {
+                        "idempotencyKey": key,
+                        "kind": "dialogue",
+                        "role": role,
+                        "runId": self.record.run_id,
+                        "planId": self.plan.id,
+                        "planVersion": self.plan.version,
+                        "referencePackId": self.pack.id,
+                        "referencePackVersion": self.pack.version,
+                        "textSha256": text_sha256,
+                    }
+                }
+            });
+            if let Some(voice) = &voice {
+                body["voice"] = json!(voice);
+            }
+            let response = self
+                .client
+                .json("POST", "/api/v1/audio/jobs", Some(body))
+                .await?;
+            if !(200..300).contains(&response.status) {
+                // A refused enqueue is deterministic — an unknown voice, a model with no weights —
+                // so retrying it would refuse identically. Say which line, and stop.
+                let detail = format!(
+                    "POST /api/v1/audio/jobs -> {}: {}",
+                    response.status,
+                    api_detail(&response.body)
+                );
+                self.fail_synthesis(index, "rejected", detail.clone());
+                self.persist()?;
+                self.halt(
+                    RunOutcome::Failed,
+                    "dialogue_synthesis_refused",
+                    format!(
+                        "the dialogue line for sound role {role:?} could not be enqueued: \
+                         {detail}; fix the pack entry and `film-harness resume` speaks it"
+                    ),
+                    true,
+                );
+                return Ok(None);
+            }
+            job_id = Some(
+                response
+                    .body
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!(
+                            "audio job response has no id: {}",
+                            response.body
+                        ))
+                    })?
+                    .to_owned(),
+            );
+        }
+        let job_id = job_id.expect("set on every branch above");
+        {
+            let line = &mut self.record.synthesized_sound[index];
+            if created_here {
+                // Nothing has ever run under this key, so the clock starts here — the same reason a
+                // render's does (a record written by a controller that died before its POST landed
+                // must not be charged every hour since).
+                line.started_at = utc_now();
+            }
+            line.job_id = Some(job_id.clone());
+            line.status = "running".to_owned();
+        }
+        self.persist()?;
+
+        // 3. Wait for it, under the plan's own declared limits: one synthesis is bounded by
+        //    `limits.maxShotSeconds` (the same per-job budget the export runs under) and the run by
+        //    `limits.maxRunSeconds`. Neither is a new knob — a speech job is a job.
+        let started = Instant::now();
+        let (view, poll_stop) = self
+            .client
+            .wait_for_job(&job_id, self.bounds(started + self.shot_budget()))
+            .await?;
+        let status = match poll_stop {
+            PollStop::Terminal | PollStop::AssetsUnsettled => view.status.clone(),
+            PollStop::Operator => "canceled_by_operator".to_owned(),
+            PollStop::ShotBudget | PollStop::RunBudget => "timed_out".to_owned(),
+        };
+        let asset = (status == "completed")
+            .then(|| audio_asset_from_result(&view.result))
+            .flatten();
+        let Some((asset_id, media_path)) = asset else {
+            let detail = match poll_stop {
+                PollStop::Terminal => view.failure_text(),
+                PollStop::AssetsUnsettled => format!(
+                    "the synthesis job reached {} but its asset never settled",
+                    view.status
+                ),
+                PollStop::Operator => "canceled by operator during synthesis".to_owned(),
+                PollStop::ShotBudget => format!(
+                    "synthesis exceeded the per-job budget of {}s",
+                    self.plan.limits.max_shot_seconds
+                ),
+                PollStop::RunBudget => format!(
+                    "the run's {}s budget ran out during synthesis",
+                    self.plan.limits.max_run_seconds
+                ),
+            };
+            self.fail_synthesis(index, &status, detail.clone());
+            self.persist()?;
+            let (outcome, reason) = match poll_stop {
+                PollStop::Operator => (RunOutcome::Canceled, "canceled"),
+                PollStop::RunBudget => (RunOutcome::StoppedRunBudget, "run_budget"),
+                _ => (RunOutcome::Failed, "dialogue_synthesis_failed"),
+            };
+            // Resumable on every one of these: the clip is missing, nothing downstream has been
+            // written against it, and a resume re-dispatches this one line and continues. The rest
+            // of the sequence — the clips already spoken, the imports already made — is untouched.
+            self.halt(
+                outcome,
+                reason,
+                format!(
+                    "the dialogue line for sound role {role:?} was not synthesized ({detail}); \
+                     `film-harness resume` speaks it and continues the sequence"
+                ),
+                true,
+            );
+            return Ok(None);
+        };
+
+        // 4. The WAV, into the pack directory. The worker writes canonical PCM-16 RIFF/WAVE, which
+        //    is the one encoding `media_convert::is_canonical_pcm16_wav` copies through — so the
+        //    import below needs no ffmpeg for a clip this run spoke, which is what lets the hosted
+        //    macOS lane (no ffmpeg) exercise the whole path.
+        //
+        //    The bytes come over the TRANSPORT, like every other media hop the harness makes.
+        //    `--api` may legitimately name a private-network address, a `.local` name or a bare
+        //    hostname (docs/film-harness.md), and the API host "may be a different machine" — on
+        //    any such host reaching into its project directory is an io error, not a clip. The
+        //    local read survives only as a FAST PATH for the common loopback case, where the file
+        //    really is right there and copying it through HTTP buys nothing.
+        let source = self
+            .record
+            .project_path
+            .as_deref()
+            .map(|path| Path::new(path).join(&media_path))
+            .filter(|source| source.is_file());
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = match &source {
+            Some(source) => std::fs::read(source).map_err(|error| {
+                HarnessError::Io(format!(
+                    "the synthesis job for {role:?} reported {} but it could not be read: {error}",
+                    source.display()
+                ))
+            })?,
+            None => download_media(self.client.transport, project_id, &media_path).await?,
+        };
+        std::fs::write(&destination, &bytes)?;
+        {
+            let line = &mut self.record.synthesized_sound[index];
+            line.status = "completed".to_owned();
+            line.asset_id = Some(asset_id);
+            line.file = Some(file.clone());
+            line.error = None;
+            line.finished_at = Some(utc_now());
+        }
+        self.persist()?;
+        Ok(Some(file))
+    }
+
+    /// Whether this run has already spoken exactly this entry's line and still has the clip — the
+    /// same adoption test [`Session::synthesize_dialogue`] applies, read-only, so the TTS worker
+    /// preflight can be scoped to the lines that are actually still owed.
+    fn line_already_spoken(&self, entry: &film_plan::SoundEntry) -> bool {
+        let Some(text) = entry.synthesis_text() else {
+            return false;
+        };
+        let Some(line) = self
+            .record
+            .synthesized_sound
+            .iter()
+            .find(|line| line.role == entry.role)
+        else {
+            return false;
+        };
+        if !line.matches(entry.synthesis_model(), entry.synthesis_voice(), text)
+            || !line.is_usable()
+        {
+            return false;
+        }
+        if self.record.sound.iter().any(|clip| clip.role == entry.role) {
+            return true;
+        }
+        let pack_dir = self
+            .pack_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        line.file
+            .as_deref()
+            .is_some_and(|file| pack_dir.join(file).is_file())
+    }
+
+    /// Settle one synthesis record as unfinished, keeping whatever it already knew.
+    fn fail_synthesis(&mut self, index: usize, status: &str, detail: String) {
+        let line = &mut self.record.synthesized_sound[index];
+        line.status = status.to_owned();
+        line.error = Some(detail);
+        line.finished_at = Some(utc_now());
+    }
+
     /// Upload one pack sound clip, with the same `filmHarness` provenance a reference carries so a
     /// controller that dies before recording it can find it again.
     ///
@@ -2213,6 +3134,7 @@ impl Session<'_> {
         &self,
         project_id: &str,
         entry: &film_plan::SoundEntry,
+        file: &str,
         path: &Path,
         sha256: &str,
     ) -> Result<(String, Option<f64>), HarnessError> {
@@ -2232,7 +3154,11 @@ impl Session<'_> {
                 "planId": self.plan.id,
                 "planVersion": self.plan.version,
                 "runId": self.record.run_id,
-                "sourceFile": entry.file,
+                "sourceFile": file,
+                // Whether the clip was SPOKEN by this run rather than put on disk by a human
+                // (sc-23404), so a reader of the project's assets can tell them apart without the
+                // run record in hand.
+                "synthesized": entry.is_synthesized(),
                 "sha256": sha256,
             }
         });
@@ -2300,12 +3226,17 @@ impl Session<'_> {
             Some("webp") => "image/webp",
             _ => "image/png",
         };
-        let provenance = json!({
+        let mut provenance = json!({
             "filmHarness": {
                 "kind": "reference",
                 "role": reference.role,
                 "referenceKind": reference.kind,
                 "approved": reference.approved,
+                // sc-23403: whether this plate was GENERATED as a fixture or supplied by a person,
+                // carried onto the asset so the answer survives the pack document. It changes
+                // nothing else — a generated reference is imported, tagged and conditioned on
+                // exactly like any other, and `approved` remains the only gate.
+                "generated": reference.generated,
                 "referencePackId": self.pack.id,
                 "referencePackVersion": self.pack.version,
                 "planId": self.plan.id,
@@ -2315,6 +3246,22 @@ impl Session<'_> {
                 "sha256": sha256,
             }
         });
+        if let Some(generation) = reference.generation.as_ref() {
+            // A provenance block that cannot be serialized is a refusal, not a `null`: the whole
+            // point of `generated` is that the answer survives the pack document, and an asset
+            // stamped `"generation": null` would say the plate came from nowhere.
+            let block = serde_json::to_value(generation).map_err(|error| {
+                HarnessError::Io(format!(
+                    "cannot serialize the generation provenance for reference {:?}: {error}",
+                    reference.role
+                ))
+            })?;
+            provenance
+                .get_mut("filmHarness")
+                .and_then(Value::as_object_mut)
+                .expect("the provenance literal has a filmHarness object")
+                .insert("generation".to_owned(), block);
+        }
         let (boundary, body) = encode_asset_upload(&filename, content_type, &bytes, &provenance);
         let route = format!("/api/v1/projects/{project_id}/assets");
         let response = self
@@ -2533,9 +3480,19 @@ impl Session<'_> {
                     }
                     let number = self.record.shots[index].next_attempt_number();
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
+                    let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
+                    let reference_image_short_edge = self.resolved_reference_short_edge(&shot.id);
+                    let (loras, effective_steps, turbo_scheduler_shift) =
+                        self.resolved_sampling(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
                         attempt: number,
                         idempotency_key: key,
+                        resolved_model_id,
+                        partition_reason,
+                        reference_image_short_edge,
+                        loras,
+                        effective_steps,
+                        turbo_scheduler_shift,
                         job_id: None,
                         status: "dispatching".to_owned(),
                         started_at: utc_now(),
@@ -2720,8 +3677,11 @@ impl Session<'_> {
         let cancel_honoured = view.is_terminal();
         let settle_grace = ASSET_SETTLE_GRACE.min(self.shot_budget());
         let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
+        // The take names the partition that actually rendered it, not the plan's declared family
+        // model (sc-23402).
+        let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
-            .then(|| take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref()))
+            .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
             .flatten();
         {
             let attempt = &mut self.record.shots[shot_index].attempts[attempt_index];
@@ -2915,10 +3875,9 @@ impl Session<'_> {
             };
             let view = self.client.get_job(&job_id).await?;
             let terminal = view.is_terminal() && view.is_settled();
+            let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
             let take = (terminal && view.status == "completed")
-                .then(|| {
-                    take_from_result(&view.result, &self.plan.model.id, view.backend.as_deref())
-                })
+                .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
                 .flatten();
             let mut adopted_memory = None;
             if terminal {
@@ -3834,6 +4793,13 @@ impl Session<'_> {
         // means the sound of a run is settled by the time the first take exists, whichever entry
         // point is driving (sc-22712).
         self.ensure_sound().await?;
+        // A synthesis that failed, was cancelled or ran past a declared limit has already recorded
+        // its stop (sc-23404). Dispatching renders against a sequence that is missing a line would
+        // spend GPU hours on a film the operator would have to re-export anyway, so the run stops
+        // here with everything it has and `resume` speaks the missing line.
+        if self.stop.is_some() {
+            return Ok(false);
+        }
         self.work_shots().await?;
         self.assemble_and_export().await
     }
@@ -3919,7 +4885,15 @@ pub async fn run_with_control(
         }
         Err(other) => return Err(other),
     };
-    let prepared = match prepare(&client, &plan, options.export, options.require_installed).await? {
+    let prepared = match prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        options.shot_ids.as_deref(),
+    )
+    .await?
+    {
         Ok(prepared) => prepared,
         Err(findings) => {
             let mut record = base_record(&run_id, &plan, &pack, options, &plan_bytes, &pack_bytes);
@@ -3965,7 +4939,7 @@ pub async fn run_with_control(
     let compiled = compiled_for_run(
         &plan,
         &pack,
-        &prepared.entry,
+        &prepared.entries(),
         lane,
         &record.plan.sha256,
         supplied_compiled.map(|(compiled, _)| compiled),
@@ -3976,7 +4950,13 @@ pub async fn run_with_control(
         fps: prepared.fps,
         lane: lane.manifest_key().to_owned(),
         backend_observed: None,
-        weights: primary_weights(&prepared.entry, plan.model.tier.as_deref()),
+        weights: primary_weights(prepared.base_entry(), plan.model.tier.as_deref()),
+        partition_weights: partition_weights(
+            &plan,
+            &prepared.entries(),
+            plan.model.tier.as_deref(),
+            record.selected_shot_ids.as_slice(),
+        ),
         hardware: HardwareRecord {
             platform: prepared.facts.platform_or_local().to_owned(),
             // The host-capabilities route reports no arch, so this process's arch is the truth only
@@ -4093,9 +5073,17 @@ async fn continue_run(
         transport,
         control: &options.control,
     };
-    let prepared = prepare(&client, &plan, options.export, options.require_installed)
-        .await?
-        .map_err(HarnessError::Validation)?;
+    // A resume dispatches exactly the shots the first controller selected, so the reference
+    // partition's install gate follows the RECORD's selection, not the whole plan (sc-23402).
+    let prepared = prepare(
+        &client,
+        &plan,
+        options.export,
+        options.require_installed,
+        Some(&record.selected_shot_ids),
+    )
+    .await?
+    .map_err(HarnessError::Validation)?;
     // The requests the run was dispatching. A record that named a compiled document is held to it,
     // hash and all — re-reading the file the run started from is what keeps a resume from
     // dispatching an edited `compiled.json` under the takes the first controller already made, the
@@ -4130,7 +5118,7 @@ async fn continue_run(
     let compiled = compiled_for_run(
         &plan,
         &pack,
-        &prepared.entry,
+        &prepared.entries(),
         prepared.facts.lane(),
         &record.plan.sha256,
         supplied,
@@ -4399,9 +5387,18 @@ pub async fn replace_take(
     // Exactly one attempt, marked as the human decision it is so it never spends the plan's cap.
     let number = session.record.shots[index].next_attempt_number();
     let key = idempotency_key(&session.record.run_id, shot_id, number);
+    let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
+    let reference_image_short_edge = session.resolved_reference_short_edge(shot_id);
+    let (loras, effective_steps, turbo_scheduler_shift) = session.resolved_sampling(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
         idempotency_key: key,
+        resolved_model_id,
+        partition_reason,
+        reference_image_short_edge,
+        loras,
+        effective_steps,
+        turbo_scheduler_shift,
         job_id: None,
         status: "dispatching".to_owned(),
         started_at: utc_now(),
@@ -4438,10 +5435,18 @@ pub async fn replace_take(
         // re-derived an EMPTY dialogue track over the saved one and every line the run had placed
         // was dropped from the sequence — the beds only survived because a bed track with no
         // asset is skipped and then kept as "not the harness's". `ensure_sound` adopts the clips
-        // the record already names; it uploads nothing on this path.
+        // the record already names — including every line this run SPOKE (sc-23404) — so it
+        // uploads nothing and speaks nothing on this path.
         session.ensure_sound().await?;
-        // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
-        session.assemble_timeline().await?;
+        // A clip that could not be re-hydrated (its file gone from the pack, a re-synthesis that
+        // failed, no live TTS worker) leaves the session's map short, and re-assembling from a
+        // short map is exactly the deletion the call above exists to prevent. Leave the saved
+        // timeline alone and let the stop say so: the sequence keeps the sound it has, and the
+        // replacement's take is still recorded.
+        if session.stop.is_none() {
+            // Rewriting the timeline is a PUT, not a job: every other shot's item keeps its asset.
+            session.assemble_timeline().await?;
+        }
     } else {
         // The shot now has NO selected take, and the timeline was deliberately not rewritten (that
         // would drop the shot out of the sequence entirely). So the timeline — and the MP4 rendered
@@ -4471,7 +5476,14 @@ pub async fn replace_take(
     // Not re-exporting is a deliberate choice, not a failure: the replacement succeeded, the
     // existing MP4 is marked stale, and the run is as finished as this invocation was asked to make
     // it. Only a failed replacement leaves the run failed (with the stop set above).
-    let export_ok = if replaced && session.export {
+    //
+    // `session.stop.is_none()` gates the export for the same reason it gates the re-assembly above:
+    // a clip that could not be re-hydrated left the saved timeline deliberately untouched, so it is
+    // the STALE timeline — the one carrying the take the human just replaced — that an export would
+    // render from, and `run_export` writes `stale: false` over the `stale: true` set above,
+    // recording a fresh MP4 of old material as current. Leave the MP4 that exists, keep the record
+    // saying it is stale, and let the stop say why.
+    let export_ok = if replaced && session.export && session.stop.is_none() {
         session.run_export().await?
     } else {
         replaced
@@ -4615,6 +5627,7 @@ fn base_record(
         selected_shot_ids,
         references: Vec::new(),
         sound: Vec::new(),
+        synthesized_sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -4707,6 +5720,7 @@ fn rejected_record(
         selected_shot_ids: options.shot_ids.clone().unwrap_or_default(),
         references: Vec::new(),
         sound: Vec::new(),
+        synthesized_sound: Vec::new(),
         shots: Vec::new(),
         timeline: None,
         export: None,
@@ -4746,6 +5760,20 @@ pub const FIXTURE_PLATE_SIZE: (u32, u32) = (576, 320);
 /// image-conditioned model something other than a single colour.
 pub fn fixture_plate_png(role: &str, rgb: [u8; 3]) -> Result<Vec<u8>, HarnessError> {
     let (width, height) = FIXTURE_PLATE_SIZE;
+    fixture_plate_png_sized(role, rgb, width, height)
+}
+
+/// The same deterministic plate at an arbitrary canvas. The fixture plates are
+/// [`FIXTURE_PLATE_SIZE`]; a caller that must honour a REQUESTED geometry — the scripted image
+/// worker the sc-23403 tests drive, which answers `make-references` at the size the job asked for
+/// — names its own.
+pub fn fixture_plate_png_sized(
+    role: &str,
+    rgb: [u8; 3],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, HarnessError> {
+    let (width, height) = (width.max(16), height.max(16));
     let mut image = image::RgbImage::new(width, height);
     let seed = role.bytes().fold(7_u32, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(u32::from(byte))
@@ -4792,14 +5820,17 @@ pub fn write_fixture_images(out_dir: &Path) -> Result<Vec<PathBuf>, HarnessError
     Ok(written)
 }
 
-/// Placeholder sound for the fixture pack (sc-22712): `(role, seconds, hz, amplitude)`.
+/// Placeholder BED sound for the fixture pack (sc-22712): `(role, seconds, hz, amplitude)`.
 ///
 /// The two beds are long enough to play under the WHOLE six-shot sequence (6 x 5.1667s ~= 31s)
 /// without running out, because a bed that stops partway would make the one thing this fixture is
 /// meant to demonstrate — continuous sound across intentional cuts — unobservable.
+///
+/// The fixture's three DIALOGUE roles are NOT here (sc-23404): they carry `text` and are spoken by
+/// the run through the audio route, so there is no placeholder tone left to write for them. The
+/// tones were placeholders for exactly this, and a "with-dialogue" export that carried a 400 Hz
+/// beep instead of a line was the thing they were standing in for.
 pub const FIXTURE_SOUNDS: &[(&str, f64, u32, i16)] = &[
-    ("courier_line", 2.0, 400, 9000),
-    ("recipient_line", 2.0, 500, 9000),
     ("workshop_room_tone", 32.0, 100, 2600),
     ("main_theme", 32.0, 250, 3600),
 ];
@@ -4920,6 +5951,27 @@ impl ApiTransport for HttpTransport {
             Ok(ApiResponse { status, body })
         })
     }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        Box::pin(async move {
+            let url = format!("{}{}", self.base_url, path);
+            let mut builder = self.client.get(&url);
+            if let Some(token) = &self.token {
+                builder = builder.header("x-sceneworks-token", token);
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?;
+            let status = response.status().as_u16();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| HarnessError::Transport(format!("{url}: {error}")))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -5000,7 +6052,8 @@ mod unit_tests {
             .as_object()
             .cloned()
             .unwrap();
-        let findings = reference_payload_findings(&plan, &entry);
+        let findings =
+            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
         assert!(findings[0].message.contains("at most 9"), "{findings:?}");
@@ -5018,7 +6071,10 @@ mod unit_tests {
             }]
         }))
         .expect("plan parses");
-        assert!(reference_payload_findings(&plan, &entry).is_empty());
+        assert!(
+            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5367,6 +6423,12 @@ mod unit_tests {
         let attempt = |job_id: Option<&str>, started_at: &str| AttemptRecord {
             attempt: 1,
             idempotency_key: "run:SH010:a1".to_owned(),
+            resolved_model_id: "minimax_h3".to_owned(),
+            partition_reason: String::new(),
+            reference_image_short_edge: None,
+            loras: Vec::new(),
+            effective_steps: None,
+            turbo_scheduler_shift: None,
             job_id: job_id.map(str::to_owned),
             status: "dispatching".to_owned(),
             started_at: started_at.to_owned(),

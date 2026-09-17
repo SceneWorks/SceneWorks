@@ -1283,6 +1283,52 @@ pub(crate) struct MlxRequestInputs {
     pub reference_count: u32,
     pub use_pid: bool,
     pub has_phases: bool,
+    /// Conservative count of CLIP windows for the actual positive/negative prompt pair.
+    /// None means the caller has not supplied prompt demand; no single-window estimate is used.
+    pub conditioning_windows: Option<u32>,
+}
+
+pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
+    // Byte-level BPE can only merge the lowercased UTF-8 bytes. BOS/EOS leave 75 content
+    // tokens per window. Count both CFG rows at their padded maximum, never sum sequential jobs.
+    let bytes = prompt
+        .to_lowercase()
+        .len()
+        .max(negative.to_lowercase().len());
+    u32::try_from(bytes.div_ceil(75).max(1)).unwrap_or(u32::MAX)
+}
+
+/// Count the same untruncated CLIP tokens the loaded SDXL provider will window. The byte bound
+/// remains a conservative fallback when tokenizer assets cannot be read during preparation.
+#[cfg(target_os = "macos")]
+pub(crate) fn clip_windows_for_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+    prompt: &str,
+    negative: &str,
+) -> u32 {
+    if engine_id == "sdxl" {
+        use runtime_macos::providers::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
+        let root = match &spec.weights {
+            WeightsSource::Dir(root) => Some(root),
+            WeightsSource::File(_) => match spec.components.get(LDM_TOKENIZER_COMPONENT) {
+                Some(WeightsSource::Dir(root)) => Some(root),
+                _ => None,
+            },
+        };
+        let count = root
+            .and_then(|root| load_tokenizer(root).ok())
+            .and_then(|tokenizer| {
+                let positive = tokenizer.tokenize(prompt).ok()?;
+                let negative = tokenizer.tokenize(negative).ok()?;
+                let tokens = positive.len().max(negative.len()).saturating_sub(2);
+                u32::try_from(tokens.div_ceil(75).max(1)).ok()
+            });
+        if let Some(windows) = count {
+            return windows;
+        }
+    }
+    clip_window_upper_bound(prompt, negative)
 }
 
 #[derive(Clone, Debug)]
@@ -1693,6 +1739,7 @@ fn parse_evidence_parameters(
         }
     };
     Ok(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: expected_numeric
             .iter()
             .find(|(key, _)| *key == "decodeTileEdge")
@@ -2088,8 +2135,8 @@ fn mlx_image_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::M
 
 /// The anchor-derived admission peak for one image-MLX request (epic 22505 feature-end fix round,
 /// E2/E7): the packaged measured anchor for this `(model, tier, mlx lane)` priced through
-/// `MemoryAnchor::derive_mlx_image_phase_peaks` — per-phase ALLOCATOR envelopes, so the returned
-/// peak is directly comparable to the measured admission envelopes the fitted arm scales.
+/// `MemoryAnchor::derive_mlx_image_phase_peaks`. The returned peak contains active allocations;
+/// the selector adds recapture uncertainty separately.
 ///
 /// Carries the FULL guard set the other anchor consumers carry, every conjunct fail-open to the
 /// caller's floor:
@@ -2208,42 +2255,10 @@ fn request_regime(
     }
 }
 
-/// The ACTIVATION term of the estimate floor for one graded candidate (sc-22665, epic 22657 E4):
-/// the sc-22663 image law's per-phase residue for THIS request's regime, phase-maxed, and NOTHING
-/// ELSE.
-///
-/// The MLX allocator envelope above the anchor's active peak is deliberately NOT pre-added here,
-/// even though MLX admission is on the allocator level, because the SELECTOR charges it:
-/// [`crate::ladder_margin_policy::admission_allowance`] gives every
-/// [`crate::memory_strategy::CandidateBasis::EstimateFloor`] whose activation slice is declared an
-/// [`crate::memory_strategy::AdmissionTerm::AllocatorEnvelopeOverActivation`] allowance of
-/// [`crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`] TIMES this value — and that
-/// constant is the measured ratio of the retained envelope above the active peak to the ACTIVE
-/// activation term. Pre-adding the envelope would seat it inside the term and then charge 3.104x
-/// of it again on top. So this returns the ACTIVE-derived quantity the allowance is defined
-/// against, and the envelope arrives exactly once, from the policy.
-///
-/// The rung-2 anchor derivation ([`mlx_image_anchor_derived_peak`]) is the opposite case and its
-/// doc says so: it MUST carry the envelope itself, because its basis pays only the recapture
-/// spread. This floor must not, because its basis pays the envelope allowance.
-///
-/// `None` — and the caller keeps [`MlxRequestPlan::generic_headroom_bytes`] — whenever the anchor
-/// does not cover the request (see [`mlx_image_anchor_match`]), the anchor carries no per-phase
-/// allocator decomposition, or the law refuses the derivation. At this pin every packaged MLX
-/// image anchor is outside the law's domain (its conditioning counters never saw its weights), so
-/// this returns `None` for the shipped store and the floor is byte-identical to what it was before
-/// this story; sc-22667 re-captures an in-domain anchor on Apple Silicon.
-///
-/// The composition the caller performs — `estimate_floor_weights_bytes` plus the MAX over phases
-/// of this residue — is the phase-max of the weights plus the phase-max of the activation, which
-/// is at or above the law's own phase-wise max of their sums. Erring large is the correct side on
-/// a gate whose permissive failure mode is an OS Jetsam SIGKILL.
-///
-/// `facts` are the architecture facts the law's rung ratios need. Production passes
-/// [`crate::video_admission::architecture_facts_from_contract`] — the contract's own
-/// `architecture_facts` block, axis by axis (sc-22667); a contract that states none leaves the
-/// window, the chunk and the tile unscaled. The fixture tests below pass the model's own facts
-/// explicitly to grade the ratios themselves.
+/// Active phase residue from a compatible anchor. Production MLX fallback calls this with the
+/// unbounded resident regime: generic dense-score and whole-tail tile reductions do not describe
+/// fused MLX attention or layer-wise decode. Exact executed reductions belong to phase facts.
+/// Cache bytes never enter this term; the selector prices recapture uncertainty separately.
 #[allow(clippy::too_many_arguments)]
 fn mlx_image_anchor_activation_residue(
     contract: &MemoryProviderContract,
@@ -2258,13 +2273,6 @@ fn mlx_image_anchor_activation_residue(
     use sceneworks_core::memory_anchor::ImageDeriveRequest;
 
     let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
-    // Required, but NOT read: the envelope is not part of this term (see the doc above). The
-    // requirement stands because `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` — the thing that charges the
-    // envelope OVER this term — was derived only over captures that report the retained allocator
-    // level above the active peak, so an anchor carrying no per-phase allocator decomposition was
-    // not measured under the discipline that allowance is defined on, and this term would be
-    // graded by a multiple its own anchor never witnessed.
-    let _envelope_measured = anchor.phase_allocator_envelope_bytes?;
     let residues = anchor.derive_phase_activation_residues(
         &ImageDeriveRequest::new(
             geometry.width,
@@ -2450,81 +2458,9 @@ fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
         .saturating_sub(contract.steady_state_transformer_bytes())
 }
 
-/// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
-/// (sc-18096). Nothing here is a tuned coefficient:
-///
-/// * `StagedResidency` engaged ⇒ the co-residency drop the rung exists for: the resident working
-///   set is the larger of the conditioning stack and everything else, exactly the
-///   `staged_weights_gb` split the load-time gate has always used.
-/// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
-///   floor and the rung's RESIDENT WINDOW comes back in. Which window depends on the lane
-///   (sc-22667, epic 22657 feature-end round):
-///   * the VIDEO lane ([`estimate_floor_weights_bytes`], `video_admission::floor_phase_peaks`)
-///     keeps its sc-18096 accounting — the window slice plus scratch is carried by its headroom
-///     term and the estimate margin, and its own law prices a windowed denoise BOUND rather than
-///     a share, so the weights term carries no window;
-///   * the IMAGE lane ([`image_floor_weights_bytes`]) has TWO regimes, keyed on whether the
-///     contract's architecture facts state a block count:
-///     - `transformer_blocks: Some(_)` — the SAME windowed residency the image law and the candle
-///       ladder price, `transformer x window / blocks`
-///       (`sceneworks_core::memory_anchor::windowed_transformer_bytes`), because its activation
-///       term is the law's residue for the rung's regime (sc-22665), which carries no weights;
-///     - `transformer_blocks: None` (a contract that states no facts — the registry's weights-free
-///       surfaces, a single-file import, a provider that has not adopted the block) — keyed on
-///       WHICH activation term the floor is composed with ([`ImageFloorActivationTerm`]):
-///       * with the GENERIC headroom, the PRE-EPIC sc-18096 accounting above, the whole
-///         transformer out and the window carried by the headroom/allowance term. Keeping the
-///         whole transformer resident here would price rung 4 like rung 2 and refuse, on real
-///         Macs, shipped unmeasured models the lane admitted before the epic
-///         (`shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission`,
-///         `shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path`); that
-///         is a regression, not conservatism, so admission is unchanged until the contract
-///         supplies a block count. This is a worker floor decision;
-///       * with the LAW's residue (an in-domain anchor priced the rung), the whole transformer
-///         STAYS resident — the law's own erring-large reading (`windowed_transformer_bytes`
-///         keeps the whole transformer with no block count). The residue carries no weights and
-///         no window, so removing the transformer here would charge rung 4's window slice
-///         NOWHERE (sc-22667 round-2 review): rung 4 prices as rung 3 until a block count makes
-///         the share knowable, never below it.
-/// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
-///   deliberately no transient reduction either, because no measured basis for one exists on an
-///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
-///   promising an unmeasured saving.
-/// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
-///   itself declares them `bounded_by` a rung the composition engages.
-/// * A declared intra-transformer eviction ([`intra_transformer_evicted_bytes`]) leaves the floor
-///   only on the STAGED branch, and only down to the load-exact transformer (sc-19721). Both
-///   restrictions are the same rule: **the drop lowers the steady state, not the peak.** The
-///   declaring phase still holds the whole sub-stack at the precompute instant — MiniMax-H3's
-///   denoise runs 64.56 GB → 38.70 GB *across* it — so the evicted bytes may only be removed from
-///   bytes that are provably NOT co-resident with that instant.
-///   * Without `StagedResidency` nothing is staged out of it: the conditioning stack, the
-///     transformer and the decoder are all charged as one co-residency, and that co-residency
-///     includes the instant. Removing anything there would under-charge it by the whole eviction —
-///     the OOM direction, and the exact asymmetry the provider's `retained_bytes` declaration is
-///     chosen to avoid.
-///   * With it engaged, `heavy` is still a lumped charge for the transformer plus every later
-///     phase's component (the decoder). Clamping the reduced lump at `transformer_bytes` — the
-///     load-exact figure, sub-stack included — keeps the precompute instant covered while letting
-///     the drop cancel against the later phases' bytes, which are not resident at that instant.
-///     The reduction is therefore `min(evicted, base_bytes − conditioning − transformer)`, never
-///     the raw eviction, and this leg is deliberately not an un-lumping of the staged phases: no
-///     measured basis for that exists here (epic 18093 owns it).
-///   * `BoundedTransformerResidency` subtracts the load-exact `transformer_bytes` from the
-///     LOAD-EXACT lump and takes NO eviction reduction at all, because that rung windows the whole
-///     transformer — the evictable sub-stack is inside the window it just removed, so reducing by
-///     the eviction as well deducts the same bytes twice. Both legs must remove the transformer,
-///     which leaves `decoder`; taking the reduction first and the window second leaves
-///     `max(0, decoder − evicted)` instead, and at bf16 the `.max(transformer_bytes)` clamp binds
-///     so that is exactly **0** — MiniMax-H3's whole 11.02 GB video+audio VAE pair vanishing from
-///     the floor, the OOM direction (sc-18650 pre-merge review).
-///
-/// The auxiliary fold deliberately charges `resident_bytes`, not
-/// `MemoryResidentComponent::steady_state_bytes`: an auxiliary network stands beside the base model
-/// rather than inside a staged phase, so nothing here establishes that its widest instant is not
-/// co-resident with the rest of the floor. No shipped provider declares an evicting auxiliary
-/// component today, so the two readings are byte-identical; this comment records which one is meant
-/// if one ever does.
+/// Historical floor arithmetic retained for Candle and compatibility callers. Production MLX
+/// image/video fallbacks use `mlx_fallback_weights_bytes`, which requires exact stream facts.
+/// The shared core implementation owns staged peak clamps and intra-transformer eviction rules.
 pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -2556,6 +2492,7 @@ pub(crate) enum ImageFloorActivationTerm {
 /// `transformer_window` is the selected `transformer_window_size`; `facts` are the contract's
 /// architecture facts (`video_admission::architecture_facts_from_contract`). All three inputs are
 /// ignored unless the composition engages `BoundedTransformerResidency`.
+#[cfg(test)]
 pub(crate) fn image_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -2580,6 +2517,45 @@ pub(crate) fn image_floor_weights_bytes(
         (None, ImageFloorActivationTerm::GenericHeadroom) => 0,
     };
     floor_weights_bytes(contract, engaged, resident_window)
+}
+
+/// MLX fallback weights: only an exact loader inventory can grant streaming credit.
+/// A component marked bounded is still materialized in windows; unknown auxiliary inventories
+/// remain fully charged. Unlike the phase estimator this deliberately keeps later-phase weights.
+pub(crate) fn mlx_fallback_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    parameters: gen_core::MemoryStrategyParameters,
+) -> u64 {
+    let facts = contract.asset_facts;
+    let streamed = engaged.contains(&MemoryStrategy::BoundedTransformerResidency)
+        && parameters.window_component().includes_dit();
+    let retained_transformer = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.transformer_stream.as_ref())
+        .filter(|stream| streamed && stream.peak_bytes(None) == facts.transformer_bytes)
+        .map_or(facts.transformer_bytes, |stream| {
+            stream.peak_bytes(parameters.transformer_window_size)
+        });
+    let heavy = facts
+        .base_bytes
+        .saturating_sub(facts.conditioning_bytes)
+        .saturating_sub(facts.transformer_bytes)
+        .saturating_add(retained_transformer);
+    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
+        facts.conditioning_bytes.max(heavy)
+    } else {
+        facts.conditioning_bytes.saturating_add(heavy)
+    };
+    let auxiliary = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.kind.is_auxiliary())
+        .fold(0_u64, |sum, component| {
+            sum.saturating_add(component.resident_bytes)
+        });
+    base.saturating_add(auxiliary.max(facts.overlay_bytes))
 }
 
 /// The shared arithmetic: `resident_window_bytes` is what rung 4 keeps resident of the
@@ -2652,6 +2628,7 @@ pub(crate) fn estimate_floor_smallest_parameters(
             .map(Some)
     };
     Some(gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
             &ranges.decode_tile_edges
         })?,
@@ -2725,6 +2702,7 @@ fn estimate_floor_parameters(
         );
     };
     let base_parameters = gen_core::MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: None,
         decode_overlap: None,
         attention_chunk_size,
@@ -2891,37 +2869,125 @@ fn estimate_floor_parameters(
     (candidates, decisions)
 }
 
-/// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
-/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
-/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
-///
-/// Peak source per rung, in preference order:
-///
-/// 1. **Fitted curve** — a verified measured cell of the same provider/tier/mode/overlay at a
-///    different geometry ([`MeasuredRungBasis`]), extrapolated over output area: the conditioning
-///    peak is area-flat (text encoding does not grow with the render target) while denoise,
-///    decode, and the admission envelope scale by the area ratio, floored at 1.0 so a
-///    smaller-than-measured request never predicts below the measurement. Gated by
-///    [`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]: if the
-///    extrapolated triple's binding phase differs from the measured cell's, the fitted candidate
-///    is NOT emitted (no per-phase variance re-derivation exists) and the rung falls back to the
-///    floor, whose no-measured-basis path the constraint's scope sentence explicitly exempts.
-/// 2. **Anchor-derived** (epic 22505 feature-end fix round, E2/E7) — the measured image anchor
-///    for this `(model, tier, mlx lane)` priced through the per-output-pixel allocator law
-///    ([`mlx_image_anchor_derived_peak`]), when the anchor is current and every identity/regime
-///    conjunct holds. Deliberately AHEAD of the floor: the derivation prices its own uncertainty
-///    terms, so the selector grades it with no additional allowance, where the floor's activation
-///    term carries the full measured allocator-envelope allowance.
-/// 3. **Weights + activation floor** — [`estimate_floor_weights_bytes`] plus an activation term
-///    that is, in preference order (sc-22665, epic 22657 E4): the image derivation law's per-phase
-///    residue for THIS rung's regime, priced off the same measured anchor rung 2 uses
-///    ([`mlx_image_anchor_activation_residue`]), so the request's decode tile, attention chunk and
-///    transformer window reach the estimate; otherwise the exact same fixed-reserve + area-scaled
-///    headroom the resident baseline charges ([`MlxRequestPlan::generic_headroom_bytes`]), which
-///    is what every request the anchor or the law refuses keeps — at this pin, all of them.
-///
-/// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
-/// (`memory_strategy::select_strategy`).
+/// Price active memory under the selected execution schedule. A resident anchor supplies
+/// only activation residues; changing the load shape here does not relabel it as a measured
+/// optimized run. Unsupported modes and auxiliary ownership retain the conservative fallback.
+#[allow(clippy::too_many_arguments)]
+fn mlx_selected_phase_peak(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    selection: &MemorySelection,
+    conditioning_windows: Option<u32>,
+) -> Option<u64> {
+    use crate::mlx_phase_estimate::{layerwise_decode_workspace, Workspace};
+    use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
+    if mode_key != "text_to_image"
+        || overlay.is_some()
+        || geometry.reference_count != 0
+        || geometry.frames != 1
+        || geometry.batch != 1
+    {
+        return None;
+    }
+    let phase = contract.phase_facts.as_ref()?;
+    let generic = plan
+        .generic_headroom_bytes(geometry)
+        .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
+    let mut workspace = Workspace {
+        conditioning: generic,
+        denoise: generic,
+        decode: generic,
+    };
+    if let Some(anchor) = mlx_image_anchor_store()
+        .and_then(|store| {
+            store.image_anchor_for(&plan.model_id, AnchorBackend::Mlx, plan_tier_key(plan.tier))
+        })
+        .filter(|anchor| {
+            anchor.route == plan.engine_id
+                && anchor.provider == contract.provider_id
+                && anchor.mode == mode_key
+                && anchor.overlay.is_none()
+                && anchor.reference_count == 0
+        })
+    {
+        let components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
+        let residues = anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: geometry.width,
+                height: geometry.height,
+            },
+            components,
+        );
+        workspace.conditioning = residues[0].unwrap_or(workspace.conditioning);
+        workspace.denoise = residues[1].unwrap_or(workspace.denoise);
+        workspace.decode = residues[2].unwrap_or(workspace.decode);
+        if residues[1].is_some()
+            && phase.architecture == Some(gen_core::ImagePipelineArchitecture::ZImageDit)
+        {
+            // Fused SDPA scales with image tokens, without materializing a quadratic score matrix.
+            let resident = components
+                .conditioning
+                .saturating_add(components.transformer)
+                .saturating_add(components.decoder);
+            let residue = anchor
+                .phase_active_peak_bytes
+                .denoise
+                .checked_sub(resident)?;
+            let scale = (f64::from(geometry.width) * f64::from(geometry.height)
+                / (f64::from(anchor.geometry.width) * f64::from(anchor.geometry.height)))
+            .max(1.0);
+            workspace.denoise = (residue as f64 * scale).ceil() as u64;
+        }
+    }
+    if phase.architecture == Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip) {
+        let windows = conditioning_windows.filter(|windows| *windows > 0)?;
+        // Retained SDXL UNet-only seam: CFG batch 2, 77 tokens, 1024², dense fp16.
+        // The exact selected reference tensor shapes total 5,134,927,368 bytes.
+        let seam_workspace = (6.58685 * 1_073_741_824.0_f64).ceil() as u64 - 5_134_927_368;
+        workspace.conditioning = crate::mlx_phase_estimate::dual_clip_workspace(windows);
+        // Scaling the whole workspace by padded context windows is conservative: only the
+        // cross-attention and carried conditioning actually grow with prompt length.
+        workspace.denoise = ((seam_workspace as f64)
+            * f64::from(windows)
+            * (f64::from(geometry.width) * f64::from(geometry.height) / 1_048_576.0).max(1.0))
+        .ceil() as u64;
+    }
+    if let Some(gen_core::ImagePipelineArchitecture::SanaLinearDit {
+        classifier_free_guidance,
+    }) = phase.architecture
+    {
+        if contract.engages_selection(selection, MemoryStrategy::BoundedDecode)
+            && selection.parameters.decode_overlap == Some(48)
+        {
+            if let Some(derived) = phase.decoder_workspace.as_ref().and_then(|facts| {
+                crate::mlx_phase_estimate::sana_workspace(
+                    facts,
+                    geometry,
+                    selection.parameters.decode_tile_edge,
+                    classifier_free_guidance,
+                )
+            }) {
+                workspace = derived;
+            }
+        }
+    }
+    if contract.engages_selection(selection, MemoryStrategy::BoundedDecode) {
+        if let (Some(decoder), Some(edge)) = (
+            &phase.decoder_workspace,
+            selection.parameters.decode_tile_edge,
+        ) {
+            if let Some(bytes) = layerwise_decode_workspace(decoder, geometry, edge) {
+                workspace.decode = bytes;
+            }
+        }
+    }
+    crate::mlx_phase_estimate::peak(contract, selection, workspace)
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn synthesize_estimate_ladder(
     contract: &MemoryProviderContract,
@@ -2932,6 +2998,35 @@ fn synthesize_estimate_ladder(
     use_pid: bool,
     calibration_fingerprint: Option<&str>,
     bases: &[MeasuredRungBasis],
+) -> SynthesizedEstimateLadder {
+    synthesize_estimate_ladder_with_conditioning(
+        contract,
+        plan,
+        mode_key,
+        overlay,
+        geometry,
+        use_pid,
+        calibration_fingerprint,
+        bases,
+        None,
+    )
+}
+
+/// Price implemented selections, including supported staging compositions. Compatible fitted
+/// cells take precedence; provider phase facts and retained active observations then derive an
+/// estimate. Unknown facts retain conservative weights and workspace. The selector owns margin
+/// widening, and every tiled candidate still requires its exact decode-quality policy.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_estimate_ladder_with_conditioning(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    use_pid: bool,
+    calibration_fingerprint: Option<&str>,
+    bases: &[MeasuredRungBasis],
+    conditioning_windows: Option<u32>,
 ) -> SynthesizedEstimateLadder {
     use crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE;
     use crate::memory_strategy::CandidateBasis;
@@ -2950,7 +3045,7 @@ fn synthesize_estimate_ladder(
             continue;
         }
         let declared_engaged = contract.engaged_composition(strategy);
-        let (parameter_candidates, decisions) = estimate_floor_parameters(
+        let (mut parameter_candidates, decisions) = estimate_floor_parameters(
             contract,
             &declared_engaged,
             strategy,
@@ -2961,6 +3056,26 @@ fn synthesize_estimate_ladder(
             use_pid,
         );
         ladder.decode_quality_decisions.extend(decisions);
+
+        if strategy != MemoryStrategy::StagedResidency
+            && !declared_engaged.contains(&MemoryStrategy::StagedResidency)
+            && matches!(
+                contract
+                    .capability(MemoryStrategy::StagedResidency)
+                    .map(|cap| &cap.support),
+                Some(gen_core::MemoryStrategySupport::Implemented)
+            )
+        {
+            let staged = parameter_candidates
+                .iter()
+                .cloned()
+                .map(|mut candidate| {
+                    candidate.parameters.stage_residency = Some(true);
+                    candidate
+                })
+                .collect::<Vec<_>>();
+            parameter_candidates.extend(staged);
+        }
 
         for parameter_candidate in parameter_candidates {
             let floor_selection = MemorySelection {
@@ -2989,6 +3104,16 @@ fn synthesize_estimate_ladder(
                 .iter()
                 .filter(|basis| {
                     basis.rung == strategy_rung(strategy)
+                        && basis.parameters.decode_tile_edge
+                            == parameter_candidate.parameters.decode_tile_edge
+                        && basis.parameters.decode_overlap
+                            == parameter_candidate.parameters.decode_overlap
+                        && (contract
+                            .phase_facts
+                            .as_ref()
+                            .and_then(|phase| phase.architecture)
+                            != Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip)
+                            || conditioning_windows == Some(1))
                         && basis.load_shape == contract.load_shape
                         && basis.engaged_composition == engaged
                         && contract.calibration.as_ref().is_some_and(|identity| {
@@ -3005,6 +3130,7 @@ fn synthesize_estimate_ladder(
                 })
                 .and_then(|basis| {
                     let mut parameters = basis.parameters;
+                    parameters.stage_residency = parameter_candidate.parameters.stage_residency;
                     parameters.decode_tile_edge = parameter_candidate.parameters.decode_tile_edge;
                     parameters.decode_overlap = parameter_candidate.parameters.decode_overlap;
                     let selection = MemorySelection {
@@ -3085,6 +3211,37 @@ fn synthesize_estimate_ladder(
                     .decode_quality_decisions
                     .push(candidate.decode_quality.clone());
                 ladder.estimates.push(candidate);
+                continue;
+            }
+
+            if let Some(predicted_peak_bytes) = mlx_selected_phase_peak(
+                contract,
+                plan,
+                mode_key,
+                overlay,
+                geometry,
+                &floor_selection,
+                conditioning_windows,
+            )
+            .filter(|_| contract.validate_selection(&floor_selection).is_ok())
+            {
+                ladder.estimates.push(SynthesizedEstimate {
+                    selection: floor_selection,
+                    evidence: estimate_evidence(
+                        contract,
+                        gen_core::MemoryBackend::Mlx,
+                        plan.tier,
+                        mode_key,
+                        overlay,
+                        geometry,
+                        floor_selection,
+                        predicted_peak_bytes,
+                        calibration_fingerprint,
+                    ),
+                    basis: CandidateBasis::EstimateFloor,
+                    unmodeled_activation_bytes: None,
+                    decode_quality: parameter_candidate.decode_quality.clone(),
+                });
                 continue;
             }
 
@@ -3171,8 +3328,8 @@ fn synthesize_estimate_ladder(
                 mode_key,
                 overlay,
                 geometry,
-                &engaged,
-                parameter_candidate.parameters,
+                &[],
+                gen_core::MemoryStrategyParameters::default(),
                 facts,
             );
             let (floor_activation_bytes, activation_term) = match &derived_residue {
@@ -3194,14 +3351,9 @@ fn synthesize_estimate_ladder(
                     .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)),
                 ImageFloorActivationTerm::LawResidue => floor_activation_bytes,
             };
-            let predicted_peak_bytes = image_floor_weights_bytes(
-                contract,
-                &engaged,
-                parameter_candidate.parameters.transformer_window_size,
-                facts,
-                activation_term,
-            )
-            .saturating_add(floor_activation_bytes);
+            let predicted_peak_bytes =
+                mlx_fallback_weights_bytes(contract, &engaged, parameter_candidate.parameters)
+                    .saturating_add(floor_activation_bytes);
             tracing::info!(
                 route = contract.provider_id,
                 backend = "mlx",
@@ -3880,7 +4032,7 @@ fn select_request_with_budget_using_bundle(
     // selectable behind the estimate margin instead of freezing to the resident baseline and
     // refusing. A covered (`Evidence`) route gets none: its measured ladder is authoritative.
     let synthesized_ladder = if admission.path == AdmissionPath::Legacy {
-        synthesize_estimate_ladder(
+        synthesize_estimate_ladder_with_conditioning(
             contract,
             plan,
             mode_key,
@@ -3889,6 +4041,7 @@ fn select_request_with_budget_using_bundle(
             inputs.use_pid,
             calibration_fingerprint,
             &admission.estimate_bases,
+            inputs.conditioning_windows,
         )
     } else {
         SynthesizedEstimateLadder::default()
@@ -4091,15 +4244,12 @@ fn select_request_with_budget_using_bundle(
         let staged = candidates
             .iter()
             .filter(|candidate| {
-                contract.engages(
-                    candidate.selection.strategy,
-                    MemoryStrategy::StagedResidency,
-                )
+                contract.engages_selection(&candidate.selection, MemoryStrategy::StagedResidency)
             })
             .cloned()
             .collect::<Vec<_>>();
         let baseline_stages = matches!(&baseline, Selection::Selected { selection, .. }
-            if contract.engages(selection.strategy, MemoryStrategy::StagedResidency));
+            if contract.engages_selection(selection, MemoryStrategy::StagedResidency));
         if baseline_stages {
             (
                 baseline,
@@ -4291,8 +4441,8 @@ fn select_request_with_budget_using_bundle(
         cache_state = ?cache_state,
         load_policy = ?load_policy,
         strategy = ?selection.strategy,
-        cache_eviction = contract.engages(
-            selection.strategy,
+        cache_eviction = contract.engages_selection(
+            &selection,
             MemoryStrategy::StagedResidency,
         ),
         parameters = ?selection.parameters,
@@ -7024,14 +7174,24 @@ mod tests {
                 .iter()
                 .map(|row| format!("{}x{}", row.geometry.width, row.geometry.height))
                 .collect::<std::collections::BTreeSet<_>>();
-            // One row per distinct geometry. This is the sealed-ness the row count used to spell as a
-            // population: a re-collection may legitimately sweep more or fewer coordinates, but it may
-            // never ship two rows for the same coordinate — the planner would then hold two exact
-            // policies for one request and the winner would be collection order.
+            // Several admitted tile choices may share a geometry; the exact policy key must
+            // remain unique, and every choice is independently exercised below.
+            let keys = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.geometry.width,
+                        row.geometry.height,
+                        row.tile_edge,
+                        row.overlap,
+                        row.use_pid,
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(
                 rows.len(),
-                measured_resolutions.len(),
-                "{model_id}: sealed corpus carries a duplicate geometry"
+                keys.len(),
+                "{model_id}: duplicate physical decode policy"
             );
             for resolution in model["limits"]["resolutions"]
                 .as_array()
@@ -8043,6 +8203,7 @@ mod tests {
             reference_count: 2,
             use_pid: false,
             has_phases: false,
+            conditioning_windows: None,
         }
     }
 
@@ -8059,6 +8220,7 @@ mod tests {
             reference_count: 0,
             use_pid: false,
             has_phases: false,
+            conditioning_windows: None,
         };
         let (mode, mode_key) = request_mode(&plain.mode);
         assert_eq!(mode, MemoryMode::TextToImage);
@@ -8212,6 +8374,7 @@ mod tests {
             reference_count: 0,
             use_pid: false,
             has_phases: false,
+            conditioning_windows: None,
         };
         for provider in ["flux1_schnell", "flux1_dev"] {
             for mode in ["text_to_image", "style_variations"] {
@@ -8718,6 +8881,7 @@ mod tests {
             reference_count: 0,
             use_pid: false,
             has_phases: false,
+            conditioning_windows: None,
         }
     }
 
@@ -8826,8 +8990,7 @@ mod tests {
     /// rung 4 windows the transformer down to its RESIDENT WINDOW (sc-22667: the law's share,
     /// `FULL_LADDER_WEIGHTS_GB x 2 / FULL_LADDER_FIXTURE_BLOCKS` = 2 GiB under the injected
     /// fixture facts) and floors at 2 + 6 = 8 GiB.
-    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0 + FULL_LADDER_RESIDENT_WINDOW_GB;
-    const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 4.0 + FULL_LADDER_RESIDENT_WINDOW_GB;
 
     /// The block count the full-ladder fixture states through the `architecture_facts_from_contract`
     /// seam (sc-22667): with the smallest declared window (2) of these blocks resident, rung 4
@@ -8850,64 +9013,36 @@ mod tests {
             activation_dtype_width: None,
         };
 
-    /// sc-22667 (coordinator decision after the macOS lane): with NO block count on the facts
-    /// (this pin), the MLX image floor's rung-4 weights term keeps the PRE-EPIC accounting — the
-    /// whole transformer out, its window carried by the headroom/allowance term — so a shipped,
-    /// unmeasured model keeps admitting on the deep rung exactly as before the epic. Graded on
-    /// the full-ladder fixture WITHOUT injected facts: rung 4 admits at its pre-epic floor
-    /// (0 + 6 GiB raw), one window below the injected-facts fixtures' 2 GiB resident share. The
-    /// arithmetic is the one the macOS-only shipped Krea/SDXL fixtures (40/5/35 GiB, 6 GiB
-    /// headroom, 40 GiB host) depend on: rung 4 weights `max(5, 40 - 5 - 35 + 0) = 5` GiB, plus
-    /// 6 GiB headroom, widened by the floor allowance to ~29.6 GiB admitted — under 40 — where a
-    /// whole-transformer share would price 40 + 6 = 46 raw, ~51.8 admitted, and refuse.
-    ///
-    /// MUTATION: dropping the `None` arm of `image_floor_weights_bytes` (whole transformer
-    /// resident without a block count) refuses here and reds the `expect`; the identity
-    /// assertion reds if the fallback keeps any window at all.
     #[test]
-    fn without_facts_the_deep_rung_floor_keeps_the_pre_epic_accounting_and_admits() {
-        let generator = full_ladder_generator();
-        let mut plan = fixture_plan();
-        plan.calibration = MlxCalibrationConfig::Absent;
-        let inputs = fixture_inputs(1024, 1024);
-        // A budget that admits rung 4 at its PRE-EPIC floor (6 GiB raw) but not at the
-        // injected-facts share (8 GiB raw): the midpoint of the two widened ceilings.
-        let pre_epic = widened_estimate_gb(6.0);
-        let with_share = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
-        assert!(pre_epic < with_share);
-        let evaluation = evaluate_request_with_budget(
+    fn unknown_stream_inventory_cannot_erase_transformer_weights() {
+        let mut generator = full_ladder_generator();
+        generator.contract.as_mut().unwrap().phase_facts = None;
+        let contract = generator.contract.as_ref().unwrap();
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedTransformerResidency,
+            tier: fixture_plan().tier,
+            parameters: gen_core::MemoryStrategyParameters {
+                transformer_window_size: Some(2),
+                ..Default::default()
+            },
+        };
+        let engaged = contract.engaged_composition_for_selection(&selection);
+        assert_eq!(
+            mlx_fallback_weights_bytes(contract, &engaged, selection.parameters),
+            gib_to_bytes(FULL_LADDER_WEIGHTS_GB)
+        );
+        assert!(evaluate_request_with_budget(
             &generator,
-            &plan,
-            &inputs,
+            &fixture_plan(),
+            &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget((pre_epic + with_share) / 2.0),
+            fixture_budget(7.0),
             full_ladder_baseline_bytes(),
             0,
-            &[],
+            &[]
         )
-        .expect("with no block count rung 4 prices at its pre-epic floor and admits");
-        assert_eq!(
-            evaluation.context.selection.strategy,
-            MemoryStrategy::BoundedTransformerResidency
-        );
-        let contract = generator.contract.as_ref().expect("contract");
-        let engaged = contract.engaged_composition_for_selection(&evaluation.context.selection);
-        assert_eq!(
-            image_floor_weights_bytes(
-                contract,
-                &engaged,
-                evaluation
-                    .context
-                    .selection
-                    .parameters
-                    .transformer_window_size,
-                crate::video_admission::architecture_facts_from_contract(contract),
-                ImageFloorActivationTerm::GenericHeadroom,
-            ),
-            estimate_floor_weights_bytes(contract, &engaged),
-            "without a block count the image floor IS the pre-epic floor"
-        );
+        .is_err());
     }
 
     /// The fixture's combined headroom (2 GiB fixed reserve + 4 GiB activations at 1024²).
@@ -8923,9 +9058,7 @@ mod tests {
     /// Sizing budgets through this function keeps each test's direction fixed across any future
     /// re-derivation.
     fn widened_estimate_gb(floor_gb: f64) -> f64 {
-        floor_gb
-            + (FIXTURE_HEADROOM_GB - 2.0)
-                * crate::ladder_margin_policy::FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE
+        floor_gb * (1.0 + crate::ladder_margin_policy::MLX_RECAPTURE_SPREAD)
     }
 
     /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
@@ -9483,6 +9616,20 @@ mod tests {
         // baseline under the re-derived activation allowance — see FULL_LADDER_WEIGHTS_GB.
         contract.asset_facts.base_bytes = gib_to_bytes(FULL_LADDER_WEIGHTS_GB);
         contract.asset_facts.transformer_bytes = gib_to_bytes(FULL_LADDER_WEIGHTS_GB);
+        contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
+            architecture: None,
+            staged_weights: gen_core::StagedWeightSchedule::TwoStage,
+            transformer_stream: Some(gen_core::StreamedWeightFacts {
+                resident_bytes: 0,
+                stacks: vec![vec![
+                    gib_to_bytes(
+                        FULL_LADDER_WEIGHTS_GB / f64::from(FULL_LADDER_FIXTURE_BLOCKS)
+                    );
+                    FULL_LADDER_FIXTURE_BLOCKS as usize
+                ]],
+            }),
+            decoder_workspace: None,
+        });
         let rung4 = contract
             .strategies
             .iter_mut()
@@ -9493,53 +9640,22 @@ mod tests {
         generator
     }
 
-    /// sc-22508 (review): the legacy RESIDENT BASELINE declares no weights/activation split, and
-    /// this pins that the selector grades it accordingly.
-    ///
-    /// Its peak is not built here as `weights + generic_headroom_bytes`. It arrives through
-    /// `request_total_peak_bytes` — which returns `providers::mage::memory::generation_peak_gb`, a
-    /// single provider scalar, on the `mage_flow` route — and then through the loaded generator's
-    /// `predicted_memory_peak_from_base`, a gen-core trait method that may rewrite it. Declaring
-    /// `generic_headroom_bytes` for it would charge `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` of a term
-    /// the peak need not contain.
-    ///
-    /// The two ceilings differ, so the choice is observable: at a host between them, a baseline
-    /// that declared the headroom term would be admitted as Resident, while the undeclared-floor
-    /// arm the policy documents refuses it and the ladder walks down. Both bounds are computed
-    /// from the policy, so this stays a statement about WHICH arm is charged rather than about
-    /// today's fractions.
+    /// Unknown activation splits and declared splits receive the same active-peak uncertainty.
     #[test]
     fn the_legacy_resident_baseline_is_graded_without_a_declared_activation_split() {
-        // sc-22667: the fixture's block count through the production facts seam.
-        let _facts = crate::video_admission::inject_architecture_facts(FULL_LADDER_FIXTURE_FACTS);
         let generator = full_ladder_generator();
-        let mut plan = fixture_plan();
-        plan.calibration = MlxCalibrationConfig::Absent;
+        let plan = fixture_plan();
         let inputs = fixture_inputs(1024, 1024);
-        let baseline_peak_bytes = gib_to_bytes(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
-        let declared_ceiling_gb = widened_estimate_gb(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
-        let undeclared_ceiling_gb = crate::memory_strategy::peak_bytes_to_gb(
+        let raw = gib_to_bytes(FULL_LADDER_WEIGHTS_GB + FIXTURE_HEADROOM_GB);
+        let admitted =
+            crate::memory_strategy::floor_admitted_peak_bytes(MemoryBackend::Mlx, raw, None);
+        assert_eq!(
+            admitted,
             crate::memory_strategy::floor_admitted_peak_bytes(
-                gen_core::MemoryBackend::Mlx,
-                baseline_peak_bytes,
-                None,
-            ),
-        );
-        // The re-derived activation allowance (epic 22505 feature-end fix round) inverted the
-        // arms' ordering: the declared arm now charges MORE than the undeclared recapture arm.
-        // The discrimination survives with its direction flipped — at a host between the two
-        // ceilings (and below every deep floor), only the UNDECLARED arm admits the baseline, so
-        // a Resident selection is what proves the undeclared arm is the one charged.
-        assert!(
-            undeclared_ceiling_gb < declared_ceiling_gb,
-            "the two arms must differ for this fixture to discriminate: \
-             declared {declared_ceiling_gb}, undeclared {undeclared_ceiling_gb}"
-        );
-        let deep_ceiling_gb = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
-        let host_gb = (undeclared_ceiling_gb + declared_ceiling_gb.min(deep_ceiling_gb)) / 2.0;
-        assert!(
-            undeclared_ceiling_gb < host_gb && host_gb < declared_ceiling_gb,
-            "the host must sit between the two arms' ceilings"
+                MemoryBackend::Mlx,
+                raw,
+                Some(gib_to_bytes(FIXTURE_HEADROOM_GB))
+            )
         );
         let evaluation = evaluate_request_with_budget(
             &generator,
@@ -9547,35 +9663,18 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(host_gb),
-            baseline_peak_bytes,
+            fixture_budget(admitted as f64 / BYTES_PER_GIB + 1.0),
+            raw,
             0,
             &[],
         )
-        .expect("the undeclared-arm baseline must admit at this host");
+        .unwrap();
         assert_eq!(
             evaluation.context.selection.strategy,
-            MemoryStrategy::Resident,
-            "only the undeclared-floor arm admits the baseline here; grading it on the declared \
-             arm charges {declared_ceiling_gb} GiB and refuses"
+            MemoryStrategy::Resident
         );
     }
 
-    /// sc-18096 acceptance: an UNMEASURED provider (no calibration opt-in, no evidence bundle)
-    /// under a small emulated unified-memory budget — the `SCENEWORKS_MLX_MEMORY_CAP_GB` scenario,
-    /// driven through the same pure seam the cap feeds — selects a DEEP rung instead of refusing,
-    /// and the selection translates to the right engine knobs.
-    ///
-    /// Floor arithmetic (fixture facts: FULL_LADDER_WEIGHTS_GB = 40 GiB, all transformer;
-    /// headroom 2 fixed + 4 area). The re-derived activation allowance (epic 22505 feature-end
-    /// fix round) charges each declared floor `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` of its 6 GiB
-    /// activation term, so the ceilings — all computed by `widened_estimate_gb`, never frozen —
-    /// order as:
-    ///   rung 4 floor    0 + 6  (windowed transformer leaves residency)  -> the cheapest
-    ///   staged/decode/attention floors 40 + 6                           -> far above it
-    ///   resident BASELINE (undeclared split, recapture-graded) 46 GiB   -> between the two
-    /// `budget_admitting_only_the_deepest_estimate_rung` sits the host midway between rung 4's
-    /// ceiling and the cheapest shallower candidate, so exactly one rung admits.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
         // sc-22667: the fixture's block count through the production facts seam.
@@ -9655,7 +9754,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(7.0),
+            fixture_budget(widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB) - 0.1),
             full_ladder_baseline_bytes(),
             0,
             &[],
@@ -9920,6 +10019,7 @@ mod tests {
             reference_count: 0,
             use_pid: false,
             has_phases: false,
+            conditioning_windows: None,
         };
         assert_eq!(
             provider_request_mode("flux2_klein_9b", &public_base),
@@ -10012,6 +10112,7 @@ mod tests {
                     reference_count: references,
                     use_pid,
                     has_phases: false,
+                    conditioning_windows: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -10059,6 +10160,7 @@ mod tests {
                 reference_count: references,
                 use_pid: true,
                 has_phases: false,
+                conditioning_windows: None,
             };
             let mut refused = plan.clone();
             refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
@@ -10188,6 +10290,7 @@ mod tests {
                     reference_count,
                     use_pid: false,
                     has_phases: false,
+                    conditioning_windows: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -10479,6 +10582,12 @@ mod tests {
             contract.asset_facts.conditioning_bytes = gib_to_bytes(5.0);
             contract.asset_facts.transformer_bytes = gib_to_bytes(35.0);
             contract.asset_facts.decoder_bytes = 0;
+            // These are synthetic weights; provide their synthetic exact stream inventory too.
+            contract.phase_facts.as_mut().unwrap().transformer_stream =
+                Some(gen_core::StreamedWeightFacts {
+                    resident_bytes: 0,
+                    stacks: vec![vec![gib_to_bytes(0.5); 70]],
+                });
             contract
         }
 
@@ -11029,6 +11138,12 @@ mod tests {
             contract.asset_facts.conditioning_bytes = gib_to_bytes(5.0);
             contract.asset_facts.transformer_bytes = gib_to_bytes(35.0);
             contract.asset_facts.decoder_bytes = 0;
+            // These are synthetic weights; provide their synthetic exact stream inventory too.
+            contract.phase_facts.as_mut().unwrap().transformer_stream =
+                Some(gen_core::StreamedWeightFacts {
+                    resident_bytes: 0,
+                    stacks: vec![vec![gib_to_bytes(0.5); 70]],
+                });
             contract
         }
 
@@ -11239,6 +11354,54 @@ mod tests {
             "the fitted estimate's raw peak is the area-scaled measured envelope (the estimate \
              margin is applied later, by the selector)"
         );
+
+        let mut smaller_tile_basis = basis.clone();
+        smaller_tile_basis.parameters.decode_tile_edge = Some(256);
+        smaller_tile_basis.parameters.decode_overlap = Some(64);
+        let changed = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            request_geometry,
+            false,
+            None,
+            &[smaller_tile_basis],
+        );
+        assert!(
+            changed
+                .estimates
+                .iter()
+                .all(|candidate| candidate.basis != CandidateBasis::EstimateFittedCurve),
+            "a larger executed tile cannot borrow the smaller tile's peak"
+        );
+        let mut sdxl = contract.clone();
+        sdxl.phase_facts = Some(gen_core::MemoryPhaseFacts {
+            architecture: Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip),
+            staged_weights: gen_core::StagedWeightSchedule::TwoStage,
+            transformer_stream: None,
+            decoder_workspace: None,
+        });
+        for windows in [None, Some(2)] {
+            let longer = synthesize_estimate_ladder_with_conditioning(
+                &sdxl,
+                &plan,
+                "text_to_image",
+                None,
+                request_geometry,
+                false,
+                None,
+                std::slice::from_ref(&basis),
+                windows,
+            );
+            assert!(
+                longer
+                    .estimates
+                    .iter()
+                    .all(|candidate| candidate.basis != CandidateBasis::EstimateFittedCurve),
+                "unknown or longer CLIP demand is outside the fitted cell"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------------------
@@ -12079,17 +12242,8 @@ mod tests {
         );
     }
 
-    /// AC 2 — the derived residue reaches the LADDER, per rung, and the packaged-anchor refusal
-    /// keeps the weights-plus-generic-headroom floor byte for byte.
-    ///
-    /// The differential is the anchor's own measured regime. An anchor measured under
-    /// `bounded_attention` is refused by the rung-2 lane shim (`derive_mlx_image_phase_peaks`
-    /// wants the eager unbounded resident composition) AND by the law for any request that does
-    /// not chunk — so on one ladder the staged and bounded-decode rungs keep the generic headroom
-    /// while the bounded-attention rung's floor is the law's residue. That is the wiring this
-    /// story adds, visible as a per-rung difference no `generic_headroom_bytes` can produce.
     #[test]
-    fn the_ladder_floor_takes_the_derived_residue_per_rung_and_falls_back_when_refused() {
+    fn unknown_mlx_topology_does_not_borrow_chunked_or_tiled_workspace_savings() {
         use crate::memory_strategy::CandidateBasis;
 
         let generator = qwen_in_domain_generator();
@@ -12121,184 +12275,21 @@ mod tests {
             )
         });
         assert!(!ladder.estimates.is_empty());
-        let generic = plan.generic_headroom_bytes(geometry);
-        let mut saw_derived = false;
-        let mut saw_generic = false;
-        for estimate in &ladder.estimates {
-            assert_eq!(
-                estimate.basis,
-                CandidateBasis::EstimateFloor,
-                "{:?}: a chunk-measured anchor cannot price the rung-2 lane shim",
-                estimate.selection.strategy
-            );
-            let engaged = contract.engaged_composition_for_selection(&estimate.selection);
-            // The chunked rungs are the ones this anchor prices (the branch below), so their
-            // weights term is composed with the law's residue; the rest keep the generic headroom.
-            let activation_term = if engaged.contains(&MemoryStrategy::BoundedAttention) {
-                ImageFloorActivationTerm::LawResidue
-            } else {
-                ImageFloorActivationTerm::GenericHeadroom
-            };
-            let weights = image_floor_weights_bytes(
-                contract,
-                &engaged,
-                estimate.selection.parameters.transformer_window_size,
-                crate::video_admission::architecture_facts_from_contract(contract),
-                activation_term,
-            );
-            let activation = estimate
-                .evidence
-                .predicted_peak_bytes
-                .checked_sub(weights)
-                .expect("the floor is its weights term plus an activation term");
-            assert_eq!(
-                estimate.unmodeled_activation_bytes,
-                Some(match activation_term {
-                    ImageFloorActivationTerm::LawResidue => activation,
-                    ImageFloorActivationTerm::GenericHeadroom => activation.saturating_sub(
-                        plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)
-                    ),
-                }),
-                "{:?}: only the actual activation slice receives the allocator allowance",
-                estimate.selection.strategy
-            );
-            if engaged.contains(&MemoryStrategy::BoundedAttention) {
-                let (residue, anchor_id) = with_injected_image_anchor_store(store.clone(), || {
-                    mlx_image_anchor_activation_residue(
-                        contract,
-                        &plan,
-                        "text_to_image",
-                        None,
-                        geometry,
-                        &engaged,
-                        estimate.selection.parameters,
-                        crate::video_admission::architecture_facts_from_contract(contract),
-                    )
-                })
-                .expect("the chunked rung's regime is inside the law's domain");
-                assert_eq!(
-                    anchor_id,
-                    store
-                        .image_anchor_for(
-                            "flux2_dev",
-                            sceneworks_core::memory_anchor::AnchorBackend::Mlx,
-                            "q4",
-                        )
-                        .expect("the injected q4 anchor")
-                        .id,
-                    "the residue must come from the anchor the arm above graded"
-                );
-                assert_eq!(activation, residue);
-
-                // NO ENVELOPE BYTE IS IN THE TERM (sc-22665 review round, blocker). The selector
-                // charges `FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE` TIMES this declared slice for the
-                // retained allocator envelope above the active peak, so the slice itself must be
-                // the law's ACTIVE-derived residue — pre-adding the envelope here would seat it
-                // inside the term and then charge 3.104x of it again on top.
-                let derived_anchor = store
-                    .image_anchor_for(
-                        "flux2_dev",
-                        sceneworks_core::memory_anchor::AnchorBackend::Mlx,
-                        "q4",
-                    )
-                    .expect("the injected q4 anchor");
-                let residues = derived_anchor
-                    .derive_phase_activation_residues(
-                        &sceneworks_core::memory_anchor::ImageDeriveRequest::new(
-                            geometry.width,
-                            geometry.height,
-                            request_regime(&engaged, estimate.selection.parameters),
-                        ),
-                        crate::video_admission::anchor_component_bytes(contract.asset_facts),
-                        crate::video_admission::architecture_facts_from_contract(contract),
-                    )
-                    .expect("the chunked rung's regime is inside the law's domain");
-                let decode_envelope = derived_anchor
-                    .phase_allocator_envelope_bytes
-                    .expect("the fixture anchor decomposes its allocator level")
-                    .decode
-                    .checked_sub(derived_anchor.phase_active_peak_bytes.decode)
-                    .expect("the allocator level is at or above the active peak");
-                assert!(
-                    decode_envelope > 0,
-                    "an anchor with no retained envelope would make the bound below vacuous"
-                );
-                assert!(
-                    activation < decode_envelope + residues.decode,
-                    "the term must sit strictly below the envelope-inclusive value, i.e. carry \
-                     no envelope byte: {activation} vs {decode_envelope} + {}",
-                    residues.decode
-                );
-                // Tighter than the bound above, and the reason it is a bound and not a coincidence:
-                // the declared slice IS the law's ACTIVE-derived phase max, whole.
-                assert_eq!(
-                    activation,
-                    residues
-                        .conditioning
-                        .max(residues.denoise)
-                        .max(residues.decode),
-                    "the floor's activation term is the law's ACTIVE-derived phase max, whole"
-                );
-                assert_ne!(
-                    activation, generic,
-                    "a derived residue that happened to equal the generic headroom would make \
-                     this test vacuous"
-                );
-                saw_derived = true;
-            } else {
-                assert_eq!(
-                    activation, generic,
-                    "{:?}: an unchunked request leaves a chunk-measured anchor's residue \
-                     unpriced and keeps the generic headroom",
-                    estimate.selection.strategy
-                );
-                saw_generic = true;
-            }
-        }
-        assert!(
-            saw_derived && saw_generic,
-            "the ladder must show BOTH activation terms for this test to say anything"
-        );
-
-        // AC 2's refusal fallback, pinned: the PACKAGED anchors (negative conditioning residue)
-        // price nothing, and every rung's floor is the weights term plus the generic headroom,
-        // byte for byte — exactly what it was before this story.
-        let ladder = with_injected_image_anchor_store(flux2_live_anchor_store(), || {
-            synthesize_estimate_ladder(
-                contract,
-                &plan,
-                "text_to_image",
-                None,
-                geometry,
-                false,
-                None,
-                &[],
-            )
-        });
-        assert!(
-            !ladder.estimates.is_empty(),
-            "fail to the floor, never refuse"
-        );
+        // A chunk-measured anchor cannot justify unbounded resident workspace. Unknown MLX
+        // topology therefore keeps generic workspace even on tiled/chunked candidates.
         for estimate in &ladder.estimates {
             assert_eq!(estimate.basis, CandidateBasis::EstimateFloor);
             let engaged = contract.engaged_composition_for_selection(&estimate.selection);
+            let weights =
+                mlx_fallback_weights_bytes(contract, &engaged, estimate.selection.parameters);
             assert_eq!(
                 estimate.evidence.predicted_peak_bytes,
-                image_floor_weights_bytes(
-                    contract,
-                    &engaged,
-                    estimate.selection.parameters.transformer_window_size,
-                    crate::video_admission::architecture_facts_from_contract(contract),
-                    ImageFloorActivationTerm::GenericHeadroom,
-                )
-                .saturating_add(generic),
-                "{:?}: a refused anchor leaves the weights+generic-headroom floor untouched",
-                estimate.selection.strategy
+                weights + plan.generic_headroom_bytes(geometry)
             );
             assert_eq!(
                 estimate.unmodeled_activation_bytes,
                 Some(
-                    generic.saturating_sub(
+                    plan.generic_headroom_bytes(geometry).saturating_sub(
                         plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes)
                     )
                 )
@@ -12306,17 +12297,6 @@ mod tests {
         }
     }
 
-    /// sc-22665 review round — the `transformer_window` arm of [`request_regime`] is LIVE, and
-    /// this is the coverage that says so.
-    ///
-    /// The law's measured-vs-request regime guard (`derive_image_phase_split`,
-    /// `memory_anchor.rs`) refuses any request that does NOT window when the anchor's own
-    /// measurement DID, so against a windowed anchor the arm's output is the only thing that
-    /// separates a `Some` from a `None`. Mirrors the `attention_chunked` differential the AC-2
-    /// test uses, on the one regime field that had no test of its own.
-    ///
-    /// MUTATION: hardcode `request_regime`'s `transformer_window` arm to `None` and the windowed
-    /// rung reds — the law then refuses it exactly as it refuses the unwindowed one.
     #[test]
     fn the_request_regimes_transformer_window_reaches_the_laws_measured_regime_guard() {
         let generator = qwen_in_domain_generator();
@@ -12440,6 +12420,8 @@ mod tests {
             vec![
                 MemoryStrategy::StagedResidency,
                 MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
                 MemoryStrategy::BoundedAttention,
             ],
             "the fixture's implemented rungs, and only those, are estimate-admissible"
@@ -12468,6 +12450,7 @@ mod tests {
                 survivors,
                 vec![
                     MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedAttention,
                     MemoryStrategy::BoundedAttention,
                 ],
                 "the mutation removes exactly the de-implemented rung — the other implemented \
@@ -12606,7 +12589,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(pairs, vec![(640, 160), (768, 192)]);
+        assert_eq!(pairs, vec![(640, 160), (768, 192), (640, 160), (768, 192)]);
 
         let off_grid = synthesize_estimate_ladder(
             contract,
@@ -17360,7 +17343,7 @@ mod tests {
             "normalization must preserve the legacy resident allowance"
         );
         assert!(
-            evaluate(2, 44.72, 44.72, 130.0).is_err(),
+            evaluate(2, 60.0, 60.0, 130.0).is_err(),
             "unrelated allocations must remain charged"
         );
     }
@@ -19436,6 +19419,346 @@ mod tests {
         assert_eq!(resolve_text_encoder_bytes(None, root), 0);
         // A provider footprint (the `mllm/` bytes) is preferred, even though the scan reads zero.
         assert_eq!(resolve_text_encoder_bytes(Some(1500), root), 1500);
+    }
+
+    /// Exercise the production declarations and footprint readers without allocating model tensors.
+    /// Unlike the old 40 GiB fixture, these are the installed q4 artifacts from the reported failures.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires shipped Z-Image, SDXL and SANA Sprint q4 snapshots; SC23584_RENDER=all also executes on exclusive Metal"]
+    fn reported_q4_requests_credit_the_implemented_memory_ladder() {
+        use crate::ladder_margin_policy::{admission_allowance, AdmissionSubject};
+        let prompt = std::env::var("SC23584_PROMPT")
+            .unwrap_or_else(|_| "A cinematic frame of a woman in a red raincoat holding a red umbrella standing in the middle of a neon street on a rainy night".to_owned());
+        let negative_prompt = std::env::var("SC23584_NEGATIVE_PROMPT").unwrap_or_default();
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .unwrap();
+        let hub = std::env::var_os("HF_HUB_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/huggingface/hub")
+            });
+        let mut failures = Vec::new();
+        for (id, count) in [("z_image_turbo", 2), ("sdxl", 1), ("sana_sprint_1600m", 1)] {
+            let model = manifest["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["id"] == id)
+                .unwrap()
+                .as_object()
+                .unwrap();
+            let download = model["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|download| {
+                    download["variant"] == "q4"
+                        && download["repo"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains("mlx")
+                })
+                .unwrap();
+            let root = hub
+                .join(format!(
+                    "models--{}",
+                    download["repo"].as_str().unwrap().replace('/', "--")
+                ))
+                .join("snapshots")
+                .join(download["revision"].as_str().unwrap())
+                .join("q4");
+            assert!(
+                root.is_dir(),
+                "required snapshot missing: {}",
+                root.display()
+            );
+            let root = std::fs::canonicalize(root).unwrap();
+            let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+                .with_resolved_route(id)
+                .with_quant(gen_core::Quant::Q4);
+            let mode = crate::memory_route_registry::MemoryRouteMode::TextToImage;
+            let context = crate::memory_route_registry::MemoryRouteRequestContext {
+                mode,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let supports_sequential = crate::inference_runtime::media_descriptor(id)
+                .unwrap()
+                .capabilities
+                .supports_sequential_offload;
+            let mut spec = crate::test_env::temp_env_var(MLX_MEMORY_CAP_ENV, "8", || {
+                crate::image_jobs::prepare_mlx_load_policy(
+                    id,
+                    Some("q4"),
+                    Some(mode),
+                    model,
+                    spec,
+                    context,
+                    true,
+                    supports_sequential,
+                )
+                .unwrap()
+            });
+            eprintln!(
+                "{id}: production shape={:?}, declaration={:?}, offload={:?}",
+                spec.load_shape, spec.load_shape_declaration_result, spec.offload_policy
+            );
+            // Exercise the receipt and path resolution used by generation. Copy bookkeeping into
+            // a scratch data directory so this test never rewrites the operator's installed receipt.
+            let source_data =
+                PathBuf::from(std::env::var_os("SC23648_INSTALL_DATA").expect(
+                    "SC23648_INSTALL_DATA must name the installed SceneWorks data directory",
+                ));
+            let data = tempfile::tempdir().unwrap();
+            let repository = download["repo"].as_str().unwrap();
+            let marker_dir = PathBuf::from("models").join(repository.replace('/', "__"));
+            std::fs::create_dir_all(data.path().join(&marker_dir)).unwrap();
+            std::fs::copy(
+                source_data.join(&marker_dir).join(crate::INSTALL_MARKER),
+                data.path().join(&marker_dir).join(crate::INSTALL_MARKER),
+            )
+            .unwrap();
+            let settings =
+                crate::image_jobs::resolved_artifact_provenance_tests::settings(data.path());
+            let image_request = sceneworks_core::image_request::ImageRequest::from_payload(
+                serde_json::json!({"model":id,"advanced":{"mlxQuantize":4},
+                    "modelManifestEntry":model})
+                .as_object()
+                .unwrap(),
+            );
+            let resolved = crate::image_jobs::resolve_weights_dir(&image_request, &settings)
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved, root);
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(
+                    crate::model_jobs::receipt_verification::ensure_huggingface_receipt_provenance(
+                        &settings,
+                        repository,
+                        id,
+                        Some("q4"),
+                        &root,
+                    ),
+                )
+                .unwrap();
+            let provenance = crate::image_jobs::resolved_mlx_artifact_provenance(
+                &image_request,
+                &settings,
+                repository,
+                &root,
+                Some("q4"),
+            )
+            .unwrap()
+            .unwrap();
+            let binding =
+                bind_decode_quality_policies_from_manifest(model, id, Some(&provenance)).unwrap();
+            spec = attach_decode_quality_binding(spec, binding, id);
+            let conditioning_windows = clip_windows_for_spec(id, &spec, &prompt, &negative_prompt);
+            if id == "sdxl" {
+                assert_eq!(clip_windows_for_spec(id, &spec, "fox", ""), 1);
+                assert_eq!(clip_windows_for_spec(id, &spec, &"fox ".repeat(76), ""), 2);
+                assert_eq!(
+                    clip_windows_for_spec(id, &spec, "fox", &"fox ".repeat(76)),
+                    2
+                );
+                assert_eq!(clip_windows_for_spec(id, &spec, "café ☔", ""), 1);
+            }
+            eprintln!("{id}: prompt demand {conditioning_windows} windows");
+            let plan =
+                MlxRequestPlan::for_spec_and_manifest(id, id, &spec, Some(model), Some(provenance));
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(id, &spec)
+                .unwrap()
+                .unwrap();
+            if std::env::var("SC23648_DIAG_ROUTE").is_ok_and(|route| route == id) {
+                // Diagnostic on the development host's real capacity, independent of the emulated
+                // admission budget. Exercise only the provider's advertised staging/decode knobs.
+                mlx_rs::memory::clear_cache();
+                mlx_rs::memory::reset_peak_memory();
+                let generator = crate::inference_runtime::load(id, &spec).unwrap();
+                let request = gen_core::GenerationRequest {
+                    prompt: prompt.clone(),
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    steps: Some(2),
+                    seed: Some(1234),
+                    memory: Some(GenerationMemory {
+                        stage_residency: true,
+                        tile_vae_decode: true,
+                        decode_tile_edge: Some(192),
+                        decode_overlap: Some(48),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut phase_peaks = Vec::new();
+                let output = generator
+                    .generate(&request, &mut |event| {
+                        if matches!(
+                            event,
+                            gen_core::Progress::Loading(_) | gen_core::Progress::Decoding
+                        ) {
+                            phase_peaks.push((
+                                format!("{event:?}"),
+                                mlx_rs::memory::get_peak_memory(),
+                                mlx_rs::memory::get_active_memory(),
+                            ));
+                            mlx_rs::memory::reset_peak_memory();
+                        }
+                    })
+                    .unwrap();
+                phase_peaks.push((
+                    "complete".to_owned(),
+                    mlx_rs::memory::get_peak_memory(),
+                    mlx_rs::memory::get_active_memory(),
+                ));
+                eprintln!("SC23648 diagnostic phases {id}: {phase_peaks:?}");
+
+                eprintln!(
+                    "SC23648 diagnostic {id}: {:?}, final decode-phase peak {} bytes",
+                    std::mem::discriminant(&output),
+                    mlx_rs::memory::get_peak_memory()
+                );
+            }
+            assert!(
+                contract.asset_facts.base_bytes > 0,
+                "production contracts must price loaded components"
+            );
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.count = count;
+            let geometry = request_geometry(&inputs);
+            assert_eq!(geometry.batch, 1, "job count is sequential");
+            let resident = plan.generic_total_peak_bytes(geometry);
+            let ladder = synthesize_estimate_ladder_with_conditioning(
+                &contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+                Some(conditioning_windows),
+            );
+            let mut minimum = u64::MAX;
+            eprintln!(
+                "{id}: facts={:?}, architecture={:?}, resident={:.3} GiB",
+                contract.asset_facts,
+                contract.architecture_facts,
+                resident as f64 / 1073741824.0
+            );
+            for candidate in ladder.estimates {
+                let raw = candidate.evidence.predicted_peak_bytes;
+                let allowance = admission_allowance(AdmissionSubject {
+                    backend: MemoryBackend::Mlx,
+                    basis: candidate.basis,
+                    unmodeled_activation_bytes: candidate.unmodeled_activation_bytes,
+                });
+                let admitted = raw.saturating_add(
+                    allowance.bytes(raw, candidate.unmodeled_activation_bytes.unwrap_or(raw)),
+                );
+                minimum = minimum.min(admitted);
+                eprintln!(
+                    "  {:?} {:?}: {:.3} + {:.3} = {:.3} GiB ({:?})",
+                    candidate.selection.strategy,
+                    candidate.selection.parameters,
+                    raw as f64 / 1073741824.0,
+                    (admitted - raw) as f64 / 1073741824.0,
+                    admitted as f64 / 1073741824.0,
+                    candidate.basis
+                );
+            }
+            if minimum > gib_to_bytes(6.0) {
+                failures.push(format!("{id}: the optimized ladder costs {minimum} bytes, above the 6 GiB request budget"));
+            }
+            inputs.conditioning_windows = Some(conditioning_windows);
+            let result = preflight_request(
+                &spec,
+                &plan,
+                &inputs,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(8.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+            )
+            .unwrap();
+            let insufficient = preflight_request(
+                &spec,
+                &plan,
+                &inputs,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(4.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(insufficient, MlxRequestAdmission::Rejected(_)),
+                "{id}: valid refusals must remain"
+            );
+            match result {
+                MlxRequestAdmission::Rejected(error) => {
+                    eprintln!("{id}: production preflight refused: {error}");
+                    failures.push(format!("{id}: production preflight refused: {error}"))
+                }
+                MlxRequestAdmission::Admitted(evaluation)
+                    if std::env::var("SC23584_RENDER")
+                        .is_ok_and(|route| route == "all" || route == id) =>
+                {
+                    mlx_rs::memory::clear_cache();
+                    mlx_rs::memory::reset_peak_memory();
+                    let generator = crate::inference_runtime::load(id, &spec).unwrap();
+                    for index in 0..count {
+                        let mut scope = generator
+                            .begin_memory_strategy_request(&evaluation.context)
+                            .unwrap()
+                            .unwrap();
+                        let mut request = gen_core::GenerationRequest {
+                            prompt: prompt.clone(),
+                            negative_prompt: (!negative_prompt.is_empty())
+                                .then(|| negative_prompt.clone()),
+                            width: 1024,
+                            height: 1024,
+                            count: 1,
+                            steps: Some(4),
+                            seed: Some(1234 + u64::from(index)),
+                            memory: Some(evaluation.memory),
+                            ..Default::default()
+                        };
+                        scope.configure_request(&mut request).unwrap();
+                        let output = generator.generate(&request, &mut |_| {}).unwrap();
+                        let gen_core::GenerationOutput::Images(images) = output else {
+                            panic!("expected images")
+                        };
+                        assert_eq!(images.len(), 1);
+                        assert_eq!((images[0].width, images[0].height), (1024, 1024));
+                        assert!(images[0]
+                            .pixels
+                            .iter()
+                            .any(|pixel| *pixel != images[0].pixels[0]));
+                        let peak = mlx_rs::memory::get_peak_memory() as u64;
+                        eprintln!("SC23584 {id} sequential item {index}: cold-inclusive active peak {peak} bytes");
+                        assert!(
+                            peak <= gib_to_bytes(6.0),
+                            "{id}: active runtime exceeded the admitted budget"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// #1544 baseline through the LIVE gate path on REAL weights (ignored — needs the model on disk +

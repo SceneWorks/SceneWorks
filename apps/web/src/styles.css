@@ -871,8 +871,19 @@ button:focus-visible {
   background: var(--bg-2);
   border-right: 1px solid var(--border);
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.sidebar-scroll > * { flex-shrink: 0; }
 
 .brand {
   display: flex;
@@ -918,17 +929,53 @@ button:focus-visible {
 }
 
 /* Pinned to the bottom of the flex-column sidebar (margin-top: auto). Shows the
-   product version injected at build time (see App.jsx / vite.config.js). */
+   product version injected at build time (see AppVersion.jsx / vite.config.js). */
 .sidebar-footer {
+  flex-shrink: 0;
   margin-top: auto;
   padding: 6px 10px 2px;
   border-top: 1px solid var(--border);
 }
 
 .app-version {
-  font-size: 10.5px;
+  font-size: 12px;
   letter-spacing: 0.04em;
   color: var(--text-faint);
+}
+
+.app-version-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-bottom: 8px;
+}
+
+.app-version-section .app-version,
+.app-update-link {
+  white-space: nowrap;
+}
+
+.app-update-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+
+.app-update-link:hover { text-decoration: underline; }
+.app-update-link:disabled { opacity: 0.6; cursor: wait; }
+
+.app-update-error {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .sidebar-section-title {

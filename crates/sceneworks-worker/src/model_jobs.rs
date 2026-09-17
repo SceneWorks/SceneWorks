@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) mod receipt_verification;
+
 use sceneworks_core::base_weights::{
     detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
     BaseWeightDetection, ComponentRole,
@@ -2405,10 +2408,25 @@ pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::A
 pub(crate) struct ResolvedWeights {
     pub(crate) path: PathBuf,
     pub(crate) provenance: Option<ResolvedArtifactProvenance>,
+    receipt: Value,
+    marker: PathBuf,
+    snapshot: PathBuf,
 }
 
 const ARTIFACT_PROVENANCE_MARKER: &str = ".sceneworks-artifact-provenance.json";
 const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const ARTIFACT_PROVENANCE_LOCK: &str = ".sceneworks-artifact-provenance.lock";
+
+fn lock_app_managed_receipt(root: &Path) -> std::io::Result<FileLock> {
+    FileLock::exclusive(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join(ARTIFACT_PROVENANCE_LOCK))?,
+    )
+}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2476,7 +2494,9 @@ fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
                     root.display()
                 ))
             })?;
-            if relative == Path::new(ARTIFACT_PROVENANCE_MARKER) {
+            if relative == Path::new(ARTIFACT_PROVENANCE_MARKER)
+                || relative == Path::new(ARTIFACT_PROVENANCE_LOCK)
+            {
                 continue;
             }
             let metadata = std::fs::symlink_metadata(&path)?;
@@ -2510,6 +2530,15 @@ fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
 use sceneworks_core::download_receipt::update_metadata_stamp;
 
 fn artifact_tree_stamp(root: &Path) -> WorkerResult<String> {
+    artifact_tree_stamp_format(root, false)
+}
+
+fn artifact_tree_stamp_format(root: &Path, legacy: bool) -> WorkerResult<String> {
+    let update_metadata_stamp = if legacy {
+        sceneworks_core::download_receipt::update_legacy_metadata_stamp
+    } else {
+        update_metadata_stamp
+    };
     let mut digest = Sha256::new();
     for path in artifact_files(root)? {
         let relative = path.strip_prefix(root).map_err(|_| {
@@ -2606,6 +2635,7 @@ pub(crate) fn write_app_managed_artifact_receipt(
     let tier = supported_artifact_tier(tier).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("unsupported app-managed artifact tier {tier:?}"))
     })?;
+    let _lock = lock_app_managed_receipt(root)?;
     let fingerprint = artifact_content_fingerprint(root)?;
     let tree_stamp = artifact_tree_stamp(root)?;
     let receipt = AppManagedArtifactReceipt {
@@ -2639,17 +2669,22 @@ pub(crate) fn app_managed_artifact_provenance(
     root: &Path,
 ) -> WorkerResult<Option<ResolvedArtifactProvenance>> {
     let marker = root.join(ARTIFACT_PROVENANCE_MARKER);
+    if !marker.is_file() {
+        return Ok(None);
+    }
+    let _lock = lock_app_managed_receipt(root)?;
     let bytes = match std::fs::read(&marker) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let receipt: AppManagedArtifactReceipt = serde_json::from_slice(&bytes).map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "invalid app-managed artifact provenance at {}: {error}",
-            marker.display()
-        ))
-    })?;
+    let mut receipt: AppManagedArtifactReceipt =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "invalid app-managed artifact provenance at {}: {error}",
+                marker.display()
+            ))
+        })?;
     if receipt.schema_version != ARTIFACT_PROVENANCE_SCHEMA_VERSION {
         return Ok(None);
     }
@@ -2663,8 +2698,21 @@ pub(crate) fn app_managed_artifact_provenance(
     let Some(tier) = supported_artifact_tier(&receipt.tier) else {
         return Ok(None);
     };
-    if artifact_tree_stamp(root)? != receipt.tree_stamp {
-        return Ok(None);
+    let stable_stamp = artifact_tree_stamp(root)?;
+    if stable_stamp != receipt.tree_stamp
+        && artifact_tree_stamp_format(root, true)? != receipt.tree_stamp
+    {
+        // Converted artifacts already carry an independent content digest. Metadata drift can
+        // regain identity only when that original digest still matches, including all components.
+        if artifact_content_fingerprint(root)? != receipt.resolved_path_fingerprint
+            || artifact_tree_stamp(root)? != stable_stamp
+        {
+            return Ok(None);
+        }
+    }
+    if stable_stamp != receipt.tree_stamp {
+        receipt.tree_stamp = stable_stamp;
+        sceneworks_core::download_receipt::write(&marker, &serde_json::to_value(&receipt)?)?;
     }
     Ok(Some(ResolvedArtifactProvenance {
         identity: ResolvedArtifactIdentity {
@@ -2683,6 +2731,114 @@ mod artifact_provenance_tests {
     use serde_json::json;
 
     #[test]
+    fn receipt_migration_rechecks_legacy_baseline_and_rejects_malformed_file_lists() {
+        let data = tempfile::tempdir().unwrap();
+        let hub = data.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let repo = "owner/model";
+        let revision = "1111111111111111111111111111111111111111";
+        let snapshot = hub.join("models--owner--model/snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let weight = snapshot.join("model.safetensors");
+        std::fs::write(&weight, b"original").unwrap();
+        let files = ["model.safetensors"];
+        let old_stamp = artifact_tree_stamp_format(&snapshot, true).unwrap();
+        let receipt = json!({"repo":repo,"modelId":"fixture","variant":"q4",
+            "snapshotRevision":revision,"resolvedFiles":files,"artifactTreeStamp":old_stamp});
+        let marker = data.path().join("models/owner__model").join(INSTALL_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(huggingface_receipt_weights(
+            data.path(),
+            repo,
+            Some("fixture"),
+            Some("q4"),
+            ProvenanceRepair::Skip
+        )
+        .unwrap()
+        .provenance
+        .is_some());
+        let stable = resolved_files_tree_stamp(&snapshot, &files).unwrap();
+        establish_receipt_tree_stamp(
+            &marker,
+            &receipt,
+            &snapshot,
+            &files,
+            "verified-legacy-metadata",
+            Some(&stable),
+        )
+        .unwrap();
+        let migrated: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(migrated["artifactTreeStamp"], stable);
+        // Reproduce the interval between resolver verification and migration's fresh stat.
+        std::fs::write(&marker, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        std::fs::write(&weight, b"modified").unwrap();
+        let changed = resolved_files_tree_stamp(&snapshot, &files).unwrap();
+        let before = std::fs::read(&marker).unwrap();
+        assert!(establish_receipt_tree_stamp(
+            &marker,
+            &receipt,
+            &snapshot,
+            &files,
+            "verified-legacy-metadata",
+            Some(&changed)
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+        // A valid stamp for a subset cannot authorize a malformed recorded closure.
+        let mut malformed = receipt;
+        malformed["artifactTreeStamp"] = json!(changed);
+        malformed["resolvedFiles"] = json!(["model.safetensors", null]);
+        std::fs::write(&marker, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        assert!(huggingface_receipt_weights(
+            data.path(),
+            repo,
+            Some("fixture"),
+            Some("q4"),
+            ProvenanceRepair::Skip
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn app_managed_receipt_migrates_stamps_only_when_original_content_survives() {
+        let data = tempfile::tempdir().unwrap();
+        let weight = data.path().join("model.safetensors");
+        std::fs::write(&weight, b"original").unwrap();
+        let identity =
+            write_app_managed_artifact_receipt(data.path(), "owner/model", "revision", "q4", "q4")
+                .unwrap();
+        let marker = data.path().join(ARTIFACT_PROVENANCE_MARKER);
+        let mut receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        receipt["treeStamp"] = json!(artifact_tree_stamp_format(data.path(), true).unwrap());
+        std::fs::write(&marker, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(
+            app_managed_artifact_provenance(data.path()).unwrap(),
+            Some(identity.clone())
+        );
+        // Simulate an old metadata baseline that no longer matches after a remount.
+        receipt["treeStamp"] = json!(format!("sha256:{}", "0".repeat(64)));
+        std::fs::write(&marker, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(
+            app_managed_artifact_provenance(data.path()).unwrap(),
+            Some(identity)
+        );
+        let migrated = std::fs::read(&marker).unwrap();
+        let parsed: Value = serde_json::from_slice(&migrated).unwrap();
+        assert_eq!(
+            parsed["treeStamp"],
+            artifact_tree_stamp(data.path()).unwrap()
+        );
+        app_managed_artifact_provenance(data.path()).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), migrated);
+        std::fs::write(weight, b"modified").unwrap();
+        assert!(app_managed_artifact_provenance(data.path())
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read(&marker).unwrap(), migrated);
+    }
+
+    #[test]
     fn tree_stamp_repair_fills_null_revision_and_refuses_a_replaced_receipt() {
         let temp = tempfile::tempdir().unwrap();
         let rev = "1111111111111111111111111111111111111111";
@@ -2694,15 +2850,28 @@ mod artifact_provenance_tests {
         let mut top = receipt.clone();
         top["receipts"] = json!([receipt]);
         std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
-        establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"]).unwrap();
+        establish_receipt_tree_stamp(
+            &marker,
+            &receipt,
+            &snapshot,
+            &["model.safetensors"],
+            "repair",
+            None,
+        )
+        .unwrap();
         let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(after["snapshotRevision"], rev);
         assert_eq!(after["receipts"][0]["snapshotRevision"], rev);
         let before = std::fs::read(&marker).unwrap();
-        assert!(
-            establish_receipt_tree_stamp(&marker, &receipt, &snapshot, &["model.safetensors"])
-                .is_err()
-        );
+        assert!(establish_receipt_tree_stamp(
+            &marker,
+            &receipt,
+            &snapshot,
+            &["model.safetensors"],
+            "repair",
+            None
+        )
+        .is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), before);
     }
 
@@ -3457,8 +3626,8 @@ fn huggingface_receipt_weights_with_revision(
 /// (it stamps what the hub client just wrote, without re-reading content), just anchored later. The
 /// receipt records `artifactTreeStampSource` so the weaker anchor is never mistaken for the original.
 ///
-/// A receipt whose stamp is PRESENT but does NOT match is untouched: that is real drift and must
-/// keep failing closed.
+/// A present but mismatched stamp stays unproven here. It may reflect file drift or a changed
+/// mount number in an old stamp; only independent content verification may replace that baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvenanceRepair {
     Allow,
@@ -3472,6 +3641,8 @@ fn establish_receipt_tree_stamp(
     receipt: &Value,
     snapshot: &Path,
     files: &[&str],
+    source: &str,
+    verified_stamp: Option<&str>,
 ) -> WorkerResult<String> {
     let _receipt_lock = sceneworks_core::download_receipt::lock(
         marker
@@ -3479,6 +3650,27 @@ fn establish_receipt_tree_stamp(
             .ok_or_else(|| WorkerError::InvalidPayload("receipt has no parent".to_owned()))?,
     )?;
     let stamp = resolved_files_tree_stamp(snapshot, files)?;
+    if verified_stamp.is_some_and(|verified| verified != stamp) {
+        return Err(WorkerError::InvalidPayload(
+            "artifact changed during content verification".to_owned(),
+        ));
+    }
+    if source == "verified-legacy-metadata" {
+        let matches = receipt
+            .get("artifactTreeStamp")
+            .and_then(Value::as_str)
+            .is_some_and(|expected| {
+                sceneworks_core::download_receipt::resolved_files_tree_stamp_matches(
+                    snapshot, files, expected,
+                )
+                .unwrap_or(false)
+            });
+        if !matches || resolved_files_tree_stamp(snapshot, files)? != stamp {
+            return Err(WorkerError::InvalidPayload(
+                "artifact changed since its legacy baseline was verified".to_owned(),
+            ));
+        }
+    }
     let revision = snapshot
         .file_name()
         .and_then(|name| name.to_str())
@@ -3497,7 +3689,7 @@ fn establish_receipt_tree_stamp(
         object.insert("artifactTreeStamp".to_owned(), Value::String(stamp.clone()));
         object.insert(
             "artifactTreeStampSource".to_owned(),
-            Value::String("repair".to_owned()),
+            Value::String(source.to_owned()),
         );
         // A backfilled receipt carries no revision, so resolution leans on the exact file set
         // identifying exactly one snapshot. Record what we just resolved to remove that ambiguity.
@@ -3606,13 +3798,13 @@ fn receipt_weights_dir_from_marker(
                 continue;
             }
         }
-        let files = receipt
+        let Some(files) = receipt
             .get("resolvedFiles")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>();
+            .and_then(|files| files.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        else {
+            continue;
+        };
         if files.is_empty() {
             continue;
         }
@@ -3647,14 +3839,21 @@ fn receipt_weights_dir_from_marker(
                 .and_then(Value::as_str)
                 .filter(|stamp| is_sha256_fingerprint(stamp));
             let tree_stamp_matches = match receipt_tree_stamp {
-                // A stamp exists: it is the baseline, and a mismatch is drift. Never repair over it.
-                Some(expected) => resolved_files_tree_stamp(&snapshot, &files)
-                    .is_ok_and(|actual| actual == expected),
+                // A stamp exists: retain its baseline. Cold content verification owns recovery
+                // when metadata changes; this synchronous lookup never repairs over a mismatch.
+                Some(expected) => {
+                    sceneworks_core::download_receipt::resolved_files_tree_stamp_matches(
+                        &snapshot, &files, expected,
+                    )
+                    .unwrap_or(false)
+                }
                 // No stamp was ever recorded (sc-16482). Establish one now when the caller allows
                 // it, so this install can reach the evidence path instead of being pinned to legacy
                 // forever. A repair failure is never fatal — it just leaves provenance unproven.
                 None if repair == ProvenanceRepair::Allow => {
-                    match establish_receipt_tree_stamp(marker, &receipt, &snapshot, &files) {
+                    match establish_receipt_tree_stamp(
+                        marker, &receipt, &snapshot, &files, "repair", None,
+                    ) {
                         Ok(stamp) => {
                             tracing::info!(
                                 event = "artifact_tree_stamp_repaired",
@@ -3689,6 +3888,9 @@ fn receipt_weights_dir_from_marker(
                     let revision = snapshot.file_name()?.to_str()?.to_owned();
                     let variant = variant.to_owned();
                     return Some(ResolvedWeights {
+                        receipt: receipt.clone(),
+                        marker: marker.to_path_buf(),
+                        snapshot: snapshot.clone(),
                         path: tier,
                         provenance: tree_stamp_matches.then(|| ResolvedArtifactProvenance {
                             identity: ResolvedArtifactIdentity {
@@ -3716,6 +3918,9 @@ fn receipt_weights_dir_from_marker(
                 .unwrap_or("default")
                 .to_owned();
             return Some(ResolvedWeights {
+                receipt: receipt.clone(),
+                marker: marker.to_path_buf(),
+                snapshot: snapshot.clone(),
                 path: snapshot,
                 provenance: tree_stamp_matches.then(|| ResolvedArtifactProvenance {
                     identity: ResolvedArtifactIdentity {

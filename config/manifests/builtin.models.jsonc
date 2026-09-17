@@ -15044,6 +15044,81 @@
                       "variant": "q4",
                       "fingerprint": "SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q4"
                     },
+                    "implementationFingerprint": "6c70ffaf9c9bbd23d449a4ee1c7dc4911b094878cd66283195d5ec98f8bd1a56",
+                    "mode": "text_to_image",
+                    "overlay": null,
+                    "geometry": {
+                      "width": 1024,
+                      "height": 1024,
+                      "batch": 1,
+                      "frames": 1,
+                      "referenceCount": 0
+                    },
+                    "usePid": false,
+                    "tileEdge": 256,
+                    "overlap": 64,
+                    "metric": "max_abs_rgb_u8",
+                    "maximumError": 48,
+                    "fixtures": [
+                      {
+                        "seed": 7,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "9ef91b3e1d0dfc746a51bdff13c110bda65c00fbe97f458ef7e61f56d3fc00b8",
+                        "denseOutputSha256": "830f102a4c295164cee9c50819c6c5a2753be04f740806f02066cc2dcf5e929b",
+                        "tiledOutputSha256": "ac2f4811b80b655c84459173f48b1af3e888174d173267ab3d5e712595177e78",
+                        "observedError": 35
+                      },
+                      {
+                        "seed": 99,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "1571d026d4fdecab7f39676fa26be1040325df90d38dc41c08b58be05405dec8",
+                        "denseOutputSha256": "69e8abb701fd157bfecfcad44c37daa33e7197f8f3ad1d30d573e81321e1e056",
+                        "tiledOutputSha256": "dcaa6a353c4c7486cbf71beeea6f4352685a85dd8738f6ff83972f253255c1b7",
+                        "observedError": 14
+                      },
+                      {
+                        "seed": 1234,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "fd9df674d6bef88ed92e0f13ded80b27c625e1f7d18c192ed7b0c4aba0883849",
+                        "denseOutputSha256": "46df4c2dcbfe0017163e68153f71a4777060363edfc1d417b8663763fc4b4285",
+                        "tiledOutputSha256": "61524b61c5428114a0d6f6d970e202779a41e5cdd583b2bbff1b8013edaa20bb",
+                        "observedError": 16
+                      },
+                      {
+                        "seed": 424242,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "641dcba95d29616a98ba5f9d72986cf79683e6f8e9b68e8b9379df0da6c2c477",
+                        "denseOutputSha256": "4f26223863ebd191d29669258da10da270ac880dc81ce9ed5113bce928d0ef49",
+                        "tiledOutputSha256": "fcc6563c6f1119ab1e7d57633d7fb1813b4a98db079efdf90af346e80894dd6b",
+                        "observedError": 15
+                      },
+                      {
+                        "seed": 20260805,
+                        "productionLatentProvenance": "sdxl@36699bb8a6353e61c920e3bf19f0e6f8e4151c55 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                        "productionLatentSha256": "aadd800bf5cb445f3a9005c6f46f3c3cd5ac5ff720e90dc3a9d38c5f4e7c3b02",
+                        "denseOutputSha256": "1648617798d45526ae6f3649e9133a39a24fe15007e55349e42e35479c737875",
+                        "tiledOutputSha256": "b5bdb57a756ebea553dbaf5041b3e358bda6a3d2fba7f0a5ac6f8e5009b68db9",
+                        "observedError": 15
+                      }
+                    ],
+                    "productionEvidenceSha256": "ad4096bf0af0bc964685acaf5127850f3645adaafe54319ced341442c5cf69fc",
+                    "disposition": {
+                      "kind": "admitted"
+                    }
+                  },
+                  {
+                    "qualityAbi": 2,
+                    "family": "sdxl",
+                    "resolvedRoute": "sdxl",
+                    "backend": "mlx",
+                    "tier": "q4",
+                    "loadShape": "deferred_materialization",
+                    "artifact": {
+                      "repository": "SceneWorks/sdxl-base-mlx",
+                      "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+                      "variant": "q4",
+                      "fingerprint": "SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q4"
+                    },
                     "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
                     "mode": "text_to_image",
                     "overlay": null,
@@ -15808,6 +15883,32 @@
               // sc-21609: the SdxlSubMode::Ip lane — character requests always carry an IP
               // adapter, so the coordinate lives at the identity overlay with the ip_adapter
               // profiles the route registry now witnesses.
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            // sc-23648: packed tiers implement the same streaming UNet; the provider validates the artifact.
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
+              // sc-21609: same narrowing as the bf16 row — inpaint spells edit, detail is a
+              // control-overlay load, character is the identity row below.
+              "modes": ["text_to_image", "edit_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
               "modes": ["character_image"],
               "overlays": ["identity"],
               "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
@@ -17852,7 +17953,7 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
@@ -26493,7 +26594,7 @@
           // campaign must re-verify these checked-in facts live in its same-run receipt.
           "terminalCandidate": {
             "schemaVersion": 1,
-            "inferenceRevision": "c21f11f5c1b69d09a4058849260008b9056bdbcc",
+            "inferenceRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
             "corpusSha256": "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5",
             "model": {
               "repository": "starvector/starvector-8b-im2svg",
@@ -26521,7 +26622,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "6a38671f9f90a922e3aeb9784aa7ff26ae5184a20dec09d8af389fa536fe0342",
+              "sha256": "c77a041fdbd357768eda2a65b2f033193af392b36323d2d492c3a459b5ffd8cc",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26540,13 +26641,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 250714,
-                  "sha256": "9a282ded353a72ad7d1e9505bd0385f5c4294338b28dfbd1307f88c9f0608ac6"
+                  "byteSize": 250722,
+                  "sha256": "a0d22ec8abb58708bf4a3fdca8d4b2d00bcaae0b77b34f438195b105a4938042"
                 },
                 {
                   "path": "Cargo.toml",
-                  "byteSize": 9798,
-                  "sha256": "a838f63163a7a956f7ae120841323558a7f802965b1f8cb4551238807b2aed5c"
+                  "byteSize": 9799,
+                  "sha256": "35a7c2a2cc656484ea743def87cb0c1f2ed934ef30fddcfb89fc2df2e2563cf7"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -26555,13 +26656,13 @@
                 },
                 {
                   "path": "crates/sceneworks-core/src/download_receipt.rs",
-                  "byteSize": 9651,
-                  "sha256": "bcafd0e7951ee8dd4e153f13a937078be7792c6ae6b0d72527a19b21190c384b"
+                  "byteSize": 10899,
+                  "sha256": "e1388013dd11175de8936e2037d062757d543352dace55866218a1a73835cb8d"
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8839,
-                  "sha256": "ae7fddaa8baf094d5a967d3d1d2223d56a65010007625ce03937a08789a08c3e"
+                  "sha256": "78eb1ec58197f77efb6ffef85c9b37662d4a3eb325a9ad968e0ce3bae9f17107"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -26590,18 +26691,18 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 146599,
-                  "sha256": "7e6d33b746aa726b5d5692ca021293896e9a1c0114c946882a799dd2aa6d8711"
+                  "byteSize": 146679,
+                  "sha256": "892b53e23aa95240f30204123216ee4f4ae9790d03fb450e6a991ba2b076dc08"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
-                  "byteSize": 382949,
-                  "sha256": "a2e9e57f14a7cde4b4bf54d7ce519cf5f1c4139593bdbd2a9bbf0cc6eb63273c"
+                  "byteSize": 391352,
+                  "sha256": "f521fd5d7a27885984a7c89341fd7bd6c69ad99569d135d89e7c9e16815cac73"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 189719,
-                  "sha256": "c8bb78c824534bca94d49472f65a1dc7445c3d355f1309884dcb62ef3c2db323"
+                  "byteSize": 190392,
+                  "sha256": "375e0bdaab84a97dd5c8fffe3f77409166822fde1ed8226f9e8b5a75039043dd"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -26620,8 +26721,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7503,
-                  "sha256": "835ca5c3e7892e6e7227cbff0eded7f5bb449292b0e5f5db83f12068bb2ac07e"
+                  "byteSize": 7504,
+                  "sha256": "a7ad8f68ee9728caf02506b5e29b8cdec1e600f360c8af1b8c7d5a2f828a27f8"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

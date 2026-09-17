@@ -1915,12 +1915,21 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
 ) {
     let (harness, _) = rendered_two_shots().await;
     script_answers(&harness, &agreeing_answers());
-    // ~0.6 s per answer against a 2 s budget: the frames sample well inside it, the first answer
-    // or two land, and the deadline falls between questions.
-    harness.script.lock().vqa_delay = Some(Duration::from_millis(600));
+    // 2 s per answer against an 8 s budget. The two bounds this test needs are both wide:
+    // the frames plus ONE answer must fit (frames have ~6 s of room, against the fraction of a
+    // second three extractions take even on a loaded runner), and all six answers must NOT
+    // (6 x 2 s = 12 s, half again over the budget) — so the deadline always falls between
+    // questions with evidence already in hand.
+    //
+    // It used to be 0.6 s answers against a 2 s budget, which left the frames ~1.4 s: enough on an
+    // idle machine, and not enough on a busy one, where this test measured 0 of 6 answers and
+    // failed (sc-23403). Its sibling above tolerates a loaded runner in its claims; this one
+    // cannot, because "partial evidence is KEPT" is the thing it exists to prove — so the margin
+    // has to be in the timings instead.
+    harness.script.lock().vqa_delay = Some(Duration::from_secs(2));
     let mut options = review_options(&harness, &["SH010"]);
     options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
-        plan.limits.max_seconds = 2;
+        plan.limits.max_seconds = 8;
     }));
     let vision = VqaVision::new(
         &harness.transport,
@@ -1936,7 +1945,7 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
         .as_deref()
         .expect("a review that spent its budget says so");
     assert!(
-        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        stop.starts_with("review_budget: limits.maxSeconds is 8s"),
         "{stop}"
     );
     let declared = shipped_review_plan().shots["SH010"].questions.len();
@@ -2255,4 +2264,167 @@ async fn routed_project_id(harness: &Harness) -> String {
         .and_then(|project| project["id"].as_str())
         .expect("the evaluation created its project")
         .to_owned()
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-23405 (S4) — one shared workshop
+// ---------------------------------------------------------------------------------------------
+
+/// AC3, first half. The shipped review plan validates against BOTH courier plans — the phase-1
+/// `plan.jsonc` baseline and the reference-conditioned `plan.v2.jsonc` — so the same questions
+/// grade the same film either way and the two are comparable answer for answer.
+#[test]
+fn the_shipped_review_plan_validates_against_both_courier_plans() {
+    let review = shipped_review_plan();
+    assert_eq!(review.version, 3);
+    for name in ["plan.jsonc", "plan.v2.jsonc"] {
+        let plan =
+            sceneworks_core::film_plan::read_plan_file(&PathBuf::from(FIXTURE_DIR).join(name))
+                .unwrap_or_else(|error| panic!("{name} reads: {error}"));
+        let findings = validate_review_plan(&review, &plan);
+        assert!(
+            findings.is_empty(),
+            "{name}: {:?}",
+            findings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<String>>()
+        );
+    }
+}
+
+/// AC3, second half. Every `acrossCut` question compares a feature of a reference BOTH sides of the
+/// cut are conditioned on in `plan.v2.jsonc`.
+///
+/// That is the whole change of premise this story makes to the review. In phase 1 a cut question
+/// could only ask whether two independently invented rooms happened to agree — the documented miss
+/// of the first smoke, where both sides answered "a woodworking workshop" while rendering different
+/// ones. In plan.v2 every shot binds the approved `workshop_location`, `workbench_table` and
+/// `red_parcel`, so each cut question names in its `intended` the role the comparison rests on, and
+/// this test holds the document to it: the named role must be approved in the pack and bound by the
+/// shot AND by the shot its `dependsOn` edge points at. A question whose `intended` names a role
+/// only one side binds is comparing nothing.
+#[test]
+fn every_cut_question_compares_a_reference_both_sides_of_the_cut_bind() {
+    let review = shipped_review_plan();
+    let plan = sceneworks_core::film_plan::read_plan_file(
+        &PathBuf::from(FIXTURE_DIR).join("plan.v2.jsonc"),
+    )
+    .expect("plan.v2.jsonc reads");
+    let pack = sceneworks_core::film_plan::read_reference_pack_file(
+        &PathBuf::from(FIXTURE_DIR).join("references.jsonc"),
+    )
+    .expect("the pack reads");
+    let approved: Vec<&str> = pack
+        .references
+        .iter()
+        .filter(|entry| entry.approved)
+        .map(|entry| entry.role.as_str())
+        .collect();
+    let bound = |shot_id: &str| -> Vec<String> {
+        let shot = plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == shot_id)
+            .unwrap_or_else(|| panic!("{shot_id} is in plan.v2.jsonc"));
+        // CONDITIONING only. `continuityRoles` is a continuity DECLARATION — it says the role is
+        // meant to stay the same across the cut — and does not put the image on either request, so
+        // chaining it in would let a question pass on two shots that were both conditioned on
+        // nothing. That is the documented miss this test exists to catch, so the set it compares is
+        // exactly the roles the compiled requests carry (sc-23405 review).
+        shot.conditioning.reference_roles.clone()
+    };
+
+    let mut checked = 0_usize;
+    for (shot_id, spec) in &review.shots {
+        for question in &spec.questions {
+            if !question.across_cut {
+                continue;
+            }
+            checked += 1;
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| &shot.id == shot_id)
+                .unwrap_or_else(|| panic!("{shot_id} is in plan.v2.jsonc"));
+            let source = shot
+                .depends_on
+                .first()
+                .unwrap_or_else(|| panic!("{shot_id}'s acrossCut question needs a dependsOn edge"));
+            let here = bound(shot_id);
+            let there = bound(&source.shot_id);
+            let shared: Vec<&str> = approved
+                .iter()
+                .copied()
+                .filter(|role| {
+                    question.intended.contains(*role)
+                        && here.iter().any(|bound| bound == role)
+                        && there.iter().any(|bound| bound == role)
+                })
+                .collect();
+            assert!(
+                !shared.is_empty(),
+                "{}: its `intended` must name an approved role that BOTH {shot_id} and {} bind, \
+                 or the question compares nothing. intended={:?}; {shot_id} binds {here:?}; {} \
+                 binds {there:?}",
+                question.id,
+                source.shot_id,
+                question.intended,
+                source.shot_id,
+            );
+        }
+    }
+    assert_eq!(checked, 5, "one cut question per cut, SH020 through SH060");
+
+    // Where the room is in frame, the shared feature graded IS the workshop — the pegboard of hand
+    // tools the approved `workshop_location` plate declares, asked identically on both sides.
+    for shot_id in ["SH020", "SH040", "SH050"] {
+        let question = review.shots[shot_id]
+            .questions
+            .iter()
+            .find(|question| question.across_cut)
+            .expect("a cut question");
+        assert!(
+            question.intended.contains("workshop_location")
+                && question.ask.contains("pegboard")
+                && question.expect.iter().any(|word| word == "yes"),
+            "{shot_id}: {question:?}"
+        );
+    }
+    // On the two CLOSE-UPS the room is not in frame, so the shared reference graded is the parcel.
+    // A frame cannot be asked about a wall it does not contain: that answer would be `unobserved`,
+    // which is a flag rather than evidence.
+    for shot_id in ["SH030", "SH060"] {
+        let question = review.shots[shot_id]
+            .questions
+            .iter()
+            .find(|question| question.across_cut)
+            .expect("a cut question");
+        assert!(
+            question.intended.contains("red_parcel") && question.ask.contains("parcel"),
+            "{shot_id}: {question:?}"
+        );
+    }
+
+    // And the LOCATION questions name the approved plate they are grading against, rather than
+    // "the same room as SH010" — which under plan.v2 is a fact about the pack, not about a take.
+    for (shot_id, role) in [
+        ("SH010", "workshop_location"),
+        ("SH020", "workshop_location"),
+        ("SH030", "workbench_table"),
+        ("SH040", "workshop_location"),
+        ("SH050", "workshop_location"),
+        ("SH060", "workbench_table"),
+    ] {
+        let question = review.shots[shot_id]
+            .questions
+            .iter()
+            .find(|question| question.topic == "location")
+            .unwrap_or_else(|| panic!("{shot_id} has a location question"));
+        assert!(
+            question.intended.contains(role),
+            "{shot_id}'s location question must name the approved {role} it grades against: {:?}",
+            question.intended
+        );
+    }
 }

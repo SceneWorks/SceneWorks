@@ -2005,6 +2005,7 @@ fn planned_selection_with_tier(
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
+            stage_residency: None,
             decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
@@ -7613,6 +7614,7 @@ fn run(request: &Value) -> Result<Value, String> {
     let attention = protocol::parameter(request, "attentionChunkSize")?;
     let window = protocol::parameter(request, "transformerWindowSize")?;
     let selected = MemoryStrategyParameters {
+        stage_residency: None,
         decode_tile_edge: Some(edge),
         decode_overlap: Some(overlap),
         attention_chunk_size: Some(attention),

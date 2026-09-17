@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::film_harness::{
-    self, ApiRequest, ApiResponse, ApiTransport, HarnessError, RequestBody, ResumeOptions,
-    RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
+    self, ApiRequest, ApiResponse, ApiTransport, BytesResponse, BytesTransportFuture, HarnessError,
+    RequestBody, ResumeOptions, RunControl, RunOptions, TransportFuture, FIXTURE_REFERENCES,
 };
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
@@ -72,6 +72,100 @@ impl ApiTransport for RouterTransport {
             };
             Ok(ApiResponse { status, body })
         })
+    }
+
+    /// The bytes half: the same `oneshot` driver, without the JSON parse — what `make-references`
+    /// downloads a rendered plate through (sc-23403), and what a synthesized dialogue clip is
+    /// fetched through (sc-23404).
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .expect("request builds");
+            let response = app
+                .oneshot(request)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?;
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|error| HarnessError::Transport(error.to_string()))?
+                .to_vec();
+            Ok(BytesResponse { status, bytes })
+        })
+    }
+}
+
+/// An [`ApiTransport`] over the in-process router that logs every file DOWNLOAD, and can answer
+/// `GET /api/v1/projects…` with the project's `path` relocated to a directory this process cannot
+/// read.
+///
+/// Relocated, that is how a REMOTE API host looks from the controller (sc-23404): `--api` may name
+/// a private-network address, a `.local` name or a bare hostname, and the API host "may be a
+/// different machine" (docs/film-harness.md), whose project directory is simply not on this
+/// filesystem. Not relocated, it is the loopback case, unchanged. Everything else — the routes, the
+/// job table, the assets — is the real in-process API either way.
+pub(crate) struct CountingTransport {
+    inner: RouterTransport,
+    /// Where the project documents claim their directories are, or `None` to leave them alone.
+    relocate_to: Option<PathBuf>,
+    pub(crate) downloads: Arc<Mutex<Vec<String>>>,
+}
+
+impl CountingTransport {
+    /// The API is on THIS machine: its project directory really is where it says it is.
+    pub(crate) fn local(app: axum::Router) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            relocate_to: None,
+            downloads: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The API is on ANOTHER machine: every project directory it names is unreadable here.
+    pub(crate) fn remote(app: axum::Router, unreachable_root: PathBuf) -> Self {
+        Self {
+            relocate_to: Some(unreachable_root),
+            ..Self::local(app)
+        }
+    }
+}
+
+impl ApiTransport for CountingTransport {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        // Only the project documents carry a host-local `path` — the list, one project, and the
+        // CREATE that answers with the freshly made one, which is the response `ensure_project`
+        // reads on a first run. Narrowed by depth so a nested route (`…/projects/{id}/assets`,
+        // five segments) is passed through untouched.
+        let relocate_to = self.relocate_to.clone().filter(|_| {
+            request.path.starts_with("/api/v1/projects") && request.path.matches('/').count() <= 4
+        });
+        let inner = self.inner.call(request);
+        Box::pin(async move {
+            let mut response = inner.await?;
+            if let Some(root) = relocate_to.filter(|_| (200..300).contains(&response.status)) {
+                let relocate = |project: &mut Value| {
+                    if let Some(id) = project.get("id").and_then(Value::as_str) {
+                        let path = root.join(id);
+                        project["path"] = json!(path.to_string_lossy());
+                    }
+                };
+                match &mut response.body {
+                    Value::Array(projects) => projects.iter_mut().for_each(relocate),
+                    project @ Value::Object(_) => relocate(project),
+                    _ => {}
+                }
+            }
+            Ok(response)
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.downloads.lock().push(path.clone());
+        self.inner.get_bytes(path)
     }
 }
 
@@ -138,6 +232,10 @@ impl ApiTransport for ScriptedTransport {
             Ok(response)
         })
     }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
+    }
 }
 
 /// How the fake worker treats one video job, keyed by the shot id the harness stamps into
@@ -189,6 +287,18 @@ pub(crate) struct WorkerScript {
     pub(crate) vqa_answers: std::collections::BTreeMap<String, String>,
     /// Fail every `image_vqa` job, for the "the backend answered nothing at all" path.
     pub(crate) vqa_fails: bool,
+    /// sc-23403: roles (`advanced.filmHarness.role`) whose `image_generate` job fails outright.
+    pub(crate) image_fails: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs until it is cancelled, so a test can spend
+    /// the spec's own `maxJobSeconds` on one.
+    pub(crate) image_hangs: Vec<String>,
+    /// sc-23403: roles whose `image_generate` job hangs and IGNORES `cancelRequested` — the image
+    /// lane's [`VideoBehavior::HangIgnoringCancel`]. A render still on the GPU after the cancel
+    /// grace is the one state in which no further plate may be dispatched beside it.
+    pub(crate) image_ignores_cancel: Vec<String>,
+    /// sc-23403: peak the fake image worker reports in its metrics block, as a percentage of host
+    /// memory. `None` reports the ordinary small peak.
+    pub(crate) image_peak_pct: Option<f64>,
     /// Questions the fake worker has been asked, in order: (tag, question).
     pub(crate) vqa_asked: Vec<(String, String)>,
     /// Replies the fake worker returns for `prompt_refine` jobs whose task is `film_plan`, in
@@ -199,6 +309,13 @@ pub(crate) struct WorkerScript {
     /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
     /// by the shot's own prompt.
     pub(crate) refine_template: Option<String>,
+    /// sc-23404: fail every `audio_generate` job — the "the TTS model refused / fell over" path.
+    pub(crate) audio_fails: bool,
+    /// sc-23404: never complete an `audio_generate` job (honouring a cancel), so a test can spend
+    /// the plan's `maxShotSeconds` inside a synthesis rather than inside a render.
+    pub(crate) audio_hangs: bool,
+    /// sc-23404: `audio_generate` jobs the fake has claimed, in order: (role, payload).
+    pub(crate) audio_claimed: Vec<(String, Value)>,
 }
 
 impl WorkerScript {
@@ -233,14 +350,21 @@ const HOST_MEMORY_MB: u64 = 128 * 1024;
 /// Every job type the harness drives, which the fake advertises unless a test narrows it.
 ///
 /// `image_vqa` (sc-22714) is what the reviewer's questions ride; `frame_extract` is what turns a
-/// take into timestamped frame evidence; `prompt_refine` (sc-22713) is the planner seam. All of
-/// them are job types the real worker already advertises.
+/// take into timestamped frame evidence; `prompt_refine` (sc-22713) is the planner seam;
+/// `audio_generate` (sc-23404) is the TTS seam a synthesized dialogue line rides; `image_generate`
+/// (sc-23403) is the generation seam `make-references` drives. All of them are job types the real
+/// worker already advertises (the macOS worker builds the candle audio lane unconditionally, so
+/// `audio_generate` is advertised on the mlx lane too).
 pub(crate) const FAKE_CAPABILITIES: &[&str] = &[
     "video_generate",
     "timeline_export",
     "frame_extract",
     "image_vqa",
     "prompt_refine",
+    "audio_generate",
+    // sc-23403: the generation seam `make-references` drives. A real image worker advertises the
+    // same capability and answers with the same `assetWrites` fact shape.
+    "image_generate",
 ];
 
 async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
@@ -322,6 +446,13 @@ fn spawn_fake_worker(
                 "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
                 "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
                 "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
+                // sc-23404: the TTS seam. Writes a deterministic canonical PCM-16 WAV where the
+                // real audio worker writes its clip and reports the same `assetWrites` fact, so
+                // asset persistence, the audio sidecar and the two-phase result rewrite are
+                // production code paths here exactly as they are for a render.
+                "audio_generate" => run_fake_audio_job(&app, &script, &job_id, &job).await,
+                // sc-23403: the image-generation seam the reference-fixture generator drives.
+                "image_generate" => run_fake_image_job(&app, &script, &job_id, &job).await,
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
@@ -547,6 +678,162 @@ async fn run_fake_video_job(
     .await;
 }
 
+/// The `image_generate` job, faked (sc-23403): write a deterministic plate at the REQUESTED
+/// geometry where the GPU worker would write its render, and report it as an `assetWrites` fact in
+/// the shape `build_image_sidecar_parts` reads. Asset persistence, the sidecar, the recipe, the
+/// index, the two-phase result rewrite and the file route the plate is downloaded back through are
+/// all production code paths.
+async fn run_fake_image_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let role = payload["advanced"]["filmHarness"]["role"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let (fails, hangs, ignores_cancel, peak_pct) = {
+        let script = script.lock();
+        (
+            script.image_fails.contains(&role),
+            script.image_hangs.contains(&role),
+            script.image_ignores_cancel.contains(&role),
+            script.image_peak_pct,
+        )
+    };
+    if fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake image engine fault", "error": "fake image engine fault",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    if ignores_cancel {
+        // A render that keeps the GPU past the cancel grace — the image lane's
+        // `VideoBehavior::HangIgnoringCancel`. The job stays `running` forever, so the generator
+        // must refuse rather than dispatch a second plate beside a render it cannot stop.
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "running", "stage": "generating", "progress": 0.2,
+                "message": "fake plate, wedged", "workerId": WORKER_ID, "backend": "mlx"
+            }),
+        )
+        .await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if hangs {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let width = payload["width"].as_u64().unwrap_or(1024) as u32;
+    let height = payload["height"].as_u64().unwrap_or(1024) as u32;
+    let seed = payload["seed"]
+        .as_i64()
+        .or_else(|| payload["seeds"][0].as_i64())
+        .unwrap_or(1);
+    let asset_id = format!("asset_{}", &job_id.replace('-', "")[..16]);
+    let genset_id = format!("genset_{}", &job_id.replace('-', "")[..16]);
+    let media_rel = format!("assets/images/{genset_id}/{asset_id}.png");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join(format!("assets/images/{genset_id}")))
+        .expect("images dir");
+    // A real PNG at the geometry the job asked for: the pack the generator publishes has to hold
+    // something a later `validate` and a later import can actually read.
+    let tint = [
+        (seed.unsigned_abs() % 251) as u8,
+        (role.len() as u8).wrapping_mul(17),
+        180,
+    ];
+    std::fs::write(
+        project_dir.join(&media_rel),
+        film_harness::fixture_plate_png_sized(&role, tint, width, height).expect("plate encodes"),
+    )
+    .expect("fake plate");
+    let fact = json!({
+        "type": "image",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "image/png",
+        "width": width, "height": height,
+        "normalizedWidth": width, "normalizedHeight": height,
+        "count": 1,
+        "index": 0,
+        "seed": seed,
+        "family": "krea-2",
+        "displayName": format!("fake plate {role}"),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": payload["mode"], "model": payload["model"], "adapter": "fake_mlx_krea",
+        "prompt": payload["prompt"], "negativePrompt": payload["negativePrompt"], "loras": [],
+        "rawAdapterSettings": { "advanced": payload["advanced"] }
+    });
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake plate done", "workerId": WORKER_ID, "backend": "mlx",
+            "result": {
+                "generationSetId": genset_id,
+                "expectedCount": 1,
+                "adapter": "fake_mlx_krea",
+                "model": payload["model"],
+                "generationSet": {
+                    "id": genset_id, "mode": payload["mode"], "model": payload["model"],
+                    "prompt": payload["prompt"], "negativePrompt": "", "count": 1,
+                    "createdAt": sceneworks_core::time::utc_now()
+                },
+                "assetWrites": [fact]
+            }
+        }),
+    )
+    .await;
+    let peak_pct = peak_pct.unwrap_or(12.0);
+    post_generation_metrics(
+        app,
+        job_id,
+        json!({
+            "backend": "mlx",
+            "totalMs": 1_000,
+            "peakMemoryBytes": (HOST_MEMORY_MB as f64 * 1024.0 * 1024.0 * peak_pct / 100.0) as u64,
+            "peakMemoryPct": peak_pct,
+        }),
+    )
+    .await;
+}
+
 /// The worker's `post_generation_metrics`: an upsert of the run's metrics block, posted after the
 /// job is already terminal.
 async fn post_generation_metrics(app: &axum::Router, job_id: &str, metrics: Value) {
@@ -640,6 +927,151 @@ async fn run_fake_frame_job(
         }),
     )
     .await;
+}
+
+/// The `audio_generate` job, faked (sc-23404): write a deterministic canonical PCM-16 WAV where the
+/// audio worker writes its clip and report it through the same `assetWrites` fact
+/// `audio_jobs::audio_asset_fact` builds. No TTS weights load; asset persistence, the audio sidecar
+/// and the two-phase result rewrite are the production code paths.
+///
+/// The clip's pitch is derived from the requested VOICE and its length from the text, so a test can
+/// tell one synthesized line from another by decoding the export — the same trick the fixture's
+/// placeholder tones used, now keyed on what was actually asked for rather than on a checked-in
+/// file.
+async fn run_fake_audio_job(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    job_id: &str,
+    job: &Value,
+) {
+    let payload = &job["payload"];
+    let role = payload["advanced"]["filmHarness"]["role"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    script
+        .lock()
+        .audio_claimed
+        .push((role.clone(), payload.clone()));
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "running", "stage": "generating", "progress": 0.3,
+            "message": "fake synthesis", "workerId": WORKER_ID, "backend": "candle"
+        }),
+    )
+    .await;
+    if script.lock().audio_fails {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "failed", "stage": "failed", "progress": 1,
+                "message": "fake tts fault", "error": "fake tts fault: no voice bank",
+                "workerId": WORKER_ID
+            }),
+        )
+        .await;
+        return;
+    }
+    if script.lock().audio_hangs {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (_, snapshot) = request(
+                app.clone(),
+                "GET",
+                &format!("/api/v1/jobs/{job_id}"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["cancelRequested"].as_bool() == Some(true) {
+                post_progress(
+                    app,
+                    job_id,
+                    json!({
+                        "status": "canceled", "stage": "canceled", "progress": 1,
+                        "message": "Canceled by user.", "workerId": WORKER_ID
+                    }),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    let project_id = job["projectId"].as_str().expect("project id").to_owned();
+    let prompt = payload["prompt"].as_str().unwrap_or_default().to_owned();
+    let voice = payload["voice"].as_str().map(str::to_owned);
+    let asset_id = format!("asset_tts_{}", &job_id.replace('-', "")[..12]);
+    let media_rel = format!("assets/audios/{asset_id}.wav");
+    let project_dir = project_path(app, &project_id).await;
+    std::fs::create_dir_all(project_dir.join("assets/audios")).expect("audios dir");
+    let (hz, seconds) = fake_speech_shape(voice.as_deref(), &prompt);
+    let wav = film_harness::fixture_sound_wav(seconds, hz, 9000);
+    std::fs::write(project_dir.join(&media_rel), &wav).expect("fake wav");
+    let fact = json!({
+        "type": "audio",
+        "assetId": asset_id,
+        "mediaPath": media_rel,
+        "mimeType": "audio/wav",
+        "duration": seconds,
+        "sampleRate": film_harness::FIXTURE_SOUND_RATE,
+        "channels": 1,
+        "family": "kokoro",
+        "displayName": prompt.chars().take(56).collect::<String>(),
+        "createdAt": sceneworks_core::time::utc_now(),
+        "mode": "speech",
+        "model": payload["model"],
+        "adapter": "fake_kokoro",
+        "prompt": prompt,
+        "voice": payload["voice"],
+        "language": Value::Null,
+        "targetDurationSecs": Value::Null,
+        "seed": Value::Null,
+        "rawAdapterSettings": {
+            "model": payload["model"],
+            "voice": payload["voice"],
+            "sampleRate": film_harness::FIXTURE_SOUND_RATE,
+            "advanced": payload["advanced"],
+        },
+    });
+    let genset_id = format!("genset_tts_{}", &job_id.replace('-', "")[..12]);
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "fake synthesis done", "workerId": WORKER_ID, "backend": "candle",
+            "result": {
+                "generationSetId": genset_id,
+                "expectedCount": 1,
+                "adapter": "fake_kokoro",
+                "model": payload["model"],
+                "generationSet": {
+                    "id": genset_id, "mode": "speech", "model": payload["model"],
+                    "prompt": payload["prompt"], "count": 1,
+                    "createdAt": sceneworks_core::time::utc_now()
+                },
+                "assetWrites": [fact]
+            }
+        }),
+    )
+    .await;
+}
+
+/// Pitch and length for one faked synthesized line: a distinct frequency per voice id, and a length
+/// that grows with the text so two lines in the same voice are still distinguishable by duration.
+pub(crate) fn fake_speech_shape(voice: Option<&str>, text: &str) -> (u32, f64) {
+    let hz = match voice {
+        Some("am_michael") => 400,
+        Some("af_heart") => 500,
+        Some(_) => 600,
+        None => 700,
+    };
+    // 25 characters per second, floored at half a second — short enough that a six-shot fixture's
+    // lines all fit inside their shots, long enough to measure.
+    let seconds = ((text.trim().chars().count() as f64) / 25.0).max(0.5);
+    (hz, (seconds * 10.0).round() / 10.0)
 }
 
 /// The `image_vqa` job, faked: answer from the script's table in the shape
@@ -1098,8 +1530,32 @@ impl Harness {
         Path::new(FIXTURE_DIR).join("plan.jsonc")
     }
 
+    /// The shipped pack, verbatim, COPIED into this harness's temp dir with its plates and beds.
+    ///
+    /// A copy rather than the checked-in path because the pack directory is now written to
+    /// (sc-23404): a run speaks its `dialogue` entries and leaves the WAVs beside the beds, so
+    /// pointing the tests at `config/film-harness/courier-workshop` would have them write into the
+    /// source tree and race each other on one filename under `cargo test`'s parallelism. The
+    /// document is byte-for-byte the shipped one, so `reference_pack.sha256` is unchanged; only its
+    /// directory moves. `checked_in_fixture_sound_matches_the_generator_byte_for_byte` reads the
+    /// shipped path directly, which is where that guarantee belongs.
     pub(crate) fn fixture_pack(&self) -> PathBuf {
-        Path::new(FIXTURE_DIR).join("references.jsonc")
+        let dir = self.temp_dir.path().join("fixture-pack");
+        let path = dir.join("references.jsonc");
+        if path.is_file() {
+            return path;
+        }
+        for sub in ["references", "sound"] {
+            std::fs::create_dir_all(dir.join(sub)).expect("pack dir");
+            for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join(sub)).expect("fixture dir") {
+                let entry = entry.expect("directory entry");
+                std::fs::copy(entry.path(), dir.join(sub).join(entry.file_name()))
+                    .expect("fixture file copies");
+            }
+        }
+        std::fs::copy(Path::new(FIXTURE_DIR).join("references.jsonc"), &path)
+            .expect("pack document copies");
+        path
     }
 
     /// The shipped pack with its `sound` array emptied, copied into the temp dir so the relative
@@ -1118,6 +1574,74 @@ impl Harness {
             let entry = entry.expect("directory entry");
             std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
                 .expect("plate copies");
+        }
+        let path = dir.join("references.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+        path
+    }
+
+    /// The shipped pack with every BINDABLE reference unapproved — only the `style` and the `plate`
+    /// stay approved — copied into the temp dir so the relative `file` paths still resolve.
+    ///
+    /// This, and not a pack that approves literally nothing, is the reachable "the pack fills no
+    /// reference shot" case, for two reasons found while covering this seam:
+    ///
+    ///   * the ANCHOR RULE (`film_plan.rs`) makes every shot name at least one APPROVED role in its
+    ///     conditioning slots or `continuityRoles`, so on a pack that approves nothing EVERY shot of
+    ///     EVERY plan is a finding and no plan can be produced at all; and
+    ///   * `brief.requiredBeats[].requiredRoles` must each be approved by the pack, so the shipped
+    ///     brief refuses an all-unapproved pack up front, before an envelope is ever built.
+    ///
+    /// Approving the style and the plate satisfies both — `house_style` is what every shot of the
+    /// scripted drafts declares — while approving no SUBJECT a `reference_to_video` shot could bind
+    /// (`BINDABLE_REFERENCE_KINDS`: character/prop/location). `sound` is left alone: a pack that
+    /// approves no conditioning images still carries its beds, and the lines are what SH020/SH050/
+    /// SH060 speak.
+    pub(crate) fn fixture_pack_without_bindable_references(&self) -> PathBuf {
+        let text = std::fs::read_to_string(self.fixture_pack()).expect("fixture pack");
+        let mut pack: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("fixture pack parses");
+        let entries = pack["references"]
+            .as_array_mut()
+            .expect("the pack declares references");
+        assert!(!entries.is_empty(), "the shipped pack declares references");
+        let mut approved_kinds = Vec::new();
+        for entry in entries {
+            let entry = entry.as_object_mut().expect("reference entry object");
+            let bindable = sceneworks_core::film_plan::BINDABLE_REFERENCE_KINDS
+                .contains(&entry["kind"].as_str().expect("every entry declares a kind"));
+            // Explicit `false`: `approved` DEFAULTS to true when the key is absent, so removing the
+            // key would approve the entry instead of unapproving it.
+            entry.insert("approved".to_owned(), json!(!bindable));
+            if !bindable {
+                approved_kinds.push(entry["kind"].as_str().unwrap().to_owned());
+            }
+        }
+        approved_kinds.sort();
+        approved_kinds.dedup();
+        assert_eq!(
+            approved_kinds,
+            vec!["plate".to_owned(), "style".to_owned()],
+            "the shipped pack must still leave exactly a style and a plate approved, or this \
+             fixture no longer anchors the shots it is used with"
+        );
+        let dir = self.temp_dir.path().join("pack-unbindable");
+        std::fs::create_dir_all(dir.join("references")).expect("pack dir");
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join("references"))
+            .expect("fixture references dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("references").join(entry.file_name()))
+                .expect("plate copies");
+        }
+        std::fs::create_dir_all(dir.join("sound")).expect("sound dir");
+        for entry in
+            std::fs::read_dir(Path::new(FIXTURE_DIR).join("sound")).expect("fixture sound dir")
+        {
+            let entry = entry.expect("directory entry");
+            std::fs::copy(entry.path(), dir.join("sound").join(entry.file_name()))
+                .expect("bed copies");
         }
         let path = dir.join("references.json");
         std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
@@ -1173,6 +1697,66 @@ impl Harness {
         let path = dir.join("references.json");
         std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
         path
+    }
+
+    /// The shipped MIXED-PARTITION fixture (sc-23402) copied into the temp dir with `edit`
+    /// applied: SH010 binds `courier` + `workshop_location`, SH020 binds nothing. Its sound block is
+    /// already absent, so it needs no ffmpeg.
+    pub(crate) fn mixed_partition_plan(&self, edit: impl FnOnce(&mut Value)) -> PathBuf {
+        let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("plan.ref.jsonc"))
+            .expect("mixed fixture plan");
+        let mut plan: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("mixed fixture plan parses");
+        edit(&mut plan);
+        let path = self.temp_dir.path().join("plan-ref.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    }
+
+    /// Make the shipped MiniMax-H3 turbo adapters INSTALLED on this harness (sc-23406).
+    ///
+    /// The route refuses an uninstalled LoRA at enqueue, so a test that dispatches one has to make
+    /// it installed the way the API decides that question: a catalog entry whose `source.path`
+    /// points at a directory holding a readable `.safetensors`. The manifest written here is the
+    /// SHIPPED `builtin.loras.jsonc` with only that one key rewritten, so the ids, families,
+    /// `modelIds` allowlists and `sampling` recipes under test are the real ones.
+    ///
+    /// The header carries one inert tensor key on purpose: it must parse (the route reads it) and
+    /// must match no family detector (a detected family would be judged against the model's, which
+    /// is a different rule from the one this test is about).
+    pub(crate) fn install_turbo_loras(&self) {
+        let weights_dir = self.temp_dir.path().join("lora-weights");
+        std::fs::create_dir_all(&weights_dir).expect("weights dir creates");
+        let header = serde_json::json!({
+            "inert.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+        });
+        let header_bytes = serde_json::to_vec(&header).expect("header json");
+        let mut bytes = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 4]);
+        let file = weights_dir.join("adapter.safetensors");
+        std::fs::write(&file, bytes).expect("adapter writes");
+
+        let shipped = include_str!("../../../../config/manifests/builtin.loras.jsonc");
+        let mut manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(shipped))
+                .expect("the shipped lora manifest parses");
+        for lora in manifest["loras"].as_array_mut().expect("loras") {
+            let id = lora["id"].as_str().unwrap_or_default().to_owned();
+            if id.starts_with("minimax_h3") {
+                lora["source"] = serde_json::json!({
+                    "path": weights_dir.display().to_string()
+                });
+            }
+        }
+        let manifests_dir = self.temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&manifests_dir).expect("manifest dir creates");
+        std::fs::write(
+            manifests_dir.join("builtin.loras.jsonc"),
+            serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
+        )
+        .expect("lora manifest writes");
     }
 
     pub(crate) fn run_record(&self) -> Value {
@@ -1571,10 +2155,9 @@ async fn missing_reference_files_and_dangling_roles_are_refused_before_dispatch(
 async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_catalog() {
     let harness = Harness::start(true, vec![]).await;
     let plan = harness.edited_plan(|plan| {
-        // References on the base MiniMax-H3 checkpoint (limits.maxReferenceAssets = 0).
-        plan["shots"][0]["conditioning"] =
-            json!({ "mode": "reference_to_video", "referenceRoles": ["courier", "red_parcel"] });
-        // A negative prompt the model has no axis for.
+        // A negative prompt the model has no axis for. (A shot that binds reference roles is NOT a
+        // refusal any more: it resolves to `minimax_h3_ref`, which declares nine — sc-23402, and
+        // `a_mixed_plan_dispatches_each_shot_on_its_own_partition` owns that case.)
         plan["shots"][0]["negativePrompt"] = json!("blurry, low quality");
         // Off the fourteen-length menu, and an undeclared canvas.
         plan["shots"][1]["targetDurationSeconds"] = json!(6.0);
@@ -1590,17 +2173,6 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
         panic!("expected a validation refusal, got {error}");
     };
     let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
-    assert!(
-        text.iter().any(|m| m.contains("[SH010] conditioning.mode")
-            && m.contains("does not declare reference_to_video")),
-        "{text:?}"
-    );
-    assert!(
-        text.iter()
-            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
-                && m.contains("maxReferenceAssets")),
-        "{text:?}"
-    );
     assert!(
         text.iter().any(|m| m.contains("[SH010] negativePrompt")),
         "{text:?}"
@@ -1624,6 +2196,653 @@ async fn unsupported_conditioning_and_off_menu_timing_are_refused_against_the_ca
     );
     assert!(harness.jobs().await.is_empty());
     assert_eq!(harness.run_record()["outcome"], "rejected");
+}
+
+/// sc-23402 AC1/AC2. One plan, two checkpoints of one family: the shot that binds reference roles
+/// dispatches as `minimax_h3_ref` / `reference_to_video`, the shot that binds none as `minimax_h3`
+/// / `text_to_video` with no reference field at all — through the REAL
+/// `POST /api/v1/video/jobs` route, with the shipped catalog deciding what each partition declares.
+#[tokio::test]
+async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan_path = harness.mixed_partition_plan(|_| {});
+    let pack_path = harness.fixture_pack_without_sound();
+
+    // `film-harness compile --no-refine` writes the document a reviewer reads and the run
+    // dispatches. Doing it here rather than compiling in memory is the point: `compiled.json` is
+    // where per-shot partition resolution has to be visible.
+    let mut compile_options = planner_options(&harness, "compile-mixed");
+    compile_options.reference_pack_path = pack_path.clone();
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &compile_options,
+        &plan_path,
+    )
+    .await
+    .expect("the mixed plan compiles");
+    let compiled: Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
+    )
+    .expect("compiled.json parses");
+
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.compiled_path = Some(artifacts.compiled_path.clone());
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(
+        compiled["model"]["id"], "minimax_h3",
+        "the plan declares the family once"
+    );
+    let request = |shot_id: &str| -> Value {
+        compiled["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .find(|request| request["shotId"] == shot_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no compiled request for {shot_id}"))
+    };
+    let referenced = request("SH010");
+    assert_eq!(referenced["model"], "minimax_h3_ref");
+    assert_eq!(referenced["mode"], "reference_to_video");
+    assert_eq!(
+        referenced["referenceRoles"],
+        json!(["courier", "workshop_location"]),
+        "role ORDER is the plan's"
+    );
+    assert!(referenced["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+    let plain = request("SH020");
+    assert_eq!(plain["model"], "minimax_h3");
+    assert_eq!(plain["mode"], "text_to_video");
+    assert_eq!(plain["referenceRoles"], json!([]));
+
+    // What the route received, and what the record says about it.
+    let location = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "workshop_location")
+        .expect("location imported");
+    let courier = record
+        .references
+        .iter()
+        .find(|reference| reference.role == "courier")
+        .expect("courier imported");
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3_ref");
+                assert_eq!(job["payload"]["mode"], "reference_to_video");
+                assert_eq!(
+                    job["payload"]["referenceAssetIds"],
+                    json!([courier.asset_id, location.asset_id]),
+                    "the reference assets ride the payload in role order"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
+                // sc-23402 short edge: this plan names none, so nothing is dispatched and the
+                // record keeps the EFFECTIVE value the engine rendered at — its own 2048.
+                assert!(
+                    job["payload"]["advanced"]
+                        .get("referenceImageShortEdge")
+                        .is_none(),
+                    "{}",
+                    job["payload"]["advanced"]
+                );
+                assert_eq!(attempt.reference_image_short_edge, Some(2048));
+                assert_eq!(
+                    shot.conditioning_assets.reference_asset_ids,
+                    vec![courier.asset_id.clone(), location.asset_id.clone()]
+                );
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3_ref",
+                    "the route resolved the reference partition's entry for this shot"
+                );
+                assert_eq!(
+                    attempt.take.as_ref().expect("take").model,
+                    "minimax_h3_ref",
+                    "the take names the checkpoint that rendered it"
+                );
+            }
+            "SH020" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3");
+                assert_eq!(job["payload"]["mode"], "text_to_video");
+                // The route normalises an absent list to `[]`; the SENT body carries no
+                // `referenceAssetIds` key at all (asserted on the compiled request in
+                // `film_compile`'s own tests).
+                assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+                assert_eq!(
+                    job["payload"]["modelManifestEntry"]["id"], "minimax_h3",
+                    "the route resolved the base entry for this shot"
+                );
+                assert_eq!(attempt.resolved_model_id, "minimax_h3");
+                assert_eq!(attempt.take.as_ref().expect("take").model, "minimax_h3");
+                assert_eq!(
+                    attempt.reference_image_short_edge, None,
+                    "a base-partition attempt encodes no reference, so it records no short edge"
+                );
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+        assert!(
+            !attempt.partition_reason.is_empty(),
+            "{} has no partition reason",
+            shot.shot_id
+        );
+        assert_eq!(
+            job["payload"]["advanced"]["filmHarness"]["partitionReason"],
+            json!(attempt.partition_reason),
+            "the payload and the record carry the same reason"
+        );
+    }
+
+    // And on disk, where a later reader finds it.
+    let on_disk = harness.run_record();
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .and_then(|shot| shot["attempts"][0].as_object())
+            .map(|attempt| Value::Object(attempt.clone()))
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(attempt("SH010")["resolvedModelId"], "minimax_h3_ref");
+    assert_eq!(attempt("SH020")["resolvedModelId"], "minimax_h3");
+    assert!(attempt("SH010")["partitionReason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("minimax_h3_ref")));
+
+    // sc-23402 review: the record names the WEIGHTS behind each partition it dispatched on, not
+    // only the declared model's row — a mixed run loads a second 18.78 GB `transformer_ref`
+    // download and nothing recorded which files produced the reference take.
+    let weights = &on_disk["model"]["partitionWeights"];
+    let partitions: Vec<&str> = weights
+        .as_object()
+        .expect("partitionWeights")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        partitions,
+        vec!["minimax_h3", "minimax_h3_ref"],
+        "both partitions this run loaded: {weights}"
+    );
+    let files = |partition: &str| -> String { weights[partition]["files"].to_string() };
+    assert!(files("minimax_h3").contains("q4/transformer/"), "{weights}");
+    assert!(
+        files("minimax_h3_ref").contains("q4/transformer_ref/"),
+        "the reference partition's own rows, not a copy of the base's: {weights}"
+    );
+    assert_eq!(
+        on_disk["model"]["weights"], weights["minimax_h3"],
+        "`weights` stays the DECLARED model's row"
+    );
+}
+
+/// sc-23402 short edge. A plan that lowers `model.advanced.referenceImageShortEdge` sends it on the
+/// REFERENCE shot's `POST /api/v1/video/jobs` body and records the same number on that attempt —
+/// while the base-partition shot in the same plan dispatches and records nothing, because it encodes
+/// no reference for the knob to size. Through the real route, with the real record on disk.
+#[tokio::test]
+async fn a_lowered_reference_short_edge_rides_the_reference_shots_payload_and_record() {
+    let harness = Harness::start(true, vec![]).await;
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["advanced"] = json!({ "referenceImageShortEdge": 1536 });
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-short-edge");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        let advanced = &job["payload"]["advanced"];
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3_ref");
+                assert_eq!(
+                    advanced["referenceImageShortEdge"],
+                    json!(1536),
+                    "the route persisted the knob in the job payload: {advanced}"
+                );
+                assert_eq!(attempt.reference_image_short_edge, Some(1536));
+            }
+            "SH020" => {
+                assert_eq!(job["payload"]["model"], "minimax_h3");
+                assert!(
+                    advanced.get("referenceImageShortEdge").is_none(),
+                    "the base partition has no reference to size: {advanced}"
+                );
+                assert_eq!(attempt.reference_image_short_edge, None);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+    }
+
+    // And on disk, where a later reader — a comparison against a 2048 run — finds it.
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(options.out_dir.join("run.json")).expect("run.json written"),
+    )
+    .expect("run.json parses");
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .map(|shot| shot["attempts"][0].clone())
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(attempt("SH010")["referenceImageShortEdge"], json!(1536));
+    assert!(
+        attempt("SH020").get("referenceImageShortEdge").is_none(),
+        "{}",
+        attempt("SH020")
+    );
+}
+
+/// 🔴 sc-23406. The plan declares its accelerators ONCE on the family; each shot's
+/// `POST /api/v1/video/jobs` body carries only the ones its RESOLVED partition was distilled for,
+/// plus the plan's `advanced.steps` — and the attempt record on disk agrees with the payload.
+///
+/// Through the real route with the fake worker, because the route is where this could silently go
+/// wrong in three different ways: the LoRA compatibility gate could refuse the pairing, the
+/// declared-partition gate could refuse the ref2v adapter on the base checkpoint (it should — and
+/// the harness must therefore never send it there), and the payload normalisation could drop the
+/// entry shape. A core-only test proves none of those.
+#[tokio::test]
+async fn the_plans_turbo_loras_ride_each_shots_payload_for_its_own_partition() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.install_turbo_loras();
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] =
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+        plan["model"]["advanced"] = json!({ "steps": 6 });
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-turbo");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        let payload = &job["payload"];
+        let sent: Vec<&str> = payload["loras"]
+            .as_array()
+            .map(|loras| {
+                loras
+                    .iter()
+                    .filter_map(|lora| lora["id"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(payload["model"], "minimax_h3_ref");
+                assert_eq!(
+                    sent,
+                    vec!["minimax_h3_ref2v_turbo_4step"],
+                    "the reference partition takes the ref2v adapter and ONLY that one: {}",
+                    payload["loras"]
+                );
+                assert_eq!(attempt.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+            }
+            "SH020" => {
+                assert_eq!(payload["model"], "minimax_h3");
+                assert_eq!(
+                    sent,
+                    vec!["minimax_h3_turbo_4step_v01"],
+                    "the base partition takes the fl2v adapter — sending the ref2v one here is \
+                     what the route's declared-partition gate refuses: {}",
+                    payload["loras"]
+                );
+                assert_eq!(attempt.loras, vec!["minimax_h3_turbo_4step_v01"]);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+        // The route hydrates each entry from the catalog, so the SENT weight survives as the
+        // catalog's declared one rather than being dropped.
+        assert_eq!(payload["loras"][0]["weight"], json!(1.0), "{payload}");
+        // The plan's override rides `advanced.steps` on both partitions and is what the record
+        // says ran — over the recipe's own 4.
+        assert_eq!(payload["advanced"]["steps"], json!(6), "{payload}");
+        assert_eq!(attempt.effective_steps, Some(6), "{}", shot.shot_id);
+        assert_eq!(
+            attempt.turbo_scheduler_shift,
+            Some(12.0),
+            "{}: a recipe applied, so its trained video shift is recorded",
+            shot.shot_id
+        );
+    }
+
+    // And on disk, where a later reader comparing this run against a 50-step one finds it.
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(options.out_dir.join("run.json")).expect("run.json written"),
+    )
+    .expect("run.json parses");
+    let attempt = |shot_id: &str| -> Value {
+        on_disk["shots"]
+            .as_array()
+            .expect("shots")
+            .iter()
+            .find(|shot| shot["shotId"] == shot_id)
+            .map(|shot| shot["attempts"][0].clone())
+            .unwrap_or_else(|| panic!("no recorded attempt for {shot_id}"))
+    };
+    assert_eq!(
+        attempt("SH010")["loras"],
+        json!(["minimax_h3_ref2v_turbo_4step"])
+    );
+    assert_eq!(
+        attempt("SH020")["loras"],
+        json!(["minimax_h3_turbo_4step_v01"])
+    );
+    assert_eq!(attempt("SH010")["effectiveSteps"], json!(6));
+    assert_eq!(attempt("SH010")["turboSchedulerShift"], json!(12.0));
+}
+
+/// The same plan with NO override: each shot records the step count its own partition's recipe
+/// declares, and a shot whose partition no accelerator reached records the model's own default.
+///
+/// The three-way distinction is the point — `advanced.steps`, the recipe, the model default are
+/// three different sources and a record that could not tell them apart would make a turbo run and
+/// a base run indistinguishable after the fact.
+#[tokio::test]
+async fn a_shot_whose_partition_no_accelerator_reaches_records_the_models_own_step_count() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.install_turbo_loras();
+    // Only the REFERENCE partition's adapter is declared, so SH020 (base) gets none.
+    let plan_path = harness.mixed_partition_plan(|plan| {
+        plan["model"]["loras"] = json!(["minimax_h3_ref2v_turbo_4step"]);
+    });
+    let pack_path = harness.fixture_pack_without_sound();
+    let mut options = harness.options(plan_path, pack_path, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-turbo-partial");
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    for shot in &record.shots {
+        let attempt = shot.attempts.last().expect("an attempt");
+        let job_id = attempt.job_id.clone().expect("job id");
+        let (_, job) = request_job(&harness, &job_id).await;
+        let payload = &job["payload"];
+        assert!(
+            payload["advanced"].get("steps").is_none(),
+            "no plan override ⇒ nothing dispatched; the recipe or the engine default governs: {}",
+            payload["advanced"]
+        );
+        match shot.shot_id.as_str() {
+            "SH010" => {
+                assert_eq!(attempt.loras, vec!["minimax_h3_ref2v_turbo_4step"]);
+                assert_eq!(attempt.effective_steps, Some(4), "the recipe's own count");
+                assert_eq!(attempt.turbo_scheduler_shift, Some(12.0));
+            }
+            "SH020" => {
+                assert!(
+                    payload
+                        .get("loras")
+                        .is_none_or(|loras| loras.as_array().is_some_and(|loras| loras.is_empty())),
+                    "the ref2v adapter must NOT reach the base checkpoint: {}",
+                    payload["loras"]
+                );
+                assert!(attempt.loras.is_empty());
+                assert_eq!(
+                    attempt.effective_steps,
+                    Some(50),
+                    "no recipe applied, so the model's declared default is what ran"
+                );
+                assert_eq!(attempt.turbo_scheduler_shift, None);
+            }
+            other => panic!("unexpected shot {other}"),
+        }
+    }
+}
+
+/// sc-23402 AC1, the refusals: too many roles for the RESOLVED partition, and a
+/// `reference_to_video` shot binding none.
+#[tokio::test]
+async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
+    let harness = Harness::start(true, vec![]).await;
+    // Ten roles against `minimax_h3_ref`'s declared nine. The pack approves ten, and every one of
+    // them is a BINDABLE kind, so the count is the only thing wrong with the plan — a `plate` here
+    // would be refused on its kind instead and the count would never be reached.
+    let roles: Vec<String> = (0..10).map(|index| format!("extra_prop_{index}")).collect();
+    let pack = harness.edited_pack(|pack| {
+        let references = pack["references"].as_array_mut().expect("references");
+        for role in 0..10 {
+            references.push(json!({
+                "role": format!("extra_prop_{role}"),
+                "kind": "prop",
+                "file": "references/workshop_plate.png"
+            }));
+        }
+    });
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"]["referenceRoles"] = json!(roles);
+    });
+    let mut options = harness.options(plan, pack.clone(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-too-many-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("over the cap");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("minimax_h3_ref")
+                && m.contains("maxReferenceAssets")
+                && m.contains('9')),
+        "{text:?}"
+    );
+
+    // A reference_to_video shot binding nothing: a contradiction, named with the shot.
+    let plan = harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"] = json!({ "mode": "reference_to_video" });
+    });
+    let mut options = harness.options(plan, pack, None);
+    options.out_dir = harness.temp_dir.path().join("run-out-no-refs");
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("no references on a reference shot");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    assert!(
+        text.iter()
+            .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                && m.contains("at least one reference role")),
+        "{text:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// A catalog rewrite that reports `minimax_h3` INSTALLED and leaves `minimax_h3_ref` exactly as
+/// the host serves it — missing, since no weights are on disk under the test's data dir.
+///
+/// That split is the whole subject of the install-gate tests below: the base checkpoint downloaded,
+/// the separate 18.78 GB reference DiT not. Without the rewrite both partitions read `missing` and
+/// the base's own refusal would mask whatever the reference partition's gate did.
+fn only_the_base_partition_is_installed(body: &mut Value) {
+    let Some(entries) = body.as_array_mut() else {
+        return;
+    };
+    for entry in entries {
+        if entry.get("id").and_then(Value::as_str) != Some("minimax_h3") {
+            continue;
+        }
+        entry["installState"] = json!("installed");
+        if let Some(variants) = entry.get_mut("variants").and_then(Value::as_array_mut) {
+            for variant in variants {
+                variant["installed"] = json!(true);
+                variant["installState"] = json!("installed");
+            }
+        }
+    }
+}
+
+/// The same rewrite, plus the family's REFERENCE partition removed from the catalog entirely
+/// (sc-23405): the host that serves `minimax_h3` and has no `minimax_h3_ref` row at all.
+///
+/// That is the catalog fact the planner's envelope narrows on — a mode whose partition the API does
+/// not serve could only ever be refused per shot — and it is the shape a `plan` on a
+/// reference-less catalog has to keep working through.
+fn only_the_base_partition_exists(body: &mut Value) {
+    only_the_base_partition_is_installed(body);
+    if let Some(entries) = body.as_array_mut() {
+        entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some("minimax_h3_ref"));
+    }
+}
+
+/// sc-23402 review. The install/reachability gate runs on the RESOLVED reference partition too, and
+/// names it: `plan.ref.jsonc`'s SH010 needs `minimax_h3_ref`, which is a second download with its
+/// own install state. Shaped like the base install-gate assertion in
+/// `a_plan_is_refused_when_the_host_cannot_run_it`, but driven from the mixed fixture.
+#[tokio::test]
+async fn the_reference_partitions_install_state_is_gated_and_named() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), None);
+    options.out_dir = harness.temp_dir.path().join("run-out-ref-install-gate");
+    options.require_installed = true;
+
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the reference partition is not installed");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "the refusal must NAME the partition that is missing: {findings:?}"
+    );
+    // And it must not blame the base checkpoint, which this host does have.
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.message.contains("minimax_h3 tier")),
+        "{findings:?}"
+    );
+    assert!(harness.jobs().await.is_empty());
+}
+
+/// sc-23402 review, the scope gap. The install gate follows the SELECTION: `--shots SH020` on the
+/// mixed fixture dispatches only the base checkpoint, so it must run on a host that never
+/// downloaded the reference DiT — even with `--require-installed`. The plan DOCUMENT is still
+/// validated whole (SH010's reference entry is still resolved and its caps still judged); only the
+/// weights-on-disk demand narrows.
+#[tokio::test]
+async fn a_shot_filtered_run_does_not_demand_an_unselected_partitions_weights() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH020"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-base-only");
+    options.require_installed = true;
+
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("a base-only selection runs with the reference DiT absent");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(record.selected_shot_ids, vec!["SH020".to_owned()]);
+    let selected = record
+        .shots
+        .iter()
+        .find(|shot| shot.shot_id == "SH020")
+        .expect("SH020 has a shot record");
+    assert_eq!(selected.attempts[0].resolved_model_id, "minimax_h3");
+
+    // Only the partition it actually loaded is priced into the record's weights.
+    let model = record.model.as_ref().expect("a model record");
+    let partitions: Vec<&String> = model.partition_weights.keys().collect();
+    assert_eq!(partitions, vec!["minimax_h3"], "{partitions:?}");
+
+    // Selecting the reference shot instead DOES demand it — same plan, same host, same gate.
+    let plan = harness.mixed_partition_plan(|_| {});
+    let mut options = harness.options(plan, harness.fixture_pack_without_sound(), Some(&["SH010"]));
+    options.out_dir = harness.temp_dir.path().join("run-out-selected-reference");
+    options.require_installed = true;
+    let error = film_harness::run(&transport, &options)
+        .await
+        .expect_err("the selected shot needs the reference partition");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|f| f.field == "model.tier"
+            && f.message.contains("minimax_h3_ref")
+            && f.message.contains("not installed")),
+        "{findings:?}"
+    );
+}
+
+/// `GET /api/v1/jobs/{id}`, for the assertions above.
+async fn request_job(harness: &Harness, job_id: &str) -> (axum::http::StatusCode, Value) {
+    request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -2363,6 +3582,15 @@ impl ApiTransport for FaultTransport {
                 "simulated controller death".to_owned(),
             ))
         })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        if self.fired() {
+            return Box::pin(async {
+                Err(HarnessError::Transport("controller is gone".to_owned()))
+            });
+        }
+        self.inner.get_bytes(path)
     }
 }
 
@@ -3784,6 +5012,79 @@ async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
     );
 }
 
+/// sc-23402 review. A run record written by a PRE-STORY build carries no `resolvedModelId` and no
+/// `partitionReason`; `#[serde(default)]` reads them back as `""`.
+///
+/// The reconcile/adopt paths cloned that empty string straight onto the take they imported, so a
+/// phase-1 run directory resumed on this build recorded its adopted take with `model: ""` — losing
+/// the only statement of which checkpoint produced the clip. The fallback is the shot's own
+/// resolved partition (what the first controller would have written), and the attempt row is
+/// backfilled so the record self-heals on the resume that touched it. The mixed fixture is the
+/// fixture that can tell the fix apart from `plan.model.id`: SH010 resolves to `minimax_h3_ref`.
+#[tokio::test]
+async fn an_adopted_attempt_without_a_recorded_partition_falls_back_and_backfills() {
+    let harness = Harness::start(true, vec![]).await;
+    // Die right after the video job POST: the API holds the job, the record does not know its id,
+    // so the resume ADOPTS it through `reconcile_shot` rather than polling one it dispatched.
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+        .on_post_route("/api/v1/video/jobs");
+    let options = harness.options(
+        harness.mixed_partition_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    film_harness::run(&transport, &options)
+        .await
+        .expect_err("the fault stops the controller");
+
+    // Rewrite the record the way a pre-story build wrote it: the two keys absent entirely.
+    let path = harness.out_dir().join("run.json");
+    let mut on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("record on disk"))
+            .expect("record parses");
+    for shot in on_disk["shots"].as_array_mut().expect("shots") {
+        for attempt in shot["attempts"].as_array_mut().expect("attempts") {
+            let attempt = attempt.as_object_mut().expect("attempt");
+            attempt.remove("resolvedModelId");
+            attempt.remove("partitionReason");
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&on_disk).unwrap()).unwrap();
+    let stripped = film_harness::read_run_record(&harness.out_dir()).expect("record re-reads");
+    let attempt = &stripped.shot("SH010").expect("SH010").attempts[0];
+    assert!(
+        attempt.resolved_model_id.is_empty() && attempt.job_id.is_none(),
+        "the fields really are absent and the job id was never recorded: {attempt:?}"
+    );
+
+    // Let the render settle so the resume adopts a COMPLETED job and imports its take.
+    wait_for_settled_shot(&harness.app, "SH010").await;
+    let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .expect("the resume adopts the in-flight job");
+    let attempt = &resumed.shot("SH010").expect("SH010").attempts[0];
+    let take = attempt.take.as_ref().unwrap_or_else(|| {
+        panic!("the adopted attempt has no take\n{}", summary(&resumed));
+    });
+    // `take_from_result` prefers the asset recipe's own `model` and falls back to the string the
+    // adopt path hands it, so this asserts the two agree — the fake worker's recipe carries the id.
+    // The ATTEMPT ROW below is the assertion that pins the fallback: it is written from nothing but
+    // the adopt path's value, and it is what a reader (and the next resume) reads.
+    assert_eq!(
+        take.model, "minimax_h3_ref",
+        "the adopted take must name the partition that rendered it, not \"\""
+    );
+    assert_eq!(
+        attempt.resolved_model_id, "minimax_h3_ref",
+        "and the attempt row is backfilled"
+    );
+    assert!(
+        attempt.partition_reason.contains("minimax_h3_ref"),
+        "{}",
+        attempt.partition_reason
+    );
+}
+
 /// `replace-take` decides ONE shot's outcome. Closing the run through the whole-run classifier
 /// overwrote a resumable stop with `attempts_exhausted` / `resumable: false`, which permanently
 /// blocks the `resume` that was going to render the remaining shots.
@@ -4289,12 +5590,17 @@ async fn the_assembled_sequence_carries_three_independently_controlled_sound_bus
         "the line sits 1.2s into SH020, not 1.2s into the sequence: {}",
         dialogue[0]
     );
+    // The line is SPOKEN by the run now rather than read off a checked-in tone (sc-23404), so its
+    // length is the length of what was said — derived from the same shape the fake synthesizes at,
+    // never a number copied here by hand.
+    let (_, spoken) =
+        fake_speech_shape(Some("am_michael"), "Delivery. I'll leave it on the bench.");
     assert!(
         close(
             dialogue[0]["timelineEnd"].as_f64().unwrap(),
-            5.1667 + 1.2 + 2.0
+            5.1667 + 1.2 + spoken
         ),
-        "the clip is the 2s fixture take: {}",
+        "the clip is the {spoken}s synthesized line: {}",
         dialogue[0]
     );
     assert_eq!(track_of(&saved, "track_dialogue")["gain"], 1.0);
@@ -4986,6 +6292,36 @@ fn checked_in_fixture_sound_matches_the_generator_byte_for_byte() {
              with `film-harness fixture-sound --out config/film-harness/courier-workshop/sound`."
         );
     }
+    // And the generator and the shipped pack agree about which roles are which (sc-23404): every
+    // BED is a checked-in file the loop above just verified, every DIALOGUE role is a line the run
+    // speaks, and no dialogue tone is left behind on disk pretending to be speech.
+    let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("references.jsonc"))
+        .expect("fixture pack");
+    let pack = sceneworks_core::film_plan::parse_reference_pack(&text).expect("pack parses");
+    for entry in &pack.sound {
+        if entry.kind == "dialogue" {
+            assert!(
+                entry.is_synthesized(),
+                "{}: the fixture's dialogue is spoken by the run, not a checked-in tone",
+                entry.role
+            );
+        } else {
+            assert!(!entry.is_synthesized(), "{}", entry.role);
+            assert!(
+                film_harness::FIXTURE_SOUNDS
+                    .iter()
+                    .any(|(role, ..)| *role == entry.role),
+                "{}: a bed the generator does not write",
+                entry.role
+            );
+        }
+    }
+    let spoken = pack
+        .sound
+        .iter()
+        .filter(|entry| entry.is_synthesized())
+        .count();
+    assert_eq!(spoken, 3, "the fixture places three lines");
 }
 
 /// The seam between the two ways a shot's take can change (sc-22711 `replace-take` re-renders,
@@ -5134,6 +6470,34 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
     })
 }
 
+/// The same shot, written the way the sc-23405 envelope asks for it: `reference_to_video`, binding
+/// the approved roles the beat is about.
+///
+/// `house_style` stays in `continuityRoles` only. It is a style reference, and MiniMax-H3's Ref2VA
+/// treats every bound image as a subject to depict — binding a look as a subject asks for a shot OF
+/// the look — which is also why the shipped `plan.v2.jsonc` binds it nowhere.
+fn reference_draft_shot(id: &str, beat_id: &str) -> Value {
+    let mut shot = draft_shot(id, beat_id);
+    let roles: Vec<&str> = beat_roles(beat_id)
+        .into_iter()
+        .filter(|role| *role != "house_style")
+        .collect();
+    shot["conditioning"] = json!({ "mode": "reference_to_video", "referenceRoles": roles });
+    shot
+}
+
+/// A well-formed draft covering every beat of the checked-in brief with every shot bound to the
+/// approved roles it depicts — what the planner is asked for when the pack has references.
+pub(crate) fn reference_draft() -> Value {
+    json!({
+        "shots": BRIEF_BEATS
+            .iter()
+            .enumerate()
+            .map(|(index, beat)| reference_draft_shot(&format!("SH{:03}0", index + 1), beat))
+            .collect::<Vec<_>>()
+    })
+}
+
 /// A well-formed draft covering every beat of the checked-in brief.
 pub(crate) fn full_draft() -> Value {
     json!({
@@ -5238,7 +6602,9 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
     assert_eq!(artifacts.plan_path, options.out_dir.join("plan.json"));
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -5257,7 +6623,12 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         &std::fs::read_to_string(&artifacts.compiled_path).expect("compiled.json written"),
     )
     .expect("compiled.json parses");
-    assert_eq!(compiled["schemaVersion"], 1);
+    assert_eq!(
+        compiled["schemaVersion"],
+        sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
+        "sc-23402 bumped this to 2 (`model` is the RESOLVED partition id) and sc-23406 to 3 (a \
+         request carries its LoRAs and its step count)"
+    );
     assert_eq!(compiled["planId"], "courier-workshop-planned");
     assert_eq!(compiled["model"]["fps"], 24);
     let requests = compiled["requests"].as_array().expect("requests");
@@ -5330,6 +6701,355 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         assert!(request.contains(beat), "{beat} missing from the request");
     }
     assert!(request.contains("workshop_plate (plate)"), "{request}");
+}
+
+/// sc-23402 review, E1, as sc-23405 leaves it. A host whose catalog serves NO reference partition
+/// plans a text-only film and is never asked for the reference weights.
+///
+/// sc-23402's first cut resolved the reference partition AND ran the entry-level gate on it for
+/// every `plan`, so with the CLI's default `--require-installed` a brief that produces a text-only
+/// film refused with "minimax_h3_ref tier q4 is not installed on this host" — demanding an 18.78 GB
+/// download the resulting plan could never load. The envelope now DOES widen to that partition when
+/// one is on offer (sc-23405), so the property is kept where it belongs: the planner offers
+/// reference conditioning only when the catalog serves the partition and the pack can fill it, and
+/// where it offers none the film, the envelope and the requests are exactly the phase-1 ones.
+#[tokio::test]
+async fn planning_without_a_reference_partition_in_the_catalog_stays_on_the_base_checkpoint() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The base checkpoint installed, and no `minimax_h3_ref` row in the catalog at all.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_exists(body);
+    });
+    let mut options = planner_options(&harness, "planned-require-installed");
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a text-only film plans with the reference partition absent");
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "with no partition to dispatch them against, reference shots are never offered"
+    );
+    // The envelope said so in as many words, so the planner was never invited to write one.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(request.contains("THIS CHECKPOINT HAS NONE"), "{request}");
+    assert!(
+        !request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    // Every compiled request stays on the base partition, so nothing here would load the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The base partition's own install state is still gated: uninstall it and the SAME planner
+    // call refuses, naming it. The gate did not go away, it narrowed to what a plan can load.
+    let strict = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |_| {});
+    let mut options = planner_options(&harness, "planned-base-missing");
+    options.require_installed = true;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    let error = film_planner::generate(&strict, &planner_llm(&harness), &options)
+        .await
+        .expect_err("the base checkpoint is not installed either");
+    let findings = findings_of(error);
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("minimax_h3") && m.contains("not installed")),
+        "{findings:?}"
+    );
+}
+
+/// sc-23405 AC2, the reference half. With a pack that approves references and a catalog that serves
+/// the family's reference partition, the planner is TOLD to bind approved roles on every shot, and
+/// the draft that does compiles to `reference_to_video` on `minimax_h3_ref` throughout.
+///
+/// The draft is scripted rather than decoded, so what this asserts is the two halves the harness
+/// owns: the request the planner composes (the envelope's caps and its default mode), and the
+/// resolution of what comes back. Whether a real 8B model follows the instruction is the coordinator's
+/// real-LLM smoke (`scripts/film-harness-plan-smoke.sh`).
+#[tokio::test]
+async fn the_planner_binds_approved_roles_on_every_shot_when_the_pack_has_references() {
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let options = planner_options(&harness, "planned-references");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a reference-binding draft is a plan");
+    assert_eq!(artifacts.repair_rounds, 0);
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    for shot in &artifacts.plan.shots {
+        assert_eq!(shot.conditioning.mode, "reference_to_video", "{}", shot.id);
+        assert!(
+            !shot.conditioning.reference_roles.is_empty(),
+            "{} binds nothing",
+            shot.id
+        );
+    }
+    // Every request resolves to the reference partition, in the draft's own role order.
+    for request in &artifacts.compiled.requests {
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        assert_eq!(request.mode, "reference_to_video", "{}", request.shot_id);
+        let shot = artifacts
+            .plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot");
+        assert_eq!(
+            request.reference_roles, shot.conditioning.reference_roles,
+            "{}",
+            request.shot_id
+        );
+    }
+    // The plan still declares the FAMILY once — the planner cannot swap the brief's model.
+    assert_eq!(artifacts.plan.model.id, "minimax_h3");
+    assert_eq!(artifacts.compiled.model.id, "minimax_h3");
+
+    // And the planner was actually told to do this: the REFERENCE partition's cap, the inverted
+    // default mode, the standing binding rule and a worked example that models it.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(
+        request.contains("at most 9 reference roles"),
+        "the cap is the REFERENCE partition's maxReferenceAssets, not the base entry's 0: {request}"
+    );
+    assert!(
+        request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    assert!(
+        request.contains("An approved reference pack is available"),
+        "{request}"
+    );
+    assert!(
+        request.contains("\"conditioning\": { \"mode\": \"reference_to_video\""),
+        "the one worked example must model the default, not contradict it: {request}"
+    );
+}
+
+/// sc-23405, E1 and the install gate. The reference partition the planner's envelope will send
+/// every shot to is gated by install state exactly as `validate`/`run` gate the partition a
+/// selected shot resolves to — a refusal in seconds naming the partition, rather than a full
+/// planning run whose every request needs 18.78 GB that are not on this disk.
+///
+/// `--skip-install-check` is the documented escape, and it still plans the same film: what the
+/// planner writes is decided by the catalog and the pack, never by which weights happen to be here,
+/// or the same brief would produce two different films on two machines.
+#[tokio::test]
+async fn the_reference_partition_the_planner_will_use_is_gated_by_install_state() {
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let mut options = planner_options(&harness, "planned-ref-uninstalled");
+    options.require_installed = true;
+    let findings = findings_of(
+        film_planner::generate(&transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("the reference DiT is not on this disk"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("minimax_h3_ref") && m.contains("not installed")),
+        "{findings:?}"
+    );
+    // Refused BEFORE the first decode: no planning job was ever created.
+    assert!(
+        refine_job_payloads(&harness, true).is_empty(),
+        "the gate runs before a token is spent"
+    );
+
+    // `--skip-install-check`: the same catalog, the same pack, the same film.
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let mut options = planner_options(&harness, "planned-ref-skipped");
+    options.require_installed = false;
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("--skip-install-check plans the reference film anyway");
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3_ref"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// sc-23405 review, E1 at the SEAM. A pack that approves no BINDABLE reference plans a text-only
+/// film and is never asked for the reference weights — even though the catalog SERVES the reference
+/// partition and that partition is not installed.
+///
+/// This is the pack half of the property
+/// `planning_without_a_reference_partition_in_the_catalog_stays_on_the_base_checkpoint` holds for the
+/// catalog half, and it is a separate test because it fails for a different reason. The narrowing
+/// that carries it — `narrowed_to_pack` inside `resolve_envelope` — had no harness-level cover: both
+/// pack fixtures approve all seven roles, so deleting the call left all 159 film_harness tests green
+/// while a pack that fills no reference shot still set `gate_reference` and made
+/// `plan --require-installed` demand the 18.78 GB `transformer_ref` for a plan that could never load
+/// it. That is the sc-23402/E1 regression, asserted here through the whole planner rather than only
+/// on `narrowed_to_pack` directly.
+///
+/// The pack approves a style and a plate rather than nothing at all, and the brief's `requiredRoles`
+/// are stripped, because a pack approving NOTHING is refused before an envelope exists — the anchor
+/// rule and `requiredRoles` both demand an approved role. See
+/// `fixture_pack_without_bindable_references`. What is left is the case the narrowing actually has
+/// to carry: approved references that are not SUBJECTS, so no `reference_to_video` shot could bind
+/// one.
+#[tokio::test]
+async fn a_pack_that_fills_no_reference_shot_plans_a_text_only_film_on_a_reference_serving_catalog()
+{
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&full_draft())]);
+    // The FULL catalog: `minimax_h3_ref` is present and is NOT installed. With an approving pack
+    // this exact transport + `require_installed` refuses by name
+    // (`the_reference_partition_the_planner_will_use_is_gated_by_install_state`), which is what
+    // makes a plan coming back here evidence that the envelope narrowed.
+    let transport = ScriptedTransport::rewriting(harness.app.clone(), "/api/v1/models", |body| {
+        only_the_base_partition_is_installed(body);
+    });
+    // `requiredRoles` stripped: they name the subjects this pack deliberately does not approve, and
+    // an unmet required role is a refusal on the BRIEF, which would mask the envelope question.
+    let mut brief: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(BRIEF_FIXTURE).unwrap(),
+    ))
+    .unwrap();
+    for beat in brief["requiredBeats"].as_array_mut().unwrap() {
+        beat.as_object_mut().unwrap().remove("requiredRoles");
+    }
+    let brief_path = harness.temp_dir.path().join("brief-no-required-roles.json");
+    std::fs::write(&brief_path, serde_json::to_string_pretty(&brief).unwrap()).unwrap();
+
+    let mut options = planner_options(&harness, "planned-unbindable-pack");
+    options.brief_path = brief_path;
+    options.reference_pack_path = harness.fixture_pack_without_bindable_references();
+    options.require_installed = true;
+
+    let artifacts = film_planner::generate(&transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a pack that fills no reference shot must not demand the reference weights");
+
+    // No shot was offered references, so none binds any.
+    assert_eq!(artifacts.plan.shots.len(), BRIEF_BEATS.len());
+    assert!(
+        artifacts
+            .plan
+            .shots
+            .iter()
+            .all(|shot| shot.conditioning.reference_roles.is_empty()),
+        "a pack approving no bindable subject fills no reference shot"
+    );
+    // The envelope told the planner so in as many words: the phase-1 envelope, not the widened one.
+    let request = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(request.contains("THIS CHECKPOINT HAS NONE"), "{request}");
+    assert!(
+        !request.contains("reference_to_video is the DEFAULT"),
+        "{request}"
+    );
+    // And every compiled request stays on the base partition, so nothing here loads the ref DiT.
+    assert!(
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .all(|request| request.model == "minimax_h3"),
+        "{:?}",
+        artifacts
+            .compiled
+            .requests
+            .iter()
+            .map(|request| request.model.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// sc-23405 AC2, the enforcement half. `requiredRoles` is enforced exactly as before, through the
+/// roles a shot BINDS — conditioning slots included. A reference draft that leaves the parcel out
+/// of the handover is a finding that names the role, handed back verbatim to a repair round; a
+/// planner that never binds it is refused rather than looped on.
+#[tokio::test]
+async fn a_reference_draft_that_leaves_a_required_role_unbound_is_repaired_then_refused_by_name() {
+    let harness = Harness::start(true, vec![]).await;
+    // The handover beat MUST show `red_parcel`; this draft binds it nowhere on that shot.
+    let mut unbound = reference_draft();
+    for shot in unbound["shots"].as_array_mut().unwrap() {
+        if shot["beatId"] != "handover" {
+            continue;
+        }
+        shot["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["courier", "workbench_table"]
+        });
+        shot["continuityRoles"] = json!(["courier", "workbench_table", "house_style"]);
+    }
+    set_plan_replies(
+        &harness,
+        vec![draft_text(&unbound), draft_text(&reference_draft())],
+    );
+    let options = planner_options(&harness, "repaired-references");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("the repair round binds the parcel");
+    assert_eq!(artifacts.repair_rounds, 1);
+    let repair = refine_job_payloads(&harness, true)
+        .get(1)
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a second planning job was created");
+    assert!(
+        repair.contains("red_parcel") && repair.contains("handover"),
+        "the finding names the unbound role and its beat: {repair}"
+    );
+
+    // A planner that never binds it is refused after the declared rounds, naming the role.
+    let harness = Harness::start(true, vec![]).await;
+    set_plan_replies(&harness, vec![draft_text(&unbound)]);
+    let mut options = planner_options(&harness, "exhausted-references");
+    options.max_repair_rounds = 0;
+    let findings = findings_of(
+        film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+            .await
+            .expect_err("an uncorrected draft is refused"),
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|m| m.contains("red_parcel") && m.contains("handover")),
+        "{findings:?}"
+    );
 }
 
 #[tokio::test]
@@ -5417,9 +7137,11 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
     unknown_field["shots"][0]["cameraLens"] = json!("35mm");
     let mut off_menu = full_draft();
     off_menu["shots"][1]["targetDurationSeconds"] = json!(6.0);
+    // A reference mode with nothing bound to it. Since sc-23402 a draft that BINDS reference roles
+    // is legitimate — it resolves to the family's reference partition and dispatches there — but a
+    // reference shot with no references is still a contradiction the validator names.
     let mut unsupported = full_draft();
-    unsupported["shots"][2]["conditioning"] =
-        json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+    unsupported["shots"][2]["conditioning"] = json!({ "mode": "reference_to_video" });
     let mut unanchored = full_draft();
     unanchored["shots"][3]["continuityRoles"] = json!([]);
     unanchored["shots"][3]["conditioning"] =
@@ -5439,7 +7161,7 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
         (
             "unsupported conditioning",
             draft_text(&unsupported),
-            "does not declare reference_to_video",
+            "requires at least one reference role",
         ),
         (
             "chain as the only anchor",
@@ -5535,7 +7257,9 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     // The stale compiled document is refused rather than dispatched.
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -5634,7 +7358,9 @@ async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_p
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         // Found beside the plan, exactly as a run started from the plan directory would.
         compiled_path: None,
         project_id: None,
@@ -5749,7 +7475,9 @@ async fn a_hand_edited_compiled_request_is_refused_instead_of_dispatched() {
 
     let run_options = RunOptions {
         plan_path: artifacts.plan_path.clone(),
-        reference_pack_path: Path::new(FIXTURE_DIR).join("references.jsonc"),
+        // The harness's own copy, never the checked-in directory: a run writes its synthesized
+        // clips beside the pack (sc-23404).
+        reference_pack_path: harness.fixture_pack(),
         compiled_path: Some(artifacts.compiled_path.clone()),
         project_id: None,
         shot_ids: None,
@@ -6081,4 +7809,1000 @@ fn the_checked_in_brief_is_valid_and_matches_the_hand_authored_baseline() {
     // Every beat is coverable inside the model's shortest legal clip and the declared window.
     assert!(brief.required_beats.len() as f64 * 5.1667 >= brief.target_total_seconds.min);
     assert!(brief.max_shots >= brief.required_beats.len());
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-23404 — speech dialogue synthesized through the audio job route
+// ---------------------------------------------------------------------------------------------
+
+/// A pack whose dialogue entries carry `text`, copied into the temp dir so the clips synthesis
+/// writes land somewhere disposable rather than in the checked-in fixture.
+///
+/// `edit` shapes the parsed pack first, so a test can break one entry (drop its text, move it to
+/// the wrong kind) without touching the shipped documents.
+fn speech_pack(harness: &Harness, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    // `fixture_pack` already gives every harness its own copy of the pack and its media, which is
+    // what keeps a run's synthesized clips out of the checked-in fixture; this only rewrites the
+    // document in place beside them.
+    let path = harness.fixture_pack();
+    let text = std::fs::read_to_string(&path).expect("fixture pack");
+    let mut pack: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+            .expect("fixture pack parses");
+    edit(&mut pack);
+    std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+    path
+}
+
+/// The synthesis jobs the API holds for one project, read out of the JOB TABLE.
+///
+/// Not out of the fake worker's claim log: that log is the fake's own bookkeeping and says what a
+/// worker picked UP, so a job the harness enqueued that nobody claimed — the thing an
+/// "exactly one job was created" assertion most needs to catch — would not appear in it at all.
+async fn audio_job_count(harness: &Harness, project_id: &str) -> usize {
+    let (status, jobs) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs?projectId={project_id}&limit=100"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{jobs}");
+    jobs.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|job| job["type"] == "audio_generate")
+        .count()
+}
+
+/// Reopen a finished run so `resume` walks the whole pipeline — project, references, sound — the
+/// way a crash-resume does, rather than returning at the first "already completed" gate.
+fn reopen_for_resume(harness: &Harness) {
+    harness.edit_run_record(|record| {
+        record["state"] = json!("running");
+        record["outcome"] = json!("failed");
+        record["export"]["stale"] = json!(true);
+        record["stop"] = json!({
+            "reason": "export_failed", "detail": "reopened by the test", "resumable": true
+        });
+    });
+}
+
+/// AC1: a `dialogue` entry carrying `text` yields ONE `audio_generate` job through the real route,
+/// a WAV in the pack directory, a dialogue-bus item at the shot's offset, and provenance in the run
+/// record — model, voice, text, job id and asset id.
+///
+/// Runs on every lane, ffmpeg or not: the synthesized clip is a canonical PCM-16 WAV, which the
+/// import route stores without a transcode (`media_convert::is_canonical_pcm16_wav`), exactly as
+/// the fixture's beds are.
+#[tokio::test]
+async fn a_dialogue_line_with_text_is_synthesized_placed_and_recorded() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    let project_id = record.project_id.clone().expect("project created");
+    // ONE synthesis job, for the ONE line this two-shot selection places. The recipient's lines
+    // belong to SH050/SH060, which the selection leaves out, so they are never spoken — synthesis
+    // follows the same "only what the run PLACES" rule the import does.
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
+    assert_eq!(
+        record.synthesized_sound.len(),
+        1,
+        "{:#?}",
+        record.synthesized_sound
+    );
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.role, "courier_line");
+    assert_eq!(line.text, "Delivery. I'll leave it on the bench.");
+    assert_eq!(line.model, "kokoro_82m");
+    assert_eq!(line.voice.as_deref(), Some("am_michael"));
+    assert_eq!(line.status, "completed");
+    assert!(line.job_id.is_some(), "{line:#?}");
+    assert!(line.asset_id.is_some(), "{line:#?}");
+    assert!(line.is_usable(), "{line:#?}");
+
+    // The dispatched body is the real audio route's, and it carries the key a resume adopts by.
+    let (_, payload) = harness
+        .script
+        .lock()
+        .audio_claimed
+        .first()
+        .cloned()
+        .expect("the fake claimed the synthesis job");
+    assert_eq!(payload["prompt"], "Delivery. I'll leave it on the bench.");
+    assert_eq!(payload["model"], "kokoro_82m");
+    assert_eq!(payload["voice"], "am_michael");
+    assert_eq!(
+        payload["advanced"]["filmHarness"]["idempotencyKey"],
+        json!(line.idempotency_key)
+    );
+    assert_eq!(payload["advanced"]["filmHarness"]["role"], "courier_line");
+    // The route resolved the model's manifest entry, which is what says this went through
+    // `create_audio_job` rather than through a hand-built job row.
+    assert_eq!(payload["modelManifestEntry"]["type"], "audio");
+
+    // The WAV is in the PACK directory, under the deterministic name, and it is what was imported.
+    let file = line.file.clone().expect("the clip was written");
+    assert_eq!(
+        file,
+        film_harness::synthesized_sound_file("courier_line", &line.text_sha256)
+    );
+    let on_disk = pack.parent().expect("pack dir").join(&file);
+    assert!(on_disk.is_file(), "{} was not written", on_disk.display());
+    let imported = record
+        .sound
+        .iter()
+        .find(|clip| clip.role == "courier_line")
+        .expect("the spoken line is imported like any other clip");
+    assert_eq!(imported.file, file);
+    assert_eq!(imported.kind, "dialogue");
+    assert_ne!(
+        Some(&imported.asset_id),
+        line.asset_id.as_ref(),
+        "the dialogue bus plays the IMPORTED clip, not the synthesis job's library asset"
+    );
+
+    // The imported asset says it was spoken rather than recorded.
+    let (status, asset) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{}", imported.asset_id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{asset}");
+    assert_eq!(asset["type"], "audio", "{asset}");
+    assert_eq!(
+        asset["extra"]["filmHarness"]["synthesized"], true,
+        "{asset}"
+    );
+
+    // And it lands on the dialogue bus at the shot's own offset, for the length that was spoken.
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+    let saved = saved_timeline(&harness.app, &project_id, &timeline.timeline_id).await;
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1, "{dialogue:#?}");
+    assert_eq!(dialogue[0]["filmHarness"]["shotId"], "SH020");
+    assert!(
+        close(dialogue[0]["timelineStart"].as_f64().unwrap(), 5.1667 + 1.2),
+        "{}",
+        dialogue[0]
+    );
+    let (_, spoken) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert!(
+        close(
+            dialogue[0]["timelineEnd"].as_f64().unwrap(),
+            5.1667 + 1.2 + spoken
+        ),
+        "the item is as long as the line that was actually spoken ({spoken}s): {}",
+        dialogue[0]
+    );
+}
+
+/// E3: the entry's `model` is what gets POSTED and what gets RECORDED, not the route's default.
+///
+/// Every other synthesis test leaves `model` off the pack entry, so
+/// [`sceneworks_core::film_plan::DEFAULT_SOUND_SYNTHESIS_MODEL`] would satisfy them all — a harness
+/// that ignored the entry's model and always posted `kokoro_82m` would stay green, and a plan asking
+/// for a named voice model would silently get the default one. Naming a second
+/// [`sceneworks_core::film_plan::SOUND_SYNTHESIS_MODELS`] entry is what separates the two.
+#[tokio::test]
+async fn a_dialogue_entry_that_names_a_speech_model_is_synthesized_and_recorded_on_that_model() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |pack| {
+        let sound = pack["sound"].as_array_mut().expect("sound");
+        let entry = sound
+            .iter_mut()
+            .find(|entry| entry["role"] == "courier_line")
+            .expect("the courier's line is in the pack");
+        entry["model"] = json!("chatterbox_tts");
+    });
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.role, "courier_line");
+    assert_eq!(
+        line.model, "chatterbox_tts",
+        "the record names the model the PACK asked for: {line:#?}"
+    );
+    let (_, payload) = harness
+        .script
+        .lock()
+        .audio_claimed
+        .first()
+        .cloned()
+        .expect("the fake claimed the synthesis job");
+    assert_eq!(
+        payload["model"], "chatterbox_tts",
+        "the posted job asks for the pack's model, not the route default: {payload}"
+    );
+    assert_eq!(payload["modelManifestEntry"]["type"], "audio", "{payload}");
+    assert!(line.is_usable(), "{line:#?}");
+}
+
+/// AC1, second half: a resume after the synthesis completed ADOPTS the clip — no second job, no
+/// second asset, the same file.
+#[tokio::test]
+async fn a_resume_adopts_a_spoken_line_instead_of_speaking_it_again() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let project_id = first.project_id.clone().expect("project");
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
+    let spoken = first.synthesized_sound[0].clone();
+
+    reopen_for_resume(&harness);
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        audio_job_count(&harness, &project_id).await,
+        1,
+        "the resume must adopt the clip, not speak the line a second time"
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1);
+    assert_eq!(resumed.synthesized_sound[0], spoken);
+    assert_eq!(resumed.sound.len(), first.sound.len());
+    assert_eq!(resumed.project_id.as_deref(), Some(project_id.as_str()));
+}
+
+/// AC2, first half: a pack entry with neither `text` nor `file`, and `text` on a non-dialogue kind,
+/// are refused BEFORE dispatch and by role. Nothing is created — no project, no job.
+#[tokio::test]
+async fn a_sound_entry_with_no_source_or_a_spoken_bed_is_refused_before_dispatch() {
+    /// How one case breaks the pack: drop the courier's line so its entry has no source at all, or
+    /// give the room-tone bed a line to speak.
+    #[derive(Clone, Copy)]
+    enum Break {
+        NoSource,
+        SpokenBed,
+    }
+    let cases = [
+        (Break::NoSource, "neither `file` nor `text`", "courier_line"),
+        (
+            Break::SpokenBed,
+            "only a `dialogue` entry may carry `text`",
+            "workshop_room_tone",
+        ),
+    ];
+    for (case, needle, label) in cases {
+        let harness = Harness::start(true, vec![]).await;
+        let pack = speech_pack(&harness, |pack| match case {
+            Break::NoSource => {
+                pack["sound"][0]
+                    .as_object_mut()
+                    .expect("entry")
+                    .remove("text");
+            }
+            Break::SpokenBed => {
+                pack["sound"][3]["text"] = json!("a quiet workshop, distant birds");
+            }
+        });
+        let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+        let error = film_harness::run(&harness.transport, &options)
+            .await
+            .unwrap_err();
+        let HarnessError::Validation(findings) = error else {
+            panic!("{label}: expected a validation refusal, got {error}");
+        };
+        let text: Vec<String> = findings.iter().map(ToString::to_string).collect();
+        // The finding names the ENTRY by role, not just the array slot.
+        assert!(
+            text.iter()
+                .any(|message| message.contains(needle) && message.contains(label)),
+            "{label}: the finding must name the entry: {text:?}"
+        );
+        assert!(harness.jobs().await.is_empty(), "{label}");
+        assert_eq!(harness.project_count().await, 0, "{label}");
+        assert_eq!(harness.run_record()["outcome"], "rejected", "{label}");
+    }
+}
+
+/// AC2, second half: a synthesis that FAILS stops the run with a resumable reason and leaves the
+/// rest of the sequence intact — no render is dispatched, the record says which line and why, and a
+/// resume with a worker that can speak finishes the film.
+#[tokio::test]
+async fn a_failed_synthesis_stops_the_run_resumably_with_the_rest_intact() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.script.lock().audio_fails = true;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("courier_line"),
+        "the stop names the line: {}",
+        stop.detail
+    );
+    assert!(record.is_resumable());
+
+    // Nothing downstream ran: the failure lands BEFORE the first render, which is the point of
+    // speaking the lines before the shots.
+    assert_eq!(harness.video_job_count(), 0);
+    assert!(record.export.is_none());
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.role, "courier_line");
+    assert_eq!(line.status, "failed");
+    assert!(
+        line.error
+            .as_deref()
+            .is_some_and(|error| error.contains("fake tts fault")),
+        "{line:#?}"
+    );
+    assert!(line.asset_id.is_none());
+
+    harness.script.lock().audio_fails = false;
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1, "one record per role");
+    assert_eq!(resumed.synthesized_sound[0].status, "completed");
+    assert_eq!(
+        resumed.synthesized_sound[0].attempt, 2,
+        "the retry is a NEW attempt under a new key, not a re-poll of the failed job"
+    );
+    assert_ne!(
+        resumed.synthesized_sound[0].idempotency_key,
+        line.idempotency_key
+    );
+    assert_eq!(
+        audio_job_count(
+            &harness,
+            resumed.project_id.as_deref().expect("project created")
+        )
+        .await,
+        2,
+        "one attempt that failed, one that spoke"
+    );
+    assert_eq!(resumed.sound.len(), 3, "{:#?}", resumed.sound);
+}
+
+/// A pack that asks for speech on a host with no TTS worker is told so BEFORE the job exists.
+///
+/// Without this the synthesis would be enqueued, claimed by nobody, and cancelled when the plan's
+/// per-job budget ran out — the run would take `maxShotSeconds` to report "not synthesized" instead
+/// of reporting "nothing here can speak" in a second. The same posture as the `video_generate` and
+/// `image_vqa` preflights, and scoped to the lines still OWED, so a run whose clips are all already
+/// spoken needs no TTS worker at all.
+#[tokio::test]
+async fn speech_with_no_live_audio_worker_is_refused_before_the_job_exists() {
+    let harness = Harness::start(false, vec![]).await;
+    harness.script.lock().capabilities = Some(vec![
+        "video_generate",
+        "timeline_export",
+        "frame_extract",
+        "image_vqa",
+        "prompt_refine",
+    ]);
+    harness.spawn_worker().await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "no_audio_worker", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("courier_line") && stop.detail.contains("audio_generate"),
+        "{}",
+        stop.detail
+    );
+    // Nothing was enqueued and nothing was rendered.
+    assert!(
+        record.synthesized_sound.is_empty(),
+        "{:#?}",
+        record.synthesized_sound
+    );
+    assert_eq!(harness.video_job_count(), 0);
+    assert_eq!(harness.jobs().await.len(), 0);
+}
+
+/// AC2, the limit: a synthesis that runs past the plan's declared per-job budget stops the run
+/// resumably, with nothing rendered.
+#[tokio::test]
+async fn a_synthesis_that_overruns_its_budget_stops_the_run_resumably() {
+    let harness = Harness::start(true, vec![]).await;
+    harness.script.lock().audio_hangs = true;
+    let pack = speech_pack(&harness, |_| {});
+    // The plan's own declared bound, tightened: one second for a synthesis the fake never finishes.
+    let plan = {
+        let text = std::fs::read_to_string(harness.fixture_plan()).expect("plan");
+        let mut plan: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text))
+                .expect("plan parses");
+        plan["limits"]["maxShotSeconds"] = json!(1);
+        let path = harness.temp_dir.path().join("tight-plan.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    };
+    let options = harness.options(plan, pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("a stopped run still returns its record");
+    assert_eq!(record.outcome, RunOutcome::Failed, "{}", summary(&record));
+    let stop = record.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+    assert!(stop.resumable, "{stop:?}");
+    assert!(
+        stop.detail.contains("per-job budget"),
+        "the stop says which limit: {}",
+        stop.detail
+    );
+    assert_eq!(record.synthesized_sound[0].status, "timed_out");
+    assert_eq!(harness.video_job_count(), 0);
+}
+
+/// What the synthesis key is keyed on, checked directly rather than through a run.
+///
+/// The role alone would be stable across restarts too — and would make a re-cast line adopt the job
+/// that spoke the old one, so the film would go on saying the wrong thing in the wrong voice. The
+/// attempt is the retry axis: without it, a resume after a failure finds the FAILED job under the
+/// same key and re-reads the same failure forever instead of speaking the line.
+#[test]
+fn the_synthesis_key_separates_content_and_attempts_and_is_stable_otherwise() {
+    let key = |voice: Option<&str>, text: &str, attempt: u32| {
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "courier_line",
+            "kokoro_82m",
+            voice,
+            text,
+            attempt,
+        )
+    };
+    let base = key(Some("am_michael"), "Delivery.", 1);
+    assert_eq!(base, key(Some("am_michael"), "  Delivery.  ", 1));
+    assert!(base.starts_with("run_1:sound:courier_line:"), "{base}");
+    assert!(base.ends_with(":a1"), "{base}");
+    for different in [
+        key(Some("bm_george"), "Delivery.", 1),
+        key(None, "Delivery.", 1),
+        key(Some("am_michael"), "Delivery, sorry.", 1),
+        key(Some("am_michael"), "Delivery.", 2),
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "recipient_line",
+            "kokoro_82m",
+            Some("am_michael"),
+            "Delivery.",
+            1,
+        ),
+        film_harness::dialogue_idempotency_key(
+            "run_1",
+            "courier_line",
+            "chatterbox_tts",
+            Some("am_michael"),
+            "Delivery.",
+            1,
+        ),
+    ] {
+        assert_ne!(base, different);
+    }
+}
+
+/// The clip's name is deterministic in the role and the line, so the same pack run twice writes the
+/// same file and a resume finds the one it wrote — and a CHANGED line is a different file rather
+/// than a silent overwrite of the one the last export used.
+#[test]
+fn a_synthesized_clips_name_is_deterministic_in_the_role_and_the_line() {
+    let digest = "0123456789abcdef0123";
+    assert_eq!(
+        film_harness::synthesized_sound_file("courier_line", digest),
+        "sound/courier_line.tts-0123456789ab.wav"
+    );
+    assert_ne!(
+        film_harness::synthesized_sound_file("courier_line", digest),
+        film_harness::synthesized_sound_file("recipient_line", digest)
+    );
+}
+
+/// A replacement re-assembles the timeline, and the sound has to survive it.
+///
+/// `assemble_timeline` derives the sound tracks from the session's clip map, and
+/// `merge_harness_audio_track` keeps only the items the harness does NOT own — so a replacement
+/// that re-assembled without re-hydrating the clips did not leave the saved dialogue and beds
+/// alone, it DELETED them, and the re-export came back as picture with nothing under it. That is
+/// the phase-1 evaluation's finding #2, fixed here alongside synthesis because a spoken line is
+/// exactly what it silences.
+#[tokio::test]
+async fn a_replacement_re_assembles_with_the_sound_the_run_already_has() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(harness.fixture_plan(), pack, Some(&["SH010", "SH020"]));
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&before, "track_dialogue").len(), 1);
+    assert_eq!(items_of(&before, "track_ambience").len(), 1);
+    let audio_jobs = audio_job_count(&harness, &project_id).await;
+
+    let replaced = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH020",
+        "the parcel is the wrong colour",
+    )
+    .await
+    .expect("the replacement runs");
+    assert_eq!(
+        replaced.shots[1].outcome,
+        ShotOutcome::Rendered,
+        "{}",
+        summary(&replaced)
+    );
+    let after = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(
+        items_of(&after, "track_dialogue").len(),
+        1,
+        "the replacement must not silence the film: {:#?}",
+        track_of(&after, "track_dialogue")
+    );
+    assert_eq!(items_of(&after, "track_ambience").len(), 1);
+    assert_eq!(items_of(&after, "track_music").len(), 1);
+    assert_eq!(
+        audio_job_count(&harness, &project_id).await,
+        audio_jobs,
+        "re-hydrating adopts the spoken line; it does not speak it again"
+    );
+    assert_eq!(replaced.sound.len(), record.sound.len());
+}
+
+/// The synthesized clip reaches the pack over the TRANSPORT, not off the API host's disk.
+///
+/// Every other media hop the harness makes is HTTP, and `--api` may legitimately name a
+/// private-network address, a `.local` name or a bare hostname — the API host "may be a different
+/// machine" (docs/film-harness.md). Reading the worker's WAV straight out of the project directory
+/// worked only when that directory happened to be on this filesystem; on any other host every
+/// synthesis died with an io error. The local read survives as a FAST PATH for the loopback case,
+/// which is the second half of this test.
+#[tokio::test]
+async fn a_synthesized_clip_is_fetched_over_the_file_route_when_the_project_dir_is_not_local() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    // The API's project directories, as this controller would see them across a network: named,
+    // and not there.
+    let transport = CountingTransport::remote(
+        harness.app.clone(),
+        harness.temp_dir.path().join("another-machine"),
+    );
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "a remote API host must not break synthesis: {}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let project_path = record.project_path.clone().expect("project path");
+    assert!(
+        !Path::new(&project_path).is_dir(),
+        "the fast path must genuinely be unavailable for this to mean anything: {project_path}"
+    );
+
+    // The file route is what carried it, once, for the one line that was spoken.
+    let downloads = transport.downloads.lock().clone();
+    assert_eq!(downloads.len(), 1, "{downloads:?}");
+    assert!(
+        downloads[0].starts_with(&format!(
+            "/api/v1/projects/{project_id}/files/assets/audios/"
+        )) && downloads[0].ends_with(".wav"),
+        "{downloads:?}"
+    );
+
+    // And the bytes that arrived are the clip the worker wrote, not an empty or truncated file.
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.status, "completed", "{line:#?}");
+    let file = line.file.clone().expect("the clip was written");
+    let written = std::fs::read(pack.parent().expect("pack dir").join(&file))
+        .expect("the clip is in the pack");
+    let (hz, seconds) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert_eq!(
+        written,
+        film_harness::fixture_sound_wav(seconds, hz, 9000),
+        "the downloaded clip must be the WAV the worker wrote"
+    );
+    // It was imported and placed exactly as a locally-read clip is.
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&saved, "track_dialogue").len(), 1, "{saved}");
+
+    // The loopback half: the same run against an API whose project directory IS readable here
+    // downloads nothing, because the fast path has the file.
+    let local = Harness::start(true, vec![]).await;
+    let local_pack = speech_pack(&local, |_| {});
+    let local_transport = CountingTransport::local(local.app.clone());
+    let local_record = film_harness::run(
+        &local_transport,
+        &local.options(local.fixture_plan(), local_pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .expect("run completes");
+    assert_eq!(
+        local_record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&local_record)
+    );
+    assert!(
+        Path::new(local_record.project_path.as_deref().expect("project path")).is_dir(),
+        "the loopback case has the project directory right here"
+    );
+    assert!(
+        local_transport.downloads.lock().is_empty(),
+        "a local project directory is read directly: {:?}",
+        local_transport.downloads.lock()
+    );
+}
+
+/// A `replace-take --export` whose sound could not be re-hydrated must not re-export.
+///
+/// `ensure_sound` stopping is what says the session's clip map is SHORT, so the re-assembly is
+/// deliberately skipped and the saved timeline keeps the take the human just replaced. Exporting
+/// anyway renders a fresh MP4 from that stale timeline — and `run_export` writes
+/// `ExportRecord { stale: false }` over the `stale: true` the replacement set, so the record would
+/// claim the MP4 is current when it carries exactly the material that was rejected.
+#[tokio::test]
+async fn a_replacement_whose_sound_cannot_be_rehydrated_does_not_re_export() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |_| {});
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let before = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let exports_before = harness.export_job_count();
+    assert!(!record.export.as_ref().expect("exported").stale);
+
+    // Take the spoken line away from the record and from the pack, so the replacement's
+    // `ensure_sound` has to speak it again — and make the TTS lane fail, so it cannot.
+    let spoken_file = record.synthesized_sound[0]
+        .file
+        .clone()
+        .expect("the clip was written");
+    std::fs::remove_file(pack.parent().expect("pack dir").join(&spoken_file))
+        .expect("clip removed");
+    harness.edit_run_record(|record| {
+        let kept: Vec<Value> = record["sound"]
+            .as_array()
+            .expect("sound")
+            .iter()
+            .filter(|clip| clip["role"] != json!("courier_line"))
+            .cloned()
+            .collect();
+        record["sound"] = json!(kept);
+        record["synthesizedSound"][0]["status"] = json!("failed");
+        record["synthesizedSound"][0]["assetId"] = Value::Null;
+        record["synthesizedSound"][0]["file"] = Value::Null;
+    });
+    harness.script.lock().audio_fails = true;
+
+    let replaced = film_harness::replace_take(
+        &harness.transport,
+        &harness.resume_options(),
+        "SH020",
+        "the parcel is the wrong colour",
+    )
+    .await
+    .expect("the replacement runs");
+
+    // The take landed, and the run stopped on the line it could not re-speak.
+    assert_eq!(
+        replaced.shots[1].outcome,
+        ShotOutcome::Rendered,
+        "{}",
+        summary(&replaced)
+    );
+    let stop = replaced.stop.as_ref().expect("the run stopped");
+    assert_eq!(stop.reason, "dialogue_synthesis_failed", "{stop:?}");
+
+    // No re-export, and the record still says the MP4 on disk is stale.
+    assert_eq!(
+        harness.export_job_count(),
+        exports_before,
+        "a stale timeline must not be rendered into a fresh MP4"
+    );
+    let export = replaced
+        .export
+        .as_ref()
+        .expect("the first export is recorded");
+    assert!(
+        export.stale,
+        "the export must stay stale when the timeline it came from was not rewritten: {export:#?}"
+    );
+    // And the saved timeline really was left alone.
+    let after = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(after, before, "the saved timeline must be untouched");
+}
+
+/// Re-casting a line is a NEW RUN, not a resume — and inside one run a record that no longer
+/// matches the pack drops the clip it made.
+///
+/// The first half is the guard `resume` / `replace-take` already apply: the pack's bytes are hashed
+/// at start and a changed document is refused, so an edited line can never reach a running record.
+/// The second half is what makes the refusal safe to rely on: a fresh run of the edited pack speaks
+/// the NEW line, and — crucially for a pack that PINS `file`, where the clip's name never changes —
+/// the stale `sound[]` entry is dropped rather than re-adopted by the import pass.
+#[tokio::test]
+async fn re_casting_a_line_is_refused_by_resume_and_spoken_by_a_fresh_run() {
+    let harness = Harness::start(true, vec![]).await;
+    // A PINNED file, so the re-cast cannot be told apart by the clip's name.
+    let pack = speech_pack(&harness, |pack| {
+        pack["sound"][0]["file"] = json!("sound/courier_line.wav");
+    });
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let first = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(first.outcome, RunOutcome::Completed, "{}", summary(&first));
+    assert_eq!(
+        first.synthesized_sound[0].file.as_deref(),
+        Some("sound/courier_line.wav")
+    );
+    assert_eq!(
+        first.synthesized_sound[0].text,
+        "Delivery. I'll leave it on the bench."
+    );
+
+    // Re-cast the line in place, at the same pinned path.
+    let text = std::fs::read_to_string(&pack).expect("pack");
+    let mut document: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&text)).expect("parses");
+    document["sound"][0]["text"] = json!("Delivery. It's on the bench, then.");
+    std::fs::write(&pack, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+    // A resume will not have it: the pack no longer hashes to what the run started from.
+    reopen_for_resume(&harness);
+    let refusal = film_harness::resume(&harness.transport, &harness.resume_options())
+        .await
+        .unwrap_err();
+    let HarnessError::Refused(message) = refusal else {
+        panic!("expected a refusal, got {refusal}");
+    };
+    assert!(
+        message.contains("reference pack") && message.contains("a new run, not a resume"),
+        "{message}"
+    );
+
+    // A FRESH run of the edited pack speaks the NEW line into the same pinned path — which is what
+    // the refusal above sends the operator to do.
+    let mut fresh_options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    fresh_options.out_dir = harness.temp_dir.path().join("recast-out");
+    let second = film_harness::run(&harness.transport, &fresh_options)
+        .await
+        .expect("the re-cast run completes");
+    assert_eq!(
+        second.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&second)
+    );
+    assert_eq!(
+        second.synthesized_sound[0].text,
+        "Delivery. It's on the bench, then."
+    );
+    assert_eq!(
+        second.synthesized_sound[0].file.as_deref(),
+        Some("sound/courier_line.wav"),
+        "the pinned path is where the re-cast line is written"
+    );
+    assert_eq!(
+        second
+            .sound
+            .iter()
+            .filter(|clip| clip.role == "courier_line")
+            .count(),
+        1,
+        "exactly one clip per role: {:#?}",
+        second.sound
+    );
+    // The line the film now says is as long as the NEW text, measured off the sequence — a re-cast
+    // that had been adopted rather than spoken would still be the 1.5s of the old line.
+    let project_id = second.project_id.clone().expect("project");
+    let timeline_id = second
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    let dialogue = items_of(&saved, "track_dialogue");
+    assert_eq!(dialogue.len(), 1, "{dialogue:#?}");
+    let (_, spoken) = fake_speech_shape(Some("am_michael"), &second.synthesized_sound[0].text);
+    assert!(
+        close(
+            dialogue[0]["timelineEnd"].as_f64().unwrap()
+                - dialogue[0]["timelineStart"].as_f64().unwrap(),
+            spoken
+        ),
+        "the placed item is as long as the RE-CAST line ({spoken}s): {}",
+        dialogue[0]
+    );
+}
+
+/// A `dialogue` entry carrying BOTH `text` and `file`: synthesis writes into the PINNED path, and
+/// everything downstream treats it as the recorded clip at that path.
+///
+/// This is how a pack keeps a stable, checkable-in name for a line it means to keep — the derived
+/// `sound/<role>.tts-<sha>.wav` name is gitignored precisely because it is an output. The
+/// `destination` / `imported` interplay is the part worth an end-to-end test rather than a
+/// validator unit test: the adoption on resume reads `record.sound` FIRST (so a pack whose clip has
+/// been cleaned away still adopts) and only then falls back to the pinned file being on disk.
+#[tokio::test]
+async fn a_dialogue_entry_with_both_text_and_file_synthesizes_into_the_pinned_path() {
+    let harness = Harness::start(true, vec![]).await;
+    let pack = speech_pack(&harness, |pack| {
+        pack["sound"][0]["file"] = json!("sound/courier_line.wav");
+    });
+    let pack_dir = pack.parent().expect("pack dir").to_path_buf();
+    let pinned = pack_dir.join("sound/courier_line.wav");
+    assert!(!pinned.exists(), "the pinned clip does not exist yet");
+
+    let options = harness.options(
+        harness.fixture_plan(),
+        pack.clone(),
+        Some(&["SH010", "SH020"]),
+    );
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("run completes");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let project_id = record.project_id.clone().expect("project");
+
+    // Synthesis wrote THERE, not under the derived name.
+    let line = &record.synthesized_sound[0];
+    assert_eq!(line.file.as_deref(), Some("sound/courier_line.wav"));
+    assert!(pinned.is_file(), "{} was not written", pinned.display());
+    assert!(
+        !pack_dir
+            .join(film_harness::synthesized_sound_file(
+                "courier_line",
+                &line.text_sha256
+            ))
+            .exists(),
+        "a pinned `file` replaces the derived name; it does not write both"
+    );
+    let (hz, seconds) = fake_speech_shape(Some("am_michael"), &line.text);
+    assert_eq!(
+        std::fs::read(&pinned).expect("pinned clip"),
+        film_harness::fixture_sound_wav(seconds, hz, 9000)
+    );
+
+    // And it is the clip the import and the bus use.
+    let imported = record
+        .sound
+        .iter()
+        .find(|clip| clip.role == "courier_line")
+        .expect("imported");
+    assert_eq!(imported.file, "sound/courier_line.wav");
+    assert_eq!(imported.kind, "dialogue");
+    let timeline_id = record
+        .timeline
+        .as_ref()
+        .expect("timeline")
+        .timeline_id
+        .clone();
+    let saved = saved_timeline(&harness.app, &project_id, &timeline_id).await;
+    assert_eq!(items_of(&saved, "track_dialogue").len(), 1, "{saved}");
+    assert_eq!(audio_job_count(&harness, &project_id).await, 1);
+
+    // `imported` before `destination`: a resume whose pack directory has been CLEANED still adopts
+    // the asset the record names rather than speaking the line a second time.
+    std::fs::remove_file(&pinned).expect("clip removed");
+    reopen_for_resume(&harness);
+    let resumed = harness.resume_to_completion().await;
+    assert_eq!(
+        resumed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&resumed)
+    );
+    assert_eq!(
+        audio_job_count(&harness, &project_id).await,
+        1,
+        "the record already names the imported clip; nothing is spoken again"
+    );
+    assert_eq!(resumed.synthesized_sound.len(), 1);
+    assert_eq!(
+        resumed
+            .sound
+            .iter()
+            .filter(|clip| clip.role == "courier_line")
+            .count(),
+        1
+    );
+    assert!(
+        !pinned.exists(),
+        "adopting must not re-download the clip into the pack"
+    );
 }

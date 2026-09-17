@@ -307,3 +307,9 @@ film-harness-runs/
 
 # film-harness review-eval results (sc-22714) default here
 film-harness-review-eval/
+
+# film-harness synthesized dialogue clips (sc-23404). A `dialogue` pack entry carrying `text` has
+# its WAV written into the pack directory by the run, named `<role>.tts-<sha>.wav`. It is an OUTPUT
+# — reproducible from the pack, and different bytes on every host and every model revision — so it
+# is deliberately not checked in. A pack that means to keep a recording pins `file` instead.
+*.tts-*.wav

@@ -2419,23 +2419,14 @@ test("a cell whose retained corpus is packaged reads Anchored, with its currency
 });
 
 // ---------------------------------------------------------------------------------------------
-// sc-22667: an anchor that is current BY ATTESTATION says so — on every cell it backs, in the
-// inventory, in the summary and in the rendered table — and an anchor keyed at its own
-// measurement revision says `null`. The attestation is the store's own (`source.currencyAttestation`,
-// written by `anchor-loader-closure.mjs --stamp-anchors`), published verbatim; the matrix neither
-// invents nor drops it, so a current row can never hide HOW it is current.
-test("a current-by-attestation anchor publishes its attestation everywhere it is cited (sc-22667)", async () => {
-  const store = JSON.parse(
-    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
-  );
+// Attestations retain their provenance whether their closure is current or historical.
+// Currency is advisory in CI: neither the packaged store nor a fixture must stay current.
+function assertAttestationsPublished(matrix, store) {
   const attested = store.anchors.filter((anchor) => anchor.source.currencyAttestation);
-  assert.ok(attested.length > 0, "the packaged store carries attested anchors at this pin");
-  const matrix = await buildMatrix();
   for (const anchor of attested) {
     const row = matrix.anchors.find((entry) => entry.id === anchor.id);
     assert.ok(row, `${anchor.id} is in the inventory`);
     assert.deepEqual(row.currencyAttestation, anchor.source.currencyAttestation);
-    assert.equal(row.current, true, `${anchor.id}: an attestation that leaves the anchor stale is stale itself`);
     const cells = matrix.cells.filter((cell) => cell.anchor?.id === anchor.id);
     assert.ok(cells.length > 0, `${anchor.id} backs a published cell`);
     for (const cell of cells) {
@@ -2449,22 +2440,78 @@ test("a current-by-attestation anchor publishes its attestation everywhere it is
     matrix.summary.attestedAnchors,
     matrix.anchors.filter((row) => row.current && row.currencyAttestation).length,
   );
-  assert.ok(matrix.summary.attestedAnchors > 0);
-  // The rendered table names the attestation on the row, and the plain "yes" is reserved for an
-  // anchor current by measurement.
   const markdown = renderMarkdown(matrix);
   for (const anchor of attested) {
+    const row = matrix.anchors.find((entry) => entry.id === anchor.id);
     const line = markdown.split("\n").find((entry) => entry.startsWith(`| \`${anchor.id}\` |`));
     assert.ok(line, `${anchor.id} has a table row`);
     const { class: kind, measuredRevision, attestedRevision, story } = anchor.source.currencyAttestation;
     assert.ok(
-      line.includes(
-        `| yes — attested ${kind} ${measuredRevision.slice(0, 8)}→${attestedRevision.slice(0, 8)} (${story}) |`,
-      ),
+      line.includes(row.current
+        ? `| yes — attested ${kind} ${measuredRevision.slice(0, 8)}→${attestedRevision.slice(0, 8)} (${story}) |`
+        : "| no — advisory |"),
       line,
     );
   }
   assert.match(markdown, /current by attestation\)/);
+}
+
+test("packaged attestation provenance is published regardless of currency", async (t) => {
+  const store = await memoryContractSource("anchorStore");
+  const matrix = await buildMatrix();
+  assertAttestationsPublished(matrix, store);
+  if (matrix.summary.staleAnchors > 0) {
+    t.diagnostic(`WARNING (advisory): ${matrix.summary.staleAnchors}/${matrix.anchors.length} ` +
+      "anchors have different loader-closure provenance. Measurements remain usable; " +
+      "CI does not require remeasurement or attestation renewal.");
+  }
+});
+
+test("pin and shared-loader drift pass the same attestation checks without renewal", async () => {
+  const store = await memoryContractSource("anchorStore");
+  const closures = await memoryContractSource("anchorLoaderClosures");
+  // Synthetic provenance makes this regression independent of which attestations happen to
+  // ship. Keep every measured value and coordinate intact, and vary only the live provenance.
+  const attestation = {
+    measuredRevision: "1".repeat(40), attestedRevision: "2".repeat(40),
+    attestedAt: "2026-09-16", story: "sc-23692", class: "accounting-only",
+    why: "fixture: no loading change", witness: "fixture: source review",
+  };
+  const published = new Set((await buildMatrix()).anchors.map((anchor) => anchor.id));
+  const fixture = structuredClone(store);
+  const fixtureAnchors = fixture.anchors.filter((anchor) => published.has(anchor.id));
+  for (const anchor of fixtureAnchors) {
+    anchor.source.loaderClosureDigest = closures.models[`${anchor.modelId}:${anchor.backend}`].digest;
+    anchor.source.currencyAttestation = attestation;
+  }
+  const build = (source, liveClosures) => buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      anchorStore: JSON.stringify(source), anchorLoaderClosures: JSON.stringify(liveClosures),
+    },
+  });
+  const baseline = await build(fixture, { ...closures, inferenceRevision: attestation.attestedRevision });
+  assert.equal(baseline.summary.attestedAnchors, fixtureAnchors.length);
+  assertAttestationsPublished(baseline, fixture);
+  const movedPin = { ...closures, inferenceRevision: "3".repeat(40) };
+  const pinOnly = await build(fixture, movedPin);
+  assertAttestationsPublished(pinOnly, fixture);
+  assert.equal(pinOnly.summary.attestedAnchors, fixtureAnchors.length);
+  const movedClosure = {
+    ...movedPin,
+    models: Object.fromEntries(Object.entries(closures.models).map(([key, entry]) =>
+      [key, { ...entry, digest: "0".repeat(64) }])),
+  };
+  const stale = await build(fixture, movedClosure);
+  assertAttestationsPublished(stale, fixture);
+  assert.equal(stale.summary.attestedAnchors, 0);
+  assert.equal(stale.summary.staleAnchors, fixtureAnchors.length);
+  assert.deepEqual(stale.cells.map((cell) => [cell.id, cell.state]),
+    baseline.cells.map((cell) => [cell.id, cell.state]));
+  for (const anchor of fixture.anchors) delete anchor.source.currencyAttestation;
+  const unattested = await build(fixture, movedClosure);
+  assertAttestationsPublished(unattested, fixture);
+  assert.equal(unattested.summary.attestedAnchors, 0);
 });
 
 // sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.

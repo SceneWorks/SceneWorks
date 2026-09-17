@@ -1,46 +1,10 @@
-//! Per-term admission allowances (sc-22508, epic 22505).
+//! Admission uncertainty above a modeled active working set.
 //!
-//! Epic 18093 shipped ONE multiplicative margin per backend per basis — `peak * 1.5041` on the
-//! MLX estimate path, `peak * 1.2520` on the since-retired MLX stale path — applied to the whole predicted peak
-//! regardless of which part of that peak was actually uncertain. On a 60 GB derived peak the MLX
-//! estimate margin alone added 30 GB of pad, which is what kept a request that truly fits a 128 GB
-//! host out of rungs it fits on. Epic 22505 E3 retires that shape: **an allowance is priced against
-//! the specific term whose value is uncertain, never against the whole peak just because the whole
-//! peak is what the selector happens to hold.**
-//!
-//! There are exactly three terms, and each names the uncertainty it covers:
-//!
-//! * [`AdmissionTerm::FullyPriced`] — nothing is left for the selector to add. Two bases reach it.
-//!   A MEASURED cell is the measurement — whether or not its provider's closure has moved since
-//!   capture (sc-22738: currency is a re-capture signal for the tooling, never a widening). A
-//!   VIDEO-lane
-//!   [`CandidateBasis::EstimateAnchorDerived`] peak (`MemoryAnchor::derive_video_phase_peaks`)
-//!   already carries its uncertainties inside the derivation: its per-token/per-voxel
-//!   coefficients each sit at or above the highest measured within-cell slope, and every phase
-//!   is widened by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` before it leaves the derivation.
-//!   Re-widening it here would double-charge terms the derivation already paid for.
-//! * [`AdmissionTerm::SameCellRecaptureSpread`] — capture-to-capture spread of the SAME cell's
-//!   binding phase. This one IS proportionate to the whole peak, because the quantity that moves
-//!   between two captures of one cell is the peak itself. Derived, not invented:
-//!   `scripts/derive-ladder-margins.mjs` reports the max binding-phase spread across the corpus's
-//!   repeat pairs, and the epic-18093 "x2 safety" and "x2 estimate widening" multipliers that sat
-//!   on top of it — neither of which named a term — are gone. An IMAGE-lane
-//!   [`CandidateBasis::EstimateAnchorDerived`] peak takes this term (sc-22663): the image law
-//!   (`MemoryAnchor::derive_phase_peaks`) fits no coefficient and widens nothing — it prices one
-//!   retained render's measured peaks minus component bytes, scaled by architecture ratios — so
-//!   the uncertainty left over it is exactly the re-capture spread of the cell it was derived
-//!   from, and nothing else is charged.
-//! * [`AdmissionTerm::AllocatorEnvelopeOverActivation`] — the allocator envelope that sits above a
-//!   floor's modelled ACTIVATION bytes. It is proportionate ONLY to that activation (headroom)
-//!   term. The weights half of a floor is counted bytes off the manifest that the allocator holds
-//!   exactly once, so charging it a percentage was the single largest piece of the retired blanket
-//!   margin. The fraction is per-backend ([`FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`] on MLX,
-//!   [`CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`] on candle) because the envelope is a property of
-//!   the allocator, not of the term's name.
-//!
-//! The margin constants are pinned against the derivation by
-//! `scripts/derive-ladder-margins.test.mjs`, so corpus growth that widens the measured spread reds
-//! CI instead of silently under-charging.
+//! Measurements are used directly. Derived estimates retain the observed same-cell recapture
+//! spread unless their law already includes it. Reclaimable MLX cache is not physical residency:
+//! it must not be multiplied into either image or video requirements. Candle retains its distinct
+//! allocation-accounting residual. Evidence-derived constants are checked by
+//! `scripts/derive-ladder-margins.test.mjs`.
 
 use gen_core::MemoryBackend;
 
@@ -55,6 +19,8 @@ use crate::memory_strategy::{AnchorDerivationLane, CandidateBasis};
 /// margin that cannot name its term is what E3 retires. The failure posture for what the sampled
 /// range does not cover is runtime catching (E6), not a standing 4x pad on every admission.
 pub const MLX_RECAPTURE_SPREAD: f64 = 0.1260183508475594;
+const _: () =
+    assert!(MLX_RECAPTURE_SPREAD == sceneworks_core::memory_anchor::MLX_ACTIVE_RECAPTURE_SPREAD);
 
 /// Same-cell spread on the candle lane. The corpus has ZERO candle repeat pairs, so no spread is
 /// measurable and none is invented; this is the documented accounting-residual floor instead.
@@ -64,71 +30,11 @@ pub const MLX_RECAPTURE_SPREAD: f64 = 0.1260183508475594;
 /// reclaimable slack), so the residual is small and bounded by the accounting, not by variance.
 pub const CANDLE_RECAPTURE_SPREAD: f64 = 0.02;
 
-/// Allowance on the ACTIVATION (headroom) term of an MLX weights+headroom floor, as a fraction of
-/// THAT TERM — not of the floor.
-///
-/// UNCERTAINTY COVERED: the MLX allocator envelope that sits above the modelled active bytes
-/// (cache retention across phase transitions). RE-DERIVED ON THE BASE IT CHARGES (epic 22505
-/// feature-end fix round, E3): `scripts/derive-ladder-margins.mjs#deriveFloorEnvelopeAllowance`
-/// takes, over every MLX record that reports a steady-state residency, the maximum of
-/// `envelope_bytes / activation_bytes` where `envelope_bytes` is the allocator envelope above the
-/// measured active peak and `activation_bytes` is the active peak above the post-cleanup resident
-/// weight set — i.e. the exact uncertainty over the exact term this fraction multiplies. The
-/// binding record is the flux2_dev q4 768x768 eager resident capture: a 26.40 GB retained
-/// envelope over an 8.50 GB activation transient, a ratio of ~3.10.
-///
-/// The previous 0.17 measured the SAME envelope as a fraction of the whole binding active phase
-/// (weights included) and then charged it against the activation term alone — under-charging by
-/// exactly the weights/activation ratio, which on the retained image renders is most of the
-/// envelope. It also happened to equal
-/// `sceneworks_core::memory_anchor::ANCHOR_ALLOCATOR_ENVELOPE_MARGIN`; the two are now different
-/// numbers BECAUSE their bases differ, and both derivations are stated: the anchor margin
-/// multiplies a WHOLE derived phase estimate (weights included), for which the envelope-over-
-/// binding-phase measurement (15.84%, bounded at 17%) remains the honest fraction, while this
-/// allowance multiplies the activation term alone, for which envelope-over-activation is. One
-/// measured phenomenon, two bases, two correctly-based fractions — the retired equality pin was a
-/// pin on a coincidence of spelling, not of meaning.
-///
-/// A fraction ABOVE 1.0 is not a blanket widening here: it says the retained cache the MLX
-/// allocator holds above the active peak is ~3x the activation transient on the widest retained
-/// render, which is a measurement, not a safety factor. The floor is the LAST-RESORT basis — an
-/// anchor-derived candidate outranks it wherever an anchor is current — so the honest charge
-/// costs admission nothing on any anchored lane.
-///
-/// WHAT THE POPULATION ACTUALLY LOOKS LIKE (recorded here so the next reader does not have to
-/// re-derive it to know what this number is a maximum OF — regenerate with
-/// `node scripts/derive-ladder-margins.mjs`):
-///
-///   * 18 MLX records qualify, from exactly two models. `flux2_dev` supplies 8 of them in a tight
-///     cluster spanning 2.9847-3.1042, and its top of that cluster IS this constant — so the
-///     maximum is set by a model family, not by one outlier that a single retirement would move.
-///   * The distribution is BIMODAL, not a spread around a centre: the `z_image_turbo` records sit
-///     an order of magnitude lower (0.5560-1.1885 across its six loaded eager captures, plus two
-///     near-zero eager captures at 0.0184/0.0261 and two staged captures at exactly 0.0, where the
-///     staged loader leaves no retained envelope above the active peak to measure). Charging every
-///     MLX floor the flux2_dev maximum is therefore a deliberate worst-case choice across two
-///     populations that do not overlap, not an average anybody's render sits near.
-///   * NO VIDEO RECORD ENTERS THE POPULATION, and the reason is a missing MEASUREMENT rather than
-///     a missing render. `deriveFloorEnvelopeAllowance` needs `lifecycleCleanPostCleanupActive` to
-///     separate the activation transient from the resident weight set; the derivation's evidence
-///     file (`docs/generated/memory-calibration-evidence.json`) carries only image-model MLX
-///     records, and the retained video corpus that does exist — the 11-record LTX-2.5 seed under
-///     `docs/calibration/sc-18791/` — reports that measurement on none of its records. (The two
-///     image models that are excluded, `qwen_image` and `krea_2_turbo`, are excluded for exactly
-///     the same reason.) So this allowance is measured on image renders and charged to every MLX
-///     floor, video ones included.
-///
-/// THE EVIDENCE FOR A PER-LANE SPLIT IS THEREFORE ALREADY HERE, and this is the place to start if
-/// one is wanted: the bimodality above is a per-model split within a single lane, and the video
-/// lane has no measurement at all rather than a different one. Splitting today would mean either
-/// inventing a video fraction from image evidence or charging video the image maximum under a
-/// second name — neither of which is a measurement. The unblocking step is a video capture that
-/// reports `lifecycleCleanPostCleanupActive`; until one exists, the single worst-case allowance is
-/// the honest shape, and it is safe because the floor is the LAST-RESORT basis.
-///
-/// NOT COVERED, deliberately: whether one flat headroom number is the right ACTIVE model for this
-/// geometry at all. That residual is unmeasured, and epic 22505 E6 makes runtime catching its
-/// failure posture rather than a standing multiple of an already-modelled allowance.
+/// Historical maximum reclaimable-cache/activation ratio, retained for the evidence audit.
+/// This is NOT an admission allowance: `Phase::non_reclaimable_bytes` explicitly excludes
+/// reclaimable MLX cache from physical-memory requirements. The population is predominantly
+/// FLUX.2 on a large host and cannot price another model's working set under pressure.
+#[cfg(test)]
 pub const FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE: f64 = 3.104_173_817_050_811;
 
 /// The candle lane's counterpart to [`FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE`], charged against the
@@ -259,23 +165,9 @@ const fn recapture_spread(backend: MemoryBackend) -> f64 {
     }
 }
 
-/// Allocator envelope over a declared floor's ACTIVATION term, for one backend. Matched
-/// exhaustively for the same reason as [`recapture_spread`]: a new backend must name its own
-/// envelope rather than inherit one measured on somebody else's allocator.
-const fn floor_envelope_allowance(backend: MemoryBackend) -> f64 {
-    match backend {
-        MemoryBackend::Candle => CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
-        MemoryBackend::Mlx => FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
-    }
-}
-
-/// The one allowance the selector adds on top of a candidate's peak.
-///
-/// The undeclared-floor arm is the only approximation left, and it is stated rather than hidden: a
-/// floor that does not publish its weights/headroom split cannot have the headroom term charged, so
-/// it falls back to the backend's whole-peak accounting residual. Runtime catching owns what that
-/// does not cover (E6); the fix for a lane that wants better is to declare the split, not to widen
-/// the number.
+/// The uncertainty allowance on a candidate's active peak. MLX uses measured recapture
+/// spread for every estimated peak; cache is reclaimable. Candle preserves its existing
+/// activation-only accounting allowance where the producer declares that split.
 pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
     let spread = AdmissionAllowance {
         term: AdmissionTerm::SameCellRecaptureSpread,
@@ -290,8 +182,7 @@ pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
         // The fitted per-phase laws already carry each phase's max fit/held-out residual, so what
         // remains is the recapture spread of the cell the curve was fitted through.
         CandidateBasis::EstimateFittedCurve => spread,
-        // The video derivation prices its own terms — bounded coefficients and the
-        // `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` widening of every phase. Nothing is left to add.
+        // Video derivation includes its lane's uncertainty once, so do not add it again.
         CandidateBasis::EstimateAnchorDerived {
             lane: AnchorDerivationLane::Video,
         } => AdmissionAllowance::NONE,
@@ -301,10 +192,16 @@ pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
             lane: AnchorDerivationLane::Image,
         } => spread,
         CandidateBasis::EstimateFloor => {
+            // MLX cache is elastic and reclaimed under pressure. Charging a historical
+            // cache/activation ratio as mandatory residency contradicted the v5 evidence
+            // contract and made optimized image AND video floors larger than resident ones.
+            if subject.backend == MemoryBackend::Mlx {
+                return spread;
+            }
             if subject.unmodeled_activation_bytes.is_some() {
                 AdmissionAllowance {
                     term: AdmissionTerm::AllocatorEnvelopeOverActivation,
-                    fraction: floor_envelope_allowance(subject.backend),
+                    fraction: CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE,
                 }
             } else {
                 spread
@@ -322,19 +219,10 @@ const _: () = {
     assert!(CANDLE_RECAPTURE_SPREAD > 0.0 && CANDLE_RECAPTURE_SPREAD < 1.0);
     // The fatal-OOM lane is never charged less than the recoverable one for the SAME term.
     assert!(MLX_RECAPTURE_SPREAD >= CANDLE_RECAPTURE_SPREAD);
-    // The MLX floor envelope allowance is a fraction of the ACTIVATION term, and the measured
-    // envelope above active runs to ~3.1x that term on the retained image renders — above 1.0 is
-    // the measurement, not a blanket doubling (see the constant's doc). The upper sanity bound
-    // says only that a runaway derivation (an order of magnitude past anything measured) cannot
-    // land silently.
-    assert!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE > 0.0 && FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE < 10.0);
     assert!(
         CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE > 0.0
             && CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE < 1.0
     );
-    // Same ordering rule as the recapture term: the fatal-OOM lane is never charged less than the
-    // recoverable one for the SAME term.
-    assert!(FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE >= CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE);
     assert!(ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE);
     assert!(RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN);
 };
@@ -388,9 +276,9 @@ mod tests {
             backend: MemoryBackend::Candle,
             ..subject(CandidateBasis::EstimateFloor, Some(headroom))
         });
-        assert_eq!(mlx.term, AdmissionTerm::AllocatorEnvelopeOverActivation);
+        assert_eq!(mlx.term, AdmissionTerm::SameCellRecaptureSpread);
         assert_eq!(candle.term, AdmissionTerm::AllocatorEnvelopeOverActivation);
-        assert_eq!(mlx.fraction, FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE);
+        assert_eq!(mlx.fraction, MLX_RECAPTURE_SPREAD);
         assert_eq!(candle.fraction, CANDLE_FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE);
         assert!(
             candle.bytes(60_000_000_000, headroom) < mlx.bytes(60_000_000_000, headroom),
@@ -406,29 +294,18 @@ mod tests {
         }
     }
 
-    /// E3, stated as arithmetic: the floor's allowance tracks its HEADROOM term and is blind to its
-    /// weights. Two floors with the same headroom and wildly different weights must be charged the
-    /// same bytes — which no fraction-of-the-peak margin can do.
     #[test]
-    fn the_floor_allowance_is_proportionate_to_headroom_not_to_the_peak() {
-        let headroom = 18_000_000_000_u64;
-        let allowance = admission_allowance(subject(CandidateBasis::EstimateFloor, Some(headroom)));
-        assert_eq!(
-            allowance.term,
-            AdmissionTerm::AllocatorEnvelopeOverActivation
-        );
-
-        let expected = (headroom as f64 * FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE).ceil() as u64;
-        let small_weights = allowance.bytes(20_000_000_000 + headroom, headroom);
-        let huge_weights = allowance.bytes(200_000_000_000 + headroom, headroom);
-        assert_eq!(small_weights, expected);
-        assert_eq!(huge_weights, expected);
-
-        // And it does track the term: double the headroom, double the allowance.
-        assert_eq!(
-            allowance.bytes(20_000_000_000 + 2 * headroom, 2 * headroom),
-            ((2 * headroom) as f64 * FLOOR_ALLOCATOR_ENVELOPE_ALLOWANCE).ceil() as u64
-        );
+    fn mlx_floor_prices_active_peak_without_a_cross_family_cache_surcharge() {
+        let peak = 5 * 1024 * 1024 * 1024;
+        for activation in [None, Some(0), Some(peak / 2), Some(peak)] {
+            let allowance = admission_allowance(subject(CandidateBasis::EstimateFloor, activation));
+            assert_eq!(allowance.term, AdmissionTerm::SameCellRecaptureSpread);
+            assert_eq!(
+                allowance.bytes(peak, activation.unwrap_or(0)),
+                (peak as f64 * MLX_RECAPTURE_SPREAD).ceil() as u64
+            );
+            assert!(peak + allowance.bytes(peak, activation.unwrap_or(0)) < 6 * 1024 * 1024 * 1024);
+        }
     }
 
     /// The recapture term is the one allowance that IS a fraction of the peak, and its doc says so
@@ -449,7 +326,7 @@ mod tests {
     /// by the allocator-envelope margin), so the selector adds nothing. This is the bullet that
     /// lets a 60 GB derived peak reach the rungs it fits.
     #[test]
-    fn a_video_anchor_derived_peak_carries_no_selector_allowance() {
+    fn a_video_anchor_derived_peak_is_not_widened_twice() {
         let allowance = admission_allowance(subject(
             CandidateBasis::EstimateAnchorDerived {
                 lane: AnchorDerivationLane::Video,

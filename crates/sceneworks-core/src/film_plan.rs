@@ -32,6 +32,7 @@ use serde_json::{json, Map, Value};
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
+    REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 // Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
@@ -70,6 +71,25 @@ pub const SHOT_CONDITIONING_MODES: &[&str] = &[
 /// Reference kinds a pack entry may declare.
 pub const REFERENCE_KINDS: &[&str] = &["character", "prop", "location", "style", "plate"];
 
+/// The subset of [`REFERENCE_KINDS`] a `reference_to_video` shot may legitimately BIND.
+///
+/// Ref2VA treats every bound image as a **subject to depict**, so only the kinds that name a
+/// subject belong in `conditioning.referenceRoles`. The two excluded kinds are excluded for that
+/// reason, not by oversight:
+///
+///   * `style` — a look, not a subject. Binding it asks for a shot OF the look, which is why the
+///     shipped pack's `house_style` lives in `continuityRoles` and is bound nowhere.
+///   * `plate` — a literal frame. It is placed through the KEYFRAME slots (`image_to_video` /
+///     `first_last_frame`), a different conditioning task.
+///
+/// Used in two places, and they are the same rule read from one constant so they cannot drift:
+/// [`validate_plan_against_pack`] REFUSES any `conditioning.referenceRoles` entry whose pack kind
+/// is not listed here, and the planner ([`crate::film_planner`]) counts a pack's bindable entries
+/// to decide whether a pack can fill a reference shot at all — a pack approving only a style and a
+/// plate approves nothing a `reference_to_video` shot could bind, so the mode comes off the
+/// envelope rather than being offered and then refused a decode later.
+pub const BINDABLE_REFERENCE_KINDS: &[&str] = &["character", "prop", "location"];
+
 /// Dependency kinds one shot may declare on another (sc-22711).
 ///
 /// * `conditioning` — this shot's conditioning is derived from the other shot's **selected take**
@@ -94,6 +114,38 @@ pub const SOUND_KINDS: &[&str] = &["dialogue", "ambience", "music", "sfx"];
 /// PCM-16 WAV (`ProjectStore::import_asset`), so this list only has to cover what a human is
 /// likely to have on disk.
 const SOUND_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
+
+/// TTS models a `dialogue` entry may name in `model` (sc-23404).
+///
+/// Deliberately a short explicit list rather than "any `type: audio` catalog id": a `sfx` or music
+/// model posted here would enqueue happily and come back as something nobody can speak, and the
+/// point of naming it in the pack is that a reader knows what voice they are asking for. Every id
+/// here is a speech model the audio route already serves; the per-model voice/language surface is
+/// still owned by the generator's own `validate` at the gen-core floor, which is why `voice` is
+/// bounded here but never allow-listed.
+pub const SOUND_SYNTHESIS_MODELS: &[&str] = &[
+    "kokoro_82m",
+    "chatterbox_tts",
+    "moss_tts_realtime",
+    "moss_ttsd_v05",
+];
+
+/// The TTS model a `dialogue` entry that names none synthesizes through. Matches the audio route's
+/// own default (`apps/rust-api/src/defaults.rs`), so an entry that says nothing gets what a caller
+/// posting the bare route would get.
+pub const DEFAULT_SOUND_SYNTHESIS_MODEL: &str = "kokoro_82m";
+
+/// Longest line a `dialogue` entry may ask to have synthesized.
+///
+/// A declared finite bound, not a guess at the model's ceiling: the audio route bounds the prompt
+/// at 4000 characters and each model's advertised `audio.maxDurationSecs` is the real cap the
+/// worker applies. This is the harness's own — a "line" in a film plan that runs past a thousand
+/// characters is a document error, and catching it here costs no GPU.
+pub const MAX_DIALOGUE_TEXT_CHARS: usize = 1_000;
+
+/// Longest voice id a `dialogue` entry may name. The route bounds nothing here (the generator owns
+/// the per-model voice bank), so the pack bounds the string it would interpolate.
+const MAX_SOUND_VOICE_CHARS: usize = 64;
 
 /// Widest gain the plan admits on a bus, a bed or a line. Matches the timeline's own per-track
 /// ceiling (`project_store::validate_timeline_track`), so a plan cannot express a level the
@@ -263,10 +315,56 @@ pub struct PlanModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Catalog LoRA ids this plan renders with, declared ONCE on the family exactly as `tier` is
+    /// (sc-23406).
+    ///
+    /// A plan does not say which of a split family's partitions a LoRA attaches to, because the
+    /// catalog already does: an entry's `modelIds` allowlist names the partitions it was distilled
+    /// for, and [`plan_loras_for_partition`] emits each id only onto the shots whose resolved
+    /// partition it is declared for. So one list covers a mixed plan — the ref2v turbo reaches the
+    /// reference shots, an fl2v turbo reaches the base ones, and neither reaches the other.
+    ///
+    /// Empty is the base regime: a plan authored before this field dispatches exactly what it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    /// Per-family engine knobs the plan may set. Omitted by every plan that wants the engine's own
+    /// defaults, which is what a plan authored before sc-23402 is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<PlanModelAdvanced>,
+}
+
+/// The plan's opt-in engine knobs (sc-23402). Each one is a REQUEST axis, not a document axis: it
+/// rides `advanced` on the dispatched job exactly as the Video Studio's own knobs do, and a plan
+/// that names none dispatches exactly what it did before the knob existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanModelAdvanced {
+    /// The short edge an image REFERENCE is encoded at, in pixels — MiniMax-H3's `ref2va` knob
+    /// (`advanced.referenceImageShortEdge`), admitted over
+    /// [`REFERENCE_IMAGE_SHORT_EDGE_MIN`]`..=`[`REFERENCE_IMAGE_SHORT_EDGE_MAX`] inclusive and
+    /// defaulting to [`REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`].
+    ///
+    /// It sizes the reference, never the render: lowering it buys reference token count (roughly
+    /// quadratic in the short edge) at the cost of reference detail. It reaches only the shots that
+    /// resolve to the family's REFERENCE partition — a base-partition shot has no reference to
+    /// size, so the knob is not written into its request, its job body or its attempt record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
+    /// Model evaluations (NFE) every shot renders at, overriding whatever the rest of the plan
+    /// would have resolved — the plan-level twin of the Video Studio's `advanced.steps` (sc-23406).
+    ///
+    /// It wins over a selected turbo recipe's own step count, exactly as it does on the worker
+    /// (`minimax_h3_sampling`): a caller who knows the checkpoint may run the 8-step file at 4.
+    /// Omitted, the recipe's count governs, and with no recipe the model's declared default does.
+    ///
+    /// Typed as a signed integer so a plan that writes `0` or `-4` is refused BY NAME here rather
+    /// than failing to parse with a serde message that names no plan field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
 }
 
 /// Finite limits declared BEFORE dispatch. Exceeding any of them stops new dispatch and leaves the
@@ -276,7 +374,14 @@ pub struct PlanModel {
 pub struct PlanLimits {
     /// Wall-clock budget for the whole run, including the export.
     pub max_run_seconds: u64,
-    /// Wall-clock budget for one attempt of one shot (and for the export job).
+    /// Wall-clock budget for one JOB the run dispatches: one attempt of one shot, the export job,
+    /// and — since sc-23404 — one dialogue synthesis (`POST /api/v1/audio/jobs`) for a `dialogue`
+    /// sound entry carrying `text`.
+    ///
+    /// There is deliberately no separate `maxSpeechSeconds`: a speech job is a job, it is dispatched
+    /// and polled on exactly the same seam as a render, and a second knob would be one more number
+    /// a plan author has to get right for no bound this one does not already state. A pack whose
+    /// lines need longer than a shot does raises this value.
     pub max_shot_seconds: u64,
     /// Attempts per shot, counting the first. `1` means no retry.
     pub max_attempts_per_shot: u32,
@@ -390,7 +495,8 @@ pub struct ReferencePack {
     pub sound: Vec<SoundEntry>,
 }
 
-/// One approved audio file the plan's sound roles resolve against.
+/// One approved audio clip the plan's sound roles resolve against — a file on disk, a line the run
+/// synthesizes, or (when both are given) a line synthesized INTO the named file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SoundEntry {
@@ -399,9 +505,65 @@ pub struct SoundEntry {
     /// One of [`SOUND_KINDS`]. A role may only be placed on the bus its kind names.
     pub kind: String,
     /// Audio path relative to the pack document's directory.
-    pub file: String,
+    ///
+    /// Optional only because an entry may carry [`SoundEntry::text`] instead (sc-23404): synthesis
+    /// writes the clip into the pack directory and the run records the path it wrote. An entry
+    /// carrying BOTH is synthesized into the named path, which is how a pack pins the filename of
+    /// a line it means to keep. An entry with NEITHER is a finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     #[serde(default)]
     pub description: String,
+    /// The line to speak (sc-23404). `dialogue` entries only — a synthesized bed or sound effect is
+    /// a different job type with a different surface, and letting `text` sit on an `ambience` entry
+    /// would quietly enqueue a TTS model against a room-tone description.
+    ///
+    /// Present ⇒ the run synthesizes the clip through `POST /api/v1/audio/jobs` during
+    /// `ensure_sound`, under the plan's own `limits`, and imports the result exactly as it imports
+    /// a pre-recorded one. Absent ⇒ [`SoundEntry::file`] is a clip a human put there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Voice id for the synthesis (e.g. Kokoro's `am_michael`). `None` ⇒ the model's own default.
+    /// NOT allow-listed here: the per-model voice bank is the generator's, and an unknown id is a
+    /// typed refusal at the gen-core floor rather than a guess this document could make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// TTS model, one of [`SOUND_SYNTHESIS_MODELS`]. `None` ⇒ [`DEFAULT_SOUND_SYNTHESIS_MODEL`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl SoundEntry {
+    /// Whether this entry's clip is produced by the run rather than read off disk.
+    pub fn is_synthesized(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// The line to speak, trimmed — the exact text the synthesis job is sent, and the text the
+    /// clip's deterministic name is digested from, so both agree on one canonicalization.
+    pub fn synthesis_text(&self) -> Option<&str> {
+        self.text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The TTS model this entry synthesizes through.
+    pub fn synthesis_model(&self) -> &str {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or(DEFAULT_SOUND_SYNTHESIS_MODEL)
+    }
+
+    /// The voice this entry asks for, if any.
+    pub fn synthesis_voice(&self) -> Option<&str> {
+        self.voice
+            .as_deref()
+            .map(str::trim)
+            .filter(|voice| !voice.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -417,6 +579,54 @@ pub struct ReferenceEntry {
     /// Only approved references may be used as conditioning.
     #[serde(default = "default_true")]
     pub approved: bool,
+    /// This plate was GENERATED as a test fixture rather than supplied by a person (sc-23403).
+    ///
+    /// Provenance only. The harness treats a generated reference exactly like any other — the same
+    /// import, the same tags, the same `approved` gate decides conditioning — and the flag exists
+    /// so a pack, and the asset imported from it, always says whether its plates came from a
+    /// person or from a fixture generator. In the product a user supplies the references; the
+    /// generator (`film-harness make-references`) exists for the harness's own fixtures.
+    #[serde(default)]
+    pub generated: bool,
+    /// What produced a generated plate, for the record: model, geometry, prompt, seed and the job
+    /// and asset it came out of. Present only on a `generated` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GeneratedReference>,
+}
+
+/// Provenance of one generated reference plate (sc-23403).
+///
+/// Every field is what the generation route was actually told or what it actually answered; none
+/// of it is read back by the harness, and changing it changes nothing about how the reference is
+/// used. `negative_prompt` is absent for a model that declares no negative-prompt support (Krea 2
+/// Turbo is CFG-free and declares `image.supportsNegativePrompt: false`), rather than recorded as
+/// an empty string the model never saw.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeneratedReference {
+    /// Catalog model id the plate was rendered with.
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Backend the job reported (`mlx` / `candle`), when it reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Image mode the job was created with (`text_to_image`).
+    pub mode: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    pub width: u32,
+    pub height: u32,
+    /// The job that rendered it.
+    pub job_id: String,
+    /// The asset the job wrote in the generating project.
+    pub asset_id: String,
+    /// SHA-256 of the file as it was written into the pack.
+    pub sha256: String,
+    pub created_at: String,
 }
 
 fn default_true() -> bool {
@@ -553,6 +763,27 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    // sc-23402. Refused, never clamped: the value is the reference TOKEN BUDGET the author asked
+    // for, so silently rendering at a different one would make the plan a false record of its own
+    // run. The same range the engine admits (gen-core's
+    // `validate_reference_image_short_edge`), refused here so a typo costs a document read rather
+    // than a 53 GB text-encoder load.
+    if let Some(edge) = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_short_edge)
+    {
+        if !(REFERENCE_IMAGE_SHORT_EDGE_MIN..=REFERENCE_IMAGE_SHORT_EDGE_MAX).contains(&edge) {
+            findings.push(PlanDiagnostic::plan(
+                "model.advanced.referenceImageShortEdge",
+                format!(
+                    "referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to \
+                     {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {edge}"
+                ),
+            ));
+        }
+    }
     if let Some(fps) = plan.model.fps {
         if !(1..=60).contains(&fps) {
             findings.push(PlanDiagnostic::plan(
@@ -569,6 +800,7 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
         }
     }
+    findings.extend(validate_plan_loras(plan));
     findings.extend(validate_limits(&plan.limits));
     findings.extend(validate_plan_sound(&plan.sound));
     if plan.shots.is_empty() {
@@ -1105,6 +1337,109 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
 }
 
 /// Structural findings on the reference pack alone.
+/// The checks one reference FILE path must pass, wherever it is declared — a pack entry or a
+/// [`ReferenceSpec`] entry. Kept in one place because the basename rule is security-relevant: the
+/// name is interpolated into the multipart `Content-Disposition` header the import posts, so a
+/// CR/LF in it injects multipart headers.
+fn reference_image_file_findings(field: &str, file: &str) -> Vec<PlanDiagnostic> {
+    let path = Path::new(file);
+    let extension_ok = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            REFERENCE_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if file.trim().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    if file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must have a 1-128 character [A-Za-z0-9._-] basename (it is sent as \
+                 a multipart filename)"
+            ),
+        )];
+    }
+    if !extension_ok {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must be an image ({})",
+                REFERENCE_IMAGE_EXTENSIONS.join(", ")
+            ),
+        )];
+    }
+    Vec::new()
+}
+
+/// `generated` and `generation` must agree (sc-23403): a pack that claims a plate was generated
+/// has to say what generated it, and provenance without the flag is a document that has been
+/// hand-edited into a state nothing wrote.
+fn generated_reference_findings(field: &str, entry: &ReferenceEntry) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    match (entry.generated, entry.generation.as_ref()) {
+        (true, None) => findings.push(PlanDiagnostic::plan(
+            format!("{field}.generation"),
+            format!(
+                "reference {:?} is marked generated but declares no generation provenance",
+                entry.role
+            ),
+        )),
+        (false, Some(_)) => findings.push(PlanDiagnostic::plan(
+            format!("{field}.generated"),
+            format!(
+                "reference {:?} carries generation provenance but is not marked generated",
+                entry.role
+            ),
+        )),
+        (true, Some(generation)) => {
+            for (name, value) in [
+                ("model", generation.model.as_str()),
+                ("mode", generation.mode.as_str()),
+                ("prompt", generation.prompt.as_str()),
+                ("jobId", generation.job_id.as_str()),
+                ("assetId", generation.asset_id.as_str()),
+                ("sha256", generation.sha256.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.generation.{name}"),
+                        format!(
+                            "reference {:?}: generation provenance needs a non-empty {name}",
+                            entry.role
+                        ),
+                    ));
+                }
+            }
+            if generation.width == 0 || generation.height == 0 {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.generation"),
+                    format!(
+                        "reference {:?}: generation provenance needs the geometry it was rendered \
+                         at",
+                        entry.role
+                    ),
+                ));
+            }
+        }
+        (false, None) => {}
+    }
+    findings
+}
+
 pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     if pack.schema_version != REFERENCE_PACK_SCHEMA_VERSION {
@@ -1162,52 +1497,8 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        let file = Path::new(&entry.file);
-        let extension_ok = file
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                REFERENCE_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
-            });
-        let basename = file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if entry.file.trim().is_empty()
-            || file.is_absolute()
-            || file
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must be a relative path inside the pack directory",
-                    entry.file
-                ),
-            ));
-        } else if entry.file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
-            // The basename is interpolated into the multipart `Content-Disposition` header the
-            // import posts, so a CR/LF in it injects multipart headers. sc-22713 generates these
-            // documents, so the charset is enforced here rather than trusted.
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must have a 1-128 character [A-Za-z0-9._-] basename (it is sent as \
-                     a multipart filename)",
-                    entry.file
-                ),
-            ));
-        } else if !extension_ok {
-            findings.push(PlanDiagnostic::plan(
-                format!("{field}.file"),
-                format!(
-                    "file {:?} must be an image ({})",
-                    entry.file,
-                    REFERENCE_IMAGE_EXTENSIONS.join(", ")
-                ),
-            ));
-        }
+        findings.extend(reference_image_file_findings(&field, &entry.file));
+        findings.extend(generated_reference_findings(&field, entry));
     }
     // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
     // because the two are placed through different slots and a collision would make
@@ -1248,14 +1539,18 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        let file = Path::new(&entry.file);
+        findings.extend(validate_sound_source(&field, entry));
+        let Some(declared) = entry.file.as_deref() else {
+            continue;
+        };
+        let file = Path::new(declared);
         let extension_ok = file
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
                 SOUND_AUDIO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
             });
-        if entry.file.trim().is_empty()
+        if declared.trim().is_empty()
             || file.is_absolute()
             || file
                 .components()
@@ -1263,17 +1558,13 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
         {
             findings.push(PlanDiagnostic::plan(
                 format!("{field}.file"),
-                format!(
-                    "file {:?} must be a relative path inside the pack directory",
-                    entry.file
-                ),
+                format!("file {declared:?} must be a relative path inside the pack directory"),
             ));
         } else if !extension_ok {
             findings.push(PlanDiagnostic::plan(
                 format!("{field}.file"),
                 format!(
-                    "file {:?} must be audio ({})",
-                    entry.file,
+                    "file {declared:?} must be audio ({})",
                     SOUND_AUDIO_EXTENSIONS.join(", ")
                 ),
             ));
@@ -1282,8 +1573,96 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     findings
 }
 
+/// Where one sound entry's audio comes from: a file, a synthesized line, or — the finding this
+/// exists for — neither (sc-23404).
+///
+/// Every finding names the entry by ROLE as well as by index, because the operator reading it is
+/// looking at a pack whose entries they know by name, and "referencePack.sound[2]" alone makes them
+/// count array elements to find out which line the harness refused to speak.
+fn validate_sound_source(field: &str, entry: &SoundEntry) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    let role = entry.role.as_str();
+    let has_file = entry
+        .file
+        .as_deref()
+        .is_some_and(|file| !file.trim().is_empty());
+    let text = entry.text.as_deref();
+    match text {
+        None => {
+            if !has_file {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.file"),
+                    format!(
+                        "sound {role:?} declares neither `file` nor `text`; a pack entry is either \
+                         a clip on disk or a `dialogue` line to synthesize"
+                    ),
+                ));
+            }
+            // `voice` / `model` are synthesis knobs. Carried without a line to speak they say the
+            // author meant to write one, so they are a finding rather than an ignored field.
+            for (name, value) in [("voice", &entry.voice), ("model", &entry.model)] {
+                if value.is_some() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.{name}"),
+                        format!(
+                            "sound {role:?} sets `{name}` but has no `text`; \
+                             `{name}` only applies to a synthesized dialogue line"
+                        ),
+                    ));
+                }
+            }
+        }
+        Some(text) => {
+            if entry.kind != "dialogue" {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.text"),
+                    format!(
+                        "sound {role:?} is kind {:?}; only a `dialogue` entry may carry `text` \
+                         (synthesis speaks a line, it does not render a bed or an effect)",
+                        entry.kind
+                    ),
+                ));
+            }
+            let length = text.trim().chars().count();
+            if length == 0 || length > MAX_DIALOGUE_TEXT_CHARS {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.text"),
+                    format!(
+                        "sound {role:?}: `text` must be 1-{MAX_DIALOGUE_TEXT_CHARS} characters, \
+                         got {length}"
+                    ),
+                ));
+            }
+            let model = entry.synthesis_model();
+            if !SOUND_SYNTHESIS_MODELS.contains(&model) {
+                findings.push(PlanDiagnostic::plan(
+                    format!("{field}.model"),
+                    format!(
+                        "sound {role:?}: unknown speech model {model:?}; expected one of {}",
+                        SOUND_SYNTHESIS_MODELS.join(", ")
+                    ),
+                ));
+            }
+            if let Some(voice) = entry.voice.as_deref() {
+                let voice = voice.trim();
+                if voice.is_empty() || voice.chars().count() > MAX_SOUND_VOICE_CHARS {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.voice"),
+                        format!(
+                            "sound {role:?}: `voice` must be 1-{MAX_SOUND_VOICE_CHARS} characters"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    findings
+}
+
 /// Findings that need both documents: every role a shot names must exist in the pack and be
-/// approved, and every shot must be anchored to at least one approved canonical reference.
+/// approved, every role bound in `conditioning.referenceRoles` must be a
+/// [`BINDABLE_REFERENCE_KINDS`] kind, and every shot must be anchored to at least one approved
+/// canonical reference.
 pub fn validate_plan_against_pack(
     plan: &ProductionPlan,
     pack: &ReferencePack,
@@ -1311,6 +1690,31 @@ pub fn validate_plan_against_pack(
         }
         let mut anchored = false;
         for (field, role) in slots {
+            // A BOUND reference is a Ref2VA subject, and only the subject kinds belong there
+            // ([`BINDABLE_REFERENCE_KINDS`]). Without this the planner's rule — which counts a
+            // pack's bindable entries to decide whether a reference shot can be offered at all —
+            // and the validator disagree, and a plan binding a `plate` or a `style` validates,
+            // compiles and dispatches it as a subject to depict. Checked independently of
+            // `approved`, so approving the plate does not make the binding legal. `continuityRoles`
+            // and the keyframe slots are unaffected: a plate is exactly what a keyframe slot takes.
+            if field == "conditioning.referenceRoles" {
+                if let Some(entry) = roles.get(role) {
+                    if !BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str()) {
+                        findings.push(PlanDiagnostic::shot(
+                            &shot.id,
+                            field,
+                            format!(
+                                "reference role {role:?} is kind {:?}; only {} may be BOUND as a \
+                                 reference_to_video subject (a `style` is a look, not a subject, \
+                                 and a `plate` is a literal frame placed through firstFrameRole / \
+                                 lastFrameRole)",
+                                entry.kind,
+                                BINDABLE_REFERENCE_KINDS.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
             match roles.get(role) {
                 None => findings.push(PlanDiagnostic::shot(
                     &shot.id,
@@ -1437,7 +1841,18 @@ pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> V
         }
     }
     for (index, entry) in pack.sound.iter().enumerate() {
-        let path = pack_dir.join(&entry.file);
+        // A synthesized line has no file on disk until the run speaks it — including one that also
+        // names a `file`, which is the path synthesis WRITES rather than one a human already put
+        // there. Checking for it here would refuse every speech pack before its first run
+        // (sc-23404); `ensure_sound` fails loudly if the clip does not appear.
+        if entry.is_synthesized() {
+            continue;
+        }
+        let Some(declared) = entry.file.as_deref() else {
+            // Structural: `validate_reference_pack` already named this entry. Nothing to stat.
+            continue;
+        };
+        let path = pack_dir.join(declared);
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
             Ok(_) => findings.push(PlanDiagnostic::plan(
@@ -1459,6 +1874,389 @@ pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> V
         }
     }
     findings
+}
+
+// ------------------------------------------------------------------------------------------
+// Reference SPEC (sc-23403) — the document `film-harness make-references` reads
+// ------------------------------------------------------------------------------------------
+
+/// Schema version of [`ReferenceSpec`] documents this build reads.
+pub const REFERENCE_SPEC_SCHEMA_VERSION: u32 = 1;
+
+/// Image modes a reference spec may drive. Generation only: an `edit_image` request needs a source
+/// asset, which a spec that starts from nothing does not have.
+pub const REFERENCE_SPEC_MODES: &[&str] = &["text_to_image"];
+
+/// Attempts one role may cost. A retry re-renders on the GPU, so the ceiling is low on purpose.
+pub const MAX_REFERENCE_SPEC_ATTEMPTS: u32 = 5;
+
+/// Wall clock ONE job may declare, in seconds (24 hours). A spec is a bounded fixture run, not a
+/// standing render: the ceiling keeps `maxJobSeconds` from being a budget in name only, and keeps
+/// the generator's `Instant::now() + Duration::from_secs(..)` deadline off the overflow that a
+/// declaration near `u64::MAX` would otherwise panic on.
+pub const MAX_REFERENCE_SPEC_JOB_SECONDS: u64 = 86_400;
+
+/// A recipe for GENERATING a reference pack's plates (sc-23403).
+///
+/// **Test fixtures only.** In the product the user supplies the reference images; this document
+/// exists so the film harness can produce its own courier/workshop fixtures locally, with the
+/// provenance of every plate recorded in the pack it writes. Nothing in the product reads it, and
+/// a pack it produced is an ordinary [`ReferencePack`] with `generated: true` on the entries it
+/// rendered.
+///
+/// The roles a plan needs but the spec does not render — a style plate, a keyframe plate — are
+/// named in [`ReferenceSpecInherit`] and copied verbatim from an existing pack, along with its
+/// sound, so the written pack validates against the same plan the source pack did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpec {
+    pub schema_version: u32,
+    /// Id of the pack this spec writes (`[A-Za-z0-9_-]{1,64}`).
+    pub id: String,
+    /// Version of the pack this spec writes.
+    pub version: u32,
+    #[serde(default)]
+    pub description: String,
+    pub model: ReferenceSpecModel,
+    pub limits: ReferenceSpecLimits,
+    /// First seed of the run; role `n` renders at `seedBase + n` so a re-run of the same spec asks
+    /// for the same images. Absent means the route picks a seed and the pack records what it got.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_base: Option<i64>,
+    /// Roles copied verbatim from an existing pack instead of generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<ReferenceSpecInherit>,
+    pub references: Vec<ReferenceSpecEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecModel {
+    /// Catalog model id (`krea_2_turbo` / `krea_2_raw` for the shipped fixture spec).
+    pub id: String,
+    /// Quant tier, when the spec pins one. Checked against the catalog's install state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// One of [`REFERENCE_SPEC_MODES`].
+    #[serde(default = "default_reference_spec_mode")]
+    pub mode: String,
+    /// `"WxH"`, or absent to render at the model's own declared default resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// Negative prompt applied to every role that does not declare its own. Refused for a model
+    /// whose catalog entry declares `image.supportsNegativePrompt: false`, rather than silently
+    /// dropped — Krea 2 Turbo is CFG-free and would ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+}
+
+fn default_reference_spec_mode() -> String {
+    REFERENCE_SPEC_MODES[0].to_owned()
+}
+
+/// What bounds a `make-references` run. Finite by declaration, like a plan's [`PlanLimits`]: the
+/// generator is driving a real GPU and nothing else stops it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecLimits {
+    /// Wall-clock budget for ONE image job.
+    pub max_job_seconds: u64,
+    /// Attempts per role, counting the first. `1` means no retry.
+    pub max_attempts_per_role: u32,
+    /// Memory the generation is allowed, in GB. Checked against the host's reported memory before
+    /// dispatch and against each job's observed peak after it.
+    pub max_memory_gb: f64,
+}
+
+/// Roles (and sound) copied from an existing pack rather than generated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecInherit {
+    /// The pack document to copy from, relative to this spec's own directory.
+    pub pack: String,
+    /// Reference roles to copy. Each must exist in that pack and must not also be generated here.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// Copy the source pack's whole `sound` array (and its files) too.
+    #[serde(default)]
+    pub sound: bool,
+}
+
+/// One role the spec renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReferenceSpecEntry {
+    /// Role name (`[A-Za-z0-9_-]{1,64}`), unique within the spec.
+    pub role: String,
+    /// One of [`REFERENCE_KINDS`].
+    pub kind: String,
+    /// Where the rendered plate is written, relative to the pack directory.
+    pub file: String,
+    #[serde(default)]
+    pub description: String,
+    /// The prompt this role renders from. Required: a role with no prompt is refused by name
+    /// rather than rendered from its description.
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    /// Seed for this role, overriding `seedBase + index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// `"WxH"` for this role, overriding the spec's model resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+}
+
+impl ReferenceSpecEntry {
+    /// The negative prompt this role sends, falling back to the spec-wide one.
+    pub fn negative_prompt_with<'a>(&'a self, spec: &'a ReferenceSpec) -> Option<&'a str> {
+        self.negative_prompt
+            .as_deref()
+            .or(spec.model.negative_prompt.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The geometry this role renders at, falling back to the spec-wide one.
+    pub fn resolution_with<'a>(&'a self, spec: &'a ReferenceSpec) -> Option<&'a str> {
+        self.resolution
+            .as_deref()
+            .or(spec.model.resolution.as_deref())
+    }
+}
+
+/// Read and parse a reference spec document (JSONC tolerated).
+pub fn read_reference_spec_file(path: &Path) -> Result<ReferenceSpec, PlanDiagnostic> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        PlanDiagnostic::plan(
+            "referenceSpec",
+            format!("cannot read {}: {error}", path.display()),
+        )
+    })?;
+    parse_reference_spec(&text).map_err(|error| {
+        PlanDiagnostic::plan("referenceSpec", format!("{}: {error}", path.display()))
+    })
+}
+
+/// Parse a reference spec from JSON/JSONC text.
+pub fn parse_reference_spec(text: &str) -> Result<ReferenceSpec, String> {
+    let stripped = strip_jsonc_comments(text);
+    serde_json::from_str(&stripped).map_err(|error| error.to_string())
+}
+
+/// Structural findings on a reference spec alone. Every one of them is answerable before a single
+/// job is created, which is the point: a spec with a role that declares no prompt must never cost
+/// four renders before it says so.
+pub fn validate_reference_spec(spec: &ReferenceSpec) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    if spec.schema_version != REFERENCE_SPEC_SCHEMA_VERSION {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.schemaVersion",
+            format!(
+                "unsupported reference spec schema version {} (this build reads \
+                 {REFERENCE_SPEC_SCHEMA_VERSION})",
+                spec.schema_version
+            ),
+        ));
+    }
+    if !is_safe_plan_id(&spec.id) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.id",
+            "reference spec id must be 1-64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    if spec.version == 0 {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.version",
+            "reference spec version must be >= 1",
+        ));
+    }
+    if !is_safe_plan_id(&spec.model.id) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.model.id",
+            format!(
+                "model id {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                spec.model.id
+            ),
+        ));
+    }
+    if !REFERENCE_SPEC_MODES.contains(&spec.model.mode.as_str()) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.model.mode",
+            format!(
+                "unsupported image mode {:?}; a reference spec generates from text ({})",
+                spec.model.mode,
+                REFERENCE_SPEC_MODES.join(", ")
+            ),
+        ));
+    }
+    if let Some(tier) = spec.model.tier.as_deref() {
+        if !is_safe_plan_id(tier) {
+            findings.push(PlanDiagnostic::plan(
+                "referenceSpec.model.tier",
+                format!("tier {tier:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+            ));
+        }
+    }
+    findings.extend(spec_resolution_finding(
+        "referenceSpec.model.resolution",
+        spec.model.resolution.as_deref(),
+    ));
+    findings.extend(spec_prompt_length_finding(
+        "referenceSpec.model.negativePrompt",
+        spec.model.negative_prompt.as_deref(),
+    ));
+    if !(1..=MAX_REFERENCE_SPEC_JOB_SECONDS).contains(&spec.limits.max_job_seconds) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxJobSeconds",
+            format!(
+                "a reference spec must declare a per-job budget between 1 and \
+                 {MAX_REFERENCE_SPEC_JOB_SECONDS} seconds (got {})",
+                spec.limits.max_job_seconds
+            ),
+        ));
+    }
+    if !(1..=MAX_REFERENCE_SPEC_ATTEMPTS).contains(&spec.limits.max_attempts_per_role) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxAttemptsPerRole",
+            format!(
+                "attempts per role must be between 1 and {MAX_REFERENCE_SPEC_ATTEMPTS} (got {})",
+                spec.limits.max_attempts_per_role
+            ),
+        ));
+    }
+    if !(spec.limits.max_memory_gb.is_finite() && spec.limits.max_memory_gb > 0.0) {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.limits.maxMemoryGb",
+            "a reference spec must declare a positive memory budget",
+        ));
+    }
+    if spec.references.is_empty() {
+        findings.push(PlanDiagnostic::plan(
+            "referenceSpec.references",
+            "a reference spec needs at least one role to generate",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for (index, entry) in spec.references.iter().enumerate() {
+        let field = format!("referenceSpec.references[{index}]");
+        if !is_safe_plan_id(&entry.role) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!(
+                    "role {:?} must be 1-64 characters of [A-Za-z0-9_-]",
+                    entry.role
+                ),
+            ));
+        } else if !seen.insert(entry.role.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.role"),
+                format!("duplicate reference role {:?}", entry.role),
+            ));
+        }
+        if !REFERENCE_KINDS.contains(&entry.kind.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.kind"),
+                format!(
+                    "unknown reference kind {:?}; expected one of {}",
+                    entry.kind,
+                    REFERENCE_KINDS.join(", ")
+                ),
+            ));
+        }
+        let file_findings = reference_image_file_findings(&field, &entry.file);
+        if file_findings.is_empty() && !files.insert(entry.file.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.file"),
+                format!(
+                    "file {:?} is declared by more than one role; each role writes its own plate",
+                    entry.file
+                ),
+            ));
+        }
+        findings.extend(file_findings);
+        if entry.prompt.trim().is_empty() {
+            findings.push(PlanDiagnostic::plan(
+                format!("{field}.prompt"),
+                format!(
+                    "role {:?} declares no prompt; every generated role needs the text it renders \
+                     from",
+                    entry.role
+                ),
+            ));
+        }
+        findings.extend(spec_prompt_length_finding(
+            &format!("{field}.prompt"),
+            Some(entry.prompt.as_str()),
+        ));
+        findings.extend(spec_prompt_length_finding(
+            &format!("{field}.negativePrompt"),
+            entry.negative_prompt.as_deref(),
+        ));
+        findings.extend(spec_resolution_finding(
+            &format!("{field}.resolution"),
+            entry.resolution.as_deref(),
+        ));
+    }
+    if let Some(inherit) = &spec.inherit {
+        let path = Path::new(&inherit.pack);
+        if inherit.pack.trim().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            findings.push(PlanDiagnostic::plan(
+                "referenceSpec.inherit.pack",
+                format!(
+                    "pack {:?} must be a relative path beside the spec",
+                    inherit.pack
+                ),
+            ));
+        }
+        let mut inherited = BTreeSet::new();
+        for (index, role) in inherit.references.iter().enumerate() {
+            let field = format!("referenceSpec.inherit.references[{index}]");
+            if !is_safe_plan_id(role) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("role {role:?} must be 1-64 characters of [A-Za-z0-9_-]"),
+                ));
+            } else if !inherited.insert(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("duplicate inherited role {role:?}"),
+                ));
+            } else if seen.contains(role.as_str()) {
+                findings.push(PlanDiagnostic::plan(
+                    field,
+                    format!("role {role:?} is generated by this spec and cannot also be inherited"),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+fn spec_resolution_finding(field: &str, resolution: Option<&str>) -> Option<PlanDiagnostic> {
+    let value = resolution?;
+    parse_resolution(value)
+        .is_none()
+        .then(|| PlanDiagnostic::plan(field, format!("resolution {value:?} must be \"WxH\"")))
+}
+
+fn spec_prompt_length_finding(field: &str, text: Option<&str>) -> Option<PlanDiagnostic> {
+    let value = text?;
+    (value.chars().count() > MAX_PROMPT_CHARS).then(|| {
+        PlanDiagnostic::plan(
+            field,
+            format!(
+                "prompt is {} characters; the generation route accepts at most {MAX_PROMPT_CHARS}",
+                value.chars().count()
+            ),
+        )
+    })
 }
 
 /// The lane a manifest entry's memory minimum is read from.
@@ -1512,6 +2310,482 @@ pub fn plan_fps(plan: &ProductionPlan, entry: &Map<String, Value>) -> Option<u32
     plan.model.fps.or_else(|| default_fps(entry))
 }
 
+// ---------------------------------------------------------------------------------------------
+// Model partitions (sc-23402)
+// ---------------------------------------------------------------------------------------------
+
+/// Families whose REFERENCE conditioning ships as a second catalog entry, as
+/// `(base model id, reference partition model id)`.
+///
+/// MiniMax-H3 is two 18.78 GB DiT checkpoints under one family: `minimax_h3` serves
+/// `text_to_video | image_to_video | first_last_frame` and declares `limits.maxReferenceAssets: 0`,
+/// while `minimax_h3_ref` serves `reference_to_video` ONLY and declares 9 images / 3 clips / 3
+/// audio (`config/manifests/builtin.models.jsonc`; the routing arm that refuses the other pairings
+/// is `jobs_store::routing::mlx`, "routing a t2v request at the reference one loads the wrong
+/// checkpoint").
+///
+/// A plan therefore declares the FAMILY once — `model.id: "minimax_h3"` — and each shot resolves to
+/// the partition its own conditioning needs. The alternative, a per-shot model override, would let
+/// a plan mix unrelated families inside one sequence; this table cannot, because the only id it can
+/// ever produce is the declared model's own reference partition.
+const REFERENCE_PARTITIONS: &[(&str, &str)] = &[("minimax_h3", "minimax_h3_ref")];
+
+/// The reference partition of `model_id`, when its family has one.
+pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
+    REFERENCE_PARTITIONS
+        .iter()
+        .find(|(base, _)| *base == model_id)
+        .map(|(_, reference)| *reference)
+}
+
+/// Whether `model_id` IS a family's reference partition — the half of the split that conditions on
+/// references (sc-23402).
+///
+/// Read off the same table [`reference_partition_for`] reads, so "this request carries references"
+/// cannot be decided by one rule in the compiler and another in the recorder. It is what gates the
+/// reference-only knobs (`referenceImageShortEdge`): a base-partition request has no reference to
+/// size, so the knob must not appear on it at all.
+pub fn is_reference_partition_id(model_id: &str) -> bool {
+    REFERENCE_PARTITIONS
+        .iter()
+        .any(|(_, reference)| *reference == model_id)
+}
+
+/// Which catalog entry one shot renders through, and why.
+///
+/// The reason is not decoration: it is written onto the compiled request, the dispatched payload's
+/// provenance and the attempt record, so a run says which of a family's checkpoints produced each
+/// take without anyone re-deriving it from the plan (epic 23401 E1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShotPartition {
+    /// The catalog model id this shot dispatches as.
+    pub model_id: String,
+    /// One sentence saying why that partition and not the other.
+    pub reason: String,
+}
+
+/// The partition a shot of `plan_model_id` binding `reference_roles` roles renders through.
+///
+/// References are OPTIONAL input: a shot that binds none is never refused for it, it simply stays
+/// on the plan's declared model. Only a shot that actually binds reference roles moves, and only
+/// when the declared model's family HAS a reference partition — otherwise it stays put and
+/// [`validate_plan_against_model`] refuses it against the declared model's own
+/// `limits.maxReferenceAssets`, which is the same refusal a single-entry family has always given.
+pub fn resolve_shot_partition(plan_model_id: &str, reference_roles: usize) -> ShotPartition {
+    match (reference_roles, reference_partition_for(plan_model_id)) {
+        (0, _) | (_, None) => ShotPartition {
+            model_id: plan_model_id.to_owned(),
+            reason: if reference_roles == 0 {
+                format!("no reference roles; renders on the plan's model {plan_model_id}")
+            } else {
+                format!(
+                    "{reference_roles} reference role(s); {plan_model_id} has no separate \
+                     reference partition, so the shot renders on it directly"
+                )
+            },
+        },
+        (_, Some(reference)) => ShotPartition {
+            model_id: reference.to_owned(),
+            reason: format!(
+                "{reference_roles} reference role(s); {plan_model_id} declares no reference \
+                 conditioning, so the shot renders on its family's reference partition {reference}"
+            ),
+        },
+    }
+}
+
+/// The catalog entries a plan's shots may resolve to: the plan's declared model, plus the family's
+/// reference partition when the catalog serves one.
+///
+/// It is a view over borrowed entries rather than an owned map so the one resolution rule
+/// ([`Self::resolve`]) is shared by the validator, the compiler and the harness driver. A shot is
+/// checked against the limits of the entry it will ACTUALLY dispatch as — the whole point of the
+/// split, since the two partitions disagree on `capabilities` and `limits.maxReferenceAssets`.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelEntries<'a> {
+    base_id: &'a str,
+    base: &'a Map<String, Value>,
+    reference: Option<(&'a str, &'a Map<String, Value>)>,
+}
+
+impl<'a> ModelEntries<'a> {
+    /// A plan whose shots all render through one entry: no reference partition is available, so a
+    /// shot that binds references is judged against `entry`'s own declared caps.
+    pub fn single(model_id: &'a str, entry: &'a Map<String, Value>) -> Self {
+        Self {
+            base_id: model_id,
+            base: entry,
+            reference: None,
+        }
+    }
+
+    /// The plan's entry plus the family's reference partition as the catalog serves it. `reference`
+    /// is `None` when the catalog has no such entry — which becomes a finding on the first shot
+    /// that needs it, never a silent dispatch at the base checkpoint.
+    pub fn with_reference_partition(
+        model_id: &'a str,
+        entry: &'a Map<String, Value>,
+        reference: Option<(&'a str, &'a Map<String, Value>)>,
+    ) -> Self {
+        Self {
+            base_id: model_id,
+            base: entry,
+            reference,
+        }
+    }
+
+    pub fn base_entry(&self) -> &'a Map<String, Value> {
+        self.base
+    }
+
+    /// The partition a shot binding `reference_roles` roles resolves to, with its catalog entry.
+    /// The entry is `None` exactly when the resolved partition is not one this view holds.
+    fn resolve(&self, reference_roles: usize) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        let partition = resolve_shot_partition(self.base_id, reference_roles);
+        if partition.model_id == self.base_id {
+            return (partition, Some(self.base));
+        }
+        let entry = self
+            .reference
+            .and_then(|(id, entry)| (id == partition.model_id).then_some(entry));
+        (partition, entry)
+    }
+
+    /// The partition `shot` resolves to, with its catalog entry.
+    pub fn resolve_shot(&self, shot: &Shot) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        self.resolve(shot.conditioning.reference_roles.len())
+    }
+
+    /// The catalog entry for an already-resolved partition, paired back with it.
+    pub fn resolve_shot_partition_entry(
+        &self,
+        partition: &ShotPartition,
+    ) -> (&'a str, Option<&'a Map<String, Value>>) {
+        if partition.model_id == self.base_id {
+            return (self.base_id, Some(self.base));
+        }
+        match self.reference {
+            Some((id, entry)) if id == partition.model_id => (id, Some(entry)),
+            _ => (self.base_id, None),
+        }
+    }
+
+    /// Every distinct partition `plan`'s shots resolve to, in plan order.
+    pub fn partitions_used(&self, plan: &ProductionPlan) -> Vec<ShotPartition> {
+        let mut used: Vec<ShotPartition> = Vec::new();
+        for shot in &plan.shots {
+            let (partition, _) = self.resolve_shot(shot);
+            if !used.iter().any(|seen| seen.model_id == partition.model_id) {
+                used.push(partition);
+            }
+        }
+        if used.is_empty() {
+            used.push(resolve_shot_partition(self.base_id, 0));
+        }
+        used
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Plan LoRAs (sc-23406)
+// ---------------------------------------------------------------------------------------------
+
+/// One catalog LoRA, as the plan validator and the compiler need it.
+///
+/// Read from the EMBEDDED builtin manifest rather than from the API's live catalog, for the same
+/// reason [`crate::minimax_h3_turbo`] resolves its recipe there: the identity of a published
+/// adapter — which family it belongs to, which partitions it was distilled for, what weight it
+/// folds at — is a property of the shipped catalog, not of the host. Install state is the one fact
+/// that IS per-host, and it is gated where it belongs: the video route refuses an uninstalled
+/// adapter at enqueue, and the planner's envelope offers only installed ones.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanLoraEntry {
+    pub id: String,
+    /// Display name — what a refusal names, so an operator reads the adapter rather than the key.
+    pub name: String,
+    /// The catalog family token (`minimax-h3`).
+    pub family: String,
+    /// The `modelIds` allowlist. EMPTY means family-wide: the adapter attaches to any model of its
+    /// family. Non-empty means it was distilled for exactly those partitions (sc-19563).
+    pub model_ids: Vec<String>,
+    /// The runtime `lora_scale` multiplier the catalog declares (`defaultWeight`), which is what
+    /// the Studio sends and what the route would fill in for a request that omits it.
+    pub default_weight: f64,
+}
+
+impl PlanLoraEntry {
+    /// Whether this adapter may attach to catalog model `model_id` on its declared allowlist alone.
+    /// Family compatibility is a separate question ([`lora_family_matches_model`]).
+    pub fn allows_model(&self, model_id: &str) -> bool {
+        self.model_ids.is_empty() || self.model_ids.iter().any(|id| id == model_id)
+    }
+}
+
+static BUILTIN_PLAN_LORAS: std::sync::OnceLock<Vec<PlanLoraEntry>> = std::sync::OnceLock::new();
+
+/// Every LoRA in the embedded builtin catalog, in catalog order.
+pub fn builtin_plan_loras() -> &'static [PlanLoraEntry] {
+    BUILTIN_PLAN_LORAS.get_or_init(|| parse_plan_loras(embedded_manifest("builtin.loras.jsonc")))
+}
+
+/// The embedded builtin catalog entry for `id`, or `None` when the id names nothing shipped.
+pub fn builtin_plan_lora(id: &str) -> Option<&'static PlanLoraEntry> {
+    builtin_plan_loras().iter().find(|lora| lora.id == id)
+}
+
+fn embedded_manifest(name: &str) -> &'static str {
+    crate::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(manifest, _)| *manifest == name)
+        .map(|(_, contents)| *contents)
+        .unwrap_or("")
+}
+
+/// Parse a `builtin.loras.jsonc` body. Split out so tests can drive synthetic catalogs; a malformed
+/// manifest yields an EMPTY list rather than a panic, exactly as [`crate::minimax_h3_turbo`] does.
+fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
+    let stripped = strip_jsonc_comments(contents);
+    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
+        return Vec::new();
+    };
+    let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    loras
+        .iter()
+        .filter_map(|lora| {
+            let id = lora.get("id")?.as_str()?.to_owned();
+            let family = lora.get("family")?.as_str()?.to_owned();
+            let model_ids = lora
+                .get("modelIds")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let name = lora
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_owned();
+            Some(PlanLoraEntry {
+                id,
+                name,
+                family,
+                model_ids,
+                default_weight: lora
+                    .get("defaultWeight")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0),
+            })
+        })
+        .collect()
+}
+
+/// The LoRA families catalog model `model_id` declares it can load
+/// (`loraCompatibility.families`), read from the embedded model catalog.
+///
+/// Empty for a model the embedded catalog does not hold — a user-installed or external entry —
+/// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
+/// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
+///
+/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
+/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
+/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
+pub fn model_lora_families(model_id: &str) -> Vec<String> {
+    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
+        std::sync::OnceLock::new();
+    MODEL_LORA_FAMILIES
+        .get_or_init(|| {
+            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
+            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
+                return BTreeMap::new();
+            };
+            manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| {
+                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
+                    let families = model
+                        .get("loraCompatibility")?
+                        .get("families")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    Some((id, families))
+                })
+                .collect()
+        })
+        .get(model_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Whether `lora`'s family is one catalog model `model_id` declares it can load. Permissive for a
+/// model the embedded catalog does not hold; see [`model_lora_families`].
+pub fn lora_family_matches_model(lora: &PlanLoraEntry, model_id: &str) -> bool {
+    let families = model_lora_families(model_id);
+    families.is_empty() || families.contains(&lora.family)
+}
+
+/// The partitions a plan declaring `plan_model_id` may ever dispatch as: the declared model, plus
+/// its family's reference partition when the catalog serves one.
+///
+/// Read off the same table [`resolve_shot_partition`] reads, so the set the validator judges a
+/// LoRA list against is exactly the set the compiler can produce.
+pub fn plan_partition_ids(plan_model_id: &str) -> Vec<String> {
+    let mut ids = vec![plan_model_id.to_owned()];
+    if let Some(reference) = reference_partition_for(plan_model_id) {
+        ids.push(reference.to_owned());
+    }
+    ids
+}
+
+/// The plan's declared LoRAs that actually attach to `partition_model_id`, in the plan's own order.
+///
+/// This is the per-shot resolution sc-23406 asks for, and it is ONE function so the compiled
+/// request, the dispatched payload and the attempt record cannot each answer it differently. Both
+/// halves of the question are asked: the adapter's declared `modelIds` allowlist (a ref2v turbo
+/// never reaches a base-partition shot, and an fl2v turbo never reaches a reference one) and its
+/// family against the partition's own declared `loraCompatibility.families`.
+///
+/// An id that names nothing in the embedded catalog is skipped rather than guessed at;
+/// [`validate_plan_structure`] has already refused it by name, so reaching here means the caller
+/// chose to compile a plan it was told not to.
+pub fn plan_loras_for_partition(
+    plan_lora_ids: &[String],
+    partition_model_id: &str,
+) -> Vec<&'static PlanLoraEntry> {
+    plan_lora_ids
+        .iter()
+        .filter_map(|id| builtin_plan_lora(id))
+        .filter(|lora| lora.allows_model(partition_model_id))
+        .filter(|lora| lora_family_matches_model(lora, partition_model_id))
+        .collect()
+}
+
+/// The `loras` entries a job body carries for `partition_model_id` — the SHAPE the Video Studio
+/// sends, not a second spelling of it.
+///
+/// `generationStudio.jsx` posts `selectedLoras.map((lora) => ({ id, weight }))`, the route's
+/// `hydrate_lora_spec` keys on `id` and `preset_lora_weight` fills an omitted weight from the
+/// catalog's `defaultWeight`. Sending the id AND the declared weight is therefore byte-identical to
+/// what the studio sends for the same selection, and identical to what the route would have filled
+/// in for an id alone — which is the property that makes a harness render and a studio render the
+/// same render.
+pub fn plan_lora_payload_entries(plan_lora_ids: &[String], partition_model_id: &str) -> Vec<Value> {
+    plan_loras_for_partition(plan_lora_ids, partition_model_id)
+        .into_iter()
+        .map(|lora| json!({ "id": lora.id, "weight": lora.default_weight }))
+        .collect()
+}
+
+/// Findings on the plan's `model.loras` and `model.advanced.steps` (sc-23406).
+///
+/// Four refusals, each by NAME, because every one of them is a document the author can fix in the
+/// plan and none of them is worth a model load to discover:
+///
+/// 1. an id no shipped catalog entry carries — a typo, refused with the id in the message;
+/// 2. the same id twice — a selection the route would silently collapse;
+/// 3. an adapter whose family the plan's model cannot load at all;
+/// 4. two step-distill recipes that would BOTH apply to one partition. A render has one schedule,
+///    so the harness refuses here rather than letting `resolve_turbo_recipe` refuse it on the
+///    worker after the weights are resident.
+fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let families = model_lora_families(&plan.model.id);
+    for id in &plan.model.loras {
+        if !seen.insert(id.as_str()) {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!("{id:?} is listed twice; declare each LoRA once"),
+            ));
+            continue;
+        }
+        let Some(lora) = builtin_plan_lora(id) else {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!(
+                    "{id:?} is not a LoRA in this build's catalog; the installed ids are listed by \
+                     `GET /api/v1/loras`"
+                ),
+            ));
+            continue;
+        };
+        if !families.is_empty() && !families.contains(&lora.family) {
+            findings.push(PlanDiagnostic::plan(
+                "model.loras",
+                format!(
+                    "{:?} is a {} LoRA, which {} cannot load (it declares {})",
+                    lora.id,
+                    lora.family,
+                    plan.model.id,
+                    families.join(", ")
+                ),
+            ));
+        }
+    }
+    // One recipe per partition. Checked per partition rather than across the list, because a plan
+    // that names the fl2v turbo AND the ref2v turbo is CORRECT — they reach different checkpoints —
+    // while two fl2v turbos would both reach the base one.
+    //
+    // The judgement is [`crate::minimax_h3_turbo::resolve_turbo_recipe`]'s, not a second copy of
+    // it: it is the resolver the WORKER runs, on the same payload entries this plan will dispatch,
+    // so a list this accepts cannot be one the worker then refuses after the weights are resident.
+    // It also already draws the distinctions a hand-rolled count gets wrong — the same id twice,
+    // and two distinct adapters that declare the SAME schedule, are neither of them conflicts.
+    for partition in plan_partition_ids(&plan.model.id) {
+        let entries = plan_lora_payload_entries(&plan.model.loras, &partition);
+        if let Err(error) = crate::minimax_h3_turbo::resolve_turbo_recipe(&partition, &entries) {
+            findings.push(PlanDiagnostic::plan("model.loras", error));
+        }
+    }
+    if let Some(steps) = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+    {
+        // Both ends, because the COMPILER's `u32::try_from(..).ok()` silently drops anything
+        // outside the range: a `steps` above `u32::MAX` validated clean and then rendered at the
+        // recipe's own count, with no field named and nothing in the record to say the override
+        // was discarded. The validator owns the whole admitted range, so what validates compiles.
+        if steps < 1 || u32::try_from(steps).is_err() {
+            findings.push(PlanDiagnostic::plan(
+                "model.advanced.steps",
+                format!(
+                    "steps must be a model-evaluation count between 1 and {}, got {steps}",
+                    u32::MAX
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// The finding for a shot whose resolved partition is not in the catalog this run judged against.
+fn missing_partition_finding(shot_id: &str, partition: &ShotPartition) -> PlanDiagnostic {
+    PlanDiagnostic::shot(
+        shot_id,
+        "conditioning.referenceRoles",
+        format!(
+            "{} is not in this API's model catalog, so this shot cannot be dispatched ({}); \
+             install it in the Model Manager, or drop the shot's reference roles",
+            partition.model_id, partition.reason
+        ),
+    )
+}
+
 /// Output geometry for `shot`: the shot's `resolution`, else the plan's, else the model's
 /// declared default.
 pub fn shot_resolution(
@@ -1530,19 +2804,43 @@ pub fn shot_resolution(
 /// resolution against the declared menus and caps, reference counts against the declared caps,
 /// negative prompts against `video.supportsNegativePrompt`, and the plan's memory budget against
 /// the model's declared minimum on `lane`.
+///
+/// Every per-shot rule is checked against the entry of the partition that shot RESOLVES to
+/// (sc-23402), not against the plan's declared model: on a split family the two entries declare
+/// different `capabilities` and different `limits.maxReferenceAssets`, so judging a
+/// `reference_to_video` shot against the base entry would refuse a shot the route would have
+/// accepted, and judging a `text_to_video` shot against the reference entry would refuse one the
+/// base checkpoint renders every day.
 pub fn validate_plan_against_model(
     plan: &ProductionPlan,
-    entry: &Map<String, Value>,
+    entries: &ModelEntries<'_>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     let model_id = plan.model.id.as_str();
-    if let Some(minimum) = model_min_memory_gb(entry, lane) {
+    let entry = entries.base_entry();
+    // `limits.maxMemoryGb` bounds ONE JOB's observed peak (`AttemptRecord::peak_memory_gb`), and
+    // shots dispatch one job at a time — a run never has two partitions resident at once. So the
+    // budget has to clear the LARGEST declared minimum among the partitions this plan uses, not
+    // their sum: every partition must fit on its own, and the largest is the binding one. Checking
+    // the declared model's alone would let a plan whose reference shots need more sail past
+    // preflight and blow the budget mid-run.
+    let binding = entries
+        .partitions_used(plan)
+        .into_iter()
+        .filter_map(|partition| {
+            let (_, entry) = entries.resolve_shot_partition_entry(&partition);
+            let minimum = model_min_memory_gb(entry?, lane)?;
+            Some((partition.model_id, minimum))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right));
+    if let Some((partition_id, minimum)) = binding {
         if plan.limits.max_memory_gb < minimum {
             findings.push(PlanDiagnostic::plan(
                 "limits.maxMemoryGb",
                 format!(
-                    "budget {} GB is below {model_id}'s declared {}.minMemoryGb of {minimum} GB",
+                    "budget {} GB is below {partition_id}'s declared {}.minMemoryGb of {minimum} \
+                     GB",
                     plan.limits.max_memory_gb,
                     lane.manifest_key()
                 ),
@@ -1559,42 +2857,55 @@ pub fn validate_plan_against_model(
     if let Some(message) = fps_limit_error(model_id, fps, entry) {
         findings.push(PlanDiagnostic::plan("model.fps", message));
     }
-    let capabilities: Vec<&str> = entry
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect();
-    let supports_negative = entry
-        .get("video")
-        .and_then(Value::as_object)
-        .and_then(|video| video.get("supportsNegativePrompt"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let caps = reference_caps(entry);
-    let limits = entry.get("limits").and_then(Value::as_object);
-    let duration_menu: Vec<f64> = limits
-        .and_then(|limits| limits.get("durations"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_f64)
-        .collect();
-    let resolution_menu: Vec<(u32, u32)> = limits
-        .and_then(|limits| limits.get("resolutions"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter_map(parse_resolution)
-        .collect();
-    let max_pixels = limits
-        .and_then(|limits| limits.get("maxPixels"))
-        .and_then(Value::as_u64);
 
     for shot in &plan.shots {
         let id = shot.id.as_str();
+        let (partition, partition_entry) = entries.resolve_shot(shot);
+        let Some(entry) = partition_entry else {
+            findings.push(missing_partition_finding(id, &partition));
+            continue;
+        };
+        let model_id = partition.model_id.as_str();
+        let capabilities: Vec<&str> = entry
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let supports_negative = entry
+            .get("video")
+            .and_then(Value::as_object)
+            .and_then(|video| video.get("supportsNegativePrompt"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let caps = reference_caps(entry);
+        let limits = entry.get("limits").and_then(Value::as_object);
+        let duration_menu: Vec<f64> = limits
+            .and_then(|limits| limits.get("durations"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .collect();
+        let resolution_menu: Vec<(u32, u32)> = limits
+            .and_then(|limits| limits.get("resolutions"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(parse_resolution)
+            .collect();
+        let max_pixels = limits
+            .and_then(|limits| limits.get("maxPixels"))
+            .and_then(Value::as_u64);
+        // A partition whose fps menu disagrees with the plan's would render a different cadence
+        // than the sequence is cut at; the plan-level check above only saw the base entry.
+        if partition.model_id != plan.model.id {
+            if let Some(message) = fps_limit_error(model_id, fps, entry) {
+                findings.push(PlanDiagnostic::shot(id, "model.fps", message));
+            }
+        }
         let mode = shot.conditioning.mode.as_str();
         if !capabilities.contains(&mode) {
             findings.push(PlanDiagnostic::shot(
@@ -1640,12 +2951,37 @@ pub fn validate_plan_against_model(
                 .iter()
                 .any(|candidate| (candidate - duration).abs() <= DURATION_MENU_TOLERANCE)
         {
+            // The nearest legal values on either side are named as the correction, because a
+            // planner told only that a value is off the menu re-derives the "right" one — the
+            // real local planner wrote 6.8333 between 6.5833 and 7.2917 (sc-23406) — while a value
+            // it is shown, it copies.
+            let below = duration_menu
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate < duration)
+                .fold(None, |best: Option<f64>, candidate| {
+                    Some(best.map_or(candidate, |best| best.max(candidate)))
+                });
+            let above = duration_menu
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate > duration)
+                .fold(None, |best: Option<f64>, candidate| {
+                    Some(best.map_or(candidate, |best| best.min(candidate)))
+                });
+            let nearest: Vec<String> = [below, above]
+                .into_iter()
+                .flatten()
+                .map(|value| format!("{value}"))
+                .collect();
             findings.push(PlanDiagnostic::shot(
                 id,
                 "targetDurationSeconds",
                 format!(
                     "{duration}s is not on {model_id}'s duration menu {duration_menu:?}; the \
-                     engine would render a different length than the plan intends"
+                     engine would render a different length than the plan intends — write {} \
+                     instead",
+                    nearest.join(" or ")
                 ),
             ));
         }
@@ -1694,7 +3030,7 @@ pub fn validate_all(
     plan: &ProductionPlan,
     pack: &ReferencePack,
     pack_dir: Option<&Path>,
-    model_entry: Option<(&Map<String, Value>, ModelLane)>,
+    model_entry: Option<(&ModelEntries<'_>, ModelLane)>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = validate_plan_structure(plan);
     findings.extend(validate_reference_pack(pack));
@@ -1705,8 +3041,8 @@ pub fn validate_all(
     if let Some(dir) = pack_dir {
         findings.extend(validate_reference_pack_files(pack, dir));
     }
-    if let Some((entry, lane)) = model_entry {
-        findings.extend(validate_plan_against_model(plan, entry, lane));
+    if let Some((entries, lane)) = model_entry {
+        findings.extend(validate_plan_against_model(plan, entries, lane));
     }
     findings
 }
@@ -1899,9 +3235,17 @@ pub struct ModelRecord {
     /// Backend label the worker reported on the first completed take (`mlx` / `cuda` / ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_observed: Option<String>,
-    /// Primary weights download for the requested tier, as the manifest declares it.
+    /// Primary weights download for the requested tier, as the manifest declares it. The DECLARED
+    /// model's own row — see `partition_weights` for what a mixed run actually loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Value>,
+    /// The primary weights download for the requested tier of EVERY partition this run dispatches
+    /// on, keyed by catalog model id (sc-23402 review). On a split family the reference partition's
+    /// `transformer_ref` rows are a second 18.78 GB download that `weights` above never named, so a
+    /// mixed run's record could not say which files produced its reference takes. A run that uses
+    /// one partition carries one entry, and it is the same row as `weights`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partition_weights: BTreeMap<String, Value>,
     pub hardware: HardwareRecord,
 }
 
@@ -1919,6 +3263,92 @@ pub struct ReferenceAssetRecord {
     /// the record has to be able to tell them apart (sc-22710).
     #[serde(default = "default_true")]
     pub approved: bool,
+}
+
+/// One dialogue line this run SYNTHESIZED (sc-23404) — the provenance of a clip nobody recorded,
+/// kept beside the imported-clip record rather than folded into it.
+///
+/// Two asset ids are in play and they are not the same thing: [`Self::asset_id`] is the `type:
+/// audio` asset the synthesis job produced in the project's library, and the clip the DIALOGUE BUS
+/// plays is the pack-directory copy imported afterwards, which appears in [`RunRecord::sound`] like
+/// any pre-recorded clip. Keeping both is what lets a reader go from the line in the film back to
+/// the job that spoke it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthesizedSoundRecord {
+    pub role: String,
+    /// The exact text the job was sent (trimmed), so a reader can check the line against the plan's
+    /// `dialogue` intent without opening the job table.
+    pub text: String,
+    /// `sha256(text)` — the deterministic half of the clip's filename.
+    pub text_sha256: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Which try this is, counting the first. A synthesis that failed is retried by the NEXT
+    /// `resume` under a new attempt and therefore a new key — re-polling the failed job under the
+    /// old one would make every resume re-read the same failure and never speak the line.
+    ///
+    /// At most one new attempt per line per invocation, so a retry loop is the operator's to run,
+    /// not the harness's to spin; the run's `limits.maxRunSeconds` bounds it either way. The plan's
+    /// `maxAttemptsPerShot` deliberately does NOT apply: it caps GPU renders, and capping a
+    /// seconds-long TTS call with it would make "resumable" untrue on the fixture's cap of 1.
+    #[serde(default = "default_attempt")]
+    pub attempt: u32,
+    /// Stamped into the dispatched body's `advanced.filmHarness` block, exactly as a render's is:
+    /// a controller that died between the POST and this write finds its OWN job instead of speaking
+    /// the line twice. Covers model + voice + text, so changing the voice is a different key rather
+    /// than an adoption of the wrong clip.
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// `dispatching` while the job is being created, `running` while it is polled, then the job's
+    /// own terminal status (`completed` / `failed` / `canceled` / `timed_out`).
+    pub status: String,
+    /// The `type: audio` asset the synthesis job wrote into the project library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// Pack-relative path the WAV was written to — the entry's `file` from here on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+fn default_attempt() -> u32 {
+    1
+}
+
+/// Statuses a synthesis record will not leave on its own. A record in one of these has a job that
+/// reached its end; anything else is a job a later pass keeps polling.
+pub const TERMINAL_SYNTHESIS_STATUSES: &[&str] = &[
+    "completed",
+    "failed",
+    "rejected",
+    "canceled",
+    "canceled_by_operator",
+    "timed_out",
+];
+
+impl SynthesizedSoundRecord {
+    /// Whether this line is spoken, written into the pack, and ready to import.
+    pub fn is_usable(&self) -> bool {
+        self.status == "completed" && self.asset_id.is_some() && self.file.is_some()
+    }
+
+    /// Whether this record's job is over, however it ended.
+    pub fn is_terminal(&self) -> bool {
+        TERMINAL_SYNTHESIS_STATUSES.contains(&self.status.as_str())
+    }
+
+    /// Whether this record was made for exactly the line the pack now asks for. A pack edited
+    /// between passes re-casts the line rather than adopting the clip that says the old thing.
+    pub fn matches(&self, model: &str, voice: Option<&str>, text: &str) -> bool {
+        self.model == model && self.voice.as_deref() == voice && self.text == text
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1988,6 +3418,46 @@ pub struct AttemptRecord {
     /// instead of enqueuing a second one.
     #[serde(default)]
     pub idempotency_key: String,
+    /// The catalog model id this attempt was DISPATCHED as — the partition the shot resolved to,
+    /// which on a split family is not the plan's declared model (sc-23402). It is the same string
+    /// the compiled request carries and the same string the job payload's `model` holds, so the
+    /// three cannot disagree about which checkpoint produced the take.
+    #[serde(default)]
+    pub resolved_model_id: String,
+    /// Why that partition and not the other, in one sentence ([`ShotPartition::reason`]).
+    #[serde(default)]
+    pub partition_reason: String,
+    /// The EFFECTIVE reference-image short edge this attempt was dispatched at, in pixels — the
+    /// plan's requested value, or the engine's own default when it named none (sc-23402).
+    ///
+    /// Present only for an attempt on the family's REFERENCE partition: a base-partition attempt
+    /// encodes no reference, so recording a number for it would claim a knob that never applied.
+    /// Resolved through [`crate::video_request::effective_reference_image_short_edge`] — the local
+    /// twin of gen-core's resolver the engine itself uses — so the recorded value cannot drift from
+    /// the rendered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_short_edge: Option<u32>,
+    /// The catalog LoRA ids this attempt was DISPATCHED with, in the order they ride the payload
+    /// (sc-23406). Empty means none applied to this attempt's partition — which is a real,
+    /// recorded state, not an absence: a mixed plan that declares only the ref2v turbo renders its
+    /// base-partition shots at the full step count, and the empty list beside `effectiveSteps` is
+    /// what says so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
+    /// The model-evaluation count this attempt actually rendered at: `model.advanced.steps` when
+    /// the plan set one, else the selected turbo recipe's own count, else the model's declared
+    /// `defaults.steps` (sc-23406).
+    ///
+    /// Recorded rather than derived on read, because the three sources resolve differently per
+    /// shot on a mixed plan and a reader comparing a turbo run against a 50-step one needs the
+    /// number that ran, not the rule that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_steps: Option<u32>,
+    /// The video flow-matching sigma shift the selected turbo recipe imposed, when one applied.
+    /// Absent in the base regime, where the engine's own `VIDEO_SIGMA_SHIFT` governs — the same
+    /// three-state distinction `referenceImageShortEdge` keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_scheduler_shift: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// `dispatching` until a job id is known, then the job's own status, or `timed_out` /
@@ -2281,9 +3751,15 @@ pub struct RunRecord {
     pub selected_shot_ids: Vec<String>,
     #[serde(default)]
     pub references: Vec<ReferenceAssetRecord>,
-    /// Sound files the run imported, with the same shape as `references` (sc-22712).
+    /// Sound files the run imported, with the same shape as `references` (sc-22712). A synthesized
+    /// line appears here too, once its WAV is in the pack directory — from the dialogue bus's point
+    /// of view a spoken line and a recorded one are the same thing.
     #[serde(default)]
     pub sound: Vec<ReferenceAssetRecord>,
+    /// Dialogue lines this run SPOKE, with the model, voice, text, job and asset behind each
+    /// (sc-23404). Empty on a run whose pack carries only pre-recorded clips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_sound: Vec<SynthesizedSoundRecord>,
     #[serde(default)]
     pub shots: Vec<ShotRunRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2391,6 +3867,11 @@ mod tests {
         })
     }
 
+    /// The single-entry view of a catalog entry, for the tests whose plans use one partition.
+    fn single_entries(entry: &Map<String, Value>) -> ModelEntries<'_> {
+        ModelEntries::single("minimax_h3", entry)
+    }
+
     fn model_entry() -> Map<String, Value> {
         json!({
             "id": "minimax_h3",
@@ -2425,6 +3906,243 @@ mod tests {
         findings.iter().map(ToString::to_string).collect()
     }
 
+    /// A plan whose LoRA list names nothing the shipped catalog carries is refused, and the
+    /// refusal NAMES the id — the fix is a one-word edit, so the message has to say which word.
+    #[test]
+    fn film_loras_refuse_an_id_the_catalog_does_not_carry() {
+        let mut document = plan_json();
+        document["model"]["loras"] = json!(["minimax_h3_turbo_4step_768"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.contains("minimax_h3_turbo_4step_768")
+                && findings[0].message.contains("not a LoRA"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// A catalog LoRA of a family this model cannot load is refused by name, and the refusal says
+    /// which family it is and which the model declares. This is the arm a plan hits by copying an
+    /// id out of another film's plan.
+    #[test]
+    fn film_loras_refuse_a_family_the_model_cannot_load() {
+        let mut document = plan_json();
+        document["model"]["loras"] = json!(["scail2_lightning"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.contains("scail2") && findings[0].message.contains("minimax-h3"),
+            "the refusal names the LoRA's family and the model's: {}",
+            findings[0].message
+        );
+    }
+
+    /// TWO step-distill accelerators that would both apply to ONE partition is refused by name.
+    ///
+    /// `minimax_h3_turbo_8step` and `minimax_h3_turbo_4step_v01` both declare
+    /// `modelIds: ["minimax_h3"]`, so both reach the base checkpoint and they ask for different
+    /// schedules (8 NFE vs 4). A render has one schedule. The pairing that is NOT a conflict —
+    /// one fl2v adapter plus the ref2v one, which reach different checkpoints — is asserted in the
+    /// same test, because a rule that refused it would make a mixed turbo plan inexpressible.
+    #[test]
+    fn film_loras_refuse_two_recipes_for_one_partition_but_allow_one_per_partition() {
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_turbo_8step", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].field, "model.loras");
+        assert!(
+            findings[0].message.starts_with("minimax_h3:")
+                && findings[0].message.contains("MiniMax-H3 Turbo (8-step)")
+                && findings[0]
+                    .message
+                    .contains("MiniMax-H3 Turbo (4-step, v0.1)"),
+            "the refusal names the partition and BOTH adapters: {}",
+            findings[0].message
+        );
+
+        // One per partition — the shape `plan.v2.turbo.jsonc` ships — is accepted.
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_ref2v_turbo_4step", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+
+        // The same id twice is a plain duplicate, refused on its own terms.
+        let mut document = plan_json();
+        document["model"]["loras"] =
+            json!(["minimax_h3_turbo_4step_v01", "minimax_h3_turbo_4step_v01"]);
+        let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+        let findings = validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert!(
+            findings[0].message.contains("listed twice"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// `model.advanced.steps` is a model-evaluation count in `1..=u32::MAX`. Zero, a negative and a
+    /// value above the compiler's `u32` are all refused by name rather than by a serde error that
+    /// names no plan field — which is why the field is typed signed and wide.
+    ///
+    /// The upper bound is not decoration: `compile_shot` narrows the field with
+    /// `u32::try_from(..).ok()`, so a value above `u32::MAX` that validated clean would be dropped
+    /// silently and the film would render at the recipe's count with nothing saying so.
+    #[test]
+    fn film_advanced_steps_must_be_positive() {
+        for steps in [0, -4, i64::from(u32::MAX) + 1] {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "steps": steps });
+            let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(
+                findings.len(),
+                1,
+                "steps {steps}: {:?}",
+                messages(&findings)
+            );
+            assert_eq!(findings[0].field, "model.advanced.steps");
+            assert!(
+                findings[0].message.contains(&steps.to_string()),
+                "{}",
+                findings[0].message
+            );
+        }
+        // Both ends of the admitted range are INCLUSIVE, so the refusals above are about the range
+        // rather than about a number near it.
+        for steps in [1, 4, i64::from(u32::MAX)] {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "steps": steps });
+            let plan: ProductionPlan = serde_json::from_value(document).expect("plan parses");
+            assert!(
+                validate_plan_structure(&plan).is_empty(),
+                "steps {steps}: {:?}",
+                messages(&validate_plan_structure(&plan))
+            );
+        }
+    }
+
+    /// A plan that declares NO LoRAs is unchanged: no field is serialized, nothing resolves, and
+    /// the payload helper produces nothing to send.
+    #[test]
+    fn a_plan_without_loras_is_unchanged() {
+        let plan: ProductionPlan = serde_json::from_value(plan_json()).expect("plan parses");
+        assert!(plan.model.loras.is_empty());
+        assert!(validate_plan_structure(&plan).is_empty());
+        let round_trip = serde_json::to_value(&plan).expect("serializes");
+        assert!(
+            round_trip["model"].get("loras").is_none(),
+            "an empty list writes no field: {}",
+            round_trip["model"]
+        );
+        assert!(plan_loras_for_partition(&plan.model.loras, "minimax_h3").is_empty());
+        assert!(plan_lora_payload_entries(&plan.model.loras, "minimax_h3_ref").is_empty());
+    }
+
+    /// 🔴 The `modelIds` allowlist routes each accelerator to its OWN partition, and the payload
+    /// entry is the shape the Video Studio sends.
+    ///
+    /// Both directions are asserted because both are silent failures: the ref2v adapter on the base
+    /// checkpoint and an fl2v adapter on the reference one BOTH fold cleanly and render at the
+    /// wrong quality (sc-19563). A resolution that emitted the whole list on every partition would
+    /// pass any test that only checked "the turbo reached the shot".
+    #[test]
+    fn the_model_ids_allowlist_routes_each_turbo_to_its_own_partition() {
+        let declared = vec![
+            "minimax_h3_ref2v_turbo_4step".to_owned(),
+            "minimax_h3_turbo_4step_v01".to_owned(),
+        ];
+        let ids = |partition: &str| -> Vec<String> {
+            plan_loras_for_partition(&declared, partition)
+                .into_iter()
+                .map(|lora| lora.id.clone())
+                .collect()
+        };
+        assert_eq!(ids("minimax_h3_ref"), vec!["minimax_h3_ref2v_turbo_4step"]);
+        assert_eq!(ids("minimax_h3"), vec!["minimax_h3_turbo_4step_v01"]);
+
+        // The payload shape: `{ id, weight }` with the catalog's declared `defaultWeight`, which is
+        // what `generationStudio.jsx` posts and what `preset_lora_weight` would have filled in.
+        assert_eq!(
+            plan_lora_payload_entries(&declared, "minimax_h3_ref"),
+            vec![json!({ "id": "minimax_h3_ref2v_turbo_4step", "weight": 1.0 })]
+        );
+
+        // A partition with no compatible entry gets NOTHING rather than a fallback.
+        assert!(plan_loras_for_partition(
+            &["minimax_h3_ref2v_turbo_4step".to_owned()],
+            "minimax_h3"
+        )
+        .is_empty());
+    }
+
+    /// sc-23402. `model.advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE and
+    /// an out-of-range value is REFUSED naming the field and the range — never clamped, since the
+    /// value is the reference token budget the author asked for.
+    #[test]
+    fn plan_refuses_a_reference_image_short_edge_outside_1024_through_2048() {
+        let with_edge = |edge: Value| -> ProductionPlan {
+            let mut document = plan_json();
+            document["model"]["advanced"] = json!({ "referenceImageShortEdge": edge });
+            serde_json::from_value(document).expect("plan parses")
+        };
+        for admitted in [1024, 1536, 2048] {
+            assert!(
+                validate_plan_structure(&with_edge(json!(admitted))).is_empty(),
+                "{admitted} is inside the admitted range: {:?}",
+                messages(&validate_plan_structure(&with_edge(json!(admitted))))
+            );
+        }
+        for refused in [0, 1, 1023, 2049, 4096] {
+            let findings = validate_plan_structure(&with_edge(json!(refused)));
+            assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+            assert_eq!(
+                findings[0].field, "model.advanced.referenceImageShortEdge",
+                "the refusal names the field"
+            );
+            assert!(
+                findings[0].message.contains("1024")
+                    && findings[0].message.contains("2048")
+                    && findings[0].message.contains(&refused.to_string()),
+                "the refusal names the range and the value, got {:?}",
+                findings[0].message
+            );
+        }
+    }
+
+    /// A plan that names no knob is byte-for-byte the plan it was before sc-23402: the block parses
+    /// to `None` and serializes with no `advanced` key at all, so an existing plan's sha256 — which
+    /// `staleness_findings` compares — does not move.
+    #[test]
+    fn a_plan_without_the_advanced_block_is_unchanged() {
+        let plan = plan();
+        assert_eq!(plan.model.advanced, None);
+        assert!(validate_plan_structure(&plan).is_empty());
+        let round_tripped = serde_json::to_value(&plan).expect("serializes");
+        assert!(
+            round_tripped["model"].get("advanced").is_none(),
+            "an absent block must not serialize a key: {}",
+            round_tripped["model"]
+        );
+        assert!(
+            !is_reference_partition_id("minimax_h3"),
+            "the base partition is not a reference partition"
+        );
+        assert!(is_reference_partition_id("minimax_h3_ref"));
+    }
+
     #[test]
     fn well_formed_plan_pack_and_model_produce_no_findings() {
         let plan = plan();
@@ -2432,7 +4150,12 @@ mod tests {
         assert!(validate_plan_structure(&plan).is_empty());
         assert!(validate_reference_pack(&pack).is_empty());
         assert!(validate_plan_against_pack(&plan, &pack).is_empty());
-        assert!(validate_plan_against_model(&plan, &model_entry(), ModelLane::Mlx).is_empty());
+        assert!(validate_plan_against_model(
+            &plan,
+            &single_entries(&model_entry()),
+            ModelLane::Mlx
+        )
+        .is_empty());
     }
 
     #[test]
@@ -2522,6 +4245,74 @@ mod tests {
             .any(|m| m.contains("[SH010]") && m.contains("not approved")));
         // Both shots still list an approved role in continuityRoles, so the dangling and
         // unapproved conditioning slots are the ONLY findings — the anchor rule does not pile on.
+    }
+
+    /// Ref2VA treats every BOUND reference as a subject to depict, so only
+    /// [`BINDABLE_REFERENCE_KINDS`] may appear in `conditioning.referenceRoles`. The planner
+    /// already counts a pack's bindable entries to decide whether a reference shot can be offered
+    /// at all; before sc-23401's feature-end pass the validator did not check the kind, so a plan
+    /// binding a `plate` (or a `style`) validated, compiled and dispatched it as a subject.
+    #[test]
+    fn a_plate_or_style_role_bound_as_a_reference_subject_is_refused_naming_shot_role_and_kind() {
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["red_parcel", "workshop_plate"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        // Structurally and geometrically the plan is fine — nothing else refuses it.
+        assert!(validate_plan_structure(&plan).is_empty());
+        let findings = messages(&validate_plan_against_pack(&plan, &pack()));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"workshop_plate\"")
+                && findings[0].contains("\"plate\"")
+                && findings[0].contains("character, prop, location"),
+            "{findings:?}"
+        );
+
+        // A `style` is refused the same way, and APPROVING it does not make the binding legal:
+        // the kind rule is about what a bound reference means, not about review state.
+        let mut pack_value = pack_json();
+        pack_value["references"][2]["approved"] = json!(true);
+        let approved_style: ReferencePack =
+            serde_json::from_value(pack_value).expect("pack parses");
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["unapproved_look"]
+        });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_pack(&plan, &approved_style));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].starts_with("[SH010] conditioning.referenceRoles:")
+                && findings[0].contains("\"unapproved_look\"")
+                && findings[0].contains("\"style\""),
+            "{findings:?}"
+        );
+
+        // The kind rule applies to the BOUND slot only: the same plate in a keyframe slot, and in
+        // continuityRoles, is exactly where a plate belongs.
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] =
+            json!({ "mode": "image_to_video", "firstFrameRole": "workshop_plate" });
+        value["shots"][0]["continuityRoles"] = json!(["red_parcel", "workshop_plate"]);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
+
+        // And the shipped reference fixture binds only bindable kinds.
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        assert!(
+            validate_plan_against_pack(&plan, &pack()).is_empty(),
+            "{:?}",
+            messages(&validate_plan_against_pack(&plan, &pack()))
+        );
     }
 
     #[test]
@@ -2669,15 +4460,25 @@ mod tests {
     fn model_findings_cover_mode_duration_resolution_references_negative_prompt_and_memory() {
         let mut value = plan_json();
         value["limits"]["maxMemoryGb"] = json!(32);
+        // A shot that binds references but asks for a keyframe mode. It resolves to the reference
+        // partition (sc-23402), and the capability check runs against THAT entry's declared modes —
+        // which is the whole point of resolving per shot.
         value["shots"][0]["conditioning"] =
-            json!({ "mode": "reference_to_video", "referenceRoles": ["red_parcel"] });
+            json!({ "mode": "image_to_video", "referenceRoles": ["red_parcel"] });
         value["shots"][0]["negativePrompt"] = json!("blurry");
         value["shots"][1]["targetDurationSeconds"] = json!(6.0);
         value["shots"][1]["resolution"] = json!("640x360");
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
         let findings = messages(&validate_plan_against_model(
             &plan,
-            &model_entry(),
+            &entries,
             ModelLane::Mlx,
         ));
         assert!(
@@ -2687,16 +4488,11 @@ mod tests {
             "{findings:?}"
         );
         assert!(
-            findings.iter().any(
-                |m| m.contains("[SH010] conditioning.mode") && m.contains("reference_to_video")
-            ),
-            "{findings:?}"
-        );
-        assert!(
             findings
                 .iter()
-                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
-                    && m.contains("maxReferenceAssets")),
+                .any(|m| m.contains("[SH010] conditioning.mode")
+                    && m.contains("minimax_h3_ref")
+                    && m.contains("image_to_video")),
             "{findings:?}"
         );
         assert!(
@@ -2724,7 +4520,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
-            &model_entry(),
+            &single_entries(&model_entry()),
             ModelLane::Mlx,
         ));
         assert!(
@@ -2736,6 +4532,216 @@ mod tests {
         assert!(
             findings.iter().any(|m| m.contains("model.fps")),
             "{findings:?}"
+        );
+    }
+
+    /// The reference partition's catalog entry, as `minimax_h3_ref` declares itself: the SAME
+    /// geometry as the base entry and 9 reference images where the base declares 0
+    /// (`config/manifests/builtin.models.jsonc`, asserted equal by
+    /// `both_minimax_h3_partitions_declare_one_geometry`).
+    fn reference_model_entry() -> Map<String, Value> {
+        json!({
+            "id": "minimax_h3_ref",
+            "capabilities": ["reference_to_video"],
+            "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+            "defaults": { "duration": 5.1667, "fps": 24, "resolution": "1344x768" },
+            "limits": {
+                "durations": [5.1667, 5.875, 14.375],
+                "hardMinDuration": 5.1667,
+                "hardMaxDuration": 14.375,
+                "fps": [24],
+                "maxPixels": 1032192,
+                "resolutions": ["1344x768", "576x320"],
+                "maxReferenceAssets": 9
+            },
+            "mlx": { "minMemoryGb": 64 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    }
+
+    /// A mixed plan: SH010 binds a reference role, SH020 binds none (sc-23402). The bound role is
+    /// the pack's only BINDABLE entry — `workshop_plate` is a `plate`, which
+    /// [`validate_plan_against_pack`] refuses in this slot.
+    fn mixed_plan_json() -> Value {
+        let mut value = plan_json();
+        value["shots"][0]["conditioning"] = json!({
+            "mode": "reference_to_video",
+            "referenceRoles": ["red_parcel"]
+        });
+        value["shots"][1]["conditioning"] = json!({ "mode": "text_to_video" });
+        value
+    }
+
+    #[test]
+    fn each_shot_is_validated_against_the_partition_it_resolves_to() {
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        // Both shots validate: the reference shot against `minimax_h3_ref` (which declares
+        // reference_to_video and 9 images), the bare one against `minimax_h3`.
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(findings.is_empty(), "{findings:?}");
+        let resolved: Vec<(String, String)> = plan
+            .shots
+            .iter()
+            .map(|shot| {
+                let (partition, entry) = entries.resolve_shot(shot);
+                assert!(entry.is_some(), "{} resolved to no entry", shot.id);
+                (shot.id.clone(), partition.model_id)
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![
+                ("SH010".to_owned(), "minimax_h3_ref".to_owned()),
+                ("SH020".to_owned(), "minimax_h3".to_owned()),
+            ]
+        );
+
+        // Without the partition in the catalog the reference shot is refused BY NAME rather than
+        // dispatched at the base checkpoint, and the shot that binds nothing is untouched.
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &single_entries(&base),
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.iter().any(|m| m.contains("[SH010]")
+                && m.contains("minimax_h3_ref")
+                && m.contains("not in this API's model catalog")),
+            "{findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|m| m.contains("[SH020]")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_resolved_partitions_limits_are_what_refuse_a_shot() {
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+
+        // Ten roles exceed the reference partition's declared nine.
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"]["referenceRoles"] =
+            json!((0..10).map(|i| format!("role_{i}")).collect::<Vec<_>>());
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains("minimax_h3_ref")
+                    && m.contains('9')),
+            "{findings:?}"
+        );
+
+        // A family with no reference partition keeps the old rule: the declared model's own
+        // `limits.maxReferenceAssets` is what refuses the shot.
+        let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &ModelEntries::single("ltx_2_5", &base),
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains("ltx_2_5")),
+            "{findings:?}"
+        );
+
+        // A reference_to_video shot with NO roles never reaches the partition table: it is a
+        // structural contradiction, refused naming the shot and the requirement.
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"] = json!({ "mode": "reference_to_video" });
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let findings = messages(&validate_plan_structure(&plan));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("at least one reference role")),
+            "{findings:?}"
+        );
+
+        // References are OPTIONAL: a shot that binds none is never refused for it.
+        let plan: ProductionPlan = serde_json::from_value(plan_json()).unwrap();
+        assert!(
+            validate_plan_against_model(&plan, &entries, ModelLane::Mlx).is_empty(),
+            "a plan with no reference shots must still validate on a split family"
+        );
+    }
+
+    #[test]
+    fn the_memory_budget_must_clear_every_partition_so_the_largest_minimum_binds() {
+        let mut value = mixed_plan_json();
+        value["limits"]["maxMemoryGb"] = json!(70);
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        let base = model_entry();
+        let mut reference = reference_model_entry();
+        reference.insert("mlx".to_owned(), json!({ "minMemoryGb": 80 }));
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.iter().any(|m| m.contains("limits.maxMemoryGb")
+                && m.contains("minimax_h3_ref")
+                && m.contains("80")),
+            "the budget bounds ONE job's peak and each partition must fit on its own, so the \
+             larger of the two minimums binds: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_family_with_no_reference_partition_resolves_to_itself() {
+        let partition = resolve_shot_partition("ltx_2_5", 3);
+        assert_eq!(partition.model_id, "ltx_2_5");
+        assert!(
+            partition.reason.contains("no separate reference partition"),
+            "{}",
+            partition.reason
+        );
+        assert_eq!(reference_partition_for("ltx_2_5"), None);
+        assert_eq!(
+            reference_partition_for("minimax_h3"),
+            Some("minimax_h3_ref")
+        );
+        // The reference partition named as the plan's own model stays put.
+        assert_eq!(
+            resolve_shot_partition("minimax_h3_ref", 2).model_id,
+            "minimax_h3_ref"
         );
     }
 
@@ -2782,7 +4788,7 @@ mod tests {
             &plan,
             &pack(),
             None,
-            Some((&model_entry(), ModelLane::Mlx)),
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
         ));
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("shots[0].id"));
@@ -3033,6 +5039,7 @@ mod tests {
             selected_shot_ids: vec!["SH010".into()],
             references: vec![],
             sound: vec![],
+            synthesized_sound: vec![],
             shots: vec![],
             timeline: None,
             export: None,
@@ -3164,6 +5171,12 @@ mod tests {
         let attempt = |number: u32, human: bool, take: bool| AttemptRecord {
             attempt: number,
             idempotency_key: format!("run_1:SH010:a{number}"),
+            resolved_model_id: "minimax_h3".into(),
+            partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
+            reference_image_short_edge: None,
+            loras: Vec::new(),
+            effective_steps: None,
+            turbo_scheduler_shift: None,
             job_id: Some(format!("job{number}")),
             status: "completed".into(),
             started_at: "t".into(),
@@ -3228,5 +5241,410 @@ mod tests {
         });
         assert!(!shot.attempts[1].has_live_take());
         assert!(shot.attempts[2].has_live_take());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-23404 — synthesized dialogue entries
+    // -----------------------------------------------------------------------------------------
+
+    /// A pack carrying exactly `sound`, so the findings under test are the sound findings.
+    fn sound_pack(entries: Value) -> ReferencePack {
+        serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "pack",
+            "version": 1,
+            "references": [
+                { "role": "plate", "kind": "plate", "file": "references/plate.png" }
+            ],
+            "sound": entries,
+        }))
+        .expect("pack parses")
+    }
+
+    fn sound_findings(entries: Value) -> Vec<PlanDiagnostic> {
+        validate_reference_pack(&sound_pack(entries))
+    }
+
+    fn lines(findings: &[PlanDiagnostic]) -> String {
+        findings
+            .iter()
+            .map(|finding| format!("{}: {}", finding.field, finding.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_dialogue_entry_may_carry_text_instead_of_a_file() {
+        let findings = sound_findings(json!([
+            { "role": "line", "kind": "dialogue", "text": "Delivery." },
+            { "role": "voiced", "kind": "dialogue", "text": "Hello.", "voice": "af_heart", "model": "chatterbox_tts" },
+            // `text` AND `file`: synthesis writes INTO the named path.
+            { "role": "pinned", "kind": "dialogue", "text": "Oh.", "file": "sound/pinned.wav" },
+            { "role": "bed", "kind": "ambience", "file": "sound/bed.wav" },
+        ]));
+        assert!(findings.is_empty(), "{}", lines(&findings));
+    }
+
+    #[test]
+    fn an_entry_with_neither_text_nor_file_is_refused_by_role() {
+        let findings = sound_findings(json!([
+            { "role": "silent_line", "kind": "dialogue", "description": "nothing to play" },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].file");
+        assert!(
+            findings[0].message.contains("silent_line")
+                && findings[0].message.contains("neither `file` nor `text`"),
+            "the finding must name the entry: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn text_on_a_non_dialogue_kind_is_refused_by_role() {
+        for kind in ["ambience", "music", "sfx"] {
+            let findings = sound_findings(json!([
+                { "role": "bed", "kind": kind, "text": "a quiet workshop" },
+            ]));
+            let named: Vec<_> = findings
+                .iter()
+                .filter(|finding| finding.field == "referencePack.sound[0].text")
+                .collect();
+            assert_eq!(named.len(), 1, "{kind}: {}", lines(&findings));
+            assert!(
+                named[0].message.contains("bed") && named[0].message.contains("dialogue"),
+                "{kind}: {}",
+                named[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn synthesis_knobs_without_a_line_to_speak_are_findings() {
+        let findings = sound_findings(json!([
+            { "role": "recorded", "kind": "dialogue", "file": "sound/recorded.wav",
+              "voice": "af_heart", "model": "kokoro_82m" },
+        ]));
+        let fields: Vec<&str> = findings.iter().map(|f| f.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            vec![
+                "referencePack.sound[0].voice",
+                "referencePack.sound[0].model"
+            ],
+            "{}",
+            lines(&findings)
+        );
+    }
+
+    #[test]
+    fn an_unknown_speech_model_or_an_overlong_line_is_refused() {
+        let findings = sound_findings(json!([
+            { "role": "wrong_model", "kind": "dialogue", "text": "hi", "model": "minimax_h3" },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].model");
+        assert!(
+            findings[0].message.contains("kokoro_82m"),
+            "{}",
+            findings[0].message
+        );
+
+        let long = "a".repeat(MAX_DIALOGUE_TEXT_CHARS + 1);
+        let findings = sound_findings(json!([
+            { "role": "long", "kind": "dialogue", "text": long },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].text");
+
+        let findings = sound_findings(json!([
+            { "role": "blank", "kind": "dialogue", "text": "   " },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].text");
+
+        let findings = sound_findings(json!([
+            { "role": "voiceless", "kind": "dialogue", "text": "hi", "voice": "   " },
+        ]));
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert_eq!(findings[0].field, "referencePack.sound[0].voice");
+    }
+
+    #[test]
+    fn every_shipped_speech_model_is_accepted_and_the_default_is_one_of_them() {
+        assert!(SOUND_SYNTHESIS_MODELS.contains(&DEFAULT_SOUND_SYNTHESIS_MODEL));
+        for model in SOUND_SYNTHESIS_MODELS {
+            let findings = sound_findings(json!([
+                { "role": "line", "kind": "dialogue", "text": "hi", "model": model },
+            ]));
+            assert!(findings.is_empty(), "{model}: {}", lines(&findings));
+        }
+    }
+
+    #[test]
+    fn a_synthesized_entry_is_not_checked_for_a_file_on_disk() {
+        let dir = std::env::temp_dir().join(format!("film-plan-sound-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("references")).expect("dir");
+        std::fs::write(dir.join("references/plate.png"), b"x").expect("plate");
+        // Neither `sound/line.wav` (pinned by the synthesized entry) nor the derived name exists
+        // yet: the clip is produced by the run, so the existence check must let it through.
+        let pack = sound_pack(json!([
+            { "role": "line", "kind": "dialogue", "text": "Delivery." },
+            { "role": "pinned", "kind": "dialogue", "text": "Oh.", "file": "sound/line.wav" },
+        ]));
+        let findings = validate_reference_pack_files(&pack, &dir);
+        assert!(findings.is_empty(), "{}", lines(&findings));
+
+        // A RECORDED entry whose file is missing is still a finding — this exemption is about
+        // synthesis, not about relaxing the check.
+        let pack = sound_pack(json!([
+            { "role": "recorded", "kind": "dialogue", "file": "sound/gone.wav" },
+        ]));
+        let findings = validate_reference_pack_files(&pack, &dir);
+        assert_eq!(findings.len(), 1, "{}", lines(&findings));
+        assert!(
+            findings[0].message.contains("recorded"),
+            "{}",
+            findings[0].message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_entry_round_trips_its_synthesis_fields_and_omits_what_it_does_not_carry() {
+        let entry: SoundEntry = serde_json::from_value(json!({
+            "role": "line", "kind": "dialogue", "text": "  Delivery.  ", "voice": " am_michael "
+        }))
+        .expect("entry parses");
+        assert!(entry.is_synthesized());
+        assert_eq!(entry.synthesis_text(), Some("Delivery."));
+        assert_eq!(entry.synthesis_voice(), Some("am_michael"));
+        assert_eq!(entry.synthesis_model(), DEFAULT_SOUND_SYNTHESIS_MODEL);
+
+        let recorded: SoundEntry = serde_json::from_value(json!({
+            "role": "bed", "kind": "ambience", "file": "sound/bed.wav"
+        }))
+        .expect("entry parses");
+        assert!(!recorded.is_synthesized());
+        // A pack written before synthesis existed serializes back to exactly what it was: no
+        // `text` / `voice` / `model` keys appear on an entry that carries none.
+        let json = serde_json::to_value(&recorded).expect("serializes");
+        assert_eq!(
+            json,
+            json!({ "role": "bed", "kind": "ambience", "file": "sound/bed.wav", "description": "" })
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Reference spec (sc-23403)
+    // ---------------------------------------------------------------------------------------
+
+    fn spec_json() -> Value {
+        json!({
+            "schemaVersion": 1,
+            "id": "courier-workshop-refs",
+            "version": 2,
+            "model": { "id": "krea_2_turbo", "tier": "q8", "resolution": "1024x1024" },
+            "limits": { "maxJobSeconds": 900, "maxAttemptsPerRole": 2, "maxMemoryGb": 96 },
+            "seedBase": 4200,
+            "inherit": { "pack": "references.jsonc", "references": ["house_style"], "sound": true },
+            "references": [
+                {
+                    "role": "courier", "kind": "character", "file": "references/courier.png",
+                    "description": "the courier", "prompt": "a courier in a blue jacket"
+                },
+                {
+                    "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png",
+                    "description": "the parcel", "prompt": "a small red parcel on a plain surface"
+                }
+            ]
+        })
+    }
+
+    fn spec_from(value: Value) -> ReferenceSpec {
+        serde_json::from_value(value).expect("spec parses")
+    }
+
+    #[test]
+    fn a_well_formed_reference_spec_validates() {
+        let spec = spec_from(spec_json());
+        assert_eq!(validate_reference_spec(&spec), Vec::new());
+        assert_eq!(spec.model.mode, "text_to_image");
+        assert_eq!(
+            spec.references[0].resolution_with(&spec),
+            Some("1024x1024"),
+            "a role with no resolution renders at the spec's"
+        );
+        assert_eq!(
+            spec.references[0].negative_prompt_with(&spec),
+            None,
+            "no negative prompt is declared anywhere, so none is sent"
+        );
+    }
+
+    #[test]
+    fn a_reference_spec_role_without_a_prompt_is_refused_by_name() {
+        let mut value = spec_json();
+        value["references"][1]["prompt"] = json!("   ");
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referenceSpec.references[1].prompt"
+                    && finding.message.contains("red_parcel")
+            }),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_spec_refuses_unbounded_or_colliding_declarations() {
+        let mut value = spec_json();
+        value["limits"] = json!({ "maxJobSeconds": 0, "maxAttemptsPerRole": 9, "maxMemoryGb": 0 });
+        value["references"][1]["role"] = json!("courier");
+        value["references"][1]["file"] = json!("references/courier.png");
+        value["inherit"]["references"] = json!(["courier"]);
+        let findings = validate_reference_spec(&spec_from(value));
+        for field in [
+            "referenceSpec.limits.maxJobSeconds",
+            "referenceSpec.limits.maxAttemptsPerRole",
+            "referenceSpec.limits.maxMemoryGb",
+            "referenceSpec.references[1].role",
+            "referenceSpec.references[1].file",
+            "referenceSpec.inherit.references[0]",
+        ] {
+            assert!(
+                findings.iter().any(|finding| finding.field == field),
+                "expected a finding on {field}: {findings:#?}"
+            );
+        }
+
+        // maxJobSeconds has a CEILING as well as a floor: a spec is a bounded fixture run, and a
+        // declaration near u64::MAX would make the generator's `Instant::now() + Duration` deadline
+        // an overflow panic rather than a budget.
+        for seconds in [MAX_REFERENCE_SPEC_JOB_SECONDS + 1, u64::MAX] {
+            let mut value = spec_json();
+            value["limits"]["maxJobSeconds"] = json!(seconds);
+            let findings = validate_reference_spec(&spec_from(value));
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.field == "referenceSpec.limits.maxJobSeconds"
+                        && finding
+                            .message
+                            .contains(&MAX_REFERENCE_SPEC_JOB_SECONDS.to_string())
+                }),
+                "maxJobSeconds {seconds} was admitted: {findings:#?}"
+            );
+        }
+        // And the ceiling itself is admitted, so the range is a range and not an off-by-one.
+        let mut value = spec_json();
+        value["limits"]["maxJobSeconds"] = json!(MAX_REFERENCE_SPEC_JOB_SECONDS);
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "referenceSpec.limits.maxJobSeconds"),
+            "the ceiling itself must be admitted: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_spec_file_cannot_escape_the_pack_or_inject_a_multipart_header() {
+        for file in [
+            "../outside.png",
+            "/tmp/outside.png",
+            "references/co\r\nurier.png",
+            "references/courier.txt",
+        ] {
+            let mut value = spec_json();
+            value["references"][0]["file"] = json!(file);
+            let findings = validate_reference_spec(&spec_from(value));
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.field == "referenceSpec.references[0].file"),
+                "{file} was admitted: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_reference_spec_key_or_schema_version_is_refused() {
+        let mut value = spec_json();
+        value["references"][0]["steps"] = json!(8);
+        assert!(
+            serde_json::from_value::<ReferenceSpec>(value).is_err(),
+            "an unknown key must not be silently dropped"
+        );
+        let mut value = spec_json();
+        value["schemaVersion"] = json!(99);
+        let findings = validate_reference_spec(&spec_from(value));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.field == "referenceSpec.schemaVersion"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_courier_reference_spec_validates() {
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/film-harness/courier-workshop/references.spec.jsonc"
+        ));
+        let spec = parse_reference_spec(text).expect("the shipped spec parses");
+        assert_eq!(validate_reference_spec(&spec), Vec::new());
+    }
+
+    #[test]
+    fn a_generated_reference_must_carry_its_provenance() {
+        let mut value = pack_json();
+        value["references"][0]["generated"] = json!(true);
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referencePack.references[0].generation"
+                    && finding.message.contains("no generation provenance")
+            }),
+            "{findings:#?}"
+        );
+
+        let mut value = pack_json();
+        value["references"][0]["generation"] = json!({
+            "model": "krea_2_turbo", "mode": "text_to_image", "prompt": "a courier",
+            "width": 1024, "height": 1024, "jobId": "job_1", "assetId": "asset_1",
+            "sha256": "abc", "createdAt": "2026-09-14T00:00:00Z"
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.field == "referencePack.references[0].generated"),
+            "provenance without the flag is a document nothing wrote: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_generated_reference_with_full_provenance_validates() {
+        let mut value = pack_json();
+        value["references"][0]["generated"] = json!(true);
+        value["references"][0]["generation"] = json!({
+            "model": "krea_2_turbo", "tier": "q8", "backend": "mlx", "mode": "text_to_image",
+            "prompt": "a courier", "seed": 4200, "width": 1024, "height": 1024,
+            "jobId": "job_1", "assetId": "asset_1", "sha256": "abc",
+            "createdAt": "2026-09-14T00:00:00Z"
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        assert_eq!(validate_reference_pack(&pack), Vec::new());
+        assert!(pack.references[0].generated);
+        assert_eq!(
+            pack.references[0]
+                .generation
+                .as_ref()
+                .map(|generation| generation.model.as_str()),
+            Some("krea_2_turbo")
+        );
     }
 }

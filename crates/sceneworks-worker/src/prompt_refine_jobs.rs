@@ -1760,6 +1760,16 @@ mod tests {
             system.contains("fixed menu, not a range"),
             "durations must never be rounded: {system}"
         );
+        // sc-23406: a beat's required-role list is NOT a template of one character, one prop and
+        // one place. The shared asset used to describe it that way, and the local 8B planner
+        // reproduced the template instead of the beat's actual roles; restoring that bullet must
+        // red this test, which is the only place the asset's own text is read.
+        assert!(
+            !system.contains("then the place")
+                && !system.contains("the location it happens in")
+                && !system.contains("the prop the beat turns on, the location"),
+            "the one-of-each-kind template must not reach the planner: {system}"
+        );
         // The `[META]` rationale block never reaches the model.
         assert!(!system.contains("[META]"), "{system}");
         assert!(!system.contains("sc-22713"), "{system}");

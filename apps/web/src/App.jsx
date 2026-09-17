@@ -1,3 +1,4 @@
+import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, {
   useCallback,
   useEffect,
@@ -277,10 +278,6 @@ function KeepAlivePane({ active, children }) {
     </div>
   );
 }
-
-// Product version, injected at build time from package.json (see vite.config.js).
-// Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
-const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
 
 // Exported so the nav registration (Workspace / Library / System sections) is assertable in
 // unit tests without rendering the whole App (epic 13400 C0 mirrors the KEEP_ALIVE_VIEWS export).
@@ -3345,6 +3342,8 @@ export function App() {
     </>
   );
 
+  const appUpdate = useAppUpdate(token, authenticated);
+
   const jobAction = useCallback(
     async (job, action, options = {}) => {
       try {
@@ -3794,6 +3793,7 @@ export function App() {
       <AppStaticContext.Provider value={appStaticValue}>
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
+            appVersion={<AppVersion update={appUpdate} />}
             accent={accent}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
@@ -3834,64 +3834,63 @@ export function App() {
     <AppLiveContext.Provider value={appLiveValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <Logo size={32} />
-          </span>
-          <div>
-            <h1>Scene<span className="light">Works</span></h1>
-            <p>Local creative studio</p>
+        <div className="sidebar-scroll">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              <Logo size={32} />
+            </span>
+            <div>
+              <h1>Scene<span className="light">Works</span></h1>
+              <p>Local creative studio</p>
+            </div>
           </div>
+
+          <ProjectSwitcher
+            activeProject={activeProject}
+            disabled={!authenticated}
+            onCreate={createProject}
+            onSelect={selectProject}
+            projects={projects}
+          />
+
+          {navSections.map((section) => (
+            <div className="sidebar-section" key={section.label}>
+              <div className="sidebar-section-title">{section.label}</div>
+              <nav className="nav-list">
+                {section.items.map((item) => {
+                  const IconComponent = item.icon;
+                  const active = activeIndicators[item.id];
+                  const label = item.label ?? item.id;
+                  return (
+                    <button
+                      className={activeView === item.id ? "nav-item active" : "nav-item"}
+                      key={item.id}
+                      onClick={() => navTo(item.id)}
+                      title={label}
+                      type="button"
+                    >
+                      <IconComponent />
+                      <span className="nav-label">{label}</span>
+                      {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          ))}
+
         </div>
-
-        <ProjectSwitcher
-          activeProject={activeProject}
-          disabled={!authenticated}
-          onCreate={createProject}
-          onSelect={selectProject}
-          projects={projects}
-        />
-
-        {navSections.map((section) => (
-          <div className="sidebar-section" key={section.label}>
-            <div className="sidebar-section-title">{section.label}</div>
-            <nav className="nav-list">
-              {section.items.map((item) => {
-                const IconComponent = item.icon;
-                const active = activeIndicators[item.id];
-                const label = item.label ?? item.id;
-                return (
-                  <button
-                    className={activeView === item.id ? "nav-item active" : "nav-item"}
-                    key={item.id}
-                    onClick={() => navTo(item.id)}
-                    title={label}
-                    type="button"
-                  >
-                    <IconComponent />
-                    <span className="nav-label">{label}</span>
-                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-        ))}
 
         {/* Simple ⇄ Advanced switch (design handoff). The ONE addition this shell makes for
             the Simple UI; the same component renders in the Simple sidebar footer, so the
             control can never present differently between the two. */}
         <div className="sidebar-footer">
+          <AppVersion update={appUpdate} />
           <SimpleModeSwitch
             locked={uiModeLocked}
             mode={ADVANCED_MODE}
             onChange={setUiModeOverride}
           />
-          {APP_VERSION ? (
-            <span className="app-version" title={`SceneWorks ${APP_VERSION}`}>
-              v{APP_VERSION}
-            </span>
-          ) : null}
         </div>
       </aside>
 
