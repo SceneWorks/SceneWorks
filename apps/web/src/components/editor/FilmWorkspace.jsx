@@ -308,14 +308,16 @@ export function FilmWorkspace() {
     });
   }
 
-  async function saveDraft() {
+  async function saveDraft({ updateLocal = true } = {}) {
     if (!draft) return null;
     const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${draft.id}`, token, {
       method: "PUT",
       body: JSON.stringify(draft),
     });
-    setDraft(saved);
-    setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+    if (updateLocal) {
+      setDraft(saved);
+      setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+    }
     return saved;
   }
 
