@@ -958,6 +958,8 @@ pub(crate) struct WorkerScript {
     /// Delay before the fake `frame_extract` job writes its frame, honouring a cancel meanwhile
     /// (sc-22715) — what lets a test spend a review's `maxSeconds` DURING an extraction.
     pub(crate) frame_delay: Option<Duration>,
+    /// Publish the extraction's running transition for tests that synchronize on active work.
+    pub(crate) frame_reports_running: bool,
     /// Capabilities the fake registers with, when a test needs it to leave one to a REAL worker
     /// (`None` advertises every job type the harness drives).
     pub(crate) capabilities: Option<Vec<&'static str>>,
@@ -1579,6 +1581,18 @@ async fn run_fake_frame_job(
     job_id: &str,
     job: &Value,
 ) {
+    let reports_running = script.lock().frame_reports_running;
+    if reports_running {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "running", "stage": "extracting", "progress": 0.1,
+                "message": "Extracting frame.", "workerId": WORKER_ID
+            }),
+        )
+        .await;
+    }
     let delay = script.lock().frame_delay;
     if let Some(delay) = delay {
         let started = std::time::Instant::now();
