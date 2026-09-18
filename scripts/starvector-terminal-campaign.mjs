@@ -23,8 +23,8 @@ export const INFERENCE_VALIDATOR_ALLOWED_PATHS = [
 ];
 export const LPIPS_LINEAR_SHA256 = "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0";
 export const ALEXNET_SHA256 = "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02";
-export const RECEIPT_SCHEMA = "release/starvector-terminal-receipt-v2-outcome-parity.schema.json";
-export const RECEIPT_SCHEMA_SHA256 = "fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35";
+export const RECEIPT_SCHEMA = "release/starvector-terminal-receipt-v2-outcome-parity-limit-behaviors.schema.json";
+export const RECEIPT_SCHEMA_SHA256 = "829c941e076aefeccbdc3c79eaa7ae05889447766dd2defadfa392ca2eb08320";
 const CAMPAIGN_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function terminalSourceRowRecord(row) {

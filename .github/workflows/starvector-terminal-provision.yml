@@ -6,7 +6,7 @@ on:
       inference_revision:
         description: Exact merged inference commit for the terminal controller and native runtime.
         required: true
-        default: c5c8c2a73bc5fe9517200c32389c20bf4a670e3d
+        default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       inference_preflight_run_id:
         description: Completed SceneWorks/inference workflow run containing the full preflight bundle.

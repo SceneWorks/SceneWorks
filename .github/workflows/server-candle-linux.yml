@@ -31,7 +31,7 @@ on:
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
-        default: c5c8c2a73bc5fe9517200c32389c20bf4a670e3d
+        default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       inference_preflight_run_id:
         description: Exact inference preflight workflow run id.
@@ -62,7 +62,7 @@ on:
       permanent_pin:
         description: Exact permanent inference pin for the one terminal campaign.
         required: false
-        default: c5c8c2a73bc5fe9517200c32389c20bf4a670e3d
+        default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       campaign_run_id:
         description: Unique terminal campaign identity.

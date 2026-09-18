@@ -14,7 +14,7 @@ test("terminal campaign is fixed, serial, and fail closed", async () => {
   assert.equal(validatorSource.revision, nativePin, "campaign follows the actual shipping provider source");
   assert.equal(validated.inference_preflight.head_sha, validatorSource.base_revision);
   assert.equal(validated.inference_preflight.artifact.name,
-    `starvector-terminal-preflight-${nativePin}-${validated.inference_preflight.workflow_run_id}-${validated.inference_preflight.workflow_run_attempt}`);
+    `starvector-terminal-preflight-${validatorSource.base_revision}-${validated.inference_preflight.workflow_run_id}-${validated.inference_preflight.workflow_run_attempt}`);
   assert.match((await readPlanAndLock("release/starvector-terminal-campaign-v1.json")).metrics_lock_sha256, /^[0-9a-f]{64}$/);
 });
 
@@ -47,7 +47,7 @@ test("terminal campaign seals validator source compatibility separately from his
 
 test("a validator-only profile may reuse the authentic historical preflight capture", () => {
   const validatorSource = {
-    base_revision: plan.inference_contract.revision,
+    base_revision: plan.inference_preflight.head_sha,
     revision: "c58fa52dedba8f3afa38244a5de8aa4fa22813d5",
     changed_paths: [
       "release/starvector-terminal-README.md",

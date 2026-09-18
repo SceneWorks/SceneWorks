@@ -128,7 +128,7 @@ jobs:
           node scripts/starvector-terminal-campaign.mjs validate-dispatch release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"
           test -x "$STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND"
           test -f "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-receipt-v1.schema.json"
-          test "$(shasum -a 256 "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-receipt-v2-outcome-parity.schema.json" | cut -d ' ' -f 1)" = fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35
+          test "$(shasum -a 256 "$STARVECTOR_TERMINAL_INFERENCE_ROOT/release/starvector-terminal-receipt-v2-outcome-parity-limit-behaviors.schema.json" | cut -d ' ' -f 1)" = 829c941e076aefeccbdc3c79eaa7ae05889447766dd2defadfa392ca2eb08320
           test -f "$STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT"
           test -f "$STARVECTOR_TERMINAL_WEIGHTS_ROOT/starvector-terminal-weights-v1.json"
           test -f "$STARVECTOR_TERMINAL_METRICS_ROOT/starvector-terminal-metrics-environment-v1.json"

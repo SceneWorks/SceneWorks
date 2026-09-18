@@ -34,7 +34,7 @@ async function removePinnedInference(checkout) { execFileSync("git", ["-C", infe
 
 test("required CI fetches the exact terminal inference revision", async () => {
   const workflow = await readFile(".github/workflows/check.yml", "utf8");
-  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=1 origin ${permanentPin}`));
+  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=2 origin ${permanentPin}`));
   assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${permanentPin}`));
 });
 

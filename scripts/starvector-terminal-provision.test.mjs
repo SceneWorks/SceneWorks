@@ -123,14 +123,15 @@ test("streaming file identity propagates read failures", async () => {
 });
 
 test("provision workflow is dispatch-only and never runs a model, service, campaign, or lease", async () => {
-  const preflight = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8")).inference_preflight;
+  const plan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
+  const preflight = plan.inference_preflight;
   assert.match(workflow, /^\s+workflow_dispatch:/m);
   assert.doesNotMatch(workflow, /^\s+(push|pull_request|schedule):/m);
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /inference_revision:[\s\S]*required: true/);
   assert.match(workflow, /inference_preflight_run_id:[\s\S]*required: true/);
-  assert.ok(workflow.includes(`default: ${preflight.head_sha}`));
+  assert.ok(workflow.includes(`default: ${plan.inference_contract.revision}`));
   assert.ok(workflow.includes(`default: "${preflight.workflow_run_id}"`));
   assert.ok(workflow.includes(`default: ${preflight.artifact.name}`));
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
