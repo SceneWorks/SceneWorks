@@ -2144,6 +2144,13 @@ struct StaticCssBudget {
     blocks: usize,
 }
 
+struct StaticSvgValidationContext<'a> {
+    sanitizer_budget: &'a mut SanitizerBudget,
+    css_budget: &'a mut StaticCssBudget,
+    references: &'a mut Vec<String>,
+    typed_references: &'a mut Vec<StaticTypedReference>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum StaticReferenceKind {
     Paint,
@@ -2670,10 +2677,7 @@ fn validate_static_svg_attributes(
     attrs: &[(String, String)],
     is_root: bool,
     hidden: &mut bool,
-    sanitizer_budget: &mut SanitizerBudget,
-    css_budget: &mut StaticCssBudget,
-    references: &mut Vec<String>,
-    typed_references: &mut Vec<StaticTypedReference>,
+    context: &mut StaticSvgValidationContext<'_>,
 ) -> WorkerResult<(Option<String>, Option<String>)> {
     let mut id = None;
     let mut href_target = None;
@@ -2700,7 +2704,7 @@ fn validate_static_svg_attributes(
             )));
         }
         if !null_presentation {
-            validate_attribute_resource_budget(element, key, value, sanitizer_budget)?;
+            validate_attribute_resource_budget(element, key, value, context.sanitizer_budget)?;
         }
         match key.as_str() {
             "id" => {
@@ -2735,7 +2739,7 @@ fn validate_static_svg_attributes(
             }
             "paint-order" => {
                 validate_paint_order(value)?;
-                validate_static_css(value, css_budget, references)?;
+                validate_static_css(value, context.css_budget, context.references)?;
             }
             "baseProfile" if !is_root || value != "full" => {
                 return Err(WorkerError::InvalidPayload(
@@ -2761,8 +2765,13 @@ fn validate_static_svg_attributes(
                 )));
             }
             "style" => {
-                validate_static_css(value, css_budget, references)?;
-                validate_static_css_declarations(value, false, typed_references, sanitizer_budget)?;
+                validate_static_css(value, context.css_budget, context.references)?;
+                validate_static_css_declarations(
+                    value,
+                    false,
+                    context.typed_references,
+                    context.sanitizer_budget,
+                )?;
                 if value
                     .split(';')
                     .filter_map(|declaration| declaration.split_once(':'))
@@ -2786,8 +2795,8 @@ fn validate_static_svg_attributes(
                     ))
                 })?;
                 validate_static_svg_id(target, "local reference")?;
-                references.push(target.to_owned());
-                if references.len() > MAX_SVG_RESOURCE_REFERENCES {
+                context.references.push(target.to_owned());
+                if context.references.len() > MAX_SVG_RESOURCE_REFERENCES {
                     return Err(WorkerError::InvalidPayload(
                         "provider SVG exceeds the local resource-reference budget".to_owned(),
                     ));
@@ -2820,8 +2829,8 @@ fn validate_static_svg_attributes(
             }
             "fill" | "stroke" | "clip-path" | "filter" | "mask" | "marker-start" | "marker-mid"
             | "marker-end" => {
-                validate_static_css(value, css_budget, references)?;
-                record_static_css_resource_reference(key, value, typed_references)?;
+                validate_static_css(value, context.css_budget, context.references)?;
+                record_static_css_resource_reference(key, value, context.typed_references)?;
             }
             "stroke-dasharray" if value == "null" => {
                 // Some vector editors serialize an absent presentation value as the invalid CSS
@@ -3102,15 +3111,18 @@ fn validate_static_svg_source(input: &str) -> WorkerResult<String> {
                 let path_commands_before = sanitizer_budget.path_commands;
                 let path_numbers_before = sanitizer_budget.path_numbers;
                 let typed_references_before = typed_references.len();
+                let mut validation_context = StaticSvgValidationContext {
+                    sanitizer_budget: &mut sanitizer_budget,
+                    css_budget: &mut css_budget,
+                    references: &mut references,
+                    typed_references: &mut typed_references,
+                };
                 let (id, href_target) = validate_static_svg_attributes(
                     &name,
                     &attrs,
                     is_root,
                     &mut hidden,
-                    &mut sanitizer_budget,
-                    &mut css_budget,
-                    &mut references,
-                    &mut typed_references,
+                    &mut validation_context,
                 )?;
                 if is_root {
                     root_xlink_bound = attrs.iter().any(|(key, value)| {
@@ -3447,12 +3459,13 @@ fn validate_static_svg_source(input: &str) -> WorkerResult<String> {
 }
 
 fn static_svg_options() -> usvg::Options<'static> {
-    let mut options = usvg::Options::default();
-    options.image_href_resolver = usvg::ImageHrefResolver {
-        resolve_data: Box::new(|_, _, _| None),
-        resolve_string: Box::new(|_, _| None),
-    };
-    options
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    }
 }
 
 fn validate_static_tree_size(tree: &usvg::Tree) -> WorkerResult<()> {
@@ -3526,13 +3539,15 @@ fn sanitize_static_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
         height,
         resvg::tiny_skia::Transform::identity(),
     )?;
-    let mut write_options = usvg::WriteOptions::default();
-    write_options.indent = usvg::Indent::None;
-    write_options.attributes_indent = usvg::Indent::None;
     // Preserve the parsed f32 geometry through the canonical SVG round trip. The writer default
     // of eight decimal places can shift a single antialiased channel at the 512px oracle size.
-    write_options.coordinates_precision = 9;
-    write_options.transforms_precision = 9;
+    let write_options = usvg::WriteOptions {
+        indent: usvg::Indent::None,
+        attributes_indent: usvg::Indent::None,
+        coordinates_precision: 9,
+        transforms_precision: 9,
+        ..usvg::WriteOptions::default()
+    };
     let body = tree.to_string(&write_options);
     if body.len() > MAX_SVG_BYTES {
         return Err(WorkerError::InvalidPayload(
