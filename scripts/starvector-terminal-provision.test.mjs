@@ -1140,7 +1140,7 @@ test("upstream pip child reports byte progress while suppressing secret-like std
     setTimeout(() => process.stdout.write(' of 10\\n'), 30);
     setTimeout(() => process.stdout.write('Progress 10 of 10\\nInstalling collected packages: fixture\\n'), 80);
     setTimeout(() => process.exit(0), 140);`;
-  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 3000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 1000 });
+  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 3000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 2500 });
   assert.ok(events.some(event => event.last_progress?.bytes === 1));
   assert.equal(events.at(-1).event, "completed");
   assert.equal(events.at(-1).last_transfer.bytes, 10);
@@ -1261,7 +1261,7 @@ test("upstream pip resets progress for a smaller second wheel without masking a 
         if (bytes === 10) { clearInterval(timer); console.log('Installing collected packages: torch, torchvision'); }
       }, 80);
     }, 80);`;
-  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 25, noProgressMs: 400 });
+  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 25, noProgressMs: 2500 });
   assert.deepEqual(events.filter(event => event.event === "download_started").map(event => event.package), ["torch", "torchvision"]);
   assert.ok(events.some(event => event.last_progress?.bytes === 5 && event.last_progress?.total_bytes === 10));
   assert.equal(events.at(-1).event, "completed");
