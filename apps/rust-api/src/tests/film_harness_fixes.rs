@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 
 use crate::film_harness::review::{self, Decision};
 use crate::film_harness::{
-    self, EditOptions, HarnessError, ResumeOptions, RunOptions, TimelineEdit,
+    self, ControllerLease, EditOptions, HarnessError, ResumeOptions, RunControl, RunOptions,
+    TimelineEdit,
 };
 use crate::film_planner;
 use crate::tests::film_harness::{
@@ -697,6 +698,131 @@ async fn an_explicit_export_records_the_exact_job_and_never_redispatches_while_r
     assert_eq!(export.status, "completed");
     assert!(export.asset_id.is_some());
     assert!(!export.stale);
+}
+
+#[tokio::test]
+async fn a_canceled_incremental_run_can_export_its_saved_cut_without_rendering_more_shots() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+            ("SH020", VideoBehavior::Hang),
+        ],
+    )
+    .await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|plan| {
+            plan["limits"] = json!({
+                "maxRunSeconds": 600, "maxShotSeconds": 600,
+                "maxAttemptsPerShot": 2, "maxMemoryGb": 96
+            });
+        }),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    run_options.export = false;
+    let control = RunControl::watching(&harness.out_dir());
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::WriteCancelSentinel(harness.out_dir()),
+    ));
+    let canceled = film_harness::run_with_control(&harness.transport, &run_options, &control)
+        .await
+        .expect("the canceled run keeps its record");
+    assert_eq!(
+        canceled.outcome,
+        RunOutcome::Canceled,
+        "{}",
+        summary(&canceled)
+    );
+    assert!(
+        canceled.timeline.is_some(),
+        "SH010 produced an incremental cut"
+    );
+    let video_jobs = harness.api_video_job_count().await;
+
+    let _lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export")
+        .expect("the separately authorized export acquires the run");
+    let mut options = ResumeOptions::new(harness.out_dir());
+    options.poll_interval = Duration::from_millis(25);
+    let (_, task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("the saved cut export starts");
+    let exported = film_harness::finish_explicit_export(&harness.transport, &options, &task)
+        .await
+        .expect("the saved cut export settles");
+    assert_eq!(exported.export.as_ref().unwrap().status, "completed");
+    assert_eq!(
+        harness.api_video_job_count().await,
+        video_jobs,
+        "exporting the retained cut must not render another shot"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_export_cancel_is_honored_and_an_explicit_retry_dispatches_exactly_once() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    run_options.export = false;
+    film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("shot run assembles without exporting");
+    harness.script.lock().export_hangs = true;
+
+    let lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export:first")
+        .expect("first export acquires");
+    let mut first_options = ResumeOptions::new(harness.out_dir());
+    first_options.poll_interval = Duration::from_millis(25);
+    let (_, first_task) = film_harness::start_explicit_export(&harness.transport, &first_options)
+        .await
+        .expect("first export starts");
+    film_harness::request_cancel(&harness.out_dir())
+        .expect("a fresh cancel reaches the active export");
+    let canceled =
+        film_harness::finish_explicit_export(&harness.transport, &first_options, &first_task)
+            .await
+            .expect("freshly canceled export settles");
+    assert_eq!(
+        canceled.export.as_ref().unwrap().status,
+        "canceled_by_operator",
+        "a cancel arriving after the new action begins remains effective"
+    );
+    drop(lease);
+
+    harness.script.lock().export_hangs = false;
+    let _retry_lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export:retry")
+        .expect("retry acquires");
+    let mut retry_options = ResumeOptions::new(harness.out_dir());
+    retry_options.poll_interval = Duration::from_millis(25);
+    let (_, retry_task) = film_harness::start_explicit_export(&harness.transport, &retry_options)
+        .await
+        .expect("retry starts");
+    assert_ne!(retry_task.job_id, first_task.job_id);
+    let retried =
+        film_harness::finish_explicit_export(&harness.transport, &retry_options, &retry_task)
+            .await
+            .expect("retry settles");
+    assert_eq!(retried.export.as_ref().unwrap().status, "completed");
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        2,
+        "the retry adds exactly one export job"
+    );
 }
 
 #[tokio::test]

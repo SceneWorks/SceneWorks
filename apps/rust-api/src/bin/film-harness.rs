@@ -1270,10 +1270,6 @@ async fn review_command(args: &[String]) -> ExitCode {
                 .collect()
         })
         .unwrap_or_default();
-    if let Err(error) = film_harness::clear_cancel_request(&options.out_dir) {
-        eprintln!("film-harness: {error}");
-        return ExitCode::from(1);
-    }
     let transport = match guarded_transport(&api_url, token) {
         Ok(transport) => transport,
         Err(code) => return code,

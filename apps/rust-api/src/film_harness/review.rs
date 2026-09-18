@@ -771,7 +771,7 @@ pub async fn review(
     options: &ReviewOptions,
     vision: &dyn ReviewVision,
 ) -> Result<RunRecord, HarnessError> {
-    let lease = super::ControllerLease::acquire(
+    let lease = super::ControllerLease::acquire_new_action(
         &options.out_dir,
         format!("review_{}", uuid::Uuid::new_v4().simple()),
     )?;

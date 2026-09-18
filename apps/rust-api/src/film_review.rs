@@ -169,7 +169,7 @@ pub(crate) async fn analyze_film_take(
     ensure_mutation_available(&before)?;
     let directory = run_directory(state.clone(), &project_id, &run_id).await?;
     let owner = format!("api-review:{run_id}");
-    let lease = ControllerLease::acquire(&directory, owner).map_err(harness_error)?;
+    let lease = ControllerLease::acquire_new_action(&directory, owner).map_err(harness_error)?;
     let control = RunControl::watching(&directory);
     let mut options = ReviewOptions::new(directory.clone());
     options.review_plan_path = Some(directory.join("review.jsonc"));

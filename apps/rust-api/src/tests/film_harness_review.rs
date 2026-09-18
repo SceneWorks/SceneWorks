@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::film_harness::review::{
     self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
 };
-use crate::film_harness::{self, RunControl};
+use crate::film_harness::{self, ControllerLease, RunControl};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
 use crate::tests::support::{huggingface_repo_cache_path, isolate_hf_cache, request, StatusCode};
 
@@ -487,6 +487,62 @@ async fn a_review_writes_observed_state_beside_the_run_and_only_points_at_the_in
     assert_eq!(observed.backend.model, review::VQA_MODEL_ID);
     assert_eq!(observed.backend.route, review::VQA_ROUTE);
     let _ = record;
+}
+
+#[tokio::test]
+async fn a_prior_cancel_does_not_stop_a_new_review_but_a_fresh_cancel_does() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    film_harness::request_cancel(&harness.out_dir()).expect("prior operation leaves a cancel");
+    let mut options = ReviewOptions::new(harness.out_dir());
+    options.review_plan_path = Some(PathBuf::from(REVIEW_PLAN));
+    options.poll_interval = Duration::from_millis(25);
+    options.shot_ids = vec!["SH020".to_owned()];
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("the newly authorized review runs");
+    let observed = observed_for(&reviewed, &harness.out_dir(), "SH020");
+    assert_eq!(
+        observed
+            .frames
+            .iter()
+            .filter(|frame| frame.shot_id == "SH020")
+            .count(),
+        shipped_review_plan().sampling.positions.len(),
+        "the prior action's cancel must not stop selected-take sampling"
+    );
+    assert!(observed.stop.is_none(), "{observed:#?}");
+
+    let lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:review:fresh")
+        .expect("a second review acquires");
+    let fresh_options = ReviewOptions {
+        shot_ids: vec!["SH020".to_owned()],
+        ..options
+    };
+    film_harness::request_cancel(&harness.out_dir())
+        .expect("a fresh cancel reaches the active review");
+    let fresh_vision = VqaVision::new(
+        &harness.transport,
+        fresh_options.poll_interval,
+        fresh_options.control.clone(),
+    );
+    let freshly_canceled =
+        review::review_with_lease(&harness.transport, &fresh_options, &fresh_vision, lease)
+            .await
+            .expect("a canceled review keeps its partial record");
+    let observed = observed_for(&freshly_canceled, &harness.out_dir(), "SH020");
+    assert!(
+        observed
+            .stop
+            .as_deref()
+            .is_some_and(|stop| stop.starts_with("canceled:")),
+        "a cancel arriving after acquisition remains effective: {observed:#?}"
+    );
 }
 
 #[tokio::test]
