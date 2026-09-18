@@ -2398,7 +2398,10 @@ struct RawSvgElement {
 }
 
 fn source_attribute_limit(name: &str, is_root: bool) -> usize {
-    if (is_root && name == "svg") || name == "sodipodi:namedview" {
+    // Some editor-authored paths carry inert source metadata in addition to the visible SVG
+    // attributes. The sanitizer strips that metadata before enforcing the unchanged canonical
+    // per-element limit below.
+    if (is_root && name == "svg") || matches!(name, "path" | "sodipodi:namedview") {
         24
     } else {
         MAX_SVG_ATTRIBUTES_PER_ELEMENT
@@ -3045,6 +3048,7 @@ fn stripped_retained_attribute(
         "xmlns:sodipodi" => Some("http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"),
         "xmlns:inkscape" => Some("http://www.inkscape.org/namespaces/inkscape"),
         "xmlns:xlink" => Some("http://www.w3.org/1999/xlink"),
+        "xmlns:ev" => Some("http://www.w3.org/2001/xml-events"),
         "xmlns:ns1" => Some("http://sozi.baierouge.fr"),
         _ => None,
     };
@@ -3068,6 +3072,7 @@ fn stripped_retained_attribute(
                 return Ok(true);
             }
             "xml:space" if matches!(value, "default" | "preserve") => return Ok(true),
+            "baseProfile" if value == "full" => return Ok(true),
             "enable-background" => {
                 validate_inert_enable_background(value)?;
                 return Ok(true);
@@ -3096,7 +3101,22 @@ fn stripped_retained_attribute(
         ),
         "path" => matches!(
             key,
-            "id" | "class" | "data-name" | "inkscape:connector-curvature"
+            "id" | "class"
+                | "data-name"
+                | "inkscape:connector-curvature"
+                | "inkscape:flatsided"
+                | "inkscape:randomized"
+                | "inkscape:rounded"
+                | "inkscape:transform-center-y"
+                | "sodipodi:arg1"
+                | "sodipodi:arg2"
+                | "sodipodi:cx"
+                | "sodipodi:cy"
+                | "sodipodi:nodetypes"
+                | "sodipodi:r1"
+                | "sodipodi:r2"
+                | "sodipodi:sides"
+                | "sodipodi:type"
         ),
         "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {
             matches!(key, "id" | "class" | "data-name")
@@ -5317,6 +5337,145 @@ mod tests {
             &mut pixmap.as_mut(),
         );
         pixmap.data().to_vec()
+    }
+
+    #[test]
+    fn terminal_campaign_inert_editor_metadata_preserves_captured_renders() {
+        let cases: [(&str, &[u8], &str); 3] = [
+            (
+                "quality-14",
+                include_bytes!("../tests/fixtures/starvector/terminal-35379924047-quality-14.svg"),
+                "5cf48f9a869e5f641d6f342c930ac4376d58183914de9162a08a25f533f8bc32",
+            ),
+            (
+                "quality-20",
+                include_bytes!("../tests/fixtures/starvector/terminal-35379924047-quality-20.svg"),
+                "8cb8ac65a95e0025c7a12573a8adfe5ed173cf2f5773b070ddcf98da8cc680e1",
+            ),
+            (
+                "quality-27",
+                include_bytes!("../tests/fixtures/starvector/terminal-35379924047-quality-27.svg"),
+                "d46970b43771126834a556044cf9879ac1d695448e3f4fd77128a04e575f084b",
+            ),
+        ];
+        for (label, bytes, expected_sha256) in cases {
+            assert_eq!(sha256_hex(bytes), expected_sha256, "wrong {label} fixture");
+            let raw = std::str::from_utf8(bytes).expect("captured provider SVG is UTF-8");
+            let canonical =
+                sanitize_svg(raw).unwrap_or_else(|error| panic!("{label} failed: {error}"));
+            assert_eq!(
+                comparison_pixels(raw, 512),
+                comparison_pixels(&canonical.svg, 512),
+                "stripping inert editor metadata changed {label} pixels"
+            );
+            assert!(
+                comparison_pixels(&canonical.svg, 512)
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "{label} canonical render is empty"
+            );
+            for removed in [
+                "baseProfile",
+                "xmlns:ev",
+                "xmlns:inkscape",
+                "xmlns:sodipodi",
+                "inkscape:",
+                "sodipodi:",
+            ] {
+                assert!(
+                    !canonical.svg.contains(removed),
+                    "{label} retained {removed}"
+                );
+            }
+            assert_eq!(
+                canonical.svg,
+                sanitize_svg(raw).expect("repeat sanitation").svg,
+                "{label} is not byte deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_campaign_editor_metadata_remains_exact_scoped_and_bounded() {
+        let sodipodi = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd";
+        let inkscape = "http://www.inkscape.org/namespaces/inkscape";
+        for invalid in [
+            r#"<svg baseProfile="basic"/>"#.to_owned(),
+            r#"<svg><path baseProfile="full" d="M0 0H1"/></svg>"#.to_owned(),
+            r#"<svg xmlns:ev="https://example.invalid/xml-events"/>"#.to_owned(),
+            r#"<svg><g xmlns:ev="http://www.w3.org/2001/xml-events"/></svg>"#.to_owned(),
+            r#"<svg xmlns:ev="http://www.w3.org/2001/xml-events"><path ev:event="load" d="M0 0H1"/></svg>"#.to_owned(),
+            format!(r#"<svg xmlns:sodipodi="{sodipodi}"><path sodipodi:unknown="x" d="M0 0H1"/></svg>"#),
+            format!(r#"<svg xmlns:inkscape="{inkscape}"><path inkscape:unknown="x" d="M0 0H1"/></svg>"#),
+            r#"<svg><path other:nodetypes="cc" d="M0 0H1"/></svg>"#.to_owned(),
+        ] {
+            assert!(sanitize_svg(&invalid).is_err(), "accepted {invalid}");
+        }
+
+        let editor_attributes = [
+            "inkscape:flatsided",
+            "inkscape:randomized",
+            "inkscape:rounded",
+            "inkscape:transform-center-y",
+            "sodipodi:arg1",
+            "sodipodi:arg2",
+            "sodipodi:cx",
+            "sodipodi:cy",
+            "sodipodi:nodetypes",
+            "sodipodi:r1",
+            "sodipodi:r2",
+            "sodipodi:sides",
+            "sodipodi:type",
+        ];
+        for attribute in editor_attributes {
+            let prefix = attribute.split_once(':').expect("prefixed attribute").0;
+            let namespace = if prefix == "inkscape" {
+                inkscape
+            } else {
+                sodipodi
+            };
+            let off_element =
+                format!(r#"<svg xmlns:{prefix}="{namespace}"><g {attribute}="x"/></svg>"#);
+            assert!(
+                sanitize_svg(&off_element).is_err(),
+                "accepted {attribute} off path"
+            );
+            let unsafe_value = format!(
+                r#"<svg xmlns:{prefix}="{namespace}"><path {attribute}="url(https://example.invalid/a)" d="M0 0H1"/></svg>"#
+            );
+            assert!(
+                sanitize_svg(&unsafe_value).is_err(),
+                "accepted unsafe {attribute} value"
+            );
+        }
+
+        let source_attributes = (0..24)
+            .map(|index| format!(r#" x{index}="v""#))
+            .collect::<String>();
+        let oversized_source = format!(r#"<svg><path d="M0 0H1"{source_attributes}/></svg>"#);
+        assert!(
+            invalid_detail(sanitize_svg(&oversized_source))
+                .contains("per-element attribute budget"),
+            "path source envelope must remain bounded"
+        );
+
+        let oversized_canonical = concat!(
+            r#"<svg><path d="M0 0H1" fill="red" fill-rule="nonzero" "#,
+            r#"clip-rule="nonzero" fill-opacity="1" stroke="black" stroke-opacity="1" "#,
+            r#"stroke-width="1" stroke-linecap="round" stroke-linejoin="round" "#,
+            r#"stroke-miterlimit="4" stroke-dasharray="1 1" stroke-dashoffset="0"/></svg>"#,
+        );
+        assert!(
+            invalid_detail(sanitize_svg(oversized_canonical))
+                .contains("per-element attribute budget"),
+            "canonical path envelope must retain its stricter ceiling"
+        );
+
+        let stylesheet = r#"<svg><style type="text/css">.st0{fill:red}</style><path class="st0" d="M0 0H1"/></svg>"#;
+        assert!(
+            sanitize_svg(stylesheet).is_err(),
+            "stylesheet policy must stay fail-closed"
+        );
     }
 
     #[test]
