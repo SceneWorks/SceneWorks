@@ -253,7 +253,10 @@ pub struct ReviewLimits {
     pub max_frames_per_shot: u32,
     /// Questions put to the backend per take.
     pub max_questions_per_shot: u32,
-    /// Wall-clock for one backend answer.
+    /// Queue, preparation and model loading before one backend answer starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_startup_seconds: Option<u64>,
+    /// Wall-clock for one backend answer after model loading.
     pub max_answer_seconds: u64,
     /// Tokens one backend answer is truncated to. Declared here rather than hard-coded in the
     /// caller so a review's whole cost is readable off its own document (epic requirement E5).
@@ -267,6 +270,18 @@ pub struct ReviewLimits {
 
 fn default_max_new_tokens() -> u32 {
     DEFAULT_MAX_NEW_TOKENS
+}
+
+impl ReviewLimits {
+    /// Resolve new-run defaults without inventing a recorded bound in older observations.
+    pub fn startup_seconds(self) -> u64 {
+        self.max_startup_seconds.unwrap_or(120)
+    }
+
+    pub fn with_startup_default(mut self) -> Self {
+        self.max_startup_seconds = Some(self.startup_seconds());
+        self
+    }
 }
 
 fn default_max_memory_gb() -> f64 {
@@ -374,6 +389,7 @@ pub fn validate_review_plan(review: &ReviewPlan, plan: &ProductionPlan) -> Vec<P
             u64::from(review.limits.max_questions_per_shot),
         ),
         ("limits.maxAnswerSeconds", review.limits.max_answer_seconds),
+        ("limits.maxStartupSeconds", review.limits.startup_seconds()),
         (
             "limits.maxNewTokens",
             u64::from(review.limits.max_new_tokens),
@@ -1369,11 +1385,19 @@ pub fn flag_for(
             "unobserved",
             "unobserved".to_owned(),
             format!(
-                "{shot_id} {}: intended {:?}, and the reviewer could NOT see it in {}. This is \
-                 recorded as unobserved, NOT as completed — look at the take yourself.",
+                "{shot_id} {}: no conclusion about intended {:?}. {} Look at the take yourself.",
                 question.topic,
                 question.intended,
-                frame_list(&observation.evidence_frame_ids)
+                observation.note.clone().unwrap_or_else(|| {
+                    if observation.evidence_frame_ids.is_empty() {
+                        "No usable frame answers were recorded.".to_owned()
+                    } else {
+                        format!(
+                            "The answers from {} were inconclusive.",
+                            frame_list(&observation.evidence_frame_ids)
+                        )
+                    }
+                })
             ),
         )),
         Verdict::Unobserved => None,
@@ -2328,11 +2352,22 @@ mod tests {
             .expect("a mustObserve question raises a flag when nothing was seen");
         assert_eq!(flag.severity, "unobserved");
         assert_eq!(flag.observed, "unobserved");
-        assert!(flag.detail.contains("NOT as completed"), "{}", flag.detail);
+        assert!(flag.detail.contains("no conclusion"), "{}", flag.detail);
         // The serialized form must not carry a value either.
         let json = serde_json::to_value(&observation).expect("observation serializes");
         assert!(json.get("observed").is_none(), "{json}");
         assert_eq!(json["unobserved"], json!(true));
+    }
+
+    #[test]
+    fn unobserved_flag_preserves_the_timeout_reason() {
+        let mut q = question("handoff");
+        q.must_observe = true;
+        let observation =
+            unasked_observation(&q, "answer_timeout: frame f3 received no answer in 30s");
+        let flag = flag_for("SH010", &q, &observation, DEFAULT_UNCERTAIN_BELOW).unwrap();
+        assert!(flag.detail.contains("answer_timeout: frame f3"));
+        assert!(!flag.detail.contains("no frames"));
     }
 
     #[test]
@@ -2544,13 +2579,23 @@ mod tests {
         // A document that names neither keeps the shipped defaults rather than failing to parse.
         assert_eq!(review.limits.max_new_tokens, DEFAULT_MAX_NEW_TOKENS);
         assert_eq!(review.limits.max_memory_gb, DEFAULT_MAX_MEMORY_GB);
+        assert_eq!(review.limits.startup_seconds(), 120);
+        assert!(serde_json::to_value(review.limits)
+            .unwrap()
+            .get("maxStartupSeconds")
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(review.limits.with_startup_default()).unwrap()
+                ["maxStartupSeconds"],
+            120
+        );
         assert!(validate_review_plan(&review, &plan).is_empty());
 
         let declared: ReviewPlan = serde_json::from_value(json!({
             "schemaVersion": 1, "id": "r", "version": 1,
             "sampling": { "positions": [0.5] },
             "limits": { "maxSeconds": 60, "maxFramesPerShot": 1, "maxQuestionsPerShot": 1,
-                        "maxAnswerSeconds": 10, "maxNewTokens": 64, "maxMemoryGb": 12.5 },
+                        "maxAnswerSeconds": 10, "maxStartupSeconds": 90, "maxNewTokens": 64, "maxMemoryGb": 12.5 },
             "shots": { "SH010": { "questions": [
                 { "id": "q", "topic": "location", "intended": "i", "ask": "a", "expect": ["x"] }
             ] } }
@@ -2558,8 +2603,14 @@ mod tests {
         .expect("review plan parses");
         assert_eq!(declared.limits.max_new_tokens, 64);
         assert_eq!(declared.limits.max_memory_gb, 12.5);
+        assert_eq!(declared.limits.max_startup_seconds, Some(90));
         assert!(validate_review_plan(&declared, &plan).is_empty());
 
+        let mut zero = declared.clone();
+        zero.limits.max_startup_seconds = Some(0);
+        assert!(validate_review_plan(&zero, &plan)
+            .iter()
+            .any(|f| f.message.contains("maxStartupSeconds")));
         let mut zero = declared.clone();
         zero.limits.max_new_tokens = 0;
         assert!(

@@ -489,6 +489,23 @@ async fn a_review_writes_observed_state_beside_the_run_and_only_points_at_the_in
     assert!(!observed.backend.real_model_inference);
     assert_eq!(observed.backend.model, review::VQA_MODEL_ID);
     assert_eq!(observed.backend.route, review::VQA_ROUTE);
+    let jobs = harness.jobs().await;
+    let vqa_jobs: Vec<_> = jobs
+        .iter()
+        .filter(|job| job["type"] == "image_vqa")
+        .collect();
+    assert!(!vqa_jobs.is_empty());
+    for job in vqa_jobs {
+        let prompt = job["payload"]["question"].as_str().expect("VQA question");
+        let question_id = prompt.strip_prefix('[').unwrap().split('@').next().unwrap();
+        let question = review_plan.shots["SH020"]
+            .questions
+            .iter()
+            .find(|question| question.id == question_id)
+            .expect("authored question");
+        assert!(prompt.contains(&question.intended), "{prompt}");
+        assert!(prompt.contains(&question.ask), "{prompt}");
+    }
     let _ = record;
 }
 
@@ -621,7 +638,7 @@ async fn an_unobserved_handoff_is_flagged_unobserved_and_never_recorded_as_compl
         .expect("a mustObserve question that was not observed raises a flag");
     assert_eq!(flag.severity, "unobserved");
     assert_eq!(flag.observed, "unobserved");
-    assert!(flag.detail.contains("NOT as completed"), "{}", flag.detail);
+    assert!(flag.detail.contains("no conclusion"), "{}", flag.detail);
     assert_eq!(flag.shot_id, "SH020");
     assert_eq!(flag.topic, "parcel_custody");
 }
@@ -2522,7 +2539,7 @@ async fn an_answer_that_times_out_is_recorded_unobserved_with_the_timeout_never_
             note.starts_with("answer_timeout: limits.maxAnswerSeconds is 1s"),
             "{note}"
         );
-        assert!(note.contains("was cancelled"), "{note}");
+        assert!(note.contains("cancellation requested"), "{note}");
         assert!(observation.is_well_formed(), "{observation:?}");
     }
     assert!(

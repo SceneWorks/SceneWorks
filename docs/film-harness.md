@@ -1136,12 +1136,21 @@ declares questions, each with a `topic` (one of `character_identity`, `costume`,
 restated for the human who reads the flag, the `ask` put to the model verbatim, `expect` /
 `contradict` answer substrings, which `frames` to grade on (`first`/`last`/`all`/`any`), and two
 flags: `mustObserve` and `acrossCut`. Its `limits` (`maxSeconds`, `maxFramesPerShot`,
-`maxQuestionsPerShot`, `maxAnswerSeconds`, `maxNewTokens`, `maxMemoryGb`) are declared **before**
+`maxQuestionsPerShot`, `maxStartupSeconds`, `maxAnswerSeconds`, `maxNewTokens`, `maxMemoryGb`) are declared **before**
 anything is dispatched. `maxNewTokens` bounds one backend answer; `maxMemoryGb` is checked in the
 preflight against the **API host's** reported memory (`GET /api/v1/host-capabilities`) — the shipped
 plan declares 16 GB, SenseNova-U1-8B's own `minMemoryGb`, so a host that cannot run the model is
 refused before a project, a timeline or a single frame exists. A host that reports no memory at all
 is refused too: an unchecked ceiling is not a checked one.
+
+VQA startup (queue, preparation, and model loading) has a separate `maxStartupSeconds`
+allowance, defaulting to 120 seconds for older review documents that omit it. The
+answer clock starts when the worker reports `generating`, after model loading.
+`maxSeconds` remains the overall per-shot ceiling, including extraction and startup;
+neither phase may extend it. New editor drafts default to 180 seconds overall,
+120 seconds for startup, and 30 seconds per answer. Existing explicit limits are preserved.
+Timeout observations identify which limit expired. Cancellation can require a bounded
+grace period while the worker exits its current operation.
 
 Every shot the parcel appears in asks a `parcel_custody` question — all six, SH050 included. A shot
 without one is a shot in which the parcel can change hands with nobody asking, and that gap is

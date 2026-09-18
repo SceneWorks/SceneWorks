@@ -1816,6 +1816,15 @@ async fn run_fake_vqa_job(
     job_id: &str,
     job: &Value,
 ) {
+    post_progress(
+        app,
+        job_id,
+        json!({
+            "status": "running", "stage": "generating", "progress": 0.6,
+            "message": "Analyzing image.", "workerId": WORKER_ID
+        }),
+    )
+    .await;
     let question = job["payload"]["question"].as_str().unwrap_or("").to_owned();
     let tag = question
         .strip_prefix('[')

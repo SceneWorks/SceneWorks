@@ -10,7 +10,7 @@ vi.mock("../../api.js", () => ({
   withMediaTicket: (url) => url,
 }));
 
-import { FilmReview } from "./FilmReview.jsx";
+import { FilmReview, normalizedPlan } from "./FilmReview.jsx";
 
 function draft() {
   return {
@@ -106,6 +106,70 @@ function changeValue(element, value) {
 }
 
 describe("FilmReview", () => {
+  it("replaces placeholder review intent while preserving concrete authored targets", () => {
+    const current = draft();
+    current.reviewPlan = normalizedPlan(current);
+    current.reviewPlan.shots.SH010.questions[0].intended = "Closing state";
+    current.productionPlan.shots[0].endState = "Mara rests her hand on the closed red box.";
+    expect(normalizedPlan(current).shots.SH010.questions[0].intended).toBe(current.productionPlan.shots[0].endState);
+    current.reviewPlan.shots.SH010.questions[0].intended = "A red box";
+    expect(normalizedPlan(current).shots.SH010.questions[0].intended).toBe("A red box");
+  });
+
+  it.each(["match", "mismatch", "unobserved"])("explains a %s result with question and frame answers without a confidence percentage", async (verdict) => {
+    await renderReview({ view: reviewView({ observations: [{
+      reviewId: "r1", shotId: "SH010", attempt: 2, mismatches: [],
+      frames: [{ id: "SH010-a2-f3", timestampSeconds: 4.5 }],
+      observations: [{ questionId: "q1", question: "Is the box closed?", intended: "A closed box", verdict,
+        observed: verdict === "unobserved" ? null : verdict === "match" ? "Yes." : "No.", confidence: 0.9,
+        answers: [{ frameId: "SH010-a2-f3", answer: verdict === "unobserved" ? "I cannot tell." : verdict === "match" ? "Yes." : "No." }] }],
+    }] }) });
+    const result = container.querySelector('[aria-label="SH010 assistive findings"]');
+    expect(result.textContent).toContain("Question: Is the box closed?");
+    expect(result.textContent).toContain("Expected: A closed box");
+    expect(result.textContent).toContain("Frame SH010-a2-f3 at 4.50s");
+    expect(result.textContent).not.toContain("90%");
+    expect(result.textContent).not.toContain("No advisory mismatches");
+  });
+
+  it("shows the saved timeout reason and warns about legacy ungrounded reviews", async () => {
+    await renderReview({ view: reviewView({ observations: [{
+      reviewId: "r1", shotId: "SH010", attempt: 1, mismatches: [], observations: [{
+        questionId: "SH010_action", question: "Does the final frame show the authored action completed? Answer yes or no.",
+        intended: "Closing state", verdict: "unobserved", answers: [],
+        note: "answer_timeout: limits.maxAnswerSeconds is 30s and frame SH010-a1-f3 got no answer in 60.4s",
+      }],
+    }] }) });
+    const result = container.querySelector('[aria-label="SH010 assistive findings"]');
+    expect(result.textContent).toContain("Analysis timed out");
+    expect(result.textContent).toContain("SH010-a1-f3 got no answer in 60.4s");
+    expect(result.textContent).toContain("did not include the intended state");
+    expect(result.textContent).not.toContain("no frames");
+    expect(result.textContent).not.toContain("0%");
+  });
+
+  it.each([
+    ["startup_timeout: limits.maxStartupSeconds is 120s", "Model startup timed out", "120-second limit"],
+    ["review_timeout: limits.maxSeconds is 180s", "Review time limit reached", "180-second limit"],
+  ])("explains the expired budget: %s", async (note, label, limit) => {
+    await renderReview({ view: reviewView({ observations: [{
+      reviewId: "r1", shotId: "SH010", attempt: 1, observations: [{
+        questionId: "q", question: "Is the box closed?", intended: "Closed box",
+        verdict: "unobserved", note, answers: [],
+      }],
+    }] }) });
+    const result = container.querySelector('[aria-label="SH010 assistive findings"]');
+    expect(result.textContent).toContain(label);
+    expect(result.textContent).toContain(limit);
+  });
+
+  it("defaults separate startup and answer budgets while retaining explicit saved limits", () => {
+    const current = draft();
+    expect(normalizedPlan(current).limits).toMatchObject({ maxSeconds: 180, maxStartupSeconds: 120, maxAnswerSeconds: 30 });
+    current.reviewPlan.limits = { maxSeconds: 120, maxStartupSeconds: 90, maxAnswerSeconds: 10 };
+    expect(normalizedPlan(current).limits).toMatchObject(current.reviewPlan.limits);
+  });
+
   it("refreshes a run created while hidden and addresses review by locator identity", async () => {
     const locatorId = "filmrun_5c1b068b8ded44e49513775feff1d71e";
     const recordRunId = "run_c54dd33cb3e14cd98735136aba56cbaa";
@@ -183,6 +247,36 @@ describe("FilmReview", () => {
     expect(current.reviewPlan.shots.SH010.questions[0].ask).toBe("Is the parcel on the counter?");
     expect(current.reviewPlan.shots.SH010.questions[0].frames).toBe("all");
     expect(current.reviewPlan.limits.maxQuestionsPerShot).toBe(8);
+  });
+
+  it("shows analysis progress after starting and unlocks take actions when polling completes", async () => {
+    vi.useFakeTimers();
+    const idle = reviewView({ selections: [{ shotId: "SH010", state: "aligned", timelineAssetId: "asset_2", timelineAttempt: 2 }] });
+    await renderReview({ view: idle });
+    const running = {
+      ...idle,
+      run: { ...idle.run, controllerActive: true, controllerOwner: "api-review:run_1" },
+      reviewOperation: { status: "running" },
+      actionDisabledReason: "api-review:run_1 is active. Wait for it to stop or cancel it before changing takes.",
+    };
+    apiFetchMock.mockResolvedValue(running);
+    await act(async () => { button("Analyze selected takes").click(); });
+    expect(apiFetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/review$/), "token", expect.objectContaining({ method: "POST" }));
+    expect(container.textContent).toContain("Analyzing selected takes.");
+    expect(container.textContent).not.toContain("Actions unavailable");
+    expect(container.textContent).not.toContain("api-review:");
+    expect(button("Analyze selected takes").disabled).toBe(true);
+    expect(button("Render one replacement").disabled).toBe(true);
+    expect([...container.querySelectorAll("button")].filter((item) => item.textContent === "Accept").every((item) => item.disabled)).toBe(true);
+
+    apiFetchMock.mockImplementation((path) => Promise.resolve(path.endsWith("/film-runs")
+      ? [{ locator: { id: "run_1", draftId: "film_1" }, record: {} }]
+      : { ...idle, reviewOperation: { status: "completed" } }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    expect(container.textContent).not.toContain("Analyzing selected takes.");
+    expect(button("Analyze selected takes").disabled).toBe(false);
+    expect(button("Render one replacement").disabled).toBe(false);
+    expect([...container.querySelectorAll("button")].some((item) => item.textContent === "Accept" && !item.disabled)).toBe(true);
   });
 
   it("disables incompatible actions with the server reason", async () => {

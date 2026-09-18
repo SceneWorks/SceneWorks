@@ -702,10 +702,10 @@ pub(crate) async fn run_vqa_job(
         api,
         &job.id,
         image_progress(
-            JobStatus::Running,
-            ProgressStage::Generating,
-            0.6,
-            "Analyzing image.",
+            JobStatus::Preparing,
+            ProgressStage::LoadingModel,
+            0.15,
+            "Loading visual question model.",
             None,
             &backend,
         ),
@@ -714,6 +714,9 @@ pub(crate) async fn run_vqa_job(
 
     let job_id = job.id.clone();
     let question_for_vqa = question.clone();
+    let ready_api = api.clone();
+    let ready_backend = backend.clone();
+    let runtime_handle = tokio::runtime::Handle::current();
     // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
     // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
     // job is never falsely marked `interrupted` (sc-8390). The engine checks the threaded
@@ -740,6 +743,27 @@ pub(crate) async fn run_vqa_job(
                 &job_id,
                 &task_cancel,
                 direct_admission,
+                || {
+                    if task_cancel.is_cancelled() {
+                        return Err(WorkerError::Canceled(VQA_CANCEL_MESSAGE.to_owned()));
+                    }
+                    runtime_handle.block_on(async {
+                        update_job(
+                            &ready_api,
+                            &job_id,
+                            image_progress(
+                                JobStatus::Running,
+                                ProgressStage::Generating,
+                                0.6,
+                                "Analyzing image.",
+                                None,
+                                &ready_backend,
+                            ),
+                        )
+                        .await
+                        .map(|_| ())
+                    })
+                },
             )
         }),
     )
@@ -778,6 +802,7 @@ fn vqa_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
+    on_loaded: impl FnOnce() -> WorkerResult<()>,
 ) -> WorkerResult<String> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
@@ -790,6 +815,7 @@ fn vqa_generate(
     let runtime = load_runtime(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+    on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
     // pixel budget (default 768², `load_image_native` min 256²).
     let pixel_values = image_to_chw01(source, 256 * 256, max_image_pixels)?;
@@ -854,6 +880,7 @@ fn vqa_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
+    on_loaded: impl FnOnce() -> WorkerResult<()>,
 ) -> WorkerResult<String> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
@@ -863,6 +890,7 @@ fn vqa_generate(
     let runtime = load_understanding_with_spec(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+    on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
     // pixel budget (default 768², min 256²).
     let pixel_values = image_to_chw01_candle(source, 256 * 256, max_image_pixels)?;
