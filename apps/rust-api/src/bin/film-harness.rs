@@ -317,9 +317,59 @@ fn guarded_transport(api_url: &str, token: Option<String>) -> Result<HttpTranspo
 
 fn report_error(error: HarnessError) -> ExitCode {
     eprintln!("film-harness: {error}");
+    if is_validation_or_refused(&error) {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn is_validation_or_refused(error: &HarnessError) -> bool {
     match error {
-        HarnessError::Validation(_) | HarnessError::Refused(_) => ExitCode::from(2),
-        _ => ExitCode::from(1),
+        HarnessError::Validation(_)
+        | HarnessError::PlannerValidation { .. }
+        | HarnessError::Refused(_) => true,
+        HarnessError::PlannerExecutionFailure { source, .. } => is_validation_or_refused(source),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use sceneworks_core::film_plan::PlanDiagnostic;
+
+    use super::{is_validation_or_refused, HarnessError};
+
+    #[test]
+    fn planner_execution_receipts_do_not_change_cli_failure_classification() {
+        let validation = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::PlannerValidation {
+                findings: vec![PlanDiagnostic::plan("planner.output", "malformed")],
+                executions: Vec::new(),
+            }),
+            executions: Vec::new(),
+        };
+        assert!(is_validation_or_refused(&validation));
+
+        let provider = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Transport("provider unavailable".to_owned())),
+            executions: Vec::new(),
+        };
+        assert!(!is_validation_or_refused(&provider));
+        let write_failure = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Io(
+                "plan.json already exists and differs".to_owned(),
+            )),
+            executions: Vec::new(),
+        };
+        assert!(!is_validation_or_refused(&write_failure));
+        let canceled = HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Refused(
+                "planning canceled by user".to_owned(),
+            )),
+            executions: Vec::new(),
+        };
+        assert!(is_validation_or_refused(&canceled));
     }
 }
 
@@ -495,9 +545,10 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             .unwrap_or_else(|| PathBuf::from("brief.json")),
     };
     // A `run` watches its own directory, which is how `film-harness cancel --out DIR` in another
-    // shell reaches it (sc-22711). A stale sentinel from a previous controller is cleared first.
+    // shell reaches it (sc-22711). Parsing must not mutate that shared state: read-only commands
+    // never own it, and a mutating command may lose the controller-lease race. Commands that
+    // consume a previous action's cancellation do so only after acquiring their own lease.
     let control = RunControl::watching(&out_dir);
-    film_harness::clear_cancel_request(&out_dir).map_err(|error| error.to_string())?;
     Ok(Parsed {
         api_url: api_url.clone(),
         token,
@@ -510,6 +561,8 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             refine_prompts,
             prompt_guide_path: prompt_guide,
             require_installed,
+            require_local_planner: true,
+            send_reference_pixels: false,
             api_url,
             force,
             poll_interval: Duration::from_secs(poll_seconds),
@@ -528,6 +581,97 @@ fn parse_options(command: &str, args: &[String]) -> Result<Parsed, String> {
             require_installed,
         },
     })
+}
+
+#[cfg(test)]
+mod cancellation_boundary_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
+
+    use sceneworks_rust_api::film_harness::{ControllerLease, RunControl, CANCEL_SENTINEL_FILE};
+
+    use super::{main_async, parse_options};
+
+    fn fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/film-harness/courier-workshop")
+            .join(name)
+    }
+
+    fn common_args(command: &str, out_dir: &Path) -> Vec<String> {
+        vec![
+            command.to_owned(),
+            "--plan".to_owned(),
+            fixture_path("plan.jsonc").display().to_string(),
+            "--brief".to_owned(),
+            fixture_path("brief.jsonc").display().to_string(),
+            "--references".to_owned(),
+            fixture_path("references.jsonc").display().to_string(),
+            "--out".to_owned(),
+            out_dir.display().to_string(),
+            "--api".to_owned(),
+            "http://127.0.0.1:0".to_owned(),
+            "--skip-install-check".to_owned(),
+        ]
+    }
+
+    fn cancel_active_owner(run_dir: &Path) -> (ControllerLease, RunControl) {
+        let lease = ControllerLease::acquire(run_dir, "api-active").expect("active owner lease");
+        let control = RunControl::watching(run_dir);
+        std::fs::write(run_dir.join(CANCEL_SENTINEL_FILE), b"cancel\n")
+            .expect("fresh cancellation");
+        (lease, control)
+    }
+
+    fn assert_cancel_preserved(run_dir: &Path, owner_control: &RunControl) {
+        assert!(
+            run_dir.join(CANCEL_SENTINEL_FILE).is_file(),
+            "a competing CLI command must preserve the active owner's cancellation"
+        );
+        assert!(
+            owner_control.is_canceled(),
+            "the active owner's watching control must still observe cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_command_does_not_clear_an_active_owners_cancel() {
+        let run_dir = tempfile::tempdir().expect("run directory");
+        let (_lease, owner_control) = cancel_active_owner(run_dir.path());
+
+        let exit = main_async(common_args("validate", run_dir.path())).await;
+
+        assert_ne!(
+            exit,
+            ExitCode::SUCCESS,
+            "no API is listening for validation"
+        );
+        assert_cancel_preserved(run_dir.path(), &owner_control);
+    }
+
+    #[tokio::test]
+    async fn competing_run_loses_the_lease_without_clearing_the_owners_cancel() {
+        let run_dir = tempfile::tempdir().expect("run directory");
+        let (_lease, owner_control) = cancel_active_owner(run_dir.path());
+
+        let exit = main_async(common_args("run", run_dir.path())).await;
+
+        assert_eq!(exit, ExitCode::from(2), "the competing run is refused");
+        assert_cancel_preserved(run_dir.path(), &owner_control);
+    }
+
+    #[test]
+    fn plan_and_compile_parsing_do_not_mutate_cancellation_state() {
+        for command in ["plan", "compile"] {
+            let run_dir = tempfile::tempdir().expect("run directory");
+            let (_lease, owner_control) = cancel_active_owner(run_dir.path());
+            let args = common_args(command, run_dir.path());
+
+            parse_options(command, &args[1..]).expect("supported options parse");
+
+            assert_cancel_preserved(run_dir.path(), &owner_control);
+        }
+    }
 }
 
 fn fixture_images(args: &[String]) -> ExitCode {
@@ -1218,10 +1362,6 @@ async fn review_command(args: &[String]) -> ExitCode {
                 .collect()
         })
         .unwrap_or_default();
-    if let Err(error) = film_harness::clear_cancel_request(&options.out_dir) {
-        eprintln!("film-harness: {error}");
-        return ExitCode::from(1);
-    }
     let transport = match guarded_transport(&api_url, token) {
         Ok(transport) => transport,
         Err(code) => return code,
@@ -1534,6 +1674,16 @@ fn status_command(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     };
     let out_dir = PathBuf::from(out_dir);
+    match film_harness::read_action_operation(&out_dir) {
+        Ok(Some(action)) => {
+            println!("Latest action: {} ({})", action.action, action.status);
+            if let Some(detail) = action.detail {
+                println!("Action detail: {detail}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return report_error(error),
+    }
     match film_harness::read_run_record(&out_dir) {
         Ok(record) => {
             print_record(&record, &out_dir);

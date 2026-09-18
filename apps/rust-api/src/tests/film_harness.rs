@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::Request;
 use parking_lot::Mutex;
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
+use sceneworks_core::film_workspace::FilmDraft;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -34,6 +35,621 @@ pub(crate) const FIXTURE_DIR: &str = concat!(
 /// [`ApiTransport`] over the in-process router: the same `oneshot` driver every route test uses.
 pub(crate) struct RouterTransport {
     pub(crate) app: axum::Router,
+}
+
+#[test]
+fn a_second_new_run_controller_is_refused_while_the_first_holds_the_directory() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    let first = film_harness::ControllerLease::acquire(&directory, "api:first")
+        .expect("first controller acquires");
+    let refused = film_harness::ControllerLease::acquire(&directory, "cli:second")
+        .expect_err("a competing controller must be refused");
+    assert!(refused.to_string().contains("another controller"));
+    drop(first);
+    film_harness::ControllerLease::acquire(&directory, "cli:after")
+        .expect("the lease releases when its owner finishes");
+}
+
+#[test]
+fn a_new_action_cannot_consume_the_cancel_request_for_a_competing_controller() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    std::fs::create_dir_all(&directory).expect("run dir");
+    std::fs::write(directory.join("run.json"), "{}").expect("run record");
+    let active = film_harness::ControllerLease::acquire(&directory, "api:active")
+        .expect("active controller acquires");
+    let sentinel = film_harness::request_cancel(&directory).expect("active controller is canceled");
+
+    let refused = film_harness::ControllerLease::acquire_new_action(&directory, "api:new-action")
+        .expect_err("a competing action cannot acquire the run");
+    assert!(refused.to_string().contains("another controller"));
+    assert!(
+        sentinel.exists(),
+        "the refused action must not consume the active controller's cancel"
+    );
+    film_harness::ControllerLease::acquire_new_action_for_api(
+        &directory,
+        "api:competing-resume",
+        film_harness::FilmControllerShutdown::default(),
+    )
+    .expect_err("API action also loses the lease before consuming cancellation");
+    assert!(sentinel.exists());
+    drop(active);
+}
+
+#[test]
+fn an_unlocked_crash_metadata_file_is_recovered_without_an_age_guess() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(film_harness::CONTROLLER_LOCK_FILE),
+        "owner=dead-process\npid=999999\nacquiredAt=2000-01-01T00:00:00Z\n",
+    )
+    .unwrap();
+    assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+    let lease = film_harness::ControllerLease::acquire_interrupted(&directory, "startup-adopt")
+        .expect("the interrupted lease can be inspected")
+        .expect("the OS-released lock is recoverable regardless of metadata age");
+    assert!(film_harness::ControllerLease::is_active(&directory).unwrap());
+    drop(lease);
+    assert!(!film_harness::ControllerLease::is_active(&directory).unwrap());
+    assert!(
+        film_harness::ControllerLease::acquire_interrupted(&directory, "startup-again")
+            .unwrap()
+            .is_none(),
+        "a clean release erases the crash marker"
+    );
+}
+
+#[tokio::test]
+async fn every_run_mutation_refuses_a_competing_api_or_cli_controller() {
+    use crate::film_harness::review::{self, Decision, ReviewOptions, ScriptedVision};
+    use crate::film_harness::{EditOptions, TimelineEdit};
+
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let out_dir = temporary.path().join("run");
+    let held = film_harness::ControllerLease::acquire(&out_dir, "api:active").unwrap();
+    let (app, _) = create_app_with_state(test_settings(&temporary)).expect("app creates");
+    let transport = RouterTransport { app };
+    let options = ResumeOptions::new(out_dir.clone());
+    let edit = EditOptions {
+        run_record_path: out_dir.join(film_harness::RUN_RECORD_FILE),
+        export: false,
+        poll_interval: Duration::from_millis(1),
+    };
+
+    let errors = [
+        film_harness::resume(&transport, &options)
+            .await
+            .unwrap_err(),
+        film_harness::replace_take(&transport, &options, "SH010", "replace")
+            .await
+            .unwrap_err(),
+        film_harness::edit_timeline(
+            &transport,
+            &edit,
+            TimelineEdit::Reorder { shot_ids: vec![] },
+        )
+        .await
+        .unwrap_err(),
+        review::review(
+            &transport,
+            &ReviewOptions::new(out_dir.clone()),
+            &ScriptedVision::new(),
+        )
+        .await
+        .unwrap_err(),
+        review::request_repair(&transport, &options, "SH010", "repair")
+            .await
+            .unwrap_err(),
+        review::decide_take(&out_dir, "SH010", Decision::Accept, "accept").unwrap_err(),
+    ];
+    for error in errors {
+        assert!(error.to_string().contains("another controller"), "{error}");
+    }
+    drop(held);
+}
+
+#[tokio::test]
+async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatch() {
+    let harness = Harness::start_http(
+        true,
+        vec![(
+            "SH010",
+            VideoBehavior::Complete {
+                delay_secs: 3,
+                peak_pct: 40.0,
+            },
+        )],
+    )
+    .await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Startup adoption")
+        .expect("project creates");
+    let draft_id = "film_draft_restart";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Startup adoption");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_restart";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan,
+        reference_pack_path: files.reference_pack,
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let running = Arc::new(tokio::sync::Notify::new());
+    harness.script.lock().running_hook =
+        Some(("SH010".to_owned(), RunningHook::Notify(running.clone())));
+    let reached_running = running.notified();
+    tokio::pin!(reached_running);
+    let controller_app = harness.app.clone();
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_restart",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
+    let mut controller = tokio::spawn(async move {
+        film_harness::run_with_control_and_lease(
+            &RouterTransport {
+                app: controller_app,
+            },
+            &options,
+            &film_harness::RunControl::default(),
+            lease,
+        )
+        .await
+    });
+    tokio::select! {
+        () = &mut reached_running => {}
+        result = &mut controller => {
+            panic!("controller ended before the fake worker reached running: {result:?}");
+        }
+    }
+    let original_job_id = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, job_id, _)| job_id.clone())
+        .expect("video job was claimed");
+
+    // The production SIGTERM path sets shutdown intent before Axum drains. Simulate the runtime
+    // then dropping this detached controller while the separately hosted worker continues the
+    // exact job. Unlike an ordinary handled controller exit, this Drop must retain its marker.
+    harness.state.film_controller_shutdown.request();
+    controller.abort();
+    assert!(
+        controller
+            .await
+            .expect_err("controller aborts")
+            .is_cancelled(),
+        "the original controller must be gone before startup adopts it"
+    );
+    let marker = std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE))
+        .expect("controller marker remains readable");
+    assert!(
+        marker
+            .lines()
+            .any(|line| line == "owner=api:filmrun_restart"),
+        "graceful API shutdown must retain active controller ownership: {marker:?}"
+    );
+    let interrupted = harness
+        .state
+        .jobs_store
+        .mark_interrupted_on_startup()
+        .expect("API startup recovery succeeds");
+    assert!(
+        interrupted.is_empty(),
+        "the worker-owned render survives API startup: {interrupted:?}"
+    );
+    let active = harness
+        .state
+        .jobs_store
+        .get_job(&original_job_id)
+        .expect("active job loads");
+    assert_eq!(
+        active.status,
+        sceneworks_core::contracts::JobStatus::Running
+    );
+    assert_eq!(active.worker_id.as_deref(), Some(WORKER_ID));
+
+    let mut restarted_state = harness.state.clone();
+    restarted_state.film_controller_shutdown = film_harness::FilmControllerShutdown::default();
+    let mut startup =
+        crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(restarted_state);
+    startup.scan.await.expect("startup scan joins");
+    startup
+        .controller_results
+        .recv()
+        .await
+        .expect("startup scan launches the film controller")
+        .unwrap_or_else(|error| panic!("startup film controller failed: {error}"));
+    let record = film_harness::read_run_record(&files.directory)
+        .expect("startup run record remains readable");
+    assert_eq!(record.state, RunState::Finished, "{}", summary(&record));
+
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert_eq!(harness.video_job_count(), 1, "startup must not redispatch");
+    assert_eq!(harness.api_video_job_count().await, 1);
+    let selected = record
+        .shot("SH010")
+        .and_then(|shot| shot.selected())
+        .expect("startup adopts the completed take");
+    assert_eq!(selected.job_id.as_deref(), Some(original_job_id.as_str()));
+}
+
+#[tokio::test]
+async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() {
+    let harness = Harness::start_http(true, vec![]).await;
+    let project = harness
+        .state
+        .project_store
+        .create_project("Explicit resume")
+        .expect("project creates");
+    let draft_id = "film_draft_explicit_resume";
+    let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Explicit resume");
+    draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+    draft.production_plan.shots[0].prompt =
+        "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    harness
+        .state
+        .project_store
+        .create_film_draft_document(&project.id, draft)
+        .expect("draft creates");
+    let locator_id = "filmrun_explicit_resume";
+    harness
+        .state
+        .project_store
+        .create_film_run(
+            &project.id,
+            locator_id,
+            draft_id,
+            vec!["SH010".to_owned()],
+            None,
+        )
+        .expect("run locator creates");
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project.id, locator_id)
+        .expect("run files resolve");
+    let options = RunOptions {
+        plan_path: files.plan.clone(),
+        reference_pack_path: files.reference_pack.clone(),
+        compiled_path: None,
+        project_id: Some(project.id.clone()),
+        shot_ids: Some(vec!["SH010".to_owned()]),
+        out_dir: files.directory.clone(),
+        poll_interval: Duration::from_millis(100),
+        export: false,
+        require_installed: false,
+    };
+    let transport = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
+        .on_post_route("/api/v1/video/jobs");
+    let lease = film_harness::ControllerLease::acquire_for_api(
+        &files.directory,
+        "api:filmrun_explicit_resume",
+        harness.state.film_controller_shutdown.clone(),
+    )
+    .expect("API controller lease acquires");
+    film_harness::run_with_control_and_lease(
+        &transport,
+        &options,
+        &film_harness::RunControl::default(),
+        lease,
+    )
+    .await
+    .expect_err("the injected transport loss stops the controller");
+    let failed = film_harness::read_run_record(&files.directory).expect("failed record persists");
+    assert_eq!(failed.state, RunState::Running, "{}", summary(&failed));
+    assert_eq!(failed.outcome, RunOutcome::Failed, "{}", summary(&failed));
+    assert!(failed.is_resumable(), "{}", summary(&failed));
+    assert_eq!(harness.api_video_job_count().await, 0);
+    assert_eq!(
+        std::fs::read_to_string(files.directory.join(film_harness::CONTROLLER_LOCK_FILE)).unwrap(),
+        "",
+        "an ordinary handled API controller failure clears ownership"
+    );
+
+    let mut startup = crate::film_lifecycle::spawn_film_startup_reconciliation_for_fake_worker(
+        harness.state.clone(),
+    );
+    startup.scan.await.expect("startup scan joins");
+    assert!(
+        startup.controller_results.recv().await.is_none(),
+        "a cleanly released failed controller must wait for explicit resume"
+    );
+    assert_eq!(harness.api_video_job_count().await, 0);
+
+    let mut resume = ResumeOptions::new(files.directory.clone());
+    resume.poll_interval = Duration::from_millis(100);
+    resume.export = false;
+    resume.require_installed = false;
+    let completed = film_harness::resume(&harness.transport, &resume)
+        .await
+        .expect("the operator can explicitly resume the failed run");
+    assert_eq!(
+        completed.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&completed)
+    );
+    assert_eq!(harness.api_video_job_count().await, 1);
+}
+
+#[tokio::test]
+async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
+    let harness = Harness::start(true, vec![]).await;
+    let mut draft = FilmDraft::manual_one_shot("project-film", "film-draft", "Manual film");
+    draft.production_plan.shots[0].prompt = "a courier crosses a quiet workshop".to_owned();
+    draft.production_plan.shots[0].beat = "The courier crosses the workshop".to_owned();
+    let document_dir = harness.temp_dir.path().join("reference-free-film");
+    std::fs::create_dir_all(&document_dir).expect("document directory");
+    let plan_path = document_dir.join("plan.json");
+    let pack_path = document_dir.join("references.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::to_vec_pretty(&draft.production_plan).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &pack_path,
+        serde_json::to_vec_pretty(&draft.reference_pack).unwrap(),
+    )
+    .unwrap();
+    let mut options = harness.options(plan_path, pack_path, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("controlled worker completion succeeds");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    let compiled = record.compiled.as_ref().expect("compiled request document");
+    assert!(Path::new(&compiled.path).is_file());
+    assert!(record.export.is_none(), "assembly must not start export");
+    let timeline = record.timeline.as_ref().expect("timeline assembled");
+    assert_eq!(timeline.items.len(), 1);
+    let project_id = record.project_id.as_deref().expect("project");
+    let saved = saved_timeline(&harness.app, project_id, &timeline.timeline_id).await;
+    assert_eq!(saved["revision"], 2);
+    assert_eq!(
+        saved["filmAssembly"]["runs"][&record.run_id]["shotOrder"],
+        json!(["SH010"])
+    );
+    let item = &saved["tracks"][0]["items"][0];
+    assert_eq!(item["filmHarness"]["runId"], record.run_id);
+    assert_eq!(item["filmHarness"]["shotId"], "SH010");
+    assert_eq!(item["filmHarness"]["plannedIndex"], 0);
+    assert_eq!(item["filmHarness"]["selectedTakeAssetId"], item["assetId"]);
+    assert!(item["filmHarness"]["jobId"].as_str().is_some());
+
+    let error = film_harness::run(&harness.transport, &options)
+        .await
+        .expect_err("repeating the same run directory is refused");
+    assert!(error.to_string().contains("already holds run"));
+    let (_, timelines) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/timelines"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        timelines.as_array().unwrap().len(),
+        1,
+        "replay made no duplicate timeline"
+    );
+}
+
+#[tokio::test]
+async fn long_legal_asset_identity_is_tagged_through_real_routes_without_losing_provenance() {
+    let harness = Harness::start(true, vec![]).await;
+    let (plan_path, pack_path) = harness.minimal_documents(json!({
+        "maxRunSeconds": 120,
+        "maxShotSeconds": 30,
+        "maxAttemptsPerShot": 1,
+        "maxMemoryGb": 96
+    }));
+    let shared_role_prefix = "r".repeat(63);
+    let first_role = format!("{shared_role_prefix}a");
+    let second_role = format!("{shared_role_prefix}b");
+    let sound_role = format!("s{}", "s".repeat(63));
+    let pack_id = format!("film_{}", "p".repeat(59));
+    assert_eq!(first_role.len(), 64);
+    assert_eq!(second_role.len(), 64);
+    assert_eq!(sound_role.len(), 64);
+    assert_eq!(pack_id.len(), 64);
+
+    let mut pack: Value = serde_json::from_slice(&std::fs::read(&pack_path).unwrap()).unwrap();
+    pack["id"] = json!(pack_id);
+    pack["references"][0]["role"] = json!(first_role);
+    let mut second = pack["references"][0].clone();
+    second["role"] = json!(second_role);
+    pack["references"].as_array_mut().unwrap().push(second);
+    let sound = ffmpeg_reachable();
+    if sound {
+        let sound_dir = pack_path.parent().unwrap().join("sound");
+        std::fs::create_dir_all(&sound_dir).unwrap();
+        std::fs::copy(
+            Path::new(FIXTURE_DIR).join("sound/workshop_room_tone.wav"),
+            sound_dir.join("room-tone.wav"),
+        )
+        .unwrap();
+        pack["sound"] = json!([{
+            "role": sound_role,
+            "kind": "ambience",
+            "file": "sound/room-tone.wav"
+        }]);
+    }
+    std::fs::write(&pack_path, serde_json::to_vec_pretty(&pack).unwrap()).unwrap();
+
+    let mut plan: Value = serde_json::from_slice(&std::fs::read(&plan_path).unwrap()).unwrap();
+    for shot in plan["shots"].as_array_mut().unwrap() {
+        shot["continuityRoles"] = json!([first_role, second_role]);
+    }
+    if sound {
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "ambience": { "role": sound_role }
+        });
+    }
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+
+    let mut options = harness.options(plan_path, pack_path, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("the project store accepts every harness-generated tag");
+    assert_eq!(
+        record.outcome,
+        RunOutcome::Completed,
+        "{}",
+        summary(&record)
+    );
+    assert!(record.run_id.starts_with("run_"), "{}", record.run_id);
+    assert_eq!(record.run_id.len(), 36, "a UUID-backed production run id");
+
+    let project_id = record.project_id.as_deref().expect("project");
+    let (_, assets) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    let references: Vec<&Value> = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "reference")
+        .collect();
+    assert_eq!(references.len(), 2, "{assets:#}");
+    let mut role_tags = Vec::new();
+    let mut pack_tags = Vec::new();
+    for asset in references {
+        let provenance = &asset["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert!(
+            provenance["role"] == first_role || provenance["role"] == second_role,
+            "{provenance}"
+        );
+        let tags: Vec<&str> = asset["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-reference"), "{tags:?}");
+        role_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("role:h:"))
+                .expect("long role has a bounded facet")
+                .to_string(),
+        );
+        pack_tags.push(
+            tags.iter()
+                .find(|tag| tag.starts_with("pack:h:"))
+                .expect("long pack id has a bounded facet")
+                .to_string(),
+        );
+    }
+    role_tags.sort();
+    role_tags.dedup();
+    pack_tags.sort();
+    pack_tags.dedup();
+    assert_eq!(role_tags.len(), 2, "role collision: {role_tags:?}");
+    assert_eq!(pack_tags.len(), 1, "one pack identity: {pack_tags:?}");
+
+    if sound {
+        let sounds: Vec<&Value> = assets
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|asset| asset["extra"]["filmHarness"]["kind"] == "sound")
+            .collect();
+        assert_eq!(sounds.len(), 1, "{assets:#}");
+        let provenance = &sounds[0]["extra"]["filmHarness"];
+        assert_eq!(provenance["runId"], record.run_id);
+        assert_eq!(provenance["referencePackId"], pack_id);
+        assert_eq!(provenance["role"], sound_role);
+        let tags: Vec<&str> = sounds[0]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(tags.iter().all(|tag| tag.len() <= 40), "{tags:?}");
+        assert!(tags.contains(&"film-harness-sound"), "{tags:?}");
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("role:h:")),
+            "{tags:?}"
+        );
+        assert!(
+            tags.iter().any(|tag| tag.starts_with("pack:h:")),
+            "{tags:?}"
+        );
+    }
+
+    let take_payload = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .find(|(kind, _, _)| kind == "video_generate")
+        .map(|(_, _, payload)| payload.clone())
+        .expect("one take was dispatched");
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["runId"],
+        record.run_id
+    );
+    assert_eq!(
+        take_payload["advanced"]["filmHarness"]["idempotencyKey"],
+        format!("{}:SH010:a1", record.run_id)
+    );
 }
 
 impl ApiTransport for RouterTransport {
@@ -97,6 +713,58 @@ impl ApiTransport for RouterTransport {
             Ok(BytesResponse { status, bytes })
         })
     }
+}
+
+#[tokio::test]
+async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_compile() {
+    let _env = crate::tests::support::isolate_hf_cache();
+    let harness = Harness::start(true, vec![]).await;
+    let transport = ScriptedTransport::rewriting(
+        harness.app.clone(),
+        "/api/v1/models",
+        only_the_base_partition_is_installed,
+    );
+    let mut draft = FilmDraft::manual_one_shot("project-film", "film-preflight", "Preflight");
+    draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+    let selected = vec!["SH010".to_owned()];
+
+    let ready = film_harness::preflight_documents(
+        &transport,
+        &draft.production_plan,
+        &draft.reference_pack,
+        None,
+        Some(&selected),
+        true,
+    )
+    .await
+    .expect("preflight resolves through the live route contract");
+    assert!(ready.valid, "{:?}", ready.findings);
+    assert_eq!(ready.compiled.as_ref().unwrap().requests.len(), 1);
+    assert!(ready
+        .capabilities
+        .as_ref()
+        .unwrap()
+        .modes
+        .contains(&"text_to_video".to_owned()));
+
+    let compiled = ready.compiled.unwrap();
+    draft.production_plan.shots[0].prompt =
+        "The edited prompt must invalidate the compile.".to_owned();
+    let stale = film_harness::preflight_documents(
+        &transport,
+        &draft.production_plan,
+        &draft.reference_pack,
+        Some(compiled),
+        Some(&selected),
+        true,
+    )
+    .await
+    .expect("staleness is a finding, not a transport failure");
+    assert!(!stale.valid);
+    assert!(stale
+        .findings
+        .iter()
+        .any(|finding| finding.field == "compiled.planSha256"));
 }
 
 /// An [`ApiTransport`] over the in-process router that logs every file DOWNLOAD, and can answer
@@ -255,9 +923,25 @@ pub(crate) enum VideoBehavior {
     HangIgnoringCancel,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum RunningHook {
+    CancelControl(RunControl),
+    WriteCancelSentinel(PathBuf),
+    Notify(Arc<tokio::sync::Notify>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WorkerScript {
     pub(crate) behaviors: Vec<(String, VideoBehavior)>,
+    /// Run this test action at the exact fake-worker transition where the named shot becomes
+    /// running. Cancellation tests use this lifecycle hook instead of racing setup and earlier
+    /// shots with a wall-clock polling timeout.
+    pub(crate) running_hook: Option<(String, RunningHook)>,
+    /// Completed video jobs, recorded only after terminal progress, asset persistence and metrics
+    /// have all landed. The notify turns adoption tests into event-driven barriers instead of a
+    /// fixed wall-clock polling window.
+    settled_video_jobs: Vec<(String, String)>,
+    settled_video_jobs_changed: Arc<tokio::sync::Notify>,
     /// Jobs the fake worker has claimed, in order: (type, job id, payload).
     pub(crate) claimed: Vec<(String, String, Value)>,
     failed_once: Vec<String>,
@@ -274,6 +958,8 @@ pub(crate) struct WorkerScript {
     /// Delay before the fake `frame_extract` job writes its frame, honouring a cancel meanwhile
     /// (sc-22715) — what lets a test spend a review's `maxSeconds` DURING an extraction.
     pub(crate) frame_delay: Option<Duration>,
+    /// Publish the extraction's running transition for tests that synchronize on active work.
+    pub(crate) frame_reports_running: bool,
     /// Capabilities the fake registers with, when a test needs it to leave one to a REAL worker
     /// (`None` advertises every job type the harness drives).
     pub(crate) capabilities: Option<Vec<&'static str>>,
@@ -410,14 +1096,19 @@ fn project_path(
 fn spawn_fake_worker(
     app: axum::Router,
     script: Arc<Mutex<WorkerScript>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
         let capabilities = script
             .lock()
             .capabilities
             .clone()
             .unwrap_or_else(|| FAKE_CAPABILITIES.to_vec());
         register_fake_worker(&app, &capabilities).await;
+        let _ = registered_tx.send(());
         loop {
             let (status, claim) = request(
                 app.clone(),
@@ -456,7 +1147,8 @@ fn spawn_fake_worker(
                 other => panic!("fake worker claimed an unexpected job type {other}"),
             }
         }
-    })
+    });
+    (handle, registered_rx)
 }
 
 async fn post_progress(app: &axum::Router, job_id: &str, body: Value) -> Value {
@@ -496,6 +1188,27 @@ async fn run_fake_video_job(
         }),
     )
     .await;
+    let running_hook = {
+        let mut script = script.lock();
+        if script
+            .running_hook
+            .as_ref()
+            .is_some_and(|(target, _)| target == &shot_id)
+        {
+            script.running_hook.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    };
+    match running_hook {
+        Some(RunningHook::CancelControl(control)) => control.cancel(),
+        Some(RunningHook::WriteCancelSentinel(out_dir)) => {
+            film_harness::request_cancel(&out_dir)
+                .expect("cancel sentinel writes from worker hook");
+        }
+        Some(RunningHook::Notify(notify)) => notify.notify_one(),
+        None => {}
+    }
     match behavior {
         VideoBehavior::HangIgnoringCancel => loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -676,6 +1389,14 @@ async fn run_fake_video_job(
         }),
     )
     .await;
+    let settled_changed = {
+        let mut script = script.lock();
+        script.settled_video_jobs.push((shot_id, job_id.to_owned()));
+        script.settled_video_jobs_changed.clone()
+    };
+    // Retain a permit when the adoption test has not started waiting yet; a broadcast-only notify
+    // could land in the controller-crash window and recreate the race this barrier replaces.
+    settled_changed.notify_one();
 }
 
 /// The `image_generate` job, faked (sc-23403): write a deterministic plate at the REQUESTED
@@ -860,6 +1581,18 @@ async fn run_fake_frame_job(
     job_id: &str,
     job: &Value,
 ) {
+    let reports_running = script.lock().frame_reports_running;
+    if reports_running {
+        post_progress(
+            app,
+            job_id,
+            json!({
+                "status": "running", "stage": "extracting", "progress": 0.1,
+                "message": "Extracting frame.", "workerId": WORKER_ID
+            }),
+        )
+        .await;
+    }
     let delay = script.lock().frame_delay;
     if let Some(delay) = delay {
         let started = std::time::Instant::now();
@@ -1190,7 +1923,13 @@ async fn run_fake_refine_job(
         json!({
             "status": "completed", "stage": "completed", "progress": 1,
             "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
-            "result": { "originalPrompt": prompt, "refinedPrompt": refined }
+            "result": {
+                "originalPrompt": prompt, "refinedPrompt": refined,
+                "executionIdentity": {
+                    "provider": "native", "model": "fixture/model-keyed-refiner",
+                    "backend": "fixture", "thinkingMode": "disabled"
+                }
+            }
         }),
     )
     .await;
@@ -1291,12 +2030,14 @@ async fn run_fake_export_job(
 
 pub(crate) struct Harness {
     pub(crate) app: axum::Router,
+    pub(crate) state: crate::AppState,
     pub(crate) transport: RouterTransport,
     pub(crate) temp_dir: tempfile::TempDir,
     pub(crate) script: Arc<Mutex<WorkerScript>>,
     /// The fake worker's task, when one runs. Behind a lock so a test that started WITHOUT a
     /// worker can script the fake first and spawn it afterwards (`spawn_worker`).
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    server: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
@@ -1324,26 +2065,144 @@ impl Harness {
                 .collect(),
             ..WorkerScript::default()
         }));
-        let worker = with_worker.then(|| spawn_fake_worker(app.clone(), script.clone()));
-        if with_worker {
-            wait_for_fake_worker(&app).await;
+        let (worker, registered) = if with_worker {
+            let (worker, registered) = spawn_fake_worker(app.clone(), script.clone());
+            (Some(worker), Some(registered))
+        } else {
+            (None, None)
+        };
+        if let Some(registered) = registered {
+            registered
+                .await
+                .expect("fake worker stopped before registration completed");
         }
         Self {
             transport: RouterTransport { app: app.clone() },
             app,
+            state,
             temp_dir,
             script,
             worker: Mutex::new(worker),
+            server: None,
+        }
+    }
+
+    /// Start the same in-process fixture with an ephemeral loopback listener. API handlers that
+    /// call back through the configured MCP URL (review/repair) then exercise their real HTTP
+    /// transport while the fake worker remains deterministic and CPU-only.
+    pub(crate) async fn start_http(
+        with_worker: bool,
+        behaviors: Vec<(&str, VideoBehavior)>,
+    ) -> Self {
+        Self::start_http_with_cancel_boundary(with_worker, behaviors, None).await
+    }
+
+    async fn start_http_with_cancel_boundary(
+        with_worker: bool,
+        behaviors: Vec<(&str, VideoBehavior)>,
+        boundary: Option<Arc<CancelBoundaryTransport>>,
+    ) -> Self {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let manifests_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&manifests_dir).expect("manifest dir creates");
+        std::fs::write(
+            manifests_dir.join("builtin.models.jsonc"),
+            include_str!("../../../../config/manifests/builtin.models.jsonc"),
+        )
+        .expect("builtin models writes");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener.local_addr().expect("loopback address");
+        let mut settings = test_settings(&temp_dir);
+        settings.mcp_api_url = format!("http://{address}");
+        let (app, state) = create_app_with_state(settings).expect("app and state create");
+        *state.video_platform_override.lock() = Some("macos");
+        let mut server_app = app.clone();
+        if let Some(boundary) = boundary {
+            server_app = server_app.layer(axum::middleware::from_fn(
+                move |request: Request<Body>, next: axum::middleware::Next| {
+                    let boundary = boundary.clone();
+                    async move {
+                        let path = request.uri().path().to_owned();
+                        let hold = request.method() == "GET"
+                            && path.contains(boundary.needle)
+                            && boundary.armed.swap(false, Ordering::SeqCst);
+                        let mut response = next.run(request).await;
+                        // Successful admission fixtures advertise availability without any weights.
+                        if path == "/api/v1/models" && response.status().is_success() {
+                            let (parts, body) = response.into_parts();
+                            let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                            let mut catalog: Value = serde_json::from_slice(&bytes).unwrap();
+                            for entry in catalog.as_array_mut().unwrap() {
+                                entry["installState"] = json!("installed");
+                                if let Some(variants) = entry["variants"].as_array_mut() {
+                                    for variant in variants {
+                                        variant["installed"] = json!(true);
+                                    }
+                                }
+                            }
+                            response = axum::response::Response::from_parts(
+                                parts,
+                                Body::from(serde_json::to_vec(&catalog).unwrap()),
+                            );
+                            response
+                                .headers_mut()
+                                .remove(axum::http::header::CONTENT_LENGTH);
+                        }
+                        if hold {
+                            assert!(response.status().is_success());
+                            boundary.reached.notify_one();
+                            boundary.release.notified().await;
+                        }
+                        response
+                    }
+                },
+            ));
+        }
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_app)
+                .await
+                .expect("loopback API serves");
+        });
+        let script = Arc::new(Mutex::new(WorkerScript {
+            behaviors: behaviors
+                .into_iter()
+                .map(|(id, behavior)| (id.to_owned(), behavior))
+                .collect(),
+            ..WorkerScript::default()
+        }));
+        let (worker, registered) = if with_worker {
+            let (worker, registered) = spawn_fake_worker(app.clone(), script.clone());
+            (Some(worker), Some(registered))
+        } else {
+            (None, None)
+        };
+        if let Some(registered) = registered {
+            registered
+                .await
+                .expect("fake worker stopped before registration completed");
+        }
+        Self {
+            transport: RouterTransport { app: app.clone() },
+            app,
+            state,
+            temp_dir,
+            script,
+            worker: Mutex::new(worker),
+            server: Some(server),
         }
     }
 
     /// Start the fake worker AFTER the script has been shaped — for a test that needs the fake
     /// to register with a narrower capability set, or to render real clips (sc-22715). Waits for
     /// the registration exactly as `start(true, …)` does.
-    pub(crate) fn spawn_worker(&self) -> impl std::future::Future<Output = ()> + '_ {
-        let handle = spawn_fake_worker(self.app.clone(), self.script.clone());
+    pub(crate) async fn spawn_worker(&self) {
+        let (handle, registered) = spawn_fake_worker(self.app.clone(), self.script.clone());
         *self.worker.lock() = Some(handle);
-        wait_for_fake_worker(&self.app)
+        registered
+            .await
+            .expect("fake worker stopped before registration completed");
     }
 
     pub(crate) fn options(
@@ -1771,25 +2630,10 @@ impl Drop for Harness {
         if let Some(worker) = self.worker.get_mut().take() {
             worker.abort();
         }
-    }
-}
-
-/// Wait for the fake worker to register before the harness looks for it — bounded, not a fixed
-/// sleep, so a slow CI runner cannot turn this into a spurious refusal.
-async fn wait_for_fake_worker(app: &axum::Router) {
-    let mut registered = false;
-    for _ in 0..200 {
-        let (_, workers) = request(app.clone(), "GET", "/api/v1/workers", Value::Null).await;
-        if workers
-            .as_array()
-            .is_some_and(|workers| workers.iter().any(|w| w["id"] == WORKER_ID))
-        {
-            registered = true;
-            break;
+        if let Some(server) = self.server.take() {
+            server.abort();
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(registered, "fake worker did not register within 5s");
 }
 
 /// One line per attempt — the shot, status and error of every attempt plus the export — for
@@ -3003,13 +3847,12 @@ async fn a_failed_attempt_is_retried_only_up_to_the_declared_cap() {
 
 #[tokio::test]
 async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched() {
-    // A job that never finishes on its own, so the ONLY thing that can end the attempt is the run
-    // budget — whether setup took a moment or a while on a loaded runner. `maxShotSeconds` equals
-    // `maxRunSeconds` and the run deadline always comes first (it starts before the attempt does),
-    // so this is the run budget tripping, not the shot budget. The two-shot / one-reference
-    // documents keep the pre-dispatch work (catalog, host, project, imports) small enough that the
-    // budget bounds the RENDER rather than the setup — sc-22711 after a 3s budget expired during
-    // setup on a runner busy with other suites.
+    // A job that never finishes on its own, so once dispatched only the run budget can end it.
+    // `maxShotSeconds` equals `maxRunSeconds` and the run deadline starts first, so it wins the
+    // tie. The run budget deliberately includes setup too: on a loaded runner it may expire before
+    // the first dispatch. Both points must stop all later dispatch and leave the same durable,
+    // terminal run-budget outcome; the focused PollBounds unit test pins the in-flight precedence
+    // without relying on twelve quiet wall-clock seconds.
     let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
     let (plan, pack) = harness.minimal_documents(json!({
         "maxRunSeconds": 12, "maxShotSeconds": 12, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
@@ -3024,31 +3867,46 @@ async fn run_budget_stops_dispatch_and_leaves_the_remaining_shots_undispatched()
         "{:#?}",
         record.shots
     );
-    assert_eq!(
-        record.shots[0].outcome,
-        ShotOutcome::TimedOut,
-        "{:#?}",
-        record.shots[0]
-    );
-    assert_eq!(
-        record.shots[0].attempts.len(),
-        1,
-        "the run budget stops retries too"
-    );
-    assert!(record.shots[0].attempts[0]
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("run exceeded its budget of 12s"));
+    let claimed = harness.script.lock().claimed.len();
+    match record.shots[0].outcome {
+        ShotOutcome::TimedOut => {
+            assert_eq!(
+                record.shots[0].attempts.len(),
+                1,
+                "the run budget stops retries too"
+            );
+            assert!(record.shots[0].attempts[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("run exceeded its budget of 12s"));
+            assert_eq!(claimed, 1, "only the timed-out first job was dispatched");
+        }
+        ShotOutcome::NotDispatched => {
+            assert!(
+                record.shots[0].attempts.is_empty(),
+                "a budget exhausted during setup cannot leave a partial attempt"
+            );
+            assert_eq!(
+                claimed, 0,
+                "a run whose budget expired during setup cannot dispatch after its deadline"
+            );
+        }
+        outcome => panic!("run budget left the first shot in {outcome:?}"),
+    }
     for shot in &record.shots[1..] {
         assert_eq!(shot.outcome, ShotOutcome::NotDispatched, "{shot:?}");
         assert!(shot.attempts.is_empty());
     }
     assert!(record.timeline.is_none());
     assert!(record.export.is_none());
-    let claimed = harness.script.lock().claimed.len();
-    assert_eq!(claimed, 1, "exactly one job was ever dispatched");
-    assert_eq!(harness.run_record()["outcome"], "stopped_run_budget");
+    let stop = record.stop.as_ref().expect("the run records its stop");
+    assert_eq!(stop.reason, "run_budget");
+    assert!(!stop.resumable, "an exhausted run budget is terminal");
+    let persisted = harness.run_record();
+    assert_eq!(persisted["outcome"], "stopped_run_budget");
+    assert_eq!(persisted["stop"]["reason"], "run_budget");
+    assert_eq!(persisted["stop"]["resumable"], false);
 }
 
 /// The memory limit reads the SAME signal a real render produces: the job's `generation_metrics`
@@ -3392,30 +4250,17 @@ async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
     });
     let options = harness.options(plan, harness.fixture_pack(), Some(&["SH010", "SH020"]));
     let control = film_harness::RunControl::new();
-    // Flip the control once a render is actually in flight, not after a fixed sleep, so the test
-    // exercises "canceled with a job running" on every runner rather than racing the import.
-    let signal = tokio::spawn({
-        let control = control.clone();
-        let app = harness.app.clone();
-        async move {
-            for _ in 0..400 {
-                let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
-                let running = jobs.as_array().is_some_and(|jobs| {
-                    jobs.iter()
-                        .any(|job| job["type"] == "video_generate" && job["status"] == "running")
-                });
-                if running {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            control.cancel();
-        }
-    });
+    harness.script.lock().running_hook = Some((
+        "SH010".to_owned(),
+        RunningHook::CancelControl(control.clone()),
+    ));
     let record = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .expect("run finishes with a record");
-    signal.await.expect("signal task");
+    assert!(
+        harness.script.lock().running_hook.is_none(),
+        "the fake worker observed SH010 running and consumed the cancellation hook"
+    );
 
     // sc-22711 gives a cancel its own outcome and a RESUMABLE stop, rather than folding it into
     // `failed` with a diagnostic: nothing went wrong, and the run can be picked back up.
@@ -3436,6 +4281,23 @@ async fn an_operator_cancel_stops_the_run_and_still_writes_the_record() {
     )
     .await;
     assert_eq!(job["status"], "canceled", "{job}");
+    let (status, _) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (_, visible_jobs) = request(harness.app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        visible_jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|job| job["id"] != job_id),
+        "the canceled attempt is hidden from the queue UI before resume"
+    );
     assert_eq!(record.shots[1].outcome, ShotOutcome::NotDispatched);
     let on_disk = harness.run_record();
     assert_eq!(on_disk["outcome"], "canceled");
@@ -3902,58 +4764,43 @@ pub(crate) fn harness_record(harness: &Harness) -> RunRecord {
 /// Block until `shot_id`'s job has finished, its assets are persisted AND its metrics block has
 /// landed — everything a resume needs to ADOPT the attempt rather than poll it. Without this a
 /// resume races the fake worker and exercises the dispatch path instead of the reconciliation one.
-async fn wait_for_settled_shot(app: &axum::Router, shot_id: &str) -> String {
-    for _ in 0..800 {
-        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
-        let job_id = jobs
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|job| job["payload"]["advanced"]["filmHarness"]["shotId"] == shot_id)
-            .and_then(|job| job["id"].as_str())
-            .map(str::to_owned);
-        if let Some(job_id) = job_id {
-            let (_, job) = request(
-                app.clone(),
-                "GET",
-                &format!("/api/v1/jobs/{job_id}"),
-                Value::Null,
-            )
-            .await;
-            let (_, metrics) = request(
-                app.clone(),
-                "GET",
-                &format!("/api/v1/jobs/{job_id}/metrics"),
-                Value::Null,
-            )
-            .await;
-            if job["status"] == "completed"
-                && job["result"]["assets"].is_array()
-                && !metrics.is_null()
+async fn wait_for_settled_shot(
+    app: &axum::Router,
+    script: &Arc<Mutex<WorkerScript>>,
+    shot_id: &str,
+) -> String {
+    let job_id = loop {
+        let changed = {
+            let script = script.lock();
+            if let Some((_, job_id)) = script
+                .settled_video_jobs
+                .iter()
+                .find(|(settled_shot_id, _)| settled_shot_id == shot_id)
             {
-                return job_id;
+                break job_id.clone();
             }
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the job for {shot_id} never settled");
-}
-
-/// Block until `shot_id`'s job is actually running, so a cancel lands mid-flight rather than at
-/// whatever point a fixed sleep happens to reach on a loaded runner.
-pub(crate) async fn wait_for_running_shot(app: &axum::Router, shot_id: &str) {
-    for _ in 0..800 {
-        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
-        let running = jobs.as_array().into_iter().flatten().any(|job| {
-            job["payload"]["advanced"]["filmHarness"]["shotId"] == shot_id
-                && job["status"] == "running"
-        });
-        if running {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("{shot_id} never reached running");
+            script.settled_video_jobs_changed.clone().notified_owned()
+        };
+        changed.await;
+    };
+    let (_, job) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    let (_, metrics) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}/metrics"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(job["status"], "completed", "{job}");
+    assert!(job["result"]["assets"].is_array(), "{job}");
+    assert!(!metrics.is_null(), "metrics missing for {job_id}");
+    job_id
 }
 
 #[tokio::test]
@@ -3984,18 +4831,17 @@ async fn a_cancel_stops_dispatch_keeps_finished_takes_and_the_run_resumes() {
     );
     // Trip the cancel once SH010 is safely rendered and SH020 is hanging.
     let control = RunControl::new();
-    let app = harness.app.clone();
-    let waiter = tokio::spawn({
-        let control = control.clone();
-        async move {
-            wait_for_running_shot(&app, "SH020").await;
-            control.cancel();
-        }
-    });
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::CancelControl(control.clone()),
+    ));
     let record = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .expect("a canceled run still returns its record");
-    waiter.await.expect("waiter joins");
+    assert!(
+        harness.script.lock().running_hook.is_none(),
+        "the fake worker observed SH020 running and consumed the cancellation hook"
+    );
 
     assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
     let stop = record.stop.as_ref().expect("a stop reason");
@@ -4032,8 +4878,8 @@ async fn a_cancel_stops_dispatch_keeps_finished_takes_and_the_run_resumes() {
     assert!(record.export.is_none(), "a cancel dispatches no export");
     assert_eq!(harness.run_record()["outcome"], "canceled");
 
-    // Resuming finishes the job: SH020 gets its remaining attempt, SH030 is dispatched, and SH010's
-    // take is reused rather than re-rendered.
+    // Resuming reads the hidden job back by exact id, finishes the run, and never duplicates the
+    // completed take: SH020 gets its remaining attempt, SH030 is dispatched, and SH010 is reused.
     harness
         .script
         .lock()
@@ -4077,16 +4923,17 @@ async fn a_cancel_sentinel_written_by_another_process_stops_the_run() {
     // The control a `film-harness run` builds: it watches its own run directory, which is how
     // `film-harness cancel --out DIR` in another shell reaches it.
     let control = RunControl::watching(&harness.out_dir());
-    let out_dir = harness.out_dir();
-    let app = harness.app.clone();
-    let waiter = tokio::spawn(async move {
-        wait_for_running_shot(&app, "SH010").await;
-        film_harness::request_cancel(&out_dir).expect("sentinel writes");
-    });
+    harness.script.lock().running_hook = Some((
+        "SH010".to_owned(),
+        RunningHook::WriteCancelSentinel(harness.out_dir()),
+    ));
     let record = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .expect("a canceled run still returns its record");
-    waiter.await.expect("waiter joins");
+    assert!(
+        harness.script.lock().running_hook.is_none(),
+        "the fake worker observed SH010 running and wrote the cancel sentinel"
+    );
     assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
     assert!(record.stop.as_ref().expect("stop").resumable);
     assert_eq!(
@@ -4160,16 +5007,17 @@ async fn a_resume_inherits_the_wall_clock_already_spent() {
     }));
     let options = harness.options(plan, pack, None);
     let control = RunControl::watching(&harness.out_dir());
-    let out_dir = harness.out_dir();
-    let app = harness.app.clone();
-    let waiter = tokio::spawn(async move {
-        wait_for_running_shot(&app, "SH010").await;
-        film_harness::request_cancel(&out_dir).expect("sentinel writes");
-    });
+    harness.script.lock().running_hook = Some((
+        "SH010".to_owned(),
+        RunningHook::WriteCancelSentinel(harness.out_dir()),
+    ));
     let record = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .unwrap();
-    waiter.await.expect("waiter joins");
+    assert!(
+        harness.script.lock().running_hook.is_none(),
+        "the fake worker observed SH010 running and wrote the cancel sentinel"
+    );
     assert_eq!(record.outcome, RunOutcome::Canceled, "{}", summary(&record));
     assert!(record.is_resumable());
     let dispatched = harness.api_video_job_count().await;
@@ -4965,7 +5813,7 @@ async fn an_over_budget_peak_adopted_on_a_resume_stops_new_dispatch() {
         "the controller never learned the job id, so the resume must reconcile it"
     );
     // Let the render finish before the resume, so the attempt is ADOPTED rather than polled.
-    wait_for_settled_shot(&harness.app, "SH010").await;
+    wait_for_settled_shot(&harness.app, &harness.script, "SH010").await;
 
     let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
         .await
@@ -5058,7 +5906,7 @@ async fn an_adopted_attempt_without_a_recorded_partition_falls_back_and_backfill
     );
 
     // Let the render settle so the resume adopts a COMPLETED job and imports its take.
-    wait_for_settled_shot(&harness.app, "SH010").await;
+    wait_for_settled_shot(&harness.app, &harness.script, "SH010").await;
     let resumed = film_harness::resume(&harness.transport, &harness.resume_options())
         .await
         .expect("the resume adopts the in-flight job");
@@ -5115,18 +5963,17 @@ async fn replacing_a_take_leaves_a_canceled_runs_resumable_stop_in_place() {
         Some(&["SH010", "SH020", "SH030"]),
     );
     let control = RunControl::new();
-    let app = harness.app.clone();
-    let waiter = tokio::spawn({
-        let control = control.clone();
-        async move {
-            wait_for_running_shot(&app, "SH020").await;
-            control.cancel();
-        }
-    });
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::CancelControl(control.clone()),
+    ));
     let canceled = film_harness::run_with_control(&harness.transport, &options, &control)
         .await
         .expect("a canceled run still returns its record");
-    waiter.await.expect("waiter joins");
+    assert!(
+        harness.script.lock().running_hook.is_none(),
+        "the fake worker observed SH020 running and consumed the cancellation hook"
+    );
     assert_eq!(
         canceled.outcome,
         RunOutcome::Canceled,
@@ -5998,8 +6845,8 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
         "an edited sequence leaves the existing export stale: {on_disk}"
     );
 
-    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so there is
-    //    no attempt to select and the shot's selection stays exactly where it was. (The other
+    // 3. The asset swapped in here is a reference PLATE, not a take this run rendered, so the saved
+    //    cut changes while selectedAttempt continues to record the last generation selection. (The other
     //    branch — a swap onto an asset that IS one of the shot's takes — moves the selection, and
     //    is proved in `swapping_onto_an_existing_take_moves_the_shots_selected_attempt`.)
     let sh010 = on_disk["shots"]
@@ -6011,7 +6858,7 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
     assert_eq!(
         sh010["selectedAttempt"],
         json!(1),
-        "a swap onto a foreign asset selects no attempt: {sh010}"
+        "a foreign cut asset does not invent or erase generation provenance: {sh010}"
     );
 
     // A reorder that does not name the whole sequence is refused rather than silently dropping a
@@ -6522,6 +7369,8 @@ pub(crate) fn planner_options(harness: &Harness, out: &str) -> film_planner::Pla
         refine_prompts: false,
         prompt_guide_path: None,
         require_installed: false,
+        require_local_planner: true,
+        send_reference_pixels: false,
         // Empty: the in-process transport has no URL. The local-only rule is exercised as a unit
         // test in `film_planner` and end to end below.
         api_url: String::new(),
@@ -6560,7 +7409,10 @@ pub(crate) fn refine_job_payloads(harness: &Harness, plan_task_only: bool) -> Ve
 
 pub(crate) fn findings_of(error: HarnessError) -> Vec<String> {
     match error {
-        HarnessError::Validation(findings) => findings.iter().map(ToString::to_string).collect(),
+        HarnessError::Validation(findings) | HarnessError::PlannerValidation { findings, .. } => {
+            findings.iter().map(ToString::to_string).collect()
+        }
+        HarnessError::PlannerExecutionFailure { source, .. } => findings_of(*source),
         other => panic!("expected a validation refusal, got {other}"),
     }
 }
@@ -7115,6 +7967,35 @@ async fn a_dropped_beat_is_repaired_and_the_repair_loop_is_bounded() {
     );
     // Exactly 1 + 2 model calls: the loop is bounded by the declared rounds.
     assert_eq!(harness.script.lock().plan_calls, 3);
+    let prompts = refine_job_payloads(&harness, true);
+    assert_eq!(
+        prompts.len(),
+        3,
+        "the initial request plus exactly two repairs"
+    );
+    for (index, payload) in prompts.iter().enumerate().skip(1) {
+        let prompt = payload["prompt"]
+            .as_str()
+            .expect("each refine job records its prompt");
+        assert!(
+            prompt.contains(&format!("Repair round {index} of 2")),
+            "{prompt}"
+        );
+        let contract = prompt.find("# Output contract").expect("shared contract");
+        let checklist = prompt
+            .rfind("# Final repair checklist")
+            .expect("final repair checklist");
+        let finding = prompt
+            .rfind("required beat \"handover\"")
+            .expect("unchanged draft's exact finding is repeated last");
+        assert!(contract < checklist && checklist < finding, "{prompt}");
+        assert!(
+            prompt.trim_end().ends_with(
+                "Return the whole corrected JSON object. Do not return the draft above unchanged."
+            ),
+            "the repeated invalid output must receive an actionable final instruction: {prompt}"
+        );
+    }
     // Nothing was written but the diagnosable refusal.
     assert!(!options.out_dir.join("plan.json").exists());
     let rejected = std::fs::read_to_string(options.out_dir.join("planner-rejected.txt"))
@@ -7164,9 +8045,9 @@ async fn malformed_and_out_of_envelope_drafts_are_refused_rather_than_coerced() 
             "requires at least one reference role",
         ),
         (
-            "chain as the only anchor",
+            "chain cannot replace required continuity roles",
             draft_text(&unanchored),
-            "the only continuity this shot declares is the chain",
+            "into SH0040's continuityRoles",
         ),
         (
             "missing reference asset",
@@ -8805,4 +9686,693 @@ async fn a_dialogue_entry_with_both_text_and_file_synthesizes_into_the_pinned_pa
         !pinned.exists(),
         "adopting must not re-download the clip into the pack"
     );
+}
+
+#[tokio::test]
+async fn interrupted_human_operations_keep_same_attempt_scope_and_prior_budget_verdict() {
+    for exhausted in [false, true] {
+        for repair in [false, true] {
+            let harness = Harness::start(true, vec![("SH020", VideoBehavior::Hang)]).await;
+            harness.script.lock().running_hook = Some((
+                "SH020".to_owned(),
+                RunningHook::WriteCancelSentinel(harness.out_dir()),
+            ));
+            let options = harness.options(
+                harness.edited_plan(|_| {}),
+                harness.fixture_pack_without_sound(),
+                Some(&["SH010", "SH020", "SH030"]),
+            );
+            let mut before = film_harness::run_with_control(
+                &harness.transport,
+                &options,
+                &RunControl::watching(&harness.out_dir()),
+            )
+            .await
+            .expect("canceled run");
+            assert_eq!(before.outcome, RunOutcome::Canceled);
+            assert!(before.shot("SH010").unwrap().selected_attempt.is_some());
+            assert!(before.shot("SH030").unwrap().attempts.is_empty());
+            if exhausted {
+                before.elapsed_seconds = before.limits.max_run_seconds as f64;
+                before.outcome = RunOutcome::StoppedRunBudget;
+                before.stop = Some(sceneworks_core::film_plan::RunStop {
+                    reason: "run_budget".to_owned(),
+                    detail: "Automatic run budget exhausted".to_owned(),
+                    resumable: false,
+                });
+                std::fs::write(
+                    harness.out_dir().join("run.json"),
+                    serde_json::to_vec_pretty(&before).unwrap(),
+                )
+                .unwrap();
+            }
+            let other_before = other_shots_digest(&before, "SH010");
+            let jobs_before = harness.api_video_job_count().await;
+            harness.script.lock().behaviors.clear();
+            let fault = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+                .on_post_route("/api/v1/video/jobs");
+            let mut resumed_options = harness.resume_options();
+            resumed_options.export = false;
+            let result = if repair {
+                film_harness::review::request_repair(
+                    &fault,
+                    &resumed_options,
+                    "SH010",
+                    "Fix the take",
+                )
+                .await
+            } else {
+                film_harness::replace_take(&fault, &resumed_options, "SH010", "Replace the take")
+                    .await
+            };
+            result.expect_err("controller dies after job dispatch, before receiving its id");
+            assert!(fault.fired());
+            let interrupted = harness_record(&harness);
+            let operation = interrupted
+                .active_take_operation
+                .as_ref()
+                .expect("durable operation before dispatch");
+            assert_eq!(
+                operation.kind,
+                if repair { "repair" } else { "replacement" }
+            );
+            assert_eq!(operation.attempt, 2);
+            assert_eq!(operation.prior_outcome, before.outcome);
+            assert_eq!(operation.prior_stop, before.stop);
+            assert!(interrupted.shot("SH010").unwrap().attempts[1]
+                .job_id
+                .is_none());
+            assert_eq!(harness.api_video_job_count().await, jobs_before + 1);
+            let after = film_harness::resume(&harness.transport, &resumed_options)
+                .await
+                .expect("adopts bounded human operation");
+            assert_eq!(
+                harness.api_video_job_count().await,
+                jobs_before + 1,
+                "recovery cannot mint a new job or resume another shot"
+            );
+            assert_eq!(after.outcome, before.outcome);
+            assert_eq!(after.stop, before.stop);
+            // The pre-crash record is in memory and recovery reads JSON. Permit only a single
+            // representational ULP; any measurable automatic budget charge still fails.
+            assert!(
+                (after.elapsed_seconds - before.elapsed_seconds).abs()
+                    <= before.elapsed_seconds.abs().max(1.0) * f64::EPSILON,
+                "human recovery cannot charge the automatic budget: {} -> {}",
+                before.elapsed_seconds,
+                after.elapsed_seconds
+            );
+            assert!(after.human_requested_elapsed_seconds > before.human_requested_elapsed_seconds);
+            assert!(after.active_take_operation.is_none());
+            let shot = after.shot("SH010").unwrap();
+            assert_eq!(shot.attempts.len(), 2);
+            assert_eq!(shot.selected_attempt, Some(2));
+            assert_eq!(shot.attempts[1].idempotency_key, operation.idempotency_key);
+            assert!(shot.attempts[1].job_id.is_some());
+            assert_eq!(other_shots_digest(&after, "SH010"), other_before);
+        }
+    }
+}
+
+#[path = "film_action_errors.rs"]
+mod action_errors;
+
+/// Hold a successful read at the asynchronous boundary where another process can Cancel.
+struct CancelBoundaryTransport {
+    inner: RouterTransport,
+    needle: &'static str,
+    armed: AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl CancelBoundaryTransport {
+    fn new(app: axum::Router, needle: &'static str) -> Self {
+        Self {
+            inner: RouterTransport { app },
+            needle,
+            armed: AtomicBool::new(true),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn cancel_at_barrier(&self, directory: &Path) {
+        tokio::time::timeout(Duration::from_secs(30), self.reached.notified())
+            .await
+            .expect("controller reaches read barrier");
+        film_harness::request_cancel(directory).expect("fresh cancellation is accepted");
+        self.release.notify_one();
+    }
+}
+
+impl ApiTransport for CancelBoundaryTransport {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        let hold = request.method == "GET"
+            && request.path.contains(self.needle)
+            && self.armed.swap(false, Ordering::SeqCst);
+        Box::pin(async move {
+            let response = self.inner.call(request).await?;
+            if hold {
+                assert_eq!(response.status, 200);
+                self.reached.notify_one();
+                self.release.notified().await;
+            }
+            Ok(response)
+        })
+    }
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.inner.get_bytes(path)
+    }
+}
+
+async fn r15_pending_video(harness: &Harness, delivered: bool) {
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 60, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+    }));
+    let mut options = harness.options(plan, pack, Some(&["SH010"]));
+    options.export = false;
+    let fault = FaultTransport::new(
+        harness.app.clone(),
+        1,
+        if delivered {
+            FaultMode::After
+        } else {
+            FaultMode::Before
+        },
+    )
+    .on_post_route("/video/jobs");
+    film_harness::run(&fault, &options)
+        .await
+        .expect_err("crash at video dispatch");
+    assert!(fault.fired());
+}
+
+#[tokio::test]
+async fn r15_fresh_cancel_during_resume_admission_is_not_consumed() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    r15_pending_video(&harness, false).await;
+    let transport = CancelBoundaryTransport::new(harness.app.clone(), "/workers");
+    let mut options = harness.resume_options();
+    options.export = false;
+    options.control = RunControl::watching(&harness.out_dir());
+    let directory = harness.out_dir();
+    let (result, ()) = tokio::join!(
+        film_harness::resume(&transport, &options),
+        transport.cancel_at_barrier(&directory),
+    );
+    let record = result.expect("cancellation settles");
+    assert!(
+        harness.out_dir().join("cancel.requested").exists(),
+        "fresh cancel must survive admission"
+    );
+    assert_eq!(record.outcome, RunOutcome::Canceled);
+    assert_eq!(record.shot("SH010").unwrap().outcome, ShotOutcome::Canceled);
+    assert_eq!(harness.api_video_job_count().await, 0);
+    assert_eq!(record.shot("SH010").unwrap().attempts.len(), 1);
+}
+
+#[tokio::test]
+async fn r15_cancel_during_video_lookup_prevents_new_dispatch() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let (plan, pack) = harness.minimal_documents(json!({
+        "maxRunSeconds": 600, "maxShotSeconds": 60, "maxAttemptsPerShot": 3, "maxMemoryGb": 96
+    }));
+    let mut options = harness.options(plan, pack, Some(&["SH010"]));
+    options.export = false;
+    let transport = CancelBoundaryTransport::new(harness.app.clone(), "/api/v1/jobs?");
+    let control = RunControl::watching(&harness.out_dir());
+    let directory = harness.out_dir();
+    let (result, ()) = tokio::join!(
+        film_harness::run_with_control(&transport, &options, &control),
+        transport.cancel_at_barrier(&directory),
+    );
+    assert_eq!(result.unwrap().outcome, RunOutcome::Canceled);
+    assert_eq!(
+        harness.api_video_job_count().await,
+        0,
+        "no new POST after cancellation during lookup"
+    );
+    let pending = film_harness::read_run_record(&directory).unwrap();
+    let key = pending.shot("SH010").unwrap().attempts[0]
+        .idempotency_key
+        .clone();
+    let mut retry = harness.resume_options();
+    retry.export = false;
+    retry.control = RunControl::watching(&directory);
+    let resumed = film_harness::resume(&harness.transport, &retry)
+        .await
+        .unwrap();
+    let shot = resumed.shot("SH010").unwrap();
+    assert_eq!(
+        shot.attempts.len(),
+        1,
+        "cancellation does not consume another attempt"
+    );
+    assert_eq!(shot.selected_attempt, Some(1));
+    assert_eq!(shot.attempts[0].idempotency_key, key);
+    assert_eq!(harness.api_video_job_count().await, 1);
+}
+
+#[tokio::test]
+async fn r15_api_accepted_resume_replace_and_repair_preserve_cancel_during_admission() {
+    for action in ["resume", "review/replace", "review/repair"] {
+        let barrier = Arc::new(CancelBoundaryTransport::new(
+            axum::Router::new(),
+            "/workers",
+        ));
+        barrier.armed.store(false, Ordering::SeqCst);
+        let harness =
+            Harness::start_http_with_cancel_boundary(true, fast(&["SH010"]), Some(barrier.clone()))
+                .await;
+        let project = harness
+            .state
+            .project_store
+            .create_project("R15 acceptance")
+            .unwrap();
+        let mut draft = FilmDraft::manual_one_shot(&project.id, "draft_r15", "R15");
+        draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
+        draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+        harness
+            .state
+            .project_store
+            .create_film_draft_document(&project.id, draft)
+            .unwrap();
+        harness
+            .state
+            .project_store
+            .create_film_run(
+                &project.id,
+                "run_r15",
+                "draft_r15",
+                vec!["SH010".to_owned()],
+                None,
+            )
+            .unwrap();
+        let files = harness
+            .state
+            .project_store
+            .film_run_files(&project.id, "run_r15")
+            .unwrap();
+        let options = RunOptions {
+            plan_path: files.plan,
+            reference_pack_path: files.reference_pack,
+            compiled_path: None,
+            project_id: Some(project.id.clone()),
+            shot_ids: Some(vec!["SH010".to_owned()]),
+            out_dir: files.directory.clone(),
+            poll_interval: Duration::from_millis(25),
+            export: false,
+            require_installed: false,
+        };
+        if action == "resume" {
+            let fault = FaultTransport::new(harness.app.clone(), 1, FaultMode::Before)
+                .on_post_route("/video/jobs");
+            film_harness::run(&fault, &options).await.unwrap_err();
+        } else {
+            film_harness::run(&harness.transport, &options)
+                .await
+                .unwrap();
+        }
+        let before = film_harness::read_run_record(&files.directory).unwrap();
+        let jobs_before = harness.api_video_job_count().await;
+        // This old marker belongs to the previous controller, not the newly accepted action.
+        film_harness::request_cancel(&files.directory).unwrap();
+        barrier.armed.store(true, Ordering::SeqCst);
+        let base = format!("/api/v1/projects/{}/film-runs/run_r15", project.id);
+        let (status, response) = request(
+            harness.app.clone(),
+            "POST",
+            &format!("{base}/{action}"),
+            json!({"shotId":"SH010", "reason":"R15"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::ACCEPTED,
+            "{action}: {response}"
+        );
+        tokio::time::timeout(Duration::from_secs(30), barrier.reached.notified())
+            .await
+            .unwrap();
+        assert!(
+            !files.directory.join("cancel.requested").exists(),
+            "explicit acceptance consumed the old marker before admission"
+        );
+        let (status, response) = request(
+            harness.app.clone(),
+            "POST",
+            &format!("{base}/cancel"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{response}");
+        barrier.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !film_harness::ControllerLease::is_active(&files.directory).unwrap() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("accepted action settles");
+        assert!(
+            files.directory.join("cancel.requested").exists(),
+            "{action} retained fresh cancel"
+        );
+        assert_eq!(
+            harness.api_video_job_count().await,
+            jobs_before,
+            "{action} dispatched no new video"
+        );
+        let after = film_harness::read_run_record(&files.directory).unwrap();
+        assert_eq!(
+            after.shot("SH010").unwrap().attempts.len(),
+            before.shot("SH010").unwrap().attempts.len()
+        );
+        assert_eq!(
+            selected_identity(&after, "SH010"),
+            selected_identity(&before, "SH010")
+        );
+        if action != "resume" {
+            assert_eq!(
+                film_harness::read_action_operation(&files.directory)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "canceled"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn r15_startup_pending_and_fresh_cancel_adopt_existing_video_without_redispatch() {
+    for (fresh, exhausted) in [(false, false), (true, false), (false, true)] {
+        let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+        r15_pending_video(&harness, true).await;
+        if exhausted {
+            harness.edit_run_record(|record| record["elapsedSeconds"] = json!(600.0));
+        }
+        let original = harness
+            .jobs()
+            .await
+            .into_iter()
+            .find(|job| job["type"] == "video_generate")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        std::fs::write(
+            harness.out_dir().join(film_harness::CONTROLLER_LOCK_FILE),
+            "owner=api:interrupted\npid=999999\n",
+        )
+        .unwrap();
+        if !fresh {
+            film_harness::request_cancel(&harness.out_dir()).unwrap();
+        }
+        let lease =
+            film_harness::ControllerLease::acquire_interrupted(&harness.out_dir(), "api:startup")
+                .unwrap()
+                .unwrap();
+        let mut options = harness.resume_options();
+        options.export = false;
+        options.control = RunControl::watching(&harness.out_dir());
+        let transport = CancelBoundaryTransport::new(harness.app.clone(), "/workers");
+        let directory = harness.out_dir();
+        let (result, ()) = tokio::join!(
+            film_harness::resume_with_lease(&transport, &options, lease),
+            async {
+                tokio::time::timeout(Duration::from_secs(30), transport.reached.notified())
+                    .await
+                    .unwrap();
+                if fresh {
+                    film_harness::request_cancel(&directory).unwrap();
+                }
+                transport.release.notify_one();
+            }
+        );
+        let record = result.unwrap();
+        assert!(directory.join("cancel.requested").exists());
+        assert_eq!(record.outcome, RunOutcome::Canceled);
+        let attempt = &record.shot("SH010").unwrap().attempts[0];
+        assert_eq!(attempt.job_id.as_deref(), Some(original.as_str()));
+        assert_eq!(attempt.status, "canceled_by_operator");
+        assert_eq!(harness.api_video_job_count().await, 1);
+        if exhausted {
+            let resumed = film_harness::resume(&harness.transport, &options)
+                .await
+                .unwrap();
+            assert_eq!(resumed.outcome, RunOutcome::StoppedRunBudget);
+            assert_eq!(
+                harness.api_video_job_count().await,
+                1,
+                "cancellation cannot replenish the spent budget"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn r15_active_take_resume_retains_cancel_and_authorized_jobless_attempt() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    r15_pending_video(&harness, false).await;
+    let mut options = harness.resume_options();
+    options.export = false;
+    film_harness::resume(&harness.transport, &options)
+        .await
+        .unwrap();
+    let fault =
+        FaultTransport::new(harness.app.clone(), 1, FaultMode::Before).on_post_route("/video/jobs");
+    film_harness::replace_take(&fault, &options, "SH010", "repair framing")
+        .await
+        .unwrap_err();
+    let before = film_harness::read_run_record(&harness.out_dir()).unwrap();
+    let transport = CancelBoundaryTransport::new(harness.app.clone(), "/workers");
+    options.control = RunControl::watching(&harness.out_dir());
+    let directory = harness.out_dir();
+    let (result, ()) = tokio::join!(
+        film_harness::resume(&transport, &options),
+        transport.cancel_at_barrier(&directory)
+    );
+    let record = result.unwrap();
+    assert_eq!(record.outcome, RunOutcome::Canceled);
+    assert!(directory.join("cancel.requested").exists());
+    assert_eq!(record.active_take_operation, before.active_take_operation);
+    assert_eq!(record.shot("SH010").unwrap().attempts.len(), 2);
+    assert_eq!(harness.api_video_job_count().await, 1);
+    let mut retry = harness.resume_options();
+    retry.export = false;
+    let resumed = film_harness::resume(&harness.transport, &retry)
+        .await
+        .unwrap();
+    assert_eq!(resumed.shot("SH010").unwrap().selected_attempt, Some(2));
+    assert_eq!(harness.api_video_job_count().await, 2);
+}
+
+#[tokio::test]
+async fn r15_video_lookup_adopts_and_cancels_existing_job() {
+    let harness = Harness::start(true, vec![("SH010", VideoBehavior::Hang)]).await;
+    r15_pending_video(&harness, true).await;
+    let id = harness.jobs().await[0]["id"].as_str().unwrap().to_owned();
+    let transport = CancelBoundaryTransport::new(harness.app.clone(), "/api/v1/jobs?");
+    let mut options = harness.resume_options();
+    options.export = false;
+    options.control = RunControl::watching(&harness.out_dir());
+    let directory = harness.out_dir();
+    let (result, ()) = tokio::join!(
+        film_harness::resume(&transport, &options),
+        transport.cancel_at_barrier(&directory)
+    );
+    let record = result.unwrap();
+    assert_eq!(harness.api_video_job_count().await, 1);
+    let attempt = &record.shot("SH010").unwrap().attempts[0];
+    assert_eq!(attempt.job_id.as_deref(), Some(id.as_str()));
+    assert_eq!(attempt.status, "canceled_by_operator");
+    assert_eq!(record.outcome, RunOutcome::Canceled);
+}
+
+#[tokio::test]
+async fn r15_audio_lookup_cancel_prevents_dispatch_or_cancels_exact_existing_job() {
+    for existing in [false, true] {
+        let harness = Harness::start(true, fast(&["SH010"])).await;
+        harness.script.lock().audio_hangs = true;
+        let mut options = harness.options(
+            harness.fixture_plan(),
+            speech_pack(&harness, |_| {}),
+            Some(&["SH020"]),
+        );
+        options.export = false;
+        if existing {
+            let fault = FaultTransport::new(harness.app.clone(), 1, FaultMode::After)
+                .on_post_route("/audio/jobs");
+            film_harness::run(&fault, &options).await.unwrap_err();
+            assert!(fault.fired());
+        }
+        let original = harness
+            .jobs()
+            .await
+            .into_iter()
+            .find(|job| job["type"] == "audio_generate")
+            .map(|job| job["id"].as_str().unwrap().to_owned());
+        let transport = CancelBoundaryTransport::new(harness.app.clone(), "/api/v1/jobs?");
+        let directory = harness.out_dir();
+        let control = RunControl::watching(&directory);
+        let mut resume = harness.resume_options();
+        resume.export = false;
+        resume.control = control.clone();
+        let (result, ()) = tokio::join!(
+            async {
+                if existing {
+                    film_harness::resume(&transport, &resume).await
+                } else {
+                    film_harness::run_with_control(&transport, &options, &control).await
+                }
+            },
+            transport.cancel_at_barrier(&directory)
+        );
+        let record = result.unwrap();
+        assert_eq!(record.outcome, RunOutcome::Canceled);
+        assert_eq!(
+            audio_job_count(&harness, record.project_id.as_deref().unwrap()).await,
+            usize::from(existing)
+        );
+        assert_eq!(harness.api_video_job_count().await, 0);
+        assert_eq!(record.synthesized_sound.len(), 1);
+        let line = &record.synthesized_sound[0];
+        assert_eq!(line.job_id, original);
+        assert_eq!(line.attempt, 1);
+        if existing {
+            assert_eq!(line.status, "canceled_by_operator");
+        } else {
+            assert!(line.error.as_ref().unwrap().contains("canceled"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn r15_both_export_lookup_routes_cancel_without_new_dispatch_and_adopt_existing() {
+    for explicit in [false, true] {
+        for existing in [false, true] {
+            let harness = Harness::start(true, fast(&["SH010"])).await;
+            r15_pending_video(&harness, false).await;
+            let mut setup = harness.resume_options();
+            setup.export = false;
+            film_harness::resume(&harness.transport, &setup)
+                .await
+                .unwrap();
+            harness.script.lock().export_hangs = true;
+            let fault = FaultTransport::new(
+                harness.app.clone(),
+                1,
+                if existing {
+                    FaultMode::After
+                } else {
+                    FaultMode::Before
+                },
+            )
+            .on_post_route("/exports");
+            // Persist a real export intention, with either a lost response or no delivered POST.
+            film_harness::start_explicit_export(&fault, &setup)
+                .await
+                .unwrap_err();
+            assert!(fault.fired());
+            let original = harness
+                .jobs()
+                .await
+                .into_iter()
+                .find(|job| job["type"] == "timeline_export")
+                .map(|job| job["id"].as_str().unwrap().to_owned());
+            if !explicit {
+                harness.edit_run_record(|record| {
+                    record["state"] = json!("running");
+                    record["outcome"] = json!("failed");
+                    record["stop"] = json!({"reason":"export_failed", "detail":"interrupted export", "resumable":true});
+                });
+            }
+            let transport = CancelBoundaryTransport::new(harness.app.clone(), "/api/v1/jobs?");
+            let mut options = harness.resume_options();
+            options.control = RunControl::watching(&harness.out_dir());
+            let directory = harness.out_dir();
+            let (result, ()) = tokio::join!(
+                async {
+                    if explicit {
+                        let _lease = film_harness::ControllerLease::acquire_new_action(
+                            &directory,
+                            "export-r15",
+                        )?;
+                        let (_, task) =
+                            film_harness::start_explicit_export(&transport, &options).await?;
+                        film_harness::finish_explicit_export(&transport, &options, &task).await
+                    } else {
+                        film_harness::resume(&transport, &options).await
+                    }
+                },
+                transport.cancel_at_barrier(&directory)
+            );
+            assert_eq!(
+                harness
+                    .jobs()
+                    .await
+                    .iter()
+                    .filter(|job| job["type"] == "timeline_export")
+                    .count(),
+                usize::from(existing)
+            );
+            assert_eq!(harness.api_video_job_count().await, 1);
+            if explicit && !existing {
+                assert!(matches!(result, Err(HarnessError::Canceled(_))));
+                assert_eq!(
+                    film_harness::read_action_operation(&directory)
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "canceled"
+                );
+                assert!(film_harness::read_run_record(&directory)
+                    .unwrap()
+                    .export_pending
+                    .is_some());
+            } else {
+                let record = result.unwrap();
+                if existing {
+                    let export = record.export.unwrap();
+                    assert_eq!(Some(export.job_id), original);
+                    assert_eq!(export.status, "canceled_by_operator");
+                } else {
+                    assert_eq!(record.outcome, RunOutcome::Canceled);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn r15_explicit_replace_and_repair_consume_only_previous_cancellation() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    r15_pending_video(&harness, false).await;
+    let mut options = harness.resume_options();
+    options.export = false;
+    film_harness::resume(&harness.transport, &options)
+        .await
+        .unwrap();
+    for repair in [false, true] {
+        film_harness::request_cancel(&harness.out_dir()).unwrap();
+        options.control = RunControl::watching(&harness.out_dir());
+        let record = if repair {
+            film_harness::review::request_repair(&harness.transport, &options, "SH010", "repair")
+                .await
+        } else {
+            film_harness::replace_take(&harness.transport, &options, "SH010", "replace").await
+        }
+        .unwrap();
+        assert!(!harness.out_dir().join("cancel.requested").exists());
+        assert_eq!(
+            record.shot("SH010").unwrap().selected_attempt,
+            Some(if repair { 3 } else { 2 })
+        );
+        assert_eq!(record.shot("SH010").unwrap().automatic_attempts(), 1);
+    }
 }

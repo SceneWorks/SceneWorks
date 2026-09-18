@@ -89,3 +89,20 @@ describe("styles.css: the two chip kinds are visually distinct", () => {
     }
   });
 });
+
+describe("styles.css: an expanded film workspace cannot cover editor controls", () => {
+  const editor = ruleBody(".ve-editor");
+  const film = ruleBody(".ve-film");
+  const upper = ruleBody(".ve-upper");
+
+  it("bounds the film authoring pane and gives overflow a scroll path", () => {
+    expect(declaration(editor, "overflow-y")).toBe("auto");
+    expect(declaration(film, "max-height")).toBeTruthy();
+    expect(declaration(film, "overflow-y")).toBe("auto");
+  });
+
+  it("keeps the Program Monitor row tall enough to own its hit targets", () => {
+    expect(declaration(upper, "flex")).toContain("240px");
+    expect(declaration(upper, "min-height")).toBe("240px");
+  });
+});

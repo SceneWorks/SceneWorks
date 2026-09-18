@@ -23,6 +23,8 @@ pub mod film_compile;
 pub mod film_plan;
 pub mod film_planner;
 pub mod film_review;
+pub mod film_timeline;
+pub mod film_workspace;
 pub mod hf_home;
 pub mod hf_repo_renames;
 pub mod ideogram_caption;

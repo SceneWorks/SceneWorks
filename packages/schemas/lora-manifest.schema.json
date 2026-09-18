@@ -124,6 +124,12 @@
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "description": "The AUDIO sigma shift the adapter was trained against. MiniMax-H3 runs dual schedulers and the audio one is a genuinely separate axis, so it is declared per variant and recorded on the asset as `effectiveAudioSchedulerShift`. ⚠️ It is NOT a request knob: `mlx-gen-minimax-h3` holds audio at its own `AUDIO_SIGMA_SHIFT` constant and exposes no override, because every published variant trains at 3.0 (12/3 and 6/3 are the two published pairs). Declaring it anyway is what makes a future variant that moves it LOUD instead of silently rendering on 3.0 — `every_turbo_variant_declares_the_audio_shift_the_engine_is_fixed_at` fails the moment a declared value diverges."
+              },
+              "trainingShortEdge": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "description": "Optional positive u32 short edge, in pixels, of the canvas used to distil this adapter. The film planner uses it only to choose among otherwise compatible installed accelerator recipes for the requested output canvas; it never changes the render resolution. The Rust parser reads this field as u64 then narrows it to u32, so the schema carries the same upper bound."
               }
             }
           },

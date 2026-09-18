@@ -1,9 +1,8 @@
 // Hide the extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// On-demand keychain credential socket for the MLX worker (sc-5891). macOS-only:
-// it replaces the eager spawn-time keychain reads that prompted at every launch.
-#[cfg(target_os = "macos")]
+// On-demand OS-credential bridge for the API sidecar on every desktop platform
+// and the MLX worker on macOS (sc-5891, sc-23730).
 mod cred_ipc;
 // First-run CUDA/onnxruntime redist downloader (Windows candle build): the heavy GPU
 // runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first

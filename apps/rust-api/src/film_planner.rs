@@ -22,14 +22,16 @@
 //! if the environment carries a hosted-LLM credential or endpoint, or if the API being driven is
 //! not on this machine or this private network.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, COMPILED_PLAN_SCHEMA_VERSION,
+    compile_plan, CompileInputs, CompiledPlan, PlannerCostRecord, PlannerExecutionRecord,
+    COMPILED_PLAN_SCHEMA_VERSION,
 };
 use sceneworks_core::film_plan::{self, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack};
 use sceneworks_core::film_planner::{
@@ -98,6 +100,16 @@ pub struct LlmRequest {
     /// it. The worker appends it to the rewrite's system turn under `# Model prompt guide`; with
     /// none, the rewrite runs on the guide-less system prompt.
     pub guide: Option<String>,
+    /// Approved reference images available to an external, image-capable planner. Local planners
+    /// ignore these; the external adapter sends them only after both user opt-in and connection
+    /// capability checks.
+    pub reference_images: Vec<PlannerReferenceImage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannerReferenceImage {
+    pub role: String,
+    pub path: PathBuf,
 }
 
 /// One completed LLM request: the text, and what it cost (sc-22715). `job_id` and
@@ -106,12 +118,17 @@ pub struct LlmRequest {
 #[derive(Debug, Clone, Default)]
 pub struct LlmReply {
     pub text: String,
+    pub thinking: Option<String>,
     pub job_id: Option<String>,
+    pub execution: Option<PlannerExecutionRecord>,
     pub elapsed_seconds: f64,
     pub peak_memory_bytes: Option<u64>,
 }
 
 pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmReply, HarnessError>> + Send + 'a>>;
+type JobCreatedCallback = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+type JobProgressCallback = std::sync::Arc<dyn Fn(&str, f64) + Send + Sync>;
+type CancelRequestedCallback = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// The planner's only dependency on a language model. Implemented over the SceneWorks LLM seam for
 /// real runs and by a scripted fake in tests, so every rule in this module is exercised against
@@ -127,6 +144,7 @@ struct PlannerCost {
     job_ids: Vec<String>,
     elapsed_seconds: f64,
     peak_memory_bytes: Option<u64>,
+    executions: Vec<PlannerExecutionRecord>,
 }
 
 impl PlannerCost {
@@ -138,6 +156,9 @@ impl PlannerCost {
         if let Some(peak) = reply.peak_memory_bytes {
             self.peak_memory_bytes = Some(self.peak_memory_bytes.map_or(peak, |max| max.max(peak)));
         }
+        if let Some(execution) = &reply.execution {
+            self.executions.push(execution.clone());
+        }
     }
 
     fn into_record(self, repair_rounds: u32, budget_gb: Option<f64>) -> PlannerCostRecord {
@@ -147,6 +168,27 @@ impl PlannerCost {
             peak_memory_bytes: self.peak_memory_bytes,
             repair_rounds,
             planner_max_memory_gb: budget_gb,
+            executions: self.executions,
+        }
+    }
+
+    fn preserve_on_error(mut self, error: HarnessError) -> HarnessError {
+        match &error {
+            HarnessError::PlannerResponse { execution, .. } => {
+                self.executions.push((**execution).clone());
+            }
+            HarnessError::PlannerExecutionFailure { executions, .. } => {
+                self.executions.extend(executions.iter().cloned());
+            }
+            _ => {}
+        }
+        if self.executions.is_empty() {
+            error
+        } else {
+            HarnessError::PlannerExecutionFailure {
+                source: Box::new(error),
+                executions: self.executions,
+            }
         }
     }
 }
@@ -157,6 +199,12 @@ pub struct SceneWorksLlm<'a> {
     transport: &'a dyn ApiTransport,
     poll_interval: Duration,
     job_timeout: Duration,
+    planner_model: Option<String>,
+    thinking_mode: String,
+    on_job_created: Option<JobCreatedCallback>,
+    on_job_progress: Option<JobProgressCallback>,
+    cancel_requested: Option<CancelRequestedCallback>,
+    adopt_job_ids: Mutex<VecDeque<String>>,
 }
 
 impl<'a> SceneWorksLlm<'a> {
@@ -169,13 +217,58 @@ impl<'a> SceneWorksLlm<'a> {
             transport,
             poll_interval,
             job_timeout,
+            planner_model: None,
+            thinking_mode: "disabled".to_owned(),
+            on_job_created: None,
+            on_job_progress: None,
+            cancel_requested: None,
+            adopt_job_ids: Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub fn with_planner_model(
+        mut self,
+        model: Option<String>,
+        thinking_mode: impl Into<String>,
+    ) -> Self {
+        self.planner_model = model;
+        self.thinking_mode = thinking_mode.into();
+        self
+    }
+
+    pub fn on_job_created(mut self, callback: JobCreatedCallback) -> Self {
+        self.on_job_created = Some(callback);
+        self
+    }
+
+    pub fn on_job_progress(mut self, callback: JobProgressCallback) -> Self {
+        self.on_job_progress = Some(callback);
+        self
+    }
+
+    pub fn cancel_requested(mut self, callback: CancelRequestedCallback) -> Self {
+        self.cancel_requested = Some(callback);
+        self
+    }
+
+    /// Replay durable planner jobs in original order before dispatching any new work. Each exact
+    /// job route remains readable after queue clearing, so a restarted planner reconstructs its
+    /// deterministic state from completed replies and adopts the one still running without ever
+    /// creating a duplicate decode.
+    pub fn adopt_jobs(self, job_ids: impl IntoIterator<Item = String>) -> Self {
+        self.adopt_job_ids.lock().extend(job_ids);
+        self
     }
 }
 
 impl PlannerLlm for SceneWorksLlm<'_> {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_> {
         Box::pin(async move {
+            if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+                return Err(HarnessError::Refused(
+                    "planning canceled before the next local model request".to_owned(),
+                ));
+            }
             let started = Instant::now();
             let mut body = json!({
                 "prompt": request.prompt,
@@ -187,6 +280,12 @@ impl PlannerLlm for SceneWorksLlm<'_> {
             if let Some(model_id) = request.model_id.as_deref() {
                 body["modelId"] = json!(model_id);
             }
+            if request.task.as_deref() == Some(FILM_PLAN_TASK) {
+                if let Some(model) = self.planner_model.as_deref() {
+                    body["model"] = json!(model);
+                }
+                body["thinkingMode"] = json!(self.thinking_mode);
+            }
             if let Some(guide) = request
                 .guide
                 .as_deref()
@@ -194,22 +293,43 @@ impl PlannerLlm for SceneWorksLlm<'_> {
             {
                 body["guide"] = json!(guide);
             }
-            let created = crate::film_harness::expect_ok_on(
-                self.transport,
-                "POST",
-                "/api/v1/prompts/refine",
-                Some(body),
-            )
-            .await?;
-            let job_id = created
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    HarnessError::Transport(format!("refine job response has no id: {created}"))
-                })?
-                .to_owned();
+            let adopted_job_id = { self.adopt_job_ids.lock().pop_front() };
+            let (mut job_id, mut adopted) = if let Some(job_id) = adopted_job_id {
+                (job_id, true)
+            } else {
+                let created = crate::film_harness::expect_ok_on(
+                    self.transport,
+                    "POST",
+                    "/api/v1/prompts/refine",
+                    Some(body.clone()),
+                )
+                .await?;
+                let job_id = created
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HarnessError::Transport(format!("refine job response has no id: {created}"))
+                    })?
+                    .to_owned();
+                if let Some(callback) = &self.on_job_created {
+                    callback(&job_id);
+                }
+                (job_id, false)
+            };
             let deadline = Instant::now() + self.job_timeout;
             loop {
+                if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+                    let _ = crate::film_harness::expect_ok_on(
+                        self.transport,
+                        "POST",
+                        &format!("/api/v1/jobs/{job_id}/cancel"),
+                        None,
+                    )
+                    .await;
+                    return Err(HarnessError::Refused(
+                        "planning canceled by user".to_owned(),
+                    ));
+                }
                 let snapshot = crate::film_harness::expect_ok_on(
                     self.transport,
                     "GET",
@@ -221,6 +341,12 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if let (Some(callback), Some(progress)) = (
+                    &self.on_job_progress,
+                    snapshot.get("progress").and_then(Value::as_f64),
+                ) {
+                    callback(&job_id, progress.clamp(0.0, 1.0));
+                }
                 match status {
                     "completed" => {
                         let text = snapshot
@@ -242,12 +368,80 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                         let peak_memory_bytes =
                             crate::film_harness::job_peak_memory_bytes(self.transport, &job_id)
                                 .await;
+                        let result = snapshot.get("result").and_then(Value::as_object);
+                        let thinking = result
+                            .and_then(|result| result.get("thinking"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .filter(|value| !value.trim().is_empty());
+                        let identity = result
+                            .and_then(|result| result.get("executionIdentity"))
+                            .and_then(Value::as_object);
+                        let execution = identity.map(|identity| PlannerExecutionRecord {
+                            job_id: Some(job_id.clone()),
+                            provider: identity
+                                .get("provider")
+                                .and_then(Value::as_str)
+                                .unwrap_or("native")
+                                .to_owned(),
+                            model: identity
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                                .to_owned(),
+                            backend: identity
+                                .get("backend")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            target_video_model_id: request.model_id.clone().unwrap_or_default(),
+                            thinking_mode: identity
+                                .get("thinkingMode")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&self.thinking_mode)
+                                .to_owned(),
+                            max_output_tokens: None,
+                            request_timeout_seconds: Some(self.job_timeout.as_secs()),
+                            temperature: None,
+                            reference_pixels_sent: None,
+                            duration_seconds: Some(started.elapsed().as_secs_f64()),
+                            finish_reason: None,
+                            failure_code: None,
+                            thinking: thinking.clone(),
+                            usage: None,
+                        });
                         return Ok(LlmReply {
                             text,
+                            thinking,
                             job_id: Some(job_id),
+                            execution,
                             elapsed_seconds: started.elapsed().as_secs_f64(),
                             peak_memory_bytes,
                         });
+                    }
+                    "interrupted" if adopted => {
+                        // API startup marks a formerly-running job interrupted. It is terminal, so
+                        // retrying the SAME deterministic request cannot duplicate live compute;
+                        // the old id remains in operation.jobIds as spent work.
+                        let created = crate::film_harness::expect_ok_on(
+                            self.transport,
+                            "POST",
+                            "/api/v1/prompts/refine",
+                            Some(body.clone()),
+                        )
+                        .await?;
+                        job_id = created
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                HarnessError::Transport(format!(
+                                    "refine retry response has no id: {created}"
+                                ))
+                            })?
+                            .to_owned();
+                        adopted = false;
+                        if let Some(callback) = &self.on_job_created {
+                            callback(&job_id);
+                        }
                     }
                     "failed" | "canceled" | "interrupted" => {
                         let detail = snapshot
@@ -345,7 +539,7 @@ fn non_local_api_reason(api_url: &str) -> Option<String> {
 
 /// Whether `host` is loopback, a private/link-local address, an `.local` name, or a single-label
 /// hostname — the addresses a SceneWorks API on the user's own hardware answers on.
-fn is_local_host(host: &str) -> bool {
+pub(crate) fn is_local_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
         return true;
@@ -387,6 +581,13 @@ pub struct PlannerOptions {
     pub prompt_guide_path: Option<PathBuf>,
     /// Refuse a model the catalog does not report installed.
     pub require_installed: bool,
+    /// Run local planner availability and host-memory admission. External adapters still use the
+    /// same plan validation/repair/compile path, but their decode does not require a local
+    /// `prompt_refine` worker and must not be blocked by hosted-provider environment variables.
+    pub require_local_planner: bool,
+    /// Make approved reference files available to the selected planner adapter. The OpenAI
+    /// adapter performs the second capability gate before reading or sending any bytes.
+    pub send_reference_pixels: bool,
     /// The API base URL, for the local-only check. Empty skips it (in-process tests).
     pub api_url: String,
     /// Overwrite an existing `plan.json` whose content differs — off by default so a generated plan
@@ -523,7 +724,11 @@ async fn refiner_findings(
 /// is refused before the first token, and a host that reports no memory at all is refused too —
 /// an unchecked ceiling is not a checked one.
 fn planner_memory_findings(brief: &ProductionBrief, facts: &HostFacts) -> Vec<PlanDiagnostic> {
-    let Some(budget) = brief.limits.planner_max_memory_gb else {
+    planner_budget_findings(brief.limits.planner_max_memory_gb, facts)
+}
+
+fn planner_budget_findings(budget: Option<f64>, facts: &HostFacts) -> Vec<PlanDiagnostic> {
+    let Some(budget) = budget else {
         // `validate_brief` has already refused an undeclared budget.
         return Vec::new();
     };
@@ -577,7 +782,7 @@ async fn prepare(
     let pack = film_plan::read_reference_pack_file(&options.reference_pack_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let mut findings = Vec::new();
-    if !options.api_url.trim().is_empty() {
+    if options.require_local_planner && !options.api_url.trim().is_empty() {
         findings.extend(local_only_findings(&options.api_url, &|name| {
             std::env::var(name).ok()
         }));
@@ -609,13 +814,15 @@ async fn prepare(
     }
     // The refiner first, then its memory: with no worker at all the answer is "nothing can plan",
     // not "nothing reports memory" — the second is a consequence of the first.
-    let findings = refiner_findings(transport).await?;
-    if !findings.is_empty() {
-        return Err(HarnessError::Validation(findings));
-    }
-    let findings = planner_memory_findings(&brief, &facts);
-    if !findings.is_empty() {
-        return Err(HarnessError::Validation(findings));
+    if options.require_local_planner {
+        let findings = refiner_findings(transport).await?;
+        if !findings.is_empty() {
+            return Err(HarnessError::Validation(findings));
+        }
+        let findings = planner_memory_findings(&brief, &facts);
+        if !findings.is_empty() {
+            return Err(HarnessError::Validation(findings));
+        }
     }
     Ok((brief, pack, catalog, caps, facts))
 }
@@ -669,17 +876,39 @@ pub async fn generate(
     llm: &dyn PlannerLlm,
     options: &PlannerOptions,
 ) -> Result<PlannerArtifacts, HarnessError> {
+    generate_with_refiner(transport, llm, llm, options).await
+}
+
+/// Select the film planner independently from the target-model shot refinement seam.
+pub async fn generate_with_refiner(
+    transport: &dyn ApiTransport,
+    llm: &dyn PlannerLlm,
+    refiner: &dyn PlannerLlm,
+    options: &PlannerOptions,
+) -> Result<PlannerArtifacts, HarnessError> {
     let (brief, pack, catalog, caps, facts) = prepare(transport, options).await?;
     let entries = catalog
         .entries()
         .expect("prepare refuses without a catalog entry");
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
+    let reference_images = if options.send_reference_pixels {
+        pack.references
+            .iter()
+            .filter(|entry| entry.approved)
+            .map(|entry| PlannerReferenceImage {
+                role: entry.role.clone(),
+                path: pack_dir(&options.reference_pack_path).join(&entry.file),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut last_reply;
     let mut round = 0_u32;
     let mut cost = PlannerCost::default();
     let plan = loop {
-        let reply = llm
+        let reply = match llm
             .complete(LlmRequest {
                 task: Some(FILM_PLAN_TASK.to_owned()),
                 prompt: request.clone(),
@@ -689,8 +918,13 @@ pub async fn generate(
                 // model's prompt-writing guide, and the whole capability envelope is already in
                 // the request the planner composes.
                 guide: None,
+                reference_images: reference_images.clone(),
             })
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => return Err(cost.preserve_on_error(error)),
+        };
         cost.record(&reply);
         let reply = reply.text;
         last_reply = reply.clone();
@@ -748,16 +982,35 @@ pub async fn generate(
                     rejected.display()
                 ),
             ));
-            return Err(HarnessError::Validation(findings));
+            return Err(HarnessError::PlannerValidation {
+                findings,
+                executions: cost.executions,
+            });
         }
         round += 1;
-        request = build_repair_request(&brief, &caps, &last_reply, &findings, round, rounds);
+        request = build_repair_request(&brief, &pack, &caps, &last_reply, &findings, round, rounds);
     };
 
-    let (plan_path, plan_bytes) = write_generated_plan(options, &plan)?;
-    copy_brief_beside_plan(options)?;
+    let (plan_path, plan_bytes) = write_generated_plan(options, &plan)
+        .map_err(|error| cost.clone().preserve_on_error(error))?;
+    copy_brief_beside_plan(options).map_err(|error| cost.clone().preserve_on_error(error))?;
+    if options.refine_prompts && !options.require_local_planner {
+        let readiness = async {
+            let mut findings = refiner_findings(transport).await?;
+            findings.extend(planner_memory_findings(&brief, &facts));
+            if findings.is_empty() {
+                Ok(())
+            } else {
+                Err(HarnessError::Validation(findings))
+            }
+        }
+        .await;
+        if let Err(error) = readiness {
+            return Err(cost.preserve_on_error(error));
+        }
+    }
     let (compiled, compiled_path) = compile_and_write(
-        llm,
+        refiner,
         options,
         &plan,
         &pack,
@@ -786,12 +1039,28 @@ pub async fn compile_existing(
     options: &PlannerOptions,
     plan_path: &Path,
 ) -> Result<PlannerArtifacts, HarnessError> {
+    compile_existing_with_executions(transport, llm, options, plan_path, Vec::new()).await
+}
+
+/// Resume native refinement of an already validated external candidate without resending it.
+pub(crate) async fn compile_existing_with_executions(
+    transport: &dyn ApiTransport,
+    llm: &dyn PlannerLlm,
+    options: &PlannerOptions,
+    plan_path: &Path,
+    executions: Vec<PlannerExecutionRecord>,
+) -> Result<PlannerArtifacts, HarnessError> {
+    let repair_rounds = executions
+        .iter()
+        .filter(|entry| entry.provider == "openai_compatible")
+        .count()
+        .saturating_sub(1) as u32;
     let plan = film_plan::read_plan_file(plan_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let pack = film_plan::read_reference_pack_file(&options.reference_pack_path)
         .map_err(|finding| HarnessError::Validation(vec![finding]))?;
     let mut findings = Vec::new();
-    if !options.api_url.trim().is_empty() {
+    if options.require_local_planner && !options.api_url.trim().is_empty() {
         findings.extend(local_only_findings(&options.api_url, &|name| {
             std::env::var(name).ok()
         }));
@@ -850,7 +1119,11 @@ pub async fn compile_existing(
         }
     }
     if options.refine_prompts {
-        let findings = refiner_findings(transport).await?;
+        let mut findings = refiner_findings(transport).await?;
+        findings.extend(planner_budget_findings(
+            plan.limits.planner_max_memory_gb,
+            &facts,
+        ));
         if !findings.is_empty() {
             return Err(HarnessError::Validation(findings));
         }
@@ -864,8 +1137,15 @@ pub async fn compile_existing(
         &entries,
         facts.lane(),
         &plan_bytes,
-        PlannerCost::default(),
-        0,
+        PlannerCost {
+            elapsed_seconds: executions
+                .iter()
+                .filter_map(|entry| entry.duration_seconds)
+                .sum(),
+            executions,
+            ..PlannerCost::default()
+        },
+        repair_rounds,
     )
     .await?;
     Ok(PlannerArtifacts {
@@ -873,7 +1153,7 @@ pub async fn compile_existing(
         plan_path: plan_path.to_path_buf(),
         compiled,
         compiled_path,
-        repair_rounds: 0,
+        repair_rounds,
     })
 }
 
@@ -973,58 +1253,66 @@ async fn compile_and_write(
     mut cost: PlannerCost,
     repair_rounds: u32,
 ) -> Result<(CompiledPlan, PathBuf), HarnessError> {
-    std::fs::create_dir_all(&options.out_dir)?;
-    let mut refined = BTreeMap::new();
-    if options.refine_prompts {
-        // Read once, not once per shot: the guide is the same for every rewrite in this compile.
-        // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
-        // even when some shots dispatch on the reference partition (sc-23402).
-        let guide = resolve_prompt_guide(options, entries.base_entry())?;
-        for shot in &plan.shots {
-            // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
-            // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
-            // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
-            // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
-            // names it).
-            let reply = llm
-                .complete(LlmRequest {
-                    task: None,
-                    prompt: shot.prompt.clone(),
-                    model_id: Some(plan.model.id.clone()),
-                    workflow: "video".to_owned(),
-                    guide: guide.clone(),
-                })
-                .await?;
-            cost.record(&reply);
-            refined.insert(shot.id.clone(), reply.text);
+    let result = async {
+        std::fs::create_dir_all(&options.out_dir)?;
+        let mut refined = BTreeMap::new();
+        if options.refine_prompts {
+            // Read once, not once per shot: the guide is the same for every rewrite in this compile.
+            // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
+            // even when some shots dispatch on the reference partition (sc-23402).
+            let guide = resolve_prompt_guide(options, entries.base_entry())?;
+            for shot in &plan.shots {
+                // The model-keyed refinement asset is selected by `modelId`, and the guide is the same
+                // `guide` field Video Studio forwards — so with a guide resolved this is the rewrite
+                // the "Refine" button runs for this model, and with none it is that rewrite MINUS its
+                // model prompt guide (`--prompt-guide FILE`, or a guide on disk where the catalog entry
+                // names it).
+                let reply = llm
+                    .complete(LlmRequest {
+                        task: None,
+                        prompt: shot.prompt.clone(),
+                        model_id: Some(plan.model.id.clone()),
+                        workflow: "video".to_owned(),
+                        guide: guide.clone(),
+                        reference_images: Vec::new(),
+                    })
+                    .await?;
+                cost.record(&reply);
+                refined.insert(shot.id.clone(), reply.text);
+            }
         }
+        let mut compiled = compile_plan(
+            plan,
+            pack,
+            &CompileInputs {
+                entries,
+                lane: lane.manifest_key(),
+                plan_sha256: &sha256_hex(plan_bytes),
+                compiled_at: &utc_now(),
+                refined_prompts: &refined,
+            },
+        )
+        .map_err(HarnessError::Validation)?;
+        // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
+        // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
+        // would read as a measured cost.
+        if !cost.job_ids.is_empty() || !cost.executions.is_empty() || repair_rounds > 0 {
+            compiled.planner = Some(
+                cost.clone()
+                    .into_record(repair_rounds, plan.limits.planner_max_memory_gb),
+            );
+        }
+        let compiled_path = options.compiled_path();
+        std::fs::write(
+            &compiled_path,
+            serde_json::to_string_pretty(&compiled)
+                .map_err(|error| HarnessError::Io(error.to_string()))?
+                + "\n",
+        )?;
+        Ok((compiled, compiled_path))
     }
-    let mut compiled = compile_plan(
-        plan,
-        pack,
-        &CompileInputs {
-            entries,
-            lane: lane.manifest_key(),
-            plan_sha256: &sha256_hex(plan_bytes),
-            compiled_at: &utc_now(),
-            refined_prompts: &refined,
-        },
-    )
-    .map_err(HarnessError::Validation)?;
-    // What the LLM work cost, persisted beside what it produced (sc-22715). A compile that ran no
-    // LLM at all (`--no-refine` over a hand-authored plan) records nothing rather than zeros that
-    // would read as a measured cost.
-    if !cost.job_ids.is_empty() || repair_rounds > 0 {
-        compiled.planner = Some(cost.into_record(repair_rounds, plan.limits.planner_max_memory_gb));
-    }
-    let compiled_path = options.compiled_path();
-    std::fs::write(
-        &compiled_path,
-        serde_json::to_string_pretty(&compiled)
-            .map_err(|error| HarnessError::Io(error.to_string()))?
-            + "\n",
-    )?;
-    Ok((compiled, compiled_path))
+    .await;
+    result.map_err(|error| cost.preserve_on_error(error))
 }
 
 /// The prompt guide to forward on every rewrite of this compile.
@@ -1105,6 +1393,283 @@ pub fn read_compiled_file(path: &Path) -> Result<CompiledPlan, PlanDiagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn execution_receipt(model: &str) -> PlannerExecutionRecord {
+        PlannerExecutionRecord {
+            provider: "openai_compatible".to_owned(),
+            model: model.to_owned(),
+            backend: Some("fixture".to_owned()),
+            target_video_model_id: "minimax_h3".to_owned(),
+            thinking_mode: "disabled".to_owned(),
+            max_output_tokens: Some(4096),
+            reference_pixels_sent: Some(true),
+            duration_seconds: Some(1.0),
+            ..PlannerExecutionRecord::default()
+        }
+    }
+
+    #[test]
+    fn accumulated_executions_survive_a_later_empty_or_provider_failure() {
+        let prior = execution_receipt("prior-malformed");
+        let final_empty = execution_receipt("final-empty");
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::PlannerResponse {
+            detail: "no textual content".to_owned(),
+            execution: Box::new(final_empty.clone()),
+        });
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected executions to wrap the final empty-response error");
+        };
+        assert!(matches!(*source, HarnessError::PlannerResponse { .. }));
+        assert_eq!(executions, vec![prior.clone(), final_empty]);
+
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::Transport(
+            "provider became unavailable".to_owned(),
+        ));
+        let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+            panic!("expected prior executions to wrap the later provider error");
+        };
+        assert!(matches!(*source, HarnessError::Transport(_)));
+        assert_eq!(executions, vec![prior.clone()]);
+        let mut final_dispatch = execution_receipt("failed-attempt");
+        final_dispatch.failure_code = Some("canceled".to_owned());
+        let error = PlannerCost {
+            executions: vec![prior.clone()],
+            ..PlannerCost::default()
+        }
+        .preserve_on_error(HarnessError::PlannerExecutionFailure {
+            source: Box::new(HarnessError::Refused("canceled".to_owned())),
+            executions: vec![final_dispatch.clone()],
+        });
+        let HarnessError::PlannerExecutionFailure { executions, .. } = error else {
+            panic!("missing receipts")
+        };
+        assert_eq!(
+            executions,
+            vec![prior, final_dispatch],
+            "earlier repair and canceled attempt appear once each"
+        );
+    }
+    struct NoCallsTransport;
+
+    impl ApiTransport for NoCallsTransport {
+        fn call(
+            &self,
+            _request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            Box::pin(async { panic!("a canceled planning request must not dispatch") })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("a canceled planning request must not fetch files") })
+        }
+    }
+
+    struct AdoptTransport {
+        calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+        interrupted: bool,
+    }
+
+    struct PendingTransport {
+        calls: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ApiTransport for PendingTransport {
+        fn call(
+            &self,
+            request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .push((request.method.to_owned(), request.path.clone()));
+                let body = match (request.method, request.path.as_str()) {
+                    ("POST", "/api/v1/prompts/refine") => json!({"id": "job_pending"}),
+                    ("GET", "/api/v1/jobs/job_pending") => {
+                        json!({"id": "job_pending", "status": "running"})
+                    }
+                    ("POST", "/api/v1/jobs/job_pending/cancel") => {
+                        json!({"id": "job_pending", "status": "cancel_requested"})
+                    }
+                    other => panic!("unexpected pending planner request: {other:?}"),
+                };
+                Ok(crate::film_harness::ApiResponse { status: 200, body })
+            })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("planner timeout must not fetch files") })
+        }
+    }
+
+    impl ApiTransport for AdoptTransport {
+        fn call(
+            &self,
+            request: crate::film_harness::ApiRequest,
+        ) -> crate::film_harness::TransportFuture<'_> {
+            let calls = self.calls.clone();
+            let interrupted = self.interrupted;
+            Box::pin(async move {
+                calls
+                    .lock()
+                    .push((request.method.to_owned(), request.path.clone()));
+                let body = match (request.method, request.path.as_str()) {
+                    ("GET", "/api/v1/jobs/job_old") if interrupted => {
+                        json!({"id": "job_old", "status": "interrupted", "message": "API restarted"})
+                    }
+                    ("GET", "/api/v1/jobs/job_old") => json!({
+                        "id": "job_old", "status": "completed",
+                        "result": {"refinedPrompt": "adopted answer"}
+                    }),
+                    ("POST", "/api/v1/prompts/refine") => json!({"id": "job_new"}),
+                    ("GET", "/api/v1/jobs/job_new") => json!({
+                        "id": "job_new", "status": "completed",
+                        "result": {"refinedPrompt": "replacement answer"}
+                    }),
+                    ("GET", path) if path.ends_with("/metrics") => Value::Null,
+                    other => panic!("unexpected planner adoption request: {other:?}"),
+                };
+                Ok(crate::film_harness::ApiResponse { status: 200, body })
+            })
+        }
+
+        fn get_bytes(&self, _path: String) -> crate::film_harness::BytesTransportFuture<'_> {
+            Box::pin(async { panic!("planner adoption must not fetch files") })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_dispatch_never_creates_a_model_job() {
+        let transport = NoCallsTransport;
+        let llm = SceneWorksLlm::new(
+            &transport,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .cancel_requested(std::sync::Arc::new(|| true));
+        let error = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect_err("the cancellation is reported");
+        assert!(format!("{error}").contains("canceled before"));
+    }
+
+    #[tokio::test]
+    async fn local_job_timeout_cancels_once_without_provider_fallback() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = PendingTransport {
+            calls: calls.clone(),
+        };
+        let llm = SceneWorksLlm::new(
+            &transport,
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+        )
+        .with_planner_model(Some("Qwen/Qwen3.6-27B".to_owned()), "enabled");
+        let error = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect_err("the running local job must time out");
+        assert!(error.to_string().contains("was canceled"), "{error}");
+        let calls = calls.lock();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| { method == "POST" && path == "/api/v1/prompts/refine" })
+                .count(),
+            1,
+            "the selected native provider is dispatched exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, path)| {
+                    method == "POST" && path == "/api/v1/jobs/job_pending/cancel"
+                })
+                .count(),
+            1,
+            "the timed-out job is canceled exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_completed_job_is_adopted_by_exact_id_without_redispatch() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = AdoptTransport {
+            calls: calls.clone(),
+            interrupted: false,
+        };
+        let llm = SceneWorksLlm::new(&transport, Duration::from_millis(1), Duration::from_secs(1))
+            .adopt_jobs(["job_old".to_owned()]);
+        let reply = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect("completed durable job is replayed");
+        assert_eq!(reply.text, "adopted answer");
+        assert_eq!(reply.job_id.as_deref(), Some("job_old"));
+        assert!(calls.lock().iter().all(|(method, _)| method != "POST"));
+    }
+
+    #[tokio::test]
+    async fn startup_interrupted_job_is_spent_before_one_replacement_dispatch() {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let transport = AdoptTransport {
+            calls: calls.clone(),
+            interrupted: true,
+        };
+        let llm = SceneWorksLlm::new(&transport, Duration::from_millis(1), Duration::from_secs(1))
+            .adopt_jobs(["job_old".to_owned()]);
+        let reply = llm
+            .complete(LlmRequest {
+                task: Some(FILM_PLAN_TASK.to_owned()),
+                prompt: "plan".to_owned(),
+                model_id: Some("minimax_h3".to_owned()),
+                workflow: "text-to-video".to_owned(),
+                guide: None,
+                reference_images: Vec::new(),
+            })
+            .await
+            .expect("interrupted durable job is replaced once");
+        assert_eq!(reply.job_id.as_deref(), Some("job_new"));
+        assert_eq!(
+            calls
+                .lock()
+                .iter()
+                .filter(|(method, path)| method == "POST" && path == "/api/v1/prompts/refine")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn hosted_credentials_and_remote_apis_are_refused_before_any_generation() {
@@ -1192,6 +1757,8 @@ mod tests {
             refine_prompts: true,
             prompt_guide_path: None,
             require_installed: true,
+            require_local_planner: true,
+            send_reference_pixels: false,
             api_url: String::new(),
             force: false,
             poll_interval: Duration::from_secs(1),

@@ -10823,9 +10823,271 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
+}
+.ve-film {
+  flex: 0 1 auto;
+  max-height: min(42vh, 360px);
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  padding: 8px 16px;
+}
+.ve-film > summary { cursor: pointer; font-weight: 650; }
+.ve-film-view-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ve-film-view-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+.ve-film-view-tabs button.selected {
+  background: color-mix(in oklch, var(--accent) 12%, var(--surface-2));
+  color: var(--text);
+}
+.ve-film-view-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ve-film [role="tabpanel"][hidden] { display: none; }
+.ve-film-toolbar,
+.ve-film-actions { display: flex; align-items: end; gap: 10px; margin-top: 10px; }
+.ve-film-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ve-film-form label,
+.ve-film-toolbar label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-prompt { grid-column: span 2; }
+.ve-film-form input,
+.ve-film-form textarea,
+.ve-film-form select,
+.ve-film-toolbar select,
+.ve-film-section input,
+.ve-film-section textarea,
+.ve-film-section select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 9px;
+}
+.ve-film-references {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.ve-film-reference-heading,
+.ve-film-reference-add,
+.ve-film-reference-row,
+.ve-film-bindings,
+.ve-film-bindings li {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ve-film-reference-heading span { color: var(--text-muted); margin-right: auto; }
+.ve-film-reference-add label,
+.ve-film-bindings label { display: grid; gap: 4px; }
+.ve-film-reference-row > input { min-width: 140px; flex: 1; }
+.ve-film-reference-check { display: flex !important; align-items: center; }
+.ve-film-file-button input { max-width: 220px; }
+.ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
+.ve-film-bindings li span { min-width: 140px; }
+.ve-film-lifecycle { grid-column: 1 / -1; display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-lifecycle-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--surface-2); border-radius: 6px; font-size: 12px; }
+.ve-film-lifecycle-row > span:nth-child(2) { color: var(--text-muted); flex: 1; }
+.ve-film-operation-actions { display: flex; gap: 6px; }
+.ve-film-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ve-film-section h3,
+.ve-film-section h4 { margin: 0 0 8px; }
+.ve-film-section label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ve-film-wide { display: grid; grid-column: 1 / -1; gap: 4px; }
+.ve-film-document-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.ve-film-document-columns > div { display: grid; align-content: start; gap: 8px; }
+.ve-film-dialogue { display: grid; grid-template-columns: minmax(90px, .35fr) 1fr; gap: 8px; }
+.ve-film-empty,
+.ve-film-provider-state { color: var(--muted); font-size: 12px; }
+.ve-film-operation { display: grid; box-sizing: border-box; min-width: 0; max-width: 100%; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-operation.is-failed,
+.ve-film-operation.is-canceled { border-left-color: var(--danger); }
+.ve-film-operation > span { min-width: 0; overflow-wrap: anywhere; }
+.ve-film-finding { margin: 2px 0; color: var(--danger); }
+.ve-film-planning-findings {
+  min-width: 0;
+  margin: 2px 0;
+  padding-left: 20px;
+  color: var(--danger);
+}
+.ve-film-planning-findings li {
+  min-width: 0;
+  margin: 3px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
+.ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-candidate article p { margin: 5px 0; }
+.ve-film-section-heading,
+.ve-film-shot-inspector > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ve-film-section-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-advanced {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-advanced > summary { cursor: pointer; padding: 10px; font-weight: 650; }
+.ve-film-advanced > .ve-film-grid { margin: 0; padding: 0 10px 10px; }
+.ve-film-advanced > fieldset { margin: 0 10px 10px; }
+.ve-film-plan-controls,
+.ve-film-inspector-fields {
+  min-width: 0;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-plan-controls > .ve-film-form { margin-top: 0; }
+.ve-film-plan-controls { padding: 0; }
+.ve-film-plan-controls > fieldset { min-width: 0; padding: 10px; border: 0; }
+.ve-film-capability-summary { color: var(--text-muted); font-size: 12px; }
+.ve-film-render-regimes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+}
+.ve-film-render-regimes > legend { margin-bottom: 5px; font-size: 12px; font-weight: 650; }
+.ve-film-render-regimes > label {
+  align-content: start;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-render-regimes > label.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--bg-2)); }
+.ve-film-render-regimes > label > span { display: flex; align-items: center; gap: 6px; font-weight: 650; }
+.ve-film-render-regimes small { color: var(--text-muted); line-height: 1.35; }
+.ve-film-render-regimes .ve-film-render-recipe { color: var(--text); overflow-wrap: anywhere; }
+.ve-film-render-effective { margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.ve-film-shot-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, .32fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+.ve-film-shot-list { display: grid; align-content: start; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ve-film-shot-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-shot-list li.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, transparent); }
+.ve-film-shot-list li > label { display: flex; align-items: center; gap: 4px; }
+.ve-film-shot-list li > button { display: grid; gap: 2px; min-width: 0; border: 0; background: transparent; color: var(--text); text-align: left; }
+.ve-film-shot-list li > button span { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ve-film-shot-inspector { min-width: 0; }
+.ve-film-shot-inspector > header .ve-film-actions { margin-top: 0; }
+.ve-film-inspector-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px;
+}
+.ve-film-inspector-fields .ve-film-prompt,
+.ve-film-dependencies,
+.ve-film-findings { grid-column: 1 / -1; }
+.ve-film-dependencies { display: grid; gap: 7px; }
+.ve-film-dependency { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(110px, .8fr) minmax(160px, 1.5fr) auto; gap: 7px; }
+.ve-film-findings { margin: 0; padding-left: 20px; color: var(--danger); font-size: 12px; }
+.ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-review { display: grid; gap: 12px; }
+.ve-film-review > details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.ve-film-review > details > summary { cursor: pointer; font-weight: 650; }
+.ve-film-review-plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+.ve-film-review-questions { display: grid; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ve-film-review-questions > header, .ve-film-review-shot > header, .ve-film-take > header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ve-film-review-questions fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.ve-film-review-runs, .ve-film-review-shot { display: grid; gap: 10px; }
+.ve-film-review-shot { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-take-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.ve-film-take { display: grid; gap: 8px; min-width: 0; padding: 10px; background: var(--bg-2); border-radius: 7px; }
+.ve-film-take video { width: 100%; max-height: 240px; background: #000; }
+.ve-film-take dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 8px; margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ve-film-take dl dt { color: var(--muted); }
+.ve-film-take-missing { display: grid; place-items: center; min-height: 120px; padding: 12px; background: var(--bg); color: var(--muted); text-align: center; }
+.ve-film-selection-state { padding: 3px 7px; border-radius: 999px; background: var(--bg-2); font-size: 12px; }
+.ve-film-selection-state.trim_conflict, .ve-film-selection-state.rejected_take_in_saved_cut, .ve-film-warning { color: var(--warning, #c56b00); }
+.ve-film-review-findings { padding: 9px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-preflight dt { color: var(--text-muted); }
+.ve-film-preflight dd { margin: 0; overflow-wrap: anywhere; }
+.ve-film-help { margin: 6px 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-sound-list,
+.ve-film-sound-beds { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+.ve-film-sound-list fieldset,
+.ve-film-sound-beds fieldset,
+.ve-film-section > fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-audio-preview { width: 100%; height: 34px; }
+.ve-film-export { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
+.ve-audio-inspector { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+.ve-audio-inspector label { display: grid; gap: 4px; font-size: 12px; }
+@media (max-width: 760px) {
+  .ve-film-render-regimes { grid-template-columns: 1fr; }
+  .ve-film-shot-layout { grid-template-columns: 1fr; }
+  .ve-film-dependency { grid-template-columns: 1fr; }
 }
 .workspace > section.ve-editor {
   flex: 1 1 auto;
@@ -11072,8 +11334,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-upper {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr) 350px;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 0 240px;
+  min-height: 240px;
 }
 
 /* Media bin */

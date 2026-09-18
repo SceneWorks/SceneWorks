@@ -123,6 +123,35 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    // Planning may explicitly opt into a different native checkpoint. Keep this separate from
+    // `modelId`, which remains the target VIDEO model whose capabilities shape the requested plan.
+    if task == Some("film_plan") {
+        if let Some(model) = payload
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+        if let Some(thinking_mode) = payload
+            .thinking_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !matches!(thinking_mode, "disabled" | "enabled" | "auto") {
+                return Err(ApiError::bad_request(
+                    "thinkingMode must be disabled, enabled, or auto",
+                ));
+            }
+            job_payload.insert(
+                "thinkingMode".to_owned(),
+                Value::String(thinking_mode.to_owned()),
+            );
+        }
+    }
+
     let workflow = payload
         .workflow
         .as_deref()
