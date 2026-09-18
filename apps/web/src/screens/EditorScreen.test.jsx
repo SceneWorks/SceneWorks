@@ -709,3 +709,23 @@ describe("timeline audio editing (sc-23739)", () => {
     expect(container.querySelector(".ve-timeline")).toBeNull();
   });
 });
+
+describe("editor guide access", () => {
+  it.each([
+    ["Timeline", {}],
+    ["Film start", { activeTimeline: null, timelines: [] }],
+    ["no project", { activeProject: null, activeTimeline: null, timelines: [] }],
+  ])("opens help from %s without mutating the editor", async (_label, overrides) => {
+    const saveTimeline = vi.fn();
+    const setActiveTimeline = vi.fn();
+    render({ ...overrides, saveTimeline, setActiveTimeline });
+    await flush();
+    const trigger = [...container.querySelectorAll("button")].find((button) => button.textContent === "Guides" && !button.closest("[hidden]"));
+    expect(trigger).toBeTruthy();
+    act(() => trigger.click());
+    expect(document.querySelector('[role="dialog"]').textContent).toContain("Copy-and-paste first test");
+    act(() => document.querySelector(".modal-close").click());
+    expect(saveTimeline).not.toHaveBeenCalled();
+    expect(setActiveTimeline).not.toHaveBeenCalled();
+  });
+});
