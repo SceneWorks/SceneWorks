@@ -518,6 +518,7 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
             "rasterModel": "flux_schnell",
             "vectorModel": "starvector_test",
             "seed": 17,
+            "sampling": { "seed": 91 },
             "detailBudget": {
                 "maxNewTokens": 2048,
                 "maxSvgBytes": 131072,
@@ -547,6 +548,8 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         "2222222222222222222222222222222222222222"
     );
     assert_eq!(workflow["vectorStage"]["mode"], "image_to_svg");
+    assert_eq!(parent["payload"]["sampling"]["seed"], 91);
+    assert_eq!(workflow["vectorStage"]["sampling"]["seed"], 91);
     let parent_id = parent["id"].as_str().expect("parent id");
     let child_id = workflow["childJobId"].as_str().expect("child id");
 
@@ -661,6 +664,13 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
     let original_child = original["payload"]["workflow"]["childJobId"]
         .as_str()
         .expect("original child");
+    let original_vector_seed = original["payload"]["sampling"]["seed"]
+        .as_u64()
+        .expect("omitted vector seed resolves before workflow persistence");
+    assert_eq!(
+        original["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
+        original_vector_seed
+    );
 
     let (status, replay) = request(
         app.clone(),
@@ -678,6 +688,11 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         original["payload"]["workflow"]["id"]
     );
     assert_ne!(replay["payload"]["workflow"]["childJobId"], original_child);
+    assert_eq!(replay["payload"]["sampling"]["seed"], original_vector_seed);
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
+        original_vector_seed
+    );
     assert_eq!(
         replay["payload"]["workflow"]["rasterStage"]["revision"],
         original["payload"]["workflow"]["rasterStage"]["revision"]
@@ -704,6 +719,84 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
     assert_eq!(drift["context"]["stage"], "raster");
     let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(after.as_array().expect("jobs").len(), 4);
+}
+
+#[tokio::test]
+async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_replayed_seeds() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg", "text_to_svg"],
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector seed persistence" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    let source_asset_id = source["id"].as_str().expect("source id").to_owned();
+
+    let (status, generated) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source_asset_id
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{generated}");
+    assert_eq!(generated["payload"]["sampling"]["temperature"], 0.2);
+    let generated_seed = generated["payload"]["sampling"]["seed"]
+        .as_u64()
+        .expect("default request persists a resolved seed");
+    u32::try_from(generated_seed).expect("server-generated seed remains exactly representable");
+    let generated_id = generated["id"].as_str().expect("job id");
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{generated_id}/{operation}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(
+            replay["payload"]["sampling"]["seed"], generated_seed,
+            "{operation} must reuse the persisted effective seed"
+        );
+    }
+
+    let (status, explicit) = request(
+        app,
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_svg",
+            "model": "starvector_test",
+            "prompt": "a minimal seed mark",
+            "sampling": { "seed": 42 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{explicit}");
+    assert_eq!(explicit["payload"]["sampling"]["seed"], 42);
 }
 
 #[tokio::test]

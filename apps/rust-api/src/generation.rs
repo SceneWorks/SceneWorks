@@ -527,7 +527,7 @@ async fn validate_vector_source_asset(
 /// preview rasterization, and atomic publication.
 pub(crate) async fn create_vector_job(
     State(state): State<AppState>,
-    ApiJson(payload): ApiJson<VectorRequest>,
+    ApiJson(mut payload): ApiJson<VectorRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_vector_request(&payload)?;
     if let Some(source_asset_id) = payload.source_asset_id.clone() {
@@ -546,6 +546,7 @@ pub(crate) async fn create_vector_job(
         enqueue_backend(&state),
         &model_manifest_entry,
     )?;
+    resolve_vector_sampling_seed(&mut payload.sampling);
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = payload.project_id.clone();
     let project_name = payload.project_name.clone();
@@ -562,6 +563,20 @@ pub(crate) async fn create_vector_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Resolve stochastic vector sampling at the API boundary so the worker, asset recipe, and every
+/// replay all observe one durable seed instead of independently choosing time-derived defaults.
+fn resolve_vector_sampling_seed(sampling: &mut VectorSampling) {
+    if sampling.seed.is_some() {
+        return;
+    }
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    // Keep server-generated seeds exactly representable by the JavaScript client while retaining
+    // the native provider's u64 wire type. This matches the established image-seed policy.
+    sampling.seed = Some(u64::from(u32::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3],
+    ])));
 }
 
 const VECTOR_PROMPT_WORKFLOW_KIND: &str = "create_from_prompt";
@@ -746,6 +761,8 @@ async fn create_vector_prompt_workflow_internal(
         payload.expected_vector_revision.as_deref(),
     )?;
     validate_vector_model_manifest(&payload.vector_model, VectorMode::ImageToSvg, &vector_model)?;
+    let mut vector_sampling = payload.sampling.clone();
+    resolve_vector_sampling_seed(&mut vector_sampling);
     let pending_vector_request = VectorRequest {
         project_id: payload.project_id.clone(),
         project_name: payload.project_name.clone(),
@@ -755,7 +772,7 @@ async fn create_vector_prompt_workflow_internal(
         // StarVector-1B does not accept guidance. The disclosed prompt belongs only to the raster
         // stage; forwarding it here would falsely turn the composition into native text-to-SVG.
         prompt: String::new(),
-        sampling: payload.sampling.clone(),
+        sampling: vector_sampling.clone(),
         detail_budget: payload.detail_budget.clone(),
         requested_gpu: payload.requested_gpu.clone(),
     };
@@ -797,7 +814,7 @@ async fn create_vector_prompt_workflow_internal(
                 "model": payload.vector_model,
                 "revision": vector_revision,
                 "mode": "image_to_svg",
-                "sampling": payload.sampling,
+                "sampling": vector_sampling,
                 "detailBudget": payload.detail_budget,
             },
         }),
