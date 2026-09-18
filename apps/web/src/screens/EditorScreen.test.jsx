@@ -658,4 +658,26 @@ describe("timeline audio editing (sc-23739)", () => {
     act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(container.textContent).toContain("Adjust the linked audio ending past the new picture cut");
   });
+
+  it("badges a film clip with its shot, hands its review to Film mode, and returns to the timeline", () => {
+    const video = { id: "v1", type: "video", displayName: "Shot", url: "/shot.mp4", file: { mimeType: "video/mp4", duration: 4 } };
+    const timeline = makeTimeline("tl_1", "Film");
+    timeline.tracks[0].items = [{ id: "shot", trackId: "track_main", assetId: "v1", type: "video", displayName: "Shot", sourceIn: 0, sourceOut: 4, timelineStart: 0, timelineEnd: 4, speed: 1, volume: 1, filmHarness: { runId: "run_1", shotId: "SH010" } }];
+    root = createRoot(container);
+    act(() => root.render(<AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: [video], timelines: [timeline], selectedTimelineId: timeline.id, setActiveTimeline: vi.fn(), setSelectedTimelineId: vi.fn(), setPreviewAsset: vi.fn(), createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}><EditorScreen /></AppContext.Provider>));
+
+    expect(container.querySelector(".ve-clip .ve-clip-shot").textContent).toBe("SH010");
+    act(() => container.querySelector(".ve-clip").click());
+    expect(container.querySelector(".ve-rail-eyebrow").textContent).toContain("FILM SHOT · SH010");
+    const film = container.querySelector('section[aria-label="Film workspace"]');
+    expect(film.hidden).toBe(true);
+
+    act(() => [...container.querySelectorAll(".ve-ctx-btn")].find((button) => button.textContent === "Review this shot").click());
+    expect(film.hidden).toBe(false);
+    expect(container.querySelector(".ve-timeline")).toBeNull();
+
+    act(() => [...container.querySelectorAll(".ve-mode-switch button")].find((button) => button.textContent === "Timeline").click());
+    expect(film.hidden).toBe(true);
+    expect(container.querySelector(".ve-clip")).not.toBeNull();
+  });
 });

@@ -90,15 +90,18 @@ describe("styles.css: the two chip kinds are visually distinct", () => {
   });
 });
 
-describe("styles.css: an expanded film workspace cannot cover editor controls", () => {
+describe("styles.css: Film mode fills the editor and only its active step scrolls", () => {
   const editor = ruleBody(".ve-editor");
   const film = ruleBody(".ve-film");
+  const panels = ruleBody(".ve-film-panels");
   const upper = ruleBody(".ve-upper");
 
-  it("bounds the film authoring pane and gives overflow a scroll path", () => {
+  it("lets the film workspace own the editor height instead of a capped strip", () => {
     expect(declaration(editor, "overflow-y")).toBe("auto");
-    expect(declaration(film, "max-height")).toBeTruthy();
-    expect(declaration(film, "overflow-y")).toBe("auto");
+    expect(declaration(film, "max-height")).toBeFalsy();
+    expect(declaration(film, "flex")).toContain("1 1");
+    expect(declaration(panels, "overflow-y")).toBe("auto");
+    expect(declaration(panels, "min-height")).toBe("0");
   });
 
   it("keeps the Program Monitor row tall enough to own its hit targets", () => {

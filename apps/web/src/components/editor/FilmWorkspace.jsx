@@ -14,20 +14,49 @@ import {
 import { useAppLive, useAppStatic } from "../../context/AppContext.js";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 import { FilmReferences } from "./FilmReferences.jsx";
+import { Icon } from "../Icons.jsx";
 import { FilmBrief } from "./FilmBrief.jsx";
+import { FilmCutStrip } from "./FilmCutStrip.jsx";
 import { FilmLifecycle } from "./FilmLifecycle.jsx";
 import { FilmPlanning } from "./FilmPlanning.jsx";
 import { FilmRenderOptions } from "./FilmRenderOptions.jsx";
 import { FilmReview, normalizedPlan } from "./FilmReview.jsx";
 import { FilmShots } from "./FilmShots.jsx";
+import { filmRunSummary } from "./filmShotState.js";
 
 const FilmSound = lazy(() => import("./FilmSound.jsx").then((module) => ({ default: module.FilmSound })));
 
+// The film workflow in the order an operator walks it. Every step stays mounted so unsaved
+// edits and open disclosures survive moving between steps.
 const FILM_VIEWS = [
-  { id: "brief", label: "Brief" },
+  { id: "script", label: "Script" },
+  { id: "references", label: "References" },
+  { id: "plan", label: "Plan" },
   { id: "shots", label: "Shots" },
-  { id: "review", label: "Review & Edit" },
+  { id: "review", label: "Review" },
+  { id: "sound", label: "Sound" },
 ];
+
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+export function describeFilmSteps({ draft, planningOperation, preflight, selectedShotIds, summary }) {
+  const brief = draft.structuredBrief ?? {};
+  const beats = brief.beats?.length ?? 0;
+  const references = draft.referencePack?.references ?? [];
+  const approved = references.filter((entry) => entry.approved).length;
+  const findings = preflight?.findings?.length ?? 0;
+  const planning = planningOperation?.status;
+  return {
+    script: { done: beats > 0, status: beats ? `${plural(beats, "beat")} · ${plural(brief.dialogue?.length ?? 0, "line")}` : "Paste a script to begin" },
+    references: { done: approved > 0, status: references.length ? `${approved} of ${references.length} approved` : "Optional" },
+    plan: { done: planning === "applied", busy: planning === "running" || planning === "canceling", status: planning ? `Planning ${planning}` : "Generate or write shots by hand" },
+    shots: { warn: findings > 0, status: `${plural(summary.total, "shot")} · ${selectedShotIds.length} selected${findings ? ` · ${plural(findings, "finding")}` : ""}` },
+    review: { warn: summary.decide > 0, status: summary.delivered ? (summary.decide ? `${plural(summary.decide, "take")} to decide` : `${summary.delivered} delivered`) : "Render a shot first" },
+    sound: { status: "Dialogue and sound beds" },
+  };
+}
 
 const QWEN_PLANNER_MODEL_ID = "film_planner_qwen3_6_27b";
 
@@ -61,7 +90,7 @@ export function describeActiveFilmShots(run) {
   }).join(" · ");
 }
 
-export function FilmWorkspace() {
+export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "film", modeSwitch = null, onFilmChange, onNewTimeline, onOpenTimeline, viewRequest = null } = {}) {
   const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
   const { jobs = [] } = useAppLive();
   const [drafts, setDrafts] = useState([]);
@@ -76,7 +105,7 @@ export function FilmWorkspace() {
   const [selectedShotIds, setSelectedShotIds] = useState([]);
   const [preflight, setPreflight] = useState(null);
   const [lastRun, setLastRun] = useState(null);
-  const [activeView, setActiveView] = useState("brief");
+  const [activeView, setActiveView] = useState("script");
   const viewTabs = useRef([]);
   const selectedDraftId = useRef("");
   const activeTimelineId = useRef("");
@@ -248,6 +277,14 @@ export function FilmWorkspace() {
     }, 500);
     return () => { canceled = true; window.clearTimeout(timer); };
   }, [activeProject?.id, draft?.id, planningOperation, token]);
+
+  useEffect(() => {
+    onFilmChange?.({ draft, run: lastRun });
+  }, [draft, lastRun, onFilmChange]);
+
+  useEffect(() => {
+    if (viewRequest?.view) setActiveView(viewRequest.view);
+  }, [viewRequest]);
 
   if (!activeProject) return null;
 
@@ -500,8 +537,8 @@ export function FilmWorkspace() {
 
   function handleViewKeyDown(event, index) {
     let next = null;
-    if (event.key === "ArrowRight") next = (index + 1) % FILM_VIEWS.length;
-    if (event.key === "ArrowLeft") next = (index - 1 + FILM_VIEWS.length) % FILM_VIEWS.length;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % FILM_VIEWS.length;
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + FILM_VIEWS.length) % FILM_VIEWS.length;
     if (event.key === "Home") next = 0;
     if (event.key === "End") next = FILM_VIEWS.length - 1;
     if (next === null) return;
@@ -509,144 +546,220 @@ export function FilmWorkspace() {
     selectFilmView(FILM_VIEWS[next].id, true);
   }
 
+  const summary = filmRunSummary(draft, lastRun);
+  const steps = draft ? describeFilmSteps({ draft, planningOperation, preflight, selectedShotIds, summary }) : {};
+  const filmTimelineId = lastRun?.record?.timeline?.timelineId;
+  const exported = lastRun?.record?.export;
+
+  function selectCutShot(shotId, state) {
+    selectFilmView(state === "planned" || state === "queued" || state === "failed" ? "shots" : "review");
+  }
+
   return (
-    <details className="ve-film" open>
-      <summary>Film workspace</summary>
-      <div className="ve-film-toolbar">
-        <label>
-          Film draft
-          <select aria-label="Film draft" disabled={busy} onChange={(event) => selectDraft(event.target.value)} value={selectedId}>
-            <option value="">Choose a draft</option>
-            {drafts.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          </select>
-        </label>
-        <button disabled={busy} onClick={createDraft} type="button">New film draft</button>
+    <section aria-label="Film workspace" className="ve-film" hidden={mode !== "film"}>
+      <div className="ve-toolbar ve-film-bar">
+        <div className="ve-brand">
+          <span className="ve-mark"><Icon.Video size={14} /></span>
+          <div className="ve-brand-text">
+            <strong>{draft?.title || "Film"}</strong>
+            <span className="ve-brand-sub">{draft ? `film draft · revision ${draft.revision ?? 1}` : "script to timeline"}</span>
+          </div>
+        </div>
+        {modeSwitch ? <><div className="ve-toolbar-div" />{modeSwitch}</> : null}
+        <div className="ve-toolbar-div" />
+        <select aria-label="Film draft" className="ve-select ve-film-draft-select" disabled={busy} onChange={(event) => selectDraft(event.target.value)} value={selectedId}>
+          <option value="">Choose a draft</option>
+          {drafts.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+        </select>
+        <button aria-label="New film draft" className="ve-ghost-btn ve-film-bar-text" disabled={busy} onClick={createDraft} title="New film draft" type="button"><Icon.Plus size={15} /><span>New film draft</span></button>
+        <div className="ve-toolbar-right">
+          {summary.renderingShotId || (lastRun?.controllerActive && summary.total) ? <span className="ve-film-run-chip">{summary.renderingShotId ? `${summary.renderingShotId} rendering` : "Run active"} · {summary.delivered} of {summary.total}</span> : null}
+          {draft ? <button aria-label="Save draft" className="ve-ghost-btn ve-film-bar-text" disabled={busy} title="Save draft" onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button"><Icon.Save size={15} /><span>Save draft</span></button> : null}
+          {draft ? <button className="ve-export" disabled={busy || !filmTimelineId} onClick={exportCurrentCut} title={filmTimelineId ? "" : "Render a shot to create the film timeline."} type="button">Export current cut</button> : null}
+        </div>
       </div>
       {draft ? (
-        <div>
-          <div aria-label="Film workspace views" className="ve-film-view-tabs" role="tablist">
-            {FILM_VIEWS.map((view, index) => <button
-              aria-controls={`film-view-${view.id}`}
-              aria-selected={activeView === view.id}
-              className={activeView === view.id ? "selected" : ""}
-              id={`film-view-tab-${view.id}`}
-              key={view.id}
-              onClick={() => selectFilmView(view.id)}
-              onKeyDown={(event) => handleViewKeyDown(event, index)}
-              ref={(node) => { viewTabs.current[index] = node; }}
-              role="tab"
-              tabIndex={activeView === view.id ? 0 : -1}
-              type="button"
-            >{view.label}</button>)}
-          </div>
-          <FilmLifecycle
-            draftId={draft.id}
-            onRunChange={acceptRunSnapshot}
-            projectId={activeProject.id}
-            selectedRunId={lastRun?.locator?.id}
-            setNotice={setNotice}
-            token={token}
-          />
-          <div aria-labelledby="film-view-tab-brief" hidden={activeView !== "brief"} id="film-view-brief" role="tabpanel">
-            <div className="ve-film-form">
-              <label>Film title<input value={draft.title} onChange={(event) => updateDraft((next) => { next.title = event.target.value; })} /></label>
+        <div className="ve-film-body">
+          <aside className="ve-film-steps">
+            <span className="ve-film-eyebrow">Film workflow</span>
+            <div aria-label="Film workspace views" aria-orientation="vertical" className="ve-film-view-tabs" role="tablist">
+              {FILM_VIEWS.map((view, index) => {
+                const step = steps[view.id] ?? {};
+                const tone = step.busy ? "busy" : step.warn ? "warn" : step.done ? "done" : "";
+                return (
+                  <div className={`ve-film-step ${tone} ${activeView === view.id ? "selected" : ""}`} key={view.id} role="presentation">
+                    <button
+                      aria-controls={`film-view-${view.id}`}
+                      aria-describedby={`film-view-status-${view.id}`}
+                      aria-selected={activeView === view.id}
+                      id={`film-view-tab-${view.id}`}
+                      onClick={() => selectFilmView(view.id)}
+                      onKeyDown={(event) => handleViewKeyDown(event, index)}
+                      ref={(node) => { viewTabs.current[index] = node; }}
+                      role="tab"
+                      tabIndex={activeView === view.id ? 0 : -1}
+                      type="button"
+                    >{view.label}</button>
+                    <span className="ve-film-step-status" id={`film-view-status-${view.id}`}>{step.status}</span>
+                  </div>
+                );
+              })}
             </div>
-            <FilmBrief disabled={busy} draft={draft} onChange={updateDraft} onParse={extractBrief} />
-            <FilmReferences
-              assets={assets}
-              busy={busy}
-              draft={draft}
-              importAsset={importAsset}
-              onDraftChange={updateDraft}
-              onReplaceDraft={replaceDraft}
-              saveDraft={saveDraft}
+            <FilmLifecycle
+              draftId={draft.id}
+              onRunChange={acceptRunSnapshot}
+              projectId={activeProject.id}
+              selectedRunId={lastRun?.locator?.id}
               setNotice={setNotice}
               token={token}
             />
-            <FilmPlanning
-              availability={plannerAvailability}
-              disabled={busy}
-              draft={draft}
-              models={models}
-              onApply={applyCandidate}
-              onCancel={cancelPlan}
-              onChange={updateDraft}
-              onInstall={installPlanner}
-              onRefreshAvailability={refreshPlannerAvailability}
-              installError={plannerInstallError}
-              installJob={plannerInstallJob}
-              onNotice={setNotice}
-              onStart={generatePlan}
-              operation={planningOperation}
-              token={token}
-            />
-          </div>
-          <div aria-labelledby="film-view-tab-shots" hidden={activeView !== "shots"} id="film-view-shots" role="tabpanel">
-            <FilmRenderOptions
-              disabled={busy}
-              draft={draft}
-              onChange={updateDraft}
-              projectId={activeProject.id}
-              token={token}
-            />
-            <FilmShots
-              capabilities={preflight?.capabilities}
-              compiled={preflight?.compiled}
-              disabled={busy}
-              draft={draft}
-              findings={preflight?.findings}
-              models={models}
-              onChange={updateDraft}
-              onImportError={setNotice}
-              selectedShotIds={selectedShotIds}
-              setSelectedShotIds={setSelectedShotIds}
-            />
-          </div>
-          <div aria-labelledby="film-view-tab-review" hidden={activeView !== "review"} id="film-view-review" role="tabpanel">
-            <Suspense fallback={<p className="ve-film-help">Loading sound controls…</p>}>
-              <FilmSound
-                activeProject={activeProject}
-                assets={assets}
-                disabled={busy}
-                draft={draft}
-                onChange={updateDraft}
-                onReplaceDraft={replaceDraft}
-                saveDraft={saveDraft}
-                setNotice={setNotice}
-                token={token}
-              />
-            </Suspense>
-            <FilmReview
-              active={activeView === "review"}
-              draft={draft}
-              onChange={updateDraft}
-              projectId={activeProject.id}
-              refreshTimelines={refreshTimelines}
-              runControllerActive={Boolean(lastRun?.controllerActive)}
-              runLocatorId={lastRun?.locator?.id}
-              setNotice={setNotice}
-              setSelectedTimelineId={setSelectedTimelineId}
-              token={token}
-            />
-          </div>
-          <div className="ve-film-actions">
-            <button disabled={busy} onClick={() => saveDraft().then(() => setNotice("Draft saved."), (error) => setNotice(error.message))} type="button">Save draft</button>
-            {activeView === "shots" ? <>
+          </aside>
+          <div className="ve-film-main">
+            <div className="ve-film-panels">
+              <div aria-labelledby="film-view-tab-script" hidden={activeView !== "script"} id="film-view-script" role="tabpanel">
+                <div className="ve-film-form">
+                  <label>Film title<input value={draft.title} onChange={(event) => updateDraft((next) => { next.title = event.target.value; })} /></label>
+                </div>
+                <FilmBrief disabled={busy} draft={draft} onChange={updateDraft} onParse={extractBrief} />
+              </div>
+              <div aria-labelledby="film-view-tab-references" hidden={activeView !== "references"} id="film-view-references" role="tabpanel">
+                <FilmReferences
+                  assets={assets}
+                  busy={busy}
+                  draft={draft}
+                  importAsset={importAsset}
+                  onDraftChange={updateDraft}
+                  onReplaceDraft={replaceDraft}
+                  saveDraft={saveDraft}
+                  setNotice={setNotice}
+                  token={token}
+                />
+              </div>
+              <div aria-labelledby="film-view-tab-plan" hidden={activeView !== "plan"} id="film-view-plan" role="tabpanel">
+                <FilmPlanning
+                  availability={plannerAvailability}
+                  disabled={busy}
+                  draft={draft}
+                  models={models}
+                  onApply={applyCandidate}
+                  onCancel={cancelPlan}
+                  onChange={updateDraft}
+                  onInstall={installPlanner}
+                  onRefreshAvailability={refreshPlannerAvailability}
+                  installError={plannerInstallError}
+                  installJob={plannerInstallJob}
+                  onNotice={setNotice}
+                  onStart={generatePlan}
+                  operation={planningOperation}
+                  token={token}
+                />
+              </div>
+              <div aria-labelledby="film-view-tab-shots" hidden={activeView !== "shots"} id="film-view-shots" role="tabpanel">
+                <FilmRenderOptions
+                  disabled={busy}
+                  draft={draft}
+                  onChange={updateDraft}
+                  projectId={activeProject.id}
+                  token={token}
+                />
+                <FilmShots
+                  capabilities={preflight?.capabilities}
+                  compiled={preflight?.compiled}
+                  disabled={busy}
+                  draft={draft}
+                  findings={preflight?.findings}
+                  models={models}
+                  onChange={updateDraft}
+                  onImportError={setNotice}
+                  run={lastRun}
+                  selectedShotIds={selectedShotIds}
+                  setSelectedShotIds={setSelectedShotIds}
+                />
+              </div>
+              <div aria-labelledby="film-view-tab-review" hidden={activeView !== "review"} id="film-view-review" role="tabpanel">
+                <FilmReview
+                  active={mode === "film" && activeView === "review"}
+                  draft={draft}
+                  onChange={updateDraft}
+                  projectId={activeProject.id}
+                  refreshTimelines={refreshTimelines}
+                  runControllerActive={Boolean(lastRun?.controllerActive)}
+                  runLocatorId={lastRun?.locator?.id}
+                  setNotice={setNotice}
+                  setSelectedTimelineId={setSelectedTimelineId}
+                  token={token}
+                />
+              </div>
+              <div aria-labelledby="film-view-tab-sound" hidden={activeView !== "sound"} id="film-view-sound" role="tabpanel">
+                <Suspense fallback={<p className="ve-film-help">Loading sound controls…</p>}>
+                  <FilmSound
+                    activeProject={activeProject}
+                    assets={assets}
+                    disabled={busy}
+                    draft={draft}
+                    onChange={updateDraft}
+                    onReplaceDraft={replaceDraft}
+                    saveDraft={saveDraft}
+                    setNotice={setNotice}
+                    token={token}
+                  />
+                </Suspense>
+              </div>
+            </div>
+            {exported ? <div className="ve-film-export" aria-label="Film export status">
+              <strong>Export {exported.status}</strong>
+              <span>{exported.stale ? "Older export is stale" : `Timeline revision ${exported.timelineRevision ?? "unknown"}`}</span>
+              {exported.assetId ? <span>Asset {exported.assetId}</span> : null}
+              {exported.error ? <span role="alert">{exported.error}</span> : null}
+              {(exported.droppedAudioLayers ?? []).map((layer, index) => <span key={`${layer.itemId ?? "layer"}:${index}`}>Dropped audio: {layer.displayName ?? layer.itemId ?? JSON.stringify(layer)}</span>)}
+            </div> : null}
+            {notice ? <p aria-live="polite" className="ve-notice">{notice}</p> : null}
+            {activeView === "shots" ? <div className="ve-film-actions ve-film-footer">
+              <span>{plural(selectedShotIds.length, "shot")} selected</span>
               <button disabled={busy || !selectedShotIds.length} onClick={inspectPreflight} type="button">Run preflight</button>
               <button className="ve-generate" disabled={busy || !selectedShotIds.length} onClick={startRun} type="button">Render selected shots</button>
-            </> : null}
-            {activeView === "review" ? <button disabled={busy || !lastRun?.record?.timeline?.timelineId} onClick={exportCurrentCut} type="button">Export current cut</button> : null}
+            </div> : null}
+            <FilmCutStrip draft={draft} onOpenTimeline={onOpenTimeline} onSelectShot={selectCutShot} run={lastRun} />
           </div>
-          {lastRun?.record?.export ? <div className="ve-film-export" aria-label="Film export status">
-            <strong>Export {lastRun.record.export.status}</strong>
-            <span>{lastRun.record.export.stale ? "Older export is stale" : `Timeline revision ${lastRun.record.export.timelineRevision ?? "unknown"}`}</span>
-            {lastRun.record.export.assetId ? <span>Asset {lastRun.record.export.assetId}</span> : null}
-            {lastRun.record.export.error ? <span role="alert">{lastRun.record.export.error}</span> : null}
-            {(lastRun.record.export.droppedAudioLayers ?? []).map((layer, index) => <span key={`${layer.itemId ?? "layer"}:${index}`}>Dropped audio: {layer.displayName ?? layer.itemId ?? JSON.stringify(layer)}</span>)}
-          </div> : null}
         </div>
-      ) : null}
-      {notice ? <p aria-live="polite" className="ve-notice">{notice}</p> : null}
-    </details>
+      ) : (
+        <div className="ve-film-start">
+          <div className="ve-film-start-head">
+            <h2>How do you want to start?</h2>
+            <p>Both paths end in the same editable timeline. You can switch between Film and Timeline at any time.</p>
+          </div>
+          <div className="ve-film-start-cards">
+            <article className="work-panel ve-film-start-card">
+              <div className="work-panel-rule" />
+              <span className="ve-film-start-icon primary"><Icon.Video size={20} /></span>
+              <h3>Start from a script</h3>
+              <p>Turn prose or a screenplay into a shot plan, then render consistent clips in sequence.</p>
+              <ul>
+                <li>Extract beats and dialogue</li>
+                <li>Bind character and location references</li>
+                <li>Render shots straight into a timeline</li>
+              </ul>
+              <button className="primary-action" disabled={busy} onClick={createDraft} type="button">New film draft</button>
+            </article>
+            <article className="ve-film-start-card">
+              <span className="ve-film-start-icon"><Icon.Editor size={20} /></span>
+              <h3>Start with a blank timeline</h3>
+              <p>Assemble clips you already have, and generate extensions or bridges as you cut.</p>
+              <ul>
+                <li>Add assets from the media bin</li>
+                <li>Extend, regenerate, or bridge gaps</li>
+                <li>Add audio tracks</li>
+              </ul>
+              <button className="secondary-action" onClick={onNewTimeline} type="button">{blankTimelineLabel}</button>
+            </article>
+          </div>
+          {drafts.length ? <div className="ve-film-start-drafts">
+            <span className="ve-film-eyebrow">Continue a film draft</span>
+            {drafts.map((item) => <button disabled={busy} key={item.id} onClick={() => selectDraft(item.id)} type="button"><Icon.Video size={15} /><strong>{item.title}</strong><span>{plural(item.productionPlan?.shots?.length ?? 0, "shot")}</span><Icon.ArrowRight size={14} /></button>)}
+          </div> : null}
+          {notice ? <p aria-live="polite" className="ve-notice">{notice}</p> : null}
+        </div>
+      )}
+    </section>
   );
 }
