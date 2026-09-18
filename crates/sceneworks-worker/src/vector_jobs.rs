@@ -5830,8 +5830,10 @@ mod tests {
     #[test]
     fn native_request_is_image_only_and_rejects_text_guidance() {
         let image = ImageRef::new(1, 1, vec![1, 2, 3]).expect("valid RGB pixel");
+        let mut provider_request = vector_request(VectorMode::ImageToSvg, "");
+        provider_request.detail_budget.max_wall_time_ms = 300_000;
         let request = native_starvector_request(
-            &vector_request(VectorMode::ImageToSvg, ""),
+            &provider_request,
             image.clone(),
             gen_core::core_llm::CancelFlag::new(),
         )
@@ -5843,6 +5845,7 @@ mod tests {
             [Content::Image(actual)] if actual == &image
         ));
         assert!(!request.has_text());
+        assert_eq!(request.max_wall_time, Duration::from_secs(300));
 
         let error = native_starvector_request(
             &vector_request(VectorMode::ImageToSvg, "undisclosed guidance"),

@@ -14,6 +14,7 @@ test("materializes six executable tier-specific limit scenarios", () => {
     assert.equal(records[2].detailBudget.maxSvgBytes, 1024);
     assert.equal(records[3].detailBudget.maxWallTimeMs, 1000);
     assert.equal(records[0].detailBudget.maxNewTokens, tier === "1b" ? 7933 : 15422);
+    assert.equal(records[0].detailBudget.maxWallTimeMs, 300000);
     assert.deepEqual(records.slice(4).map((record) => record.detailBudget), [records[0].detailBudget, records[0].detailBudget]);
     assert.equal(records[4].cancel_after_create, true);
     assert.equal(records[4].worker_unloaded, true);

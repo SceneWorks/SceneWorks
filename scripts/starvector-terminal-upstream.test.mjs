@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { produceUpstreamReferences, promoteUpstreamManifests, validateUpstreamInputs } from "./starvector-terminal-upstream.mjs";
+import { produceUpstreamReferences, promoteUpstreamManifests, UPSTREAM_TIER_TIMEOUT_MS, validateUpstreamInputs } from "./starvector-terminal-upstream.mjs";
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const parityIndices = [0, 30, 60, 90].flatMap(start => Array.from({ length: 5 }, (_, offset) => start + offset));
 const referenceRows = () => Array.from({ length: 120 }, (_, index) => ({ png_sha256: `input-${index}` }));
@@ -43,6 +44,13 @@ test("both upstream models validate entirely offline before caller claims an att
   });
   assert.deepEqual(reports.map(x => x.tier), ["1b", "8b"]);
   for (const {command,args,options} of calls) { assert.equal(command, "/oracle/python"); assert.equal(args[1], "validate"); assert.equal(options.env.HF_HUB_OFFLINE, "1"); assert.equal(options.env.TRANSFORMERS_OFFLINE, "1"); assert.ok(args.includes("--components-root")); }
+});
+
+test("the upstream tier supervisor permits every case to use the shipping generation ceiling", () => {
+  const limitCases = JSON.parse(readFileSync("scripts/lib/starvector-terminal-limit-cases.json", "utf8"));
+  const perCaseMs = limitCases.shipping_detail_budgets["8b"].maxWallTimeMs;
+  assert.equal(perCaseMs, 300000);
+  assert.ok(UPSTREAM_TIER_TIMEOUT_MS > 20 * perCaseMs);
 });
 
 test("one upstream job precedes all four native tuples and every tuple consumes its artifact", async () => {

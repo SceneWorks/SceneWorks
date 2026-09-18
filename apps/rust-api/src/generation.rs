@@ -1,5 +1,5 @@
 use super::*;
-use crate::dto::VectorSampling;
+use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
 
 /// The single backend this API instance can actually enqueue for — the one authority every
 /// enqueue-time capability gate must key off.
@@ -274,7 +274,6 @@ pub(crate) async fn create_image_job(
 
 const MIN_VECTOR_SVG_BYTES: u32 = 1_024;
 const MAX_VECTOR_SVG_BYTES: u32 = 256 * 1_024;
-
 fn validate_vector_request(payload: &VectorRequest) -> Result<(), ApiError> {
     if payload.project_id.trim().is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -346,10 +345,10 @@ fn validate_vector_request(payload: &VectorRequest) -> Result<(), ApiError> {
             "detailBudget.maxSvgBytes must be between {MIN_VECTOR_SVG_BYTES} and {MAX_VECTOR_SVG_BYTES}"
         )));
     }
-    if !(1_000..=600_000).contains(&budget.max_wall_time_ms) {
-        return Err(ApiError::bad_request(
-            "detailBudget.maxWallTimeMs must be between 1000 and 600000",
-        ));
+    if !(1_000..=MAX_VECTOR_WALL_TIME_MS).contains(&budget.max_wall_time_ms) {
+        return Err(ApiError::bad_request(format!(
+            "detailBudget.maxWallTimeMs must be between 1000 and {MAX_VECTOR_WALL_TIME_MS}"
+        )));
     }
     Ok(())
 }

@@ -26,6 +26,12 @@ class OracleTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_tier_supervisor_permits_twenty_full_shipping_generation_budgets(self):
+        self.assertGreater(
+            oracle.TIER_TIMEOUT_SECONDS,
+            20 * oracle.DIAGNOSTIC_BUDGET['maxWallTimeMs'] / 1000,
+        )
+
     def cairo_fixture(self, *, member_type=tarfile.REGTYPE, duplicate=False, corrupt=False):
         # Real tar parsing/extraction; the codec seam keeps this CPU fixture
         # independent of optional installed packages. Real MSYS2 archive hashes
@@ -587,8 +593,8 @@ class OracleTests(unittest.TestCase):
             path.write_bytes(('distinct PNG fixture %s' % index).encode())
             rows.append({'case_index': index, 'input_png_path': path.name, 'png_sha256': oracle.digest(path),
                          'sampling': {'temperature': 0.0, 'topP': 1.0, 'topK': 1, 'repetitionPenalty': 1.0, 'seed': index},
-                         'detail_budgets': {'1b': {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000},
-                                            '8b': {'maxNewTokens': 15422, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}}})
+                         'detail_budgets': {'1b': {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 300000},
+                                            '8b': {'maxNewTokens': 15422, 'maxSvgBytes': 262144, 'maxWallTimeMs': 300000}}})
         self.save_rows(rows)
         return rows
 

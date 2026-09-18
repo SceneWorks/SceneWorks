@@ -2,6 +2,14 @@
 use super::support::*;
 
 #[test]
+fn vector_detail_default_allows_five_minutes_per_svg() {
+    assert_eq!(
+        crate::dto::VectorDetailBudget::default().max_wall_time_ms,
+        300_000
+    );
+}
+
+#[test]
 fn terminal_model_lifecycle_jobs_invalidate_catalog_snapshots() {
     for job_type in [
         crate::JobType::ModelDownload,
@@ -1165,7 +1173,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
             "sourceAssetId": source_asset_id,
             "prompt": "keep the silhouette",
             "sampling": { "temperature": 0.1, "topP": 0.95, "seed": 42 },
-            "detailBudget": { "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 90000 }
+            "detailBudget": { "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 300000 }
         }),
     )
     .await;
@@ -1178,6 +1186,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     assert_eq!(created["payload"]["sourceAssetId"], source_asset_id);
     assert_eq!(created["payload"]["sampling"]["seed"], 42);
     assert_eq!(created["payload"]["detailBudget"]["maxSvgBytes"], 131072);
+    assert_eq!(created["payload"]["detailBudget"]["maxWallTimeMs"], 300000);
     assert_eq!(
         created["payload"]["modelManifestEntry"]["adapter"],
         "starvector"
@@ -1509,6 +1518,20 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
                 "fixtureSvg": "<svg/>"
             }),
             StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id,
+                "detailBudget": {
+                    "maxNewTokens": 2048,
+                    "maxSvgBytes": 131072,
+                    "maxWallTimeMs": 300001
+                }
+            }),
+            StatusCode::BAD_REQUEST,
         ),
     ] {
         let (status, _) = request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;

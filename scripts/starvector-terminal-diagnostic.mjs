@@ -17,7 +17,8 @@ import { preserveTerminalDiagnostics, submitAndPoll, vectorRequest } from "./sta
 
 export const DIAGNOSTIC_TUPLE = "candle-cuda:1b";
 export const DIAGNOSTIC_CASES = Object.freeze([9, 11, 12, 13, 15]);
-export const DIAGNOSTIC_BUDGET = Object.freeze({ maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 });
+// This is the hard per-SVG generation ceiling. The 1B p95 acceptance target remains 120 seconds.
+export const DIAGNOSTIC_BUDGET = Object.freeze({ maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 300000 });
 export const DIAGNOSTIC_SAMPLING = Object.freeze({ temperature: 0, topP: 1, topK: 1, repetitionPenalty: 1, repetitionContext: 0, seed: 7 });
 export const DIAGNOSTIC_STOP = Object.freeze({ accepted: 3, rejected: 3 });
 export const DIAGNOSTIC_PRIOR_OBSERVATIONS = Object.freeze([Object.freeze({

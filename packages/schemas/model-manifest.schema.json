@@ -911,7 +911,7 @@
               "acceptsTextGuidance": { "type": "boolean" },
               "maxNewTokens": { "type": "integer", "minimum": 1 },
               "maxSvgBytes": { "type": "integer", "minimum": 1 },
-              "maxWallTimeMs": { "type": "integer", "minimum": 1 },
+              "maxWallTimeMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
               "deviceAdmission": {
                 "type": "object",
                 "additionalProperties": false,
