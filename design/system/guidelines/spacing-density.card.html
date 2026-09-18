@@ -1,0 +1,21 @@
+<!-- @dsCard group="Spacing" viewport="700x160" name="Density Scale" subtitle="gap-1…5 · 6/10/14/20/28px" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 18px; background: var(--bg); font-family: var(--font-ui); }
+  .rows { display: grid; gap: 9px; }
+  .r { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 12px; }
+  .k { font-size: 11px; font-weight: 600; color: var(--text); }
+  .k span { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); font-weight: 400; }
+  .bar { height: 18px; background: var(--accent); border-radius: var(--r-xs); }
+</style></head>
+<body>
+<div class="rows">
+  <div class="r"><div class="k">gap-1<span>6px</span></div><div class="bar" style="width:6px"></div></div>
+  <div class="r"><div class="k">gap-2<span>10px</span></div><div class="bar" style="width:10px"></div></div>
+  <div class="r"><div class="k">gap-3<span>14px</span></div><div class="bar" style="width:14px"></div></div>
+  <div class="r"><div class="k">gap-4<span>20px</span></div><div class="bar" style="width:20px"></div></div>
+  <div class="r"><div class="k">gap-5<span>28px</span></div><div class="bar" style="width:28px"></div></div>
+</div>
+</body></html>

@@ -1,0 +1,56 @@
+<!-- @dsCard group="Components" viewport="700x340" name="Icons & Buttons" subtitle="Icon set + primary / secondary / danger / icon buttons" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../../styles.css" />
+<style>
+  body { margin: 0; padding: 20px; background: var(--bg); }
+  .wrap { display: grid; gap: 20px; }
+  .block { display: grid; gap: 10px; }
+  .cap { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+  .icon-grid { display: grid; grid-template-columns: repeat(15, 1fr); gap: 6px; }
+  .icon-cell { display: grid; place-items: center; height: 34px; border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-muted); background: var(--surface); }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script type="text/babel">
+const { Icon, Button } = window.SceneWorksDesignSystem_b6febf;
+const NAMES = Object.keys(Icon);
+function App() {
+  return (
+    <div className="wrap">
+      <div className="block">
+        <span className="cap">Icon set · {NAMES.length} glyphs · 24×24 stroked, currentColor</span>
+        <div className="icon-grid">
+          {NAMES.map((n) => {
+            const G = Icon[n];
+            return <div className="icon-cell" key={n} title={n}><G /></div>;
+          })}
+        </div>
+      </div>
+      <div className="block">
+        <span className="cap">Buttons</span>
+        <div className="btn-row">
+          <Button variant="primary" icon={<Icon.Sparkle />}>Generate</Button>
+          <Button variant="secondary">Cancel</Button>
+          <Button variant="secondary" icon={<Icon.Folder />}>Import</Button>
+          <Button variant="danger" icon={<Icon.Logs />}>Delete</Button>
+          <Button variant="secondary" disabled>Disabled</Button>
+          <Button variant="icon" aria-label="Notifications"><Icon.Bell /></Button>
+          <Button variant="icon" aria-label="Theme"><Icon.Moon /></Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

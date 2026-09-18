@@ -1,0 +1,25 @@
+<!-- @dsCard group="Type" viewport="700x230" name="Type Scale" subtitle="Topbar title · section heading · eyebrow · body · label · value" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); }
+  .stack { display: grid; gap: 12px; }
+  .line { display: grid; gap: 1px; }
+  .tag { font-size: 10px; font-family: var(--font-mono); color: var(--text-faint); }
+  h1.t { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  h2.s { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .eb { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+  .body { margin: 0; font-size: 14px; line-height: 1.6; color: var(--text); max-width: 560px; }
+  .lb { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+  .val { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+</style></head>
+<body>
+<div class="stack">
+  <div class="line"><span class="tag">.topbar-title h1 — 17/600</span><h1 class="t">Image Studio</h1></div>
+  <div class="line"><span class="tag">.section-heading h2 — 22/600</span><h2 class="s">Recent renders</h2></div>
+  <div class="line"><span class="tag">.eyebrow — 11/700 · 0.08em · uppercase</span><p class="eb">Text to image</p></div>
+  <div class="line"><span class="tag">body / .view-copy — 14/1.6</span><p class="body">Generation runs directly on your machine's GPU — no cloud, no Python. Prompts and media never leave the workstation.</p></div>
+  <div class="line"><span class="tag">label — 12/600 · value — mono 13</span><span class="lb">Guidance <span class="val">cfg 4.5</span></span></div>
+</div>
+</body></html>

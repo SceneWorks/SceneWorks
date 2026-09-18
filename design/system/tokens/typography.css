@@ -1,0 +1,7 @@
+/* SceneWorks — type tokens (verbatim from SceneWorks apps/web styles.css).
+   Two families: Plus Jakarta Sans for all UI, JetBrains Mono for code/values.
+   The body opts into the stylistic sets ss01 + cv11 (see shell.css body rule). */
+:root {
+  --font-ui: "Plus Jakarta Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
