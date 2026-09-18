@@ -421,6 +421,9 @@ test("publication failure predecessor proves completed asset writes, displayName
   const missingDisplayName = { ...records, "product-service-api.stdout.log": apiLog.replaceAll("Missing required field: displayName", "different API failure") };
   const missingDisplayNameArchives = await writeArchives("missing-display-name", missingDisplayName);
   await assert.rejects(() => validateNativeExecutionArchives(value, missingDisplayNameArchives), /displayName failure/);
+  const summaryNeutralApiSubstitution = { ...records, "product-service-api.stdout.log": `${apiLog}${JSON.stringify({ event: "unrelated_valid_event" })}\n` };
+  const summaryNeutralApiArchives = await writeArchives("summary-neutral-api", records, summaryNeutralApiSubstitution);
+  await assert.rejects(() => validateNativeExecutionArchives(value, summaryNeutralApiArchives), /substituted product service API evidence/);
   const noCompleted = { ...records, "vector-generate-route.ndjson": routeRows.slice(0, 2).map((record) => JSON.stringify(record)).join("\n") + "\n" };
   const noCompletedArchives = await writeArchives("no-completed", noCompleted);
   await assert.rejects(() => validateNativeExecutionArchives(value, noCompletedArchives), /completed generation/);

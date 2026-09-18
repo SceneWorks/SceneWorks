@@ -191,6 +191,7 @@ export async function validateNativeExecutionArchives(value, archives) {
     // and its raw asset write do not establish model-quality or terminal acceptance.
     const publicationRecords = ["product-service-api.stdout.log", "product-service-stopped.json"];
     const rawPublication = await boundedArchiveRecords(archives.raw, publicationRecords), combinedPublication = await boundedArchiveRecords(archives.combined, publicationRecords);
+    if (!rawPublication["product-service-api.stdout.log"].equals(combinedPublication["product-service-api.stdout.log"])) fail("combined archive substituted product service API evidence");
     if (!rawPublication["product-service-stopped.json"].equals(combinedPublication["product-service-stopped.json"])) fail("combined archive substituted product service stop evidence");
     const rawRoute = await boundedPublicationRouteSummary(archives.raw), combinedRoute = await boundedPublicationRouteSummary(archives.combined);
     if (rawRoute.sha256 !== combinedRoute.sha256 || rawRoute.size !== combinedRoute.size || stable(rawRoute) !== stable(combinedRoute)) fail("combined archive substituted publication route evidence");
