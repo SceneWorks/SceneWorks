@@ -243,6 +243,8 @@ mod image_decode;
 mod image_jobs;
 use image_jobs::*;
 mod vector_jobs;
+#[doc(hidden)]
+pub use vector_jobs::build_vector_asset_fact;
 use vector_jobs::*;
 #[doc(hidden)]
 pub use vector_jobs::{

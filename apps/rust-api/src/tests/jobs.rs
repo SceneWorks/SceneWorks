@@ -1245,6 +1245,184 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     assert_eq!(text_claim["job"]["id"], text_created["id"]);
 }
 
+/// The vector worker and API share a two-phase completion boundary: the worker reports a flat
+/// `assetWrites` fact, then the API validates/persists its sidecar and rewrites the job result to
+/// `assets` / `assetIds`. A missing required sidecar field leaves the job terminal with raw
+/// `assetWrites`, so exercise the production worker fact builder through the real progress route.
+#[tokio::test]
+async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector publication" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let (_, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let source_asset_id = source["id"].as_str().expect("source id");
+
+    let create = |app: axum::Router| {
+        let project_id = project_id.clone();
+        let source_asset_id = source_asset_id.to_owned();
+        async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/image/vectorize/jobs",
+                json!({
+                    "projectId": project_id,
+                    "mode": "image_to_svg",
+                    "model": "starvector_test",
+                    "sourceAssetId": source_asset_id,
+                    "prompt": "keep the silhouette"
+                }),
+            )
+            .await
+        }
+    };
+    let fact = |asset_id: &str, generation_set_id: &str| {
+        sceneworks_worker::build_vector_asset_fact(
+            asset_id,
+            generation_set_id,
+            512,
+            512,
+            "2026-09-18T00:00:00Z",
+            "image_to_svg",
+            "starvector_test",
+            "starvector",
+            "keep the silhouette",
+            Some(source_asset_id),
+            json!({ "temperature": 0.2, "topP": 0.9, "topK": 0, "repetitionPenalty": 1.0, "repetitionContext": 0, "seed": 7 }),
+            json!({ "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 90000 }),
+            None,
+        )
+    };
+
+    let (status, legacy_job) = create(app.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{legacy_job}");
+    let legacy_job_id = legacy_job["id"].as_str().expect("legacy job id");
+    claim_job_as_worker(
+        &app,
+        legacy_job_id,
+        "legacy-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+    let mut legacy_fact = fact("asset_vector_legacy", "genset_vector_legacy");
+    legacy_fact
+        .as_object_mut()
+        .expect("fact object")
+        .remove("displayName");
+    let legacy_media = legacy_fact["mediaPath"]
+        .as_str()
+        .expect("legacy media path");
+    std::fs::create_dir_all(
+        project_path
+            .join(legacy_media)
+            .parent()
+            .expect("media parent"),
+    )
+    .expect("legacy media dir creates");
+    std::fs::write(
+        project_path.join(legacy_media),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .expect("legacy vector writes");
+    let (status, rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{legacy_job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Done", "workerId": "legacy-vector-worker",
+            "result": { "generationSetId": "genset_vector_legacy", "assetWrites": [legacy_fact] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("displayName")));
+
+    let (status, generated_job) = create(app.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{generated_job}");
+    let generated_job_id = generated_job["id"].as_str().expect("generated job id");
+    claim_job_as_worker(
+        &app,
+        generated_job_id,
+        "fixed-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+    let generated_fact = fact("asset_vector_fixed", "genset_vector_fixed");
+    let generated_media = generated_fact["mediaPath"]
+        .as_str()
+        .expect("generated media path");
+    std::fs::create_dir_all(
+        project_path
+            .join(generated_media)
+            .parent()
+            .expect("media parent"),
+    )
+    .expect("generated media dir creates");
+    std::fs::write(
+        project_path.join(generated_media),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .expect("generated vector writes");
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generated_job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Done", "workerId": "fixed-vector-worker",
+            "result": { "generationSetId": "genset_vector_fixed", "assetWrites": [generated_fact] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert!(completed["result"].get("assetWrites").is_none());
+    assert_eq!(
+        completed["result"]["assetIds"],
+        json!(["asset_vector_fixed"])
+    );
+    assert_eq!(
+        completed["result"]["assets"][0]["displayName"],
+        "keep the silhouette #1"
+    );
+    assert_eq!(completed["result"]["assets"][0]["type"], "vector");
+
+    let (status, published) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true&includeTrashed=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let fixed = published
+        .as_array()
+        .expect("asset list")
+        .iter()
+        .find(|asset| asset["id"] == "asset_vector_fixed")
+        .expect("published vector asset");
+    assert_eq!(fixed["displayName"], "keep the silhouette #1");
+    assert_eq!(fixed["type"], "vector");
+}
+
 #[tokio::test]
 async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_before_enqueue() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

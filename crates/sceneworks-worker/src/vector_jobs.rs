@@ -280,6 +280,68 @@ pub(crate) struct VectorProviderRequest {
     pub(crate) detail_budget: VectorDetailBudget,
 }
 
+/// Build the flat vector asset fact consumed by the API's generated-asset
+/// persistence boundary. Kept public for the API contract test: the test must
+/// exercise the exact producer shape rather than a hand-written approximation.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_vector_asset_fact(
+    asset_id: &str,
+    generation_set_id: &str,
+    width: u32,
+    height: u32,
+    created_at: &str,
+    mode: &str,
+    model: &str,
+    adapter: &str,
+    prompt: &str,
+    source_asset_id: Option<&str>,
+    sampling: Value,
+    detail_budget: Value,
+    workflow: Option<Value>,
+) -> Value {
+    let title: String = prompt.chars().take(56).collect();
+    let title = title.trim();
+    let display_name = format!(
+        "{} #1",
+        if title.is_empty() {
+            "Generated vector"
+        } else {
+            title
+        }
+    );
+    json!({
+        "assetId": asset_id,
+        "type": "vector",
+        "mediaPath": format!("assets/images/{generation_set_id}/{asset_id}/vector.svg"),
+        "mimeType": "image/svg+xml",
+        "width": width,
+        "height": height,
+        "displayName": display_name,
+        "createdAt": created_at,
+        "mode": mode,
+        "model": model,
+        "adapter": adapter,
+        "prompt": prompt,
+        "negativePrompt": "",
+        "sourceAssetId": source_asset_id,
+        "sampling": sampling,
+        "detailBudget": detail_budget,
+        "sanitizerVersion": VECTOR_SANITIZER_VERSION,
+        "rendererVersion": VECTOR_RENDERER_VERSION,
+        "workflow": workflow,
+        "count": 1,
+        "normalizedWidth": width,
+        "normalizedHeight": height,
+        "preview": {
+            "path": format!("assets/images/{generation_set_id}/{asset_id}/preview.png"),
+            "mimeType": "image/png",
+            "width": width,
+            "height": height,
+        },
+    })
+}
+
 /// Injected multimodal text-provider seam. Implementations must poll `cancel` while decoding and
 /// emit only UTF-8 source fragments. Production uses [`NativeStarVectorProvider`]; tests inject
 /// small structural providers without loading weights.
@@ -1340,32 +1402,21 @@ pub(crate) async fn run_vector_job_with_provider(
         None
     };
 
-    let media_path = format!("assets/images/{generation_set_id}/{asset_id}/vector.svg");
-    let preview_path = format!("assets/images/{generation_set_id}/{asset_id}/preview.png");
-    let fact = json!({
-        "assetId": asset_id,
-        "type": "vector",
-        "mediaPath": media_path,
-        "mimeType": "image/svg+xml",
-        "width": canonical.width,
-        "height": canonical.height,
-        "createdAt": created_at,
-        "mode": payload.mode.as_str(),
-        "model": payload.model,
-        "adapter": provider.provider_id(),
-        "prompt": payload.prompt,
-        "negativePrompt": "",
-        "sourceAssetId": payload.source_asset_id,
-        "sampling": payload.sampling,
-        "detailBudget": payload.detail_budget,
-        "sanitizerVersion": VECTOR_SANITIZER_VERSION,
-        "rendererVersion": VECTOR_RENDERER_VERSION,
-        "workflow": payload.workflow,
-        "count": 1,
-        "normalizedWidth": canonical.width,
-        "normalizedHeight": canonical.height,
-        "preview": { "path": preview_path, "mimeType": "image/png", "width": canonical.width, "height": canonical.height },
-    });
+    let fact = build_vector_asset_fact(
+        &asset_id,
+        &generation_set_id,
+        canonical.width,
+        canonical.height,
+        &created_at,
+        payload.mode.as_str(),
+        &payload.model,
+        provider.provider_id(),
+        &payload.prompt,
+        payload.source_asset_id.as_deref(),
+        json!(payload.sampling),
+        json!(payload.detail_budget),
+        payload.workflow.clone(),
+    );
     let mut result = json!({
         "generationSetId": generation_set_id,
         "expectedCount": 1,
