@@ -12,6 +12,7 @@ import {
 import { useAppStatic } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { EditorGuides } from "../components/editor/EditorGuides.jsx";
 import { EditorModeSwitch } from "../components/editor/EditorModeSwitch.jsx";
 import { EditorToolbar } from "../components/editor/EditorToolbar.jsx";
 import { MediaBin } from "../components/editor/MediaBin.jsx";
@@ -811,11 +812,12 @@ export function EditorScreen() {
     return (
       <section className="ve-editor ve-editor-empty">
         <div className="empty-panel">Open a project before assembling a timeline.</div>
+        <EditorGuides />
       </section>
     );
   }
 
-  const modeSwitch = <EditorModeSwitch mode={mode} onChange={changeMode} />;
+  const modeSwitch = <><EditorModeSwitch mode={mode} onChange={changeMode} /><EditorGuides /></>;
   const filmWorkspace = (
     <FilmWorkspace
       mode={mode}

@@ -18673,3 +18673,9 @@ button.audio-wave {
 .checkpoint-import.compact .models-import-grid {
   grid-template-columns: 1fr;
 }
+
+/* Shared guide reader: navigation stays visible while the document scrolls. */
+.editor-guides-modal { grid-template-rows: auto auto minmax(0, 1fr); }
+.editor-guides-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.editor-guides-nav button { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
+.editor-guides-nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }

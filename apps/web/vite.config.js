@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
+import editorGuidesPlugin from "./vite-plugin-editor-guides.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
 // tauri.conf.json by scripts/sync-version.mjs) to the frontend as a build-time
@@ -32,6 +33,7 @@ export default defineConfig({
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
     themeInitPlugin(),
+    editorGuidesPlugin(),
     bundleReportPlugin({ budgets: bundleBudgets }),
     precompressPlugin(),
   ],

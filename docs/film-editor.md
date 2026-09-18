@@ -11,6 +11,9 @@ operator workflow in the editor.
 New to writing a script or testing Film? Start with [Writing your first film script](film-script-writing.md),
 which includes copy-and-paste examples, parser limitations, and a staged first-test checklist.
 
+You can also choose **Guides** beside the editor’s **Film | Timeline** switch to read both guides
+in a dialog without leaving the project. They ship with the app and are available offline.
+
 ## Before you begin
 
 Open or create a project, then open **Editor**. The editor toolbar has a **Film | Timeline** switch.
