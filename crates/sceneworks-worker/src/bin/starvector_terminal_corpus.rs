@@ -236,7 +236,9 @@ fn write_png(svg: &str, destination: &Path) -> Result<Vec<u8>, Box<dyn std::erro
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
     let source = tree.size();
     let scale = (512.0 / source.width()).min(512.0 / source.height());
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    let x = (512.0 - source.width() * scale) / 2.0;
+    let y = (512.0 - source.height() * scale) / 2.0;
+    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     pixmap.save_png(destination)?;
     Ok(fs::read(destination)?)
@@ -482,7 +484,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_limit_cases, shipping_detail_budgets};
+    use super::{materialize_limit_cases, shipping_detail_budgets, write_png};
+
+    #[test]
+    fn terminal_corpus_centers_non_square_renders_on_the_fixed_canvas() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("wide.png");
+        let bytes = write_png(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="#ff0000"/></svg>"##,
+            &destination,
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
+
+        assert_eq!(pixels.dimensions(), (512, 512));
+        assert_eq!(pixels.get_pixel(256, 0).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 127).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 128).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(256, 383).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(256, 384).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 511).0, [255, 255, 255, 255]);
+    }
 
     #[test]
     fn terminal_detailed_budgets_come_from_the_embedded_shipping_manifest() {
