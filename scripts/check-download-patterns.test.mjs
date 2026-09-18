@@ -169,20 +169,20 @@ test("the committed evidence grades the real catalog clean", async () => {
 // shared-component co-requisite, and the raw off-Mac snapshot row — which landed on the epic
 // branch while the Xinsir authority landed on the feature; the union therefore has 100 current
 // keys. SC-18791 adds the public, immutable SceneWorks/ltx-2.5-mlx authority, bringing the current
-// census to 101. SC-23730 moves the optional Qwen3.6 planner from its metadata-only pin to the
-// first complete official snapshot, adding one current authority and bringing the census to 102.
+// census to 101. SC-22256 adds the StarVector-1B upstream snapshot (102), and SC-22261 adds the
+// StarVector-8B snapshot (103). SC-23730 adds the complete Qwen3.6 planner snapshot (104).
 // SC-21306 adds two exact historical rows for the audited artifact importer; they are not manifest
 // claims and are guarded separately against absence, identity drift, and file-census drift.
-test("all 102 current and two frozen legacy download keys use immutable commit SHAs", async () => {
+test("all 104 current and two frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 102, "update the current-key disclosure when the real key census changes");
+  assert.equal(keys.size, 104, "update the 104/104 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    104,
-    "the evidence census must be the 102 current claims plus two frozen importer authorities",
+    106,
+    "the evidence census must be the 104 current claims plus two frozen importer authorities",
   );
   for (const claim of claims) {
     assert.match(

@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
+  "inferenceRevision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -6603,7 +6603,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "fae351c3cd3e0d069c3cc0337772efeabc07a86c5243e4f4edd514e65064cc27",
+      "digest": "461de77e116c0b41897cec8fa462be16ddf7109beb2af9fae602ca8c2781b948",
       "closureFileCount": 173,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6976,7 +6976,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "689d7b0419c168eebee408d5c27a10488ab788dc4782e0265f082a90e7b4069f",
+      "digest": "edeb38b511ad21568501d911114ef3ee14da681bec0fe95a25dc524450a2c517",
       "closureFileCount": 173,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",

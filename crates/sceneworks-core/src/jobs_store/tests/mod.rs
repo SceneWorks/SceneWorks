@@ -7,4 +7,5 @@ mod claim_projection_tests;
 mod connection_pool_tests;
 mod derive_job_title_truncate_tests;
 mod mlx_routing_tests;
+mod pending_workflow_tests;
 mod termination_failure_error_tests;

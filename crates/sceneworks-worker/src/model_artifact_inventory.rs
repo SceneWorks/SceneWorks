@@ -146,6 +146,13 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/vector_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ReceiptProvenance,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/catalog_semantic_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {

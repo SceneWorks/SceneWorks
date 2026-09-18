@@ -153,8 +153,9 @@ describe("selectEditorMediaAssets", () => {
   it("keeps project audio available to timeline auditioning", () => {
     const audio = { id: "room-tone", type: "audio" };
     const video = { id: "shot", type: "video" };
+    const vector = { id: "logo", type: "vector" };
     const unrelated = { id: "model", type: "model" };
 
-    expect(selectEditorMediaAssets([audio, video, unrelated])).toEqual([audio, video]);
+    expect(selectEditorMediaAssets([audio, video, vector, unrelated])).toEqual([audio, video, vector]);
   });
 });

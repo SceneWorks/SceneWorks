@@ -48,6 +48,7 @@ const EDITOR_MEDIA_TYPES = new Set([
   "render",
   "upload",
   "video",
+  "vector",
 ]);
 
 export function selectEditorMediaAssets(assets) {

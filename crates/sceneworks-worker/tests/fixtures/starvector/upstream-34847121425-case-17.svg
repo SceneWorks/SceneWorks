@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="900" height="600" version="1.1">
+    <defs>
+        <filter id="blur" width="200%" height="200%">
+            <feGaussianBlur in="SourceAlpha" result="blurAlpha" stdDeviation="3"/>
+            <feOffset in="blurAlpha" result="offsetBlur" dx="6" dy="6"/>
+            <feMerge>
+                <feMergeNode in="offsetBlur"/>
+                <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+        </filter>
+    </defs>
+    <g filter="url(#blur)">
+        <polygon fill="none" stroke-width="10" stroke="black" points="100,900 200,300 550,260 515,400 650,260 1200,210 700,600 900,820 600,850 450,690 400,860"/>
+    </g>
+</svg>

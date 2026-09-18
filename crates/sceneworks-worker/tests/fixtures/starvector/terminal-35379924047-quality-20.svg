@@ -1,0 +1,86 @@
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   width="136"
+   height="136"
+   viewBox="0 0 35.983333 35.983334"
+   version="1.1"
+   id="svg8"
+   inkscape:version="0.92.4 (5da689c313, 2019-01-14)"
+   sodipodi:docname="icon.svg">
+  <defs
+     id="defs2" />
+  <sodipodi:namedview
+     id="base"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageopacity="0.0"
+     inkscape:pageshadow="2"
+     inkscape:zoom="1.979899"
+     inkscape:cx="103.63265"
+     inkscape:cy="68.000002"
+     inkscape:document-units="mm"
+     inkscape:current-layer="layer1"
+     showgrid="false"
+     units="px"
+     inkscape:window-width="1920"
+     inkscape:window-height="1017"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1" />
+  <metadata
+     id="metadata5">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(0,-261.01665)">
+    <path
+       sodipodi:type="star"
+       style="opacity:1;fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.40000001;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1"
+       id="path815"
+       sodipodi:sides="6"
+       sodipodi:cx="17.991667"
+       sodipodi:cy="279.00832"
+       sodipodi:r1="14.816666"
+       sodipodi:r2="13.229166"
+       sodipodi:arg1="0.52359878"
+       sodipodi:arg2="1.0471976"
+       inkscape:flatsided="true"
+       inkscape:rounded="0"
+       inkscape:randomized="0"
+       d="m 30.266667,285.675 -12.275,6.66667 -1.904167,0 -12.275,-6.66667 0,-13.33333 12.275,-6.66667 1.904167,0 12.275,6.66667 z"
+       inkscape:transform-center-y="-6.6145833" />
+    <g
+       id="g839"
+       transform="matrix(0.26458333,0,0,0.26458333,8.9958333,269.9854)"
+       style="stroke:#000000;stroke-opacity:1;stroke-width:2;stroke-miterlimit:4;stroke-dasharray:none">
+      <path
+         id="path835"
+         d="m 50,20 h 2.5 c 0,0 2.5,2.5 2.5,5 v 2.5 h 2.5 c 0,0 2.5,0 5,2.5 2.5,2.5 2.5,2.5 2.5,2.5 V 30 H 65 c 0,0 -2.5,0 -5,2.5 -2.5,2.5 -2.5,2.5 -2.5,2.5 v 5 H 60 c 0,0 2.5,0 5,2.5 2.5,2.5 2.5,2.5 2.5,2.5 0,0 0,0 0,2.5 -2.5,2.5 -5,2.5 -5,2.5 h -2.5 v 5 H 60 c 0,0 2.5,0 5,2.5 2.5,2.5 2.5,2.5 2.5,2.5 0,0 0,0 0,2.5 -2.5,2.5 -5,2.5 -5,2.5 H 62.5 V 60 c 0,0 0,2.5 -2.5,5 -2.5,2.5 -2.5,2.5 -2.5,2.5 H 55 V 70 c 0,0 0,2.5 -2.5,5 -2.5,2.5 -2.5,2.5 -2.5,2.5 0,0 0,0 -2.5,-2.5 C 47.5,72.5 47.5,70 47.5,70 H 40 c 0,0 0,2.5 -2.5,5 -2.5,2.5 -2.5,2.5 -2.5,2.5 0,0 0,0 -2.5,-2.5 C 32.5,72.5 32.5,70 32.5,70 H 27.5 V 72.5 C 27.5,72.5 27.5,75 25,77.5 22.5,80 22.5,80 22.5,80 22.5,80 20,80 17.5,77.5 15,75 15,72.5 15,72.5 H 12.5 c 0,0 -2.5,0 -5,-2.5 -2.5,-2.5 -2.5,-2.5 -2.5,-2.5 0,0 0,0 0,-2.5 2.5,-2.5 5,-2.5 5,-2.5 H 15 V 55 H 12.5 c 0,0 -2.5,0 -5,-2.5 -2.5,-2.5 -2.5,-2.5 -2.5,-2.5 0,0 0,0 0,-2.5 2.5,-2.5 5,-2.5 5,-2.5 H 15 V 40 H 12.5 c 0,0 -2.5,0 -5,-2.5 -2.5,-2.5 -2.5,-2.5 -2.5,-2.5 0,0 0,0 0,-2.5 2.5,-2.5 5,-2.5 5,-2.5 H 15 V 30 C 15,30 15,27.5 17.5,25 20,22.5 20,22.5 20,22.5 H 25 V 20 C 25,20 25,17.5 27.5,15 30,12.5 30,12.5 30,12.5 c 0,0 0,0 2.5,2.5 2.5,2.5 2.5,5 2.5,5 h 5 V 20 c 0,0 0,-2.5 2.5,-5 2.5,-2.5 2.5,-2.5 2.5,-2.5 0,0 0,0 2.5,2.5 C 50,17.5 50,20 50,20 Z"
+         inkscape:connector-curvature="0"
+         style="fill:none;stroke:#000000;stroke-opacity:1;stroke-width:2;stroke-miterlimit:4;stroke-dasharray:none" />
+      <path
+         id="path837"
+         d="m 15,25 h 35 v 35 H 15 Z m 5,5 v 25 h 25 V 30 Z"
+         inkscape:connector-curvature="0"
+         style="fill:none;stroke:#000000;stroke-opacity:1;stroke-width:2;stroke-miterlimit:4;stroke-dasharray:none" />
+    </g>
+  </g>
+</svg>
