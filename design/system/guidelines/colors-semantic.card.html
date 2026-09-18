@@ -1,0 +1,20 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic" subtitle="success · warn · danger, each with a soft tint" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 16px; background: var(--bg); font-family: var(--font-ui); }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--border); }
+  .chip { height: 60px; display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+  .meta { grid-column: 1 / -1; padding: 7px 9px; background: var(--surface); }
+  .name { font-size: 11.5px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="grid">
+  <div class="pair"><div class="chip" style="background:var(--success);color:#fff">solid</div><div class="chip" style="background:var(--surface);color:var(--success)">•</div><div class="meta"><div class="name">success</div><div class="var">--success</div></div></div>
+  <div class="pair"><div class="chip" style="background:var(--warn);color:var(--ink)">solid</div><div class="chip" style="background:var(--warn-soft);color:var(--text)">soft</div><div class="meta"><div class="name">warn / warn-soft</div><div class="var">--warn · --warn-soft</div></div></div>
+  <div class="pair"><div class="chip" style="background:var(--danger);color:#fff">solid</div><div class="chip" style="background:var(--danger-soft);color:var(--danger)">soft</div><div class="meta"><div class="name">danger / danger-soft</div><div class="var">--danger · --danger-soft</div></div></div>
+</div>
+</body></html>

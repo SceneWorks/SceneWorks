@@ -1,0 +1,25 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Accent Ramp" subtitle="Hue-driven — one [data-accent] swap recolors it all" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 16px; background: var(--bg); font-family: var(--font-ui); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .sw { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--border); }
+  .chip { height: 62px; display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+  .meta { padding: 7px 9px; background: var(--surface); }
+  .name { font-size: 11.5px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--accent);color:var(--accent-fg)">Aa</div><div class="meta"><div class="name">accent</div><div class="var">--accent</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-strong);color:var(--accent-fg)">Aa</div><div class="meta"><div class="name">accent-strong</div><div class="var">--accent-strong</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-soft);color:var(--accent-strong)">Aa</div><div class="meta"><div class="name">accent-soft</div><div class="var">--accent-soft</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-fg);color:var(--accent);border-bottom:1px solid var(--border)">Aa</div><div class="meta"><div class="name">accent-fg</div><div class="var">--accent-fg</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ai);color:var(--ai-fg)">AI</div><div class="meta"><div class="name">ai (violet, fixed)</div><div class="var">--ai</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ai-strong);color:var(--ai-fg)">AI</div><div class="meta"><div class="name">ai-strong</div><div class="var">--ai-strong</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ai-soft);color:var(--ai-strong)">AI</div><div class="meta"><div class="name">ai-soft</div><div class="var">--ai-soft</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--warm);color:var(--ink)">Ww</div><div class="meta"><div class="name">warm (secondary)</div><div class="var">--warm</div></div></div>
+</div>
+</body></html>

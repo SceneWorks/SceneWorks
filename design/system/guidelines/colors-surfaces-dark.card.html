@@ -1,0 +1,27 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Surfaces & Text (Dark)" subtitle="Same tokens under data-theme=dark" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 16px; background: var(--bg); font-family: var(--font-ui); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .sw { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--border); }
+  .chip { height: 56px; }
+  .meta { padding: 7px 9px; background: var(--surface); }
+  .name { font-size: 11.5px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--bg)"></div><div class="meta"><div class="name">bg</div><div class="var">--bg</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--bg-2)"></div><div class="meta"><div class="name">bg-2</div><div class="var">--bg-2</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface)"></div><div class="meta"><div class="name">surface</div><div class="var">--surface</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface-2)"></div><div class="meta"><div class="name">surface-2</div><div class="var">--surface-2</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface-hover)"></div><div class="meta"><div class="name">surface-hover</div><div class="var">--surface-hover</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--border)"></div><div class="meta"><div class="name">border</div><div class="var">--border</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--border-strong)"></div><div class="meta"><div class="name">border-strong</div><div class="var">--border-strong</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--text)"></div><div class="meta"><div class="name">text</div><div class="var">--text</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--text-muted)"></div><div class="meta"><div class="name">text-muted</div><div class="var">--text-muted</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--text-faint)"></div><div class="meta"><div class="name">text-faint</div><div class="var">--text-faint</div></div></div>
+</div>
+</body></html>

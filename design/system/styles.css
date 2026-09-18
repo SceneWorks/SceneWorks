@@ -1,0 +1,13 @@
+/* SceneWorks Design System — global entry point.
+ * Consumers link THIS one file. It reaches every token and font-face file plus
+ * the app-shell + component-class layer. Mirrors the real @sceneworks/ui split
+ * (theme.css tokens + shell.css layout), consolidated behind one import.
+ *
+ * Drive theme + accent with attributes on a root element:
+ *   <html data-theme="light|dark" data-accent="teal|indigo|cobalt|violet|coral|amber|emerald">
+ */
+@import "./tokens/fonts.css";
+@import "./tokens/colors.css";
+@import "./tokens/typography.css";
+@import "./tokens/primitives.css";
+@import "./shell.css";
