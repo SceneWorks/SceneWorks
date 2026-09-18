@@ -6771,6 +6771,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
  "windows-sys 0.59.0",
  "zip 2.4.2",
 ]
@@ -6865,6 +6866,7 @@ name = "sceneworks-rust-api"
 version = "0.8.12"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "fs2",
  "futures-util",
  "glob",

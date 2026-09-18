@@ -251,7 +251,8 @@ pub fn validate_brief(brief: &ProductionBrief) -> Vec<PlanDiagnostic> {
 /// only this — never a capability from a model card, an upstream repo or a hosted API — so a draft
 /// that is inside the envelope is dispatchable and one that is not is refused with the same
 /// diagnostics `film-harness validate` would produce.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerCapabilities {
     pub model_id: String,
     /// Conditioning modes the entry declares AND this schema can express.
@@ -264,6 +265,8 @@ pub struct PlannerCapabilities {
     pub resolutions: Vec<String>,
     /// The resolution every shot uses unless it overrides it (plan default, else model default).
     pub default_resolution: Option<String>,
+    /// Model evaluations used when neither a turbo recipe nor an authored step override applies.
+    pub default_steps: Option<u32>,
     /// `limits.maxReferenceAssets` — zero means the checkpoint has no reference conditioning.
     pub max_reference_images: usize,
     pub supports_negative_prompt: bool,
@@ -290,7 +293,8 @@ pub struct PlannerCapabilities {
 }
 
 /// One installed accelerator the planner may declare, as the envelope states it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerTurboLora {
     /// The catalog id — the exact string the draft must write.
     pub id: String,
@@ -345,6 +349,12 @@ pub fn capabilities_for(
         fps: plan_model.fps.or_else(|| default_fps(entry)),
         resolutions,
         default_resolution,
+        default_steps: entry
+            .get("defaults")
+            .and_then(Value::as_object)
+            .and_then(|defaults| defaults.get("steps"))
+            .and_then(Value::as_u64)
+            .and_then(|steps| u32::try_from(steps).ok()),
         max_reference_images: reference_caps(entry).images,
         supports_negative_prompt: entry
             .get("video")
@@ -433,13 +443,11 @@ impl PlannerCapabilities {
     ///    partition in use ([`TurboRecipe::recipe_eq`]). A mixed film dispatches both partitions,
     ///    and sampling its two halves on two different schedules is the thing
     ///    `plan.v2.turbo.jsonc`'s header exists to avoid.
-    /// 2. **Training canvas.** The accelerator whose declared training short edge equals this
-    ///    plan's own. Undeclared is GENERIC: it neither matches nor loses, and no shipped entry
-    ///    declares one today (see [`TurboRecipe::training_short_edge`]), so this rule is currently
-    ///    inert on the shipped catalog and becomes live the moment a canvas is declared.
-    /// 3. **Fewest steps, then catalog order.** Fewest steps because that is what the accelerator
-    ///    is FOR, and catalog order — not the route's — as the tiebreak, so the answer does not
-    ///    move when a display name is edited.
+    /// 2. **Training canvas.** Among recipes that declare a training short edge, choose the nearest
+    ///    one to this plan's short edge. This keeps the 768p recipe on 768p plans and the 544p
+    ///    recipe on the shipped 576x320 film canvas. An undeclared canvas remains generic.
+    /// 3. **Fewest steps, then catalog order.** Break equal canvas distances by the fewest model
+    ///    evaluations, then by catalog order — never by the route's display-name sort.
     ///
     /// The REFERENCE partition is resolved first when it is offered, because it is the constrained
     /// end: exactly one shipped adapter distils the reference path, so resolving it first gives the
@@ -530,9 +538,15 @@ impl PlannerCapabilities {
             }
         }
         if let Some(edge) = plan_short_edge {
-            if let Some(index) = recipes
+            if let Some((index, _)) = recipes
                 .iter()
-                .position(|recipe| recipe.training_short_edge == Some(edge))
+                .enumerate()
+                .filter_map(|(index, recipe)| {
+                    recipe.training_short_edge.map(|training_edge| {
+                        (index, (training_edge.abs_diff(edge), recipe.steps, index))
+                    })
+                })
+                .min_by_key(|(_, key)| *key)
             {
                 return Some(index);
             }
@@ -1336,6 +1350,30 @@ pub fn lora_offer_findings(
     plan: &ProductionPlan,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
+    let brief_has_custom_steps = brief
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.steps)
+        .is_some();
+    if !brief.prefer_quality
+        && brief.model.loras.is_empty()
+        && !brief_has_custom_steps
+        && plan.model.loras.is_empty()
+        && !caps.turbo_loras.is_empty()
+    {
+        findings.push(PlanDiagnostic::plan(
+            "model.loras",
+            format!(
+                "the planner omitted the default installed Turbo recipe; write exactly {}",
+                caps.turbo_loras
+                    .iter()
+                    .map(|offer| offer.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
     for id in &plan.model.loras {
         if caps.turbo_loras.iter().any(|offer| offer.id == *id) {
             continue;
@@ -1482,12 +1520,21 @@ pub fn build_planner_request(
     }
 
     out.push_str("\n# Approved reference roles\n\n");
-    out.push_str(
-        "These are the only reference roles that exist. Name them exactly; never invent one. \
-         Every shot lists in continuityRoles the roles it depicts, so the sequence stays anchored \
-         to these approved references rather than to whatever the previous shot happened to end \
-         on.\n\n",
-    );
+    let has_approved_roles = pack.references.iter().any(|entry| entry.approved);
+    if has_approved_roles {
+        out.push_str(
+            "These are the only reference roles that exist. Name them exactly; never invent one. \
+             Every shot lists in continuityRoles the approved roles it depicts, so the sequence \
+             stays anchored to these approved references rather than to whatever the previous \
+             shot happened to end on.\n\n",
+        );
+    } else {
+        out.push_str(
+            "This reference pack approves NO roles. Write continuityRoles: [] on EVERY shot. \
+             Characters, props and locations named only in the brief or prompt are prose, not \
+             role ids; never invent role ids for them.\n\n",
+        );
+    }
     if caps.offers_references() {
         out.push_str(
             "This model can also CONDITION on these references directly. Bind the ones a shot \
@@ -1510,7 +1557,7 @@ pub fn build_planner_request(
     out.push_str(&caps.as_prompt_section());
 
     out.push_str("\n\n# Output contract\n\n");
-    out.push_str(&plan_json_contract(caps));
+    out.push_str(&plan_json_contract(caps, pack));
     out
 }
 
@@ -1526,6 +1573,7 @@ pub fn build_planner_request(
 /// read before the contract.
 pub fn build_repair_request(
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     caps: &PlannerCapabilities,
     previous_output: &str,
     findings: &[PlanDiagnostic],
@@ -1546,7 +1594,9 @@ pub fn build_repair_request(
     }
     out.push_str("\n# Beats the corrected plan must still cover (in order)\n\n");
     out.push_str(
-        "Fixing a finding never removes a beat, shortens the film or drops a shot's subject.\n\n",
+        "Fixing a finding never removes a beat or drops a shot's subject. When a duration finding \
+         says the total is outside the brief's window, change legal shot durations or the number \
+         of shots while retaining every beat.\n\n",
     );
     for beat in &brief.required_beats {
         out.push_str(&format!("- {}: {}", beat.id, beat.summary.trim()));
@@ -1567,7 +1617,20 @@ pub fn build_repair_request(
         out.push_str(&format!("- {finding}\n"));
     }
     out.push_str("\n# Output contract\n\n");
-    out.push_str(&plan_json_contract(caps));
+    out.push_str(&plan_json_contract(caps, pack));
+    out.push_str("\n\n# Final repair checklist — apply every item now\n\n");
+    if !pack.references.iter().any(|entry| entry.approved) {
+        out.push_str(
+            "- This pack approves no roles: write continuityRoles: [] on EVERY shot and do not \
+             invent role ids from prose nouns.\n",
+        );
+    }
+    for finding in findings {
+        out.push_str(&format!("- {finding}\n"));
+    }
+    out.push_str(
+        "Return the whole corrected JSON object. Do not return the draft above unchanged.\n",
+    );
     out
 }
 
@@ -1584,6 +1647,15 @@ pub const EXAMPLE_DURATION_PLACEHOLDER: &str = "{{EXAMPLE_DURATION}}";
 /// default it must not show a `text_to_video` shot — that teaches the opposite of what the
 /// envelope's own mode guidance just said.
 pub const EXAMPLE_CONDITIONING_PLACEHOLDER: &str = "{{EXAMPLE_CONDITIONING}}";
+
+/// Where the output shape, standing rule and filled example describe continuity roles. These are
+/// filled from the approved pack rather than from the model envelope: a script-only film with no
+/// approved references must be shown empty arrays, not example role ids it cannot legally copy.
+pub const CONTINUITY_FIELD_PLACEHOLDER: &str = "{{CONTINUITY_FIELD}}";
+/// See [`CONTINUITY_FIELD_PLACEHOLDER`].
+pub const CONTINUITY_RULE_PLACEHOLDER: &str = "{{CONTINUITY_RULE}}";
+/// See [`CONTINUITY_FIELD_PLACEHOLDER`].
+pub const EXAMPLE_CONTINUITY_PLACEHOLDER: &str = "{{EXAMPLE_CONTINUITY}}";
 
 /// Where the per-envelope reference RULE goes: the standing instruction to bind approved roles on
 /// every shot, or nothing at all when no reference conditioning is on offer.
@@ -1611,7 +1683,7 @@ continuityRoles.";
 /// The contract with its worked example on THIS model's envelope: the first allowed duration when
 /// the model declares a menu, else a plain round number the "any positive value" rule admits, and
 /// the conditioning form the envelope makes the default.
-pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
+pub fn plan_json_contract(caps: &PlannerCapabilities, pack: &ReferencePack) -> String {
     let example = caps
         .durations
         .first()
@@ -1646,9 +1718,32 @@ pub fn plan_json_contract(caps: &PlannerCapabilities) -> String {
             ),
         )
     };
+    let (continuity_field, continuity_rule, example_continuity) =
+        if pack.references.iter().any(|entry| entry.approved) {
+            (
+                "[\"<the approved roles this shot depicts>\"]",
+                "- Every shot needs at least one approved role in continuityRoles, and a shot \
+                 lists every approved role that is on screen in it. Start from the array its beat \
+                 says it MUST show and copy that array whole — it is checked role by role after \
+                 you answer, and a beat that names two props and no location means exactly that, \
+                 not one character, one prop and one place.",
+                "[\"mechanic\", \"customer\", \"brass_key\"]",
+            )
+        } else {
+            (
+                "[]",
+                "- This reference pack approves NO roles. Write continuityRoles: [] on EVERY \
+                 shot. Characters, props and locations named only in the brief or prompt are \
+                 prose, not role ids; never invent role ids for them.",
+                "[]",
+            )
+        };
     PLAN_JSON_CONTRACT
         .replace(EXAMPLE_DURATION_PLACEHOLDER, &example)
         .replace(EXAMPLE_CONDITIONING_PLACEHOLDER, conditioning)
+        .replace(CONTINUITY_FIELD_PLACEHOLDER, continuity_field)
+        .replace(CONTINUITY_RULE_PLACEHOLDER, continuity_rule)
+        .replace(EXAMPLE_CONTINUITY_PLACEHOLDER, example_continuity)
         .replace(REFERENCE_RULE_PLACEHOLDER, reference_rule)
         .replace(LORA_FIELD_PLACEHOLDER, &lora_field)
         .replace(LORA_RULE_PLACEHOLDER, &lora_rule)
@@ -1675,7 +1770,7 @@ Answer with ONE JSON object and nothing else — no prose, no markdown fence, no
       \"dialogue\": \"<a spoken line, or omit the field>\",
       \"conditioning\": { \"mode\": \"<one of the allowed modes>\" },
       \"seed\": <an integer, optional>,
-      \"continuityRoles\": [\"<the approved roles this shot depicts>\"]
+      \"continuityRoles\": {{CONTINUITY_FIELD}}
     }
   ]
 }
@@ -1704,10 +1799,7 @@ conditioning tasks.
 - first_last_frame needs TWO DIFFERENT roles. The same role in both slots is refused.
 - chainFromShotId names the shot IMMEDIATELY BEFORE this one, or is omitted. It is never a \
 substitute for continuityRoles: a chained shot still names the approved roles it depicts.
-- Every shot needs at least one approved role in continuityRoles, and a shot lists every approved \
-role that is on screen in it. Start from the array its beat says it MUST show and copy that array \
-whole — it is checked role by role after you answer, and a beat that names two props and no \
-location means exactly that, not one character, one prop and one place.{{REFERENCE_RULE}}
+{{CONTINUITY_RULE}}{{REFERENCE_RULE}}
 
 One filled shot, for shape only. It is from a DIFFERENT film: copy the spelling and the level of \
 detail, never the content.
@@ -1727,7 +1819,7 @@ palm; the customer waits opposite with both hands at their sides.\",
 mechanic's hand is withdrawn.\",
   \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
   \"conditioning\": {{EXAMPLE_CONDITIONING}},
-  \"continuityRoles\": [\"mechanic\", \"customer\", \"brass_key\"]
+  \"continuityRoles\": {{EXAMPLE_CONTINUITY}}
 }";
 
 #[cfg(test)]
@@ -1964,7 +2056,7 @@ mod tests {
                 && section.contains("ON BY DEFAULT"),
             "{section}"
         );
-        let contract = plan_json_contract(&caps);
+        let contract = plan_json_contract(&caps, &pack());
         assert!(
             contract.contains(
                 "\"loras\": [\"minimax_h3_turbo_4step_v01\", \"minimax_h3_ref2v_turbo_4step\"]"
@@ -1993,9 +2085,9 @@ mod tests {
             bare.as_prompt_section()
         );
         assert!(
-            !plan_json_contract(&bare).contains("\"loras\""),
+            !plan_json_contract(&bare, &pack()).contains("\"loras\""),
             "{}",
-            plan_json_contract(&bare)
+            plan_json_contract(&bare, &pack())
         );
     }
 
@@ -2006,9 +2098,9 @@ mod tests {
     /// reference partition — can produce no shot that dispatches there, so the ref2v adapter is an
     /// id the planner would copy into a list that reaches no shot, and a second name to get wrong.
     ///
-    /// With no reference partition there is also no parity anchor, so the base offer falls to the
-    /// last tier: fewest steps, then CATALOG order — which is the 768p file, not the v0.1 one the
-    /// mixed envelope offers. Those are the same rule reaching two answers from two premises.
+    /// With no reference partition there is also no parity anchor, so the base offer follows the
+    /// plan canvas. The shipped 576x320 film canvas is nearer the 544p v0.1 recipe than the 768p
+    /// recipe and therefore keeps the same base adapter used by a mixed film.
     #[test]
     fn the_reference_accelerator_is_offered_only_when_references_are() {
         let offered = |caps: PlannerCapabilities| -> Vec<(String, String)> {
@@ -2021,7 +2113,7 @@ mod tests {
         let base_only = capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx);
         assert!(!base_only.offers_references());
         let base_offer = vec![(
-            "minimax_h3_turbo_4step_768p".to_owned(),
+            "minimax_h3_turbo_4step_v01".to_owned(),
             "minimax_h3".to_owned(),
         )];
         assert_eq!(offered(base_only), base_offer);
@@ -2057,8 +2149,7 @@ mod tests {
     /// 🔴 The three tiers of the offer rule, driven directly so each one is asserted where it
     /// DECIDES rather than only where the shipped catalog happens to exercise it.
     ///
-    /// The canvas tier is the one the shipped catalog cannot reach — no entry declares a training
-    /// short edge — so without this it would be a rule nothing had ever run.
+    /// The canvas tier exercises both an exact match and a nearest-canvas choice.
     #[test]
     fn the_offer_rule_prefers_parity_then_canvas_then_fewest_steps() {
         let recipe = |id: &str, steps: u32, video_shift: f32, edge: Option<u32>| TurboRecipe {
@@ -2070,7 +2161,7 @@ mod tests {
             training_short_edge: edge,
         };
         let fast_768 = recipe("fast_768", 4, 6.0, Some(768));
-        let fast_544 = recipe("fast_544", 4, 12.0, None);
+        let fast_544 = recipe("fast_544", 4, 12.0, Some(544));
         let slow_320 = recipe("slow_320", 8, 12.0, Some(320));
         let candidates = [&fast_768, &fast_544, &slow_320];
 
@@ -2087,11 +2178,10 @@ mod tests {
             PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(320)),
             Some(2)
         );
-        // 3. Neither: fewest steps, then catalog order — `fast_544` ties `fast_768` and loses on
-        //    position. An undeclared canvas never matches, so it cannot win tier 2 by default.
+        // 3. Nearest canvas wins; equal distances then use steps and catalog order.
         assert_eq!(
             PlannerCapabilities::choose_turbo_offer(&candidates, None, Some(544)),
-            Some(0)
+            Some(1)
         );
         assert_eq!(
             PlannerCapabilities::choose_turbo_offer(&candidates, None, None),
@@ -2133,6 +2223,43 @@ mod tests {
             Some(&turbo_caps()),
         );
         assert!(findings.is_empty(), "{:?}", messages(&findings));
+    }
+
+    #[test]
+    fn omitting_the_default_turbo_recipe_is_repairable_but_explicit_regimes_are_not() {
+        let caps = turbo_caps();
+        let draft = good_draft();
+        let default_brief = brief();
+        let plan = draft_to_plan(&default_brief, &draft);
+        let findings = messages(&lora_offer_findings(&caps, &default_brief, &plan));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("omitted the default installed Turbo recipe")
+                && findings[0].contains("minimax_h3_turbo_4step_v01")
+                && findings[0].contains("minimax_h3_ref2v_turbo_4step"),
+            "{}",
+            findings[0]
+        );
+
+        let mut quality_document = brief_json();
+        quality_document["preferQuality"] = json!(true);
+        let quality_brief: ProductionBrief =
+            serde_json::from_value(quality_document).expect("quality brief parses");
+        let quality_plan = draft_to_plan(&quality_brief, &draft);
+        assert!(
+            lora_offer_findings(&caps, &quality_brief, &quality_plan).is_empty(),
+            "Full quality explicitly opts out of Turbo"
+        );
+
+        let mut custom_document = brief_json();
+        custom_document["model"]["advanced"] = json!({"steps": 7});
+        let custom_brief: ProductionBrief =
+            serde_json::from_value(custom_document).expect("custom brief parses");
+        let custom_plan = draft_to_plan(&custom_brief, &draft);
+        assert!(
+            lora_offer_findings(&caps, &custom_brief, &custom_plan).is_empty(),
+            "a custom step count explicitly opts out of the default recipe"
+        );
     }
 
     /// 🔴 A draft naming an accelerator this host does NOT offer is refused BY NAME, and the
@@ -2647,7 +2774,8 @@ mod tests {
             "{findings:?}"
         );
 
-        // An unapproved role cannot be conditioned on, and leaves the shot unanchored.
+        // An unapproved role cannot be conditioned on. The presence of other references in the
+        // pack does not independently require this shot to invent a continuity binding.
         let mut draft = good_draft();
         draft.shots[0].conditioning = ShotConditioning {
             mode: "image_to_video".to_owned(),
@@ -2671,12 +2799,7 @@ mod tests {
             findings.iter().any(|m| m.contains("not approved")),
             "{findings:?}"
         );
-        assert!(
-            findings
-                .iter()
-                .any(|m| m.contains("[SH010] continuityRoles")),
-            "{findings:?}"
-        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[test]
@@ -2840,7 +2963,7 @@ mod tests {
         let with_references = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
             .with_reference_partition(&reference_entry())
             .narrowed_to_pack(&pack());
-        let contract = plan_json_contract(&with_references);
+        let contract = plan_json_contract(&with_references, &pack());
         assert!(
             contract.contains(
                 "\"conditioning\": { \"mode\": \"reference_to_video\", \"referenceRoles\": \
@@ -2854,7 +2977,7 @@ mod tests {
         );
 
         let without = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
-        let contract = plan_json_contract(&without);
+        let contract = plan_json_contract(&without, &pack());
         assert!(
             contract.contains("\"conditioning\": { \"mode\": \"text_to_video\" },"),
             "{contract}"
@@ -2868,11 +2991,14 @@ mod tests {
         for caps in [&with_references, &without] {
             for text in [
                 build_planner_request(&brief, &pack(), caps),
-                build_repair_request(&brief, caps, "{}", &[], 1, 1),
+                build_repair_request(&brief, &pack(), caps, "{}", &[], 1, 1),
             ] {
                 for placeholder in [
                     EXAMPLE_DURATION_PLACEHOLDER,
                     EXAMPLE_CONDITIONING_PLACEHOLDER,
+                    CONTINUITY_FIELD_PLACEHOLDER,
+                    CONTINUITY_RULE_PLACEHOLDER,
+                    EXAMPLE_CONTINUITY_PLACEHOLDER,
                     REFERENCE_RULE_PLACEHOLDER,
                 ] {
                     assert!(
@@ -2881,6 +3007,93 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A script-only film has prose nouns but no approved role ids. Its initial prompt and every
+    /// repair round must therefore model empty continuity arrays all the way through the shape,
+    /// standing rule and filled example. The repair's actionable findings are repeated after that
+    /// long shared contract so a model cannot simply echo the refused draft again.
+    #[test]
+    fn an_empty_pack_contract_and_repair_never_teach_invented_continuity_roles() {
+        let brief = brief();
+        let pack = pack_without_references();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+        let contract = plan_json_contract(&caps, &pack);
+
+        assert!(
+            request.contains(
+                "This reference pack approves NO roles. Write continuityRoles: [] on EVERY shot."
+            ),
+            "{request}"
+        );
+        assert_eq!(
+            contract.matches("\"continuityRoles\": []").count(),
+            2,
+            "the output shape and filled example both model the legal empty array: {contract}"
+        );
+        assert!(
+            !contract.contains("\"continuityRoles\": [\"mechanic\"")
+                && !contract.contains("Every shot needs at least one approved role"),
+            "the different-film example must not invent role ids for this pack: {contract}"
+        );
+
+        let findings = vec![
+            PlanDiagnostic::shot(
+                "SH010",
+                "continuityRoles",
+                "role \"courier\" is not approved by this film's reference pack",
+            ),
+            PlanDiagnostic::plan(
+                "shots.duration",
+                "total duration 13.1667s is above the brief maximum 12.91675s",
+            ),
+        ];
+        let repair = build_repair_request(&brief, &pack, &caps, "{\"shots\": []}", &findings, 1, 2);
+        assert!(
+            !repair.contains("shortens the film"),
+            "the repair cannot forbid the duration correction it requests: {repair}"
+        );
+        assert!(
+            repair.contains(
+                "change legal shot durations or the number of shots while retaining every beat"
+            ),
+            "{repair}"
+        );
+        let contract_position = repair.find("# Output contract").expect("shared contract");
+        let checklist_position = repair
+            .rfind("# Final repair checklist")
+            .expect("final checklist");
+        assert!(contract_position < checklist_position, "{repair}");
+        for finding in &findings {
+            let finding_position = repair
+                .rfind(&finding.to_string())
+                .expect("finding is repeated in the final checklist");
+            assert!(checklist_position < finding_position, "{repair}");
+        }
+        assert!(
+            repair.trim_end().ends_with(
+                "Return the whole corrected JSON object. Do not return the draft above unchanged."
+            ),
+            "the exact repair checklist must be the model's final instruction: {repair}"
+        );
+        for placeholder in [
+            EXAMPLE_DURATION_PLACEHOLDER,
+            EXAMPLE_CONDITIONING_PLACEHOLDER,
+            CONTINUITY_FIELD_PLACEHOLDER,
+            CONTINUITY_RULE_PLACEHOLDER,
+            EXAMPLE_CONTINUITY_PLACEHOLDER,
+            REFERENCE_RULE_PLACEHOLDER,
+            LORA_FIELD_PLACEHOLDER,
+            LORA_RULE_PLACEHOLDER,
+        ] {
+            assert!(
+                !repair.contains(placeholder),
+                "{placeholder} survived: {repair}"
+            );
         }
     }
 
@@ -3214,7 +3427,7 @@ mod tests {
             "{envelope}"
         );
         let request = build_planner_request(&brief, &pack(), &caps);
-        let repair = build_repair_request(&brief, &caps, "{}", &[], 1, 2);
+        let repair = build_repair_request(&brief, &pack(), &caps, "{}", &[], 1, 2);
         for (name, text) in [("request", &request), ("repair", &repair)] {
             assert!(
                 text.contains(
@@ -3227,9 +3440,9 @@ mod tests {
         // An envelope with no reference conditioning is told nothing about binding at all.
         let bare = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         assert!(
-            !plan_json_contract(&bare).contains("NEVER listed in referenceRoles"),
+            !plan_json_contract(&bare, &pack()).contains("NEVER listed in referenceRoles"),
             "{}",
-            plan_json_contract(&bare)
+            plan_json_contract(&bare, &pack())
         );
     }
 
@@ -3259,7 +3472,7 @@ mod tests {
             ),
             "{request}"
         );
-        let repair = build_repair_request(&brief, &with_references, "{}", &[], 1, 2);
+        let repair = build_repair_request(&brief, &pack(), &with_references, "{}", &[], 1, 2);
         assert!(
             repair.contains(
                 "[MUST show — write [\"courier\", \"red_parcel\", \"workbench_table\"] into the \
@@ -3292,7 +3505,7 @@ mod tests {
         }
 
         let turbo = with_references.with_installed_turbo_loras(&route_ordered_turbo_ids());
-        let contract = plan_json_contract(&turbo);
+        let contract = plan_json_contract(&turbo, &pack());
         let lora_rule = contract
             .find("- loras is the top-level list")
             .expect("the accelerator rule is in the contract");
@@ -3358,7 +3571,10 @@ mod tests {
             "an unapproved role must never be offered to the planner"
         );
         assert!(request.contains("576x320"), "{request}");
-        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+        assert!(
+            request.contains(&plan_json_contract(&caps, &pack)),
+            "{request}"
+        );
         assert!(
             !request.contains(EXAMPLE_DURATION_PLACEHOLDER),
             "the contract template must never reach the planner unfilled: {request}"
@@ -3374,14 +3590,18 @@ mod tests {
             PlanDiagnostic::plan("shots", "required beat \"delivery\" is covered by no shot"),
             PlanDiagnostic::shot("SH010", "targetDurationSeconds", "6s is not on the menu"),
         ];
-        let request = build_repair_request(&brief, &caps, "{\"shots\": []}", &findings, 1, 2);
+        let request =
+            build_repair_request(&brief, &pack(), &caps, "{\"shots\": []}", &findings, 1, 2);
         assert!(request.contains("Repair round 1 of 2"), "{request}");
         for finding in &findings {
             assert!(request.contains(&finding.to_string()), "{request}");
         }
         assert!(request.contains("arrival:"), "{request}");
         assert!(request.contains("{\"shots\": []}"), "{request}");
-        assert!(request.contains(&plan_json_contract(&caps)), "{request}");
+        assert!(
+            request.contains(&plan_json_contract(&caps, &pack())),
+            "{request}"
+        );
     }
 
     /// AT4 (sc-22715): the contract's ONE worked example copies a duration off the envelope it is
@@ -3393,9 +3613,9 @@ mod tests {
         let brief = brief();
         let h3 = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         assert!(
-            plan_json_contract(&h3).contains("\"targetDurationSeconds\": 5.1667,"),
+            plan_json_contract(&h3, &pack()).contains("\"targetDurationSeconds\": 5.1667,"),
             "{}",
-            plan_json_contract(&h3)
+            plan_json_contract(&h3, &pack())
         );
 
         // An LTX-2.5-shaped envelope: whole-second clips, none of them 5.1667.
@@ -3403,7 +3623,7 @@ mod tests {
         entry["limits"]["durations"] = json!([4, 6, 8, 10, 12, 15]);
         entry["defaults"]["duration"] = json!(6);
         let ltx = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
-        let contract = plan_json_contract(&ltx);
+        let contract = plan_json_contract(&ltx, &pack());
         assert!(
             contract.contains("\"targetDurationSeconds\": 4,"),
             "the example must be the first allowed duration: {contract}"
@@ -3418,16 +3638,16 @@ mod tests {
             "{request}"
         );
         assert!(!request.contains("5.1667"), "{request}");
-        let repair = build_repair_request(&brief, &ltx, "{}", &[], 1, 1);
+        let repair = build_repair_request(&brief, &pack(), &ltx, "{}", &[], 1, 1);
         assert!(repair.contains("\"targetDurationSeconds\": 4,"), "{repair}");
 
         // No declared menu at all: a plain round number the "any positive value" rule admits.
         entry["limits"]["durations"] = json!([]);
         let open = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
         assert!(
-            plan_json_contract(&open).contains("\"targetDurationSeconds\": 6,"),
+            plan_json_contract(&open, &pack()).contains("\"targetDurationSeconds\": 6,"),
             "{}",
-            plan_json_contract(&open)
+            plan_json_contract(&open, &pack())
         );
     }
 

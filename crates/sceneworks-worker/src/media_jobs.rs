@@ -2452,6 +2452,10 @@ impl TimelineExport<'_> {
             Value::String(self.request.timeline_id.clone()),
         );
         result.insert("renderPath".to_owned(), Value::String(output_rel));
+        result.insert(
+            "timelineRevision".to_owned(),
+            json!(sceneworks_core::film_timeline::revision(&self.timeline)),
+        );
         // Every layer the mix went without, in the RESULT (sc-22715): the film harness copies it
         // into the run record's export entry, so "why is the music missing" is answerable from
         // `run.json` alone.
@@ -4005,6 +4009,7 @@ pub(crate) fn build_render_asset(
             "loras": [],
             "normalizedSettings": {
                 "timelineId": request.timeline_id,
+                "timelineRevision": sceneworks_core::film_timeline::revision(timeline),
                 "resolution": request.resolution,
                 "width": width,
                 "height": height,

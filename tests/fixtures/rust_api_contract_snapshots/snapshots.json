@@ -4633,6 +4633,7 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 1,
     "schemaVersion": 1,
     "tracks": [
       {
@@ -4679,6 +4680,7 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 2,
     "schemaVersion": 1,
     "tracks": [
       {
@@ -4769,7 +4771,8 @@
       "resolution": 640,
       "timelineId": "timeline_fixture",
       "timelineName": "Main timeline",
-      "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
+      "timelinePath": "timeline-exports/<timeline-export-snapshot>.json",
+      "timelineRevision": 2
     },
     "progress": 0.0,
     "projectId": "project_fixture",
@@ -4849,6 +4852,7 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 2,
     "schemaVersion": 1,
     "tracks": [
       {

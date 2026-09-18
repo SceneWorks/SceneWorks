@@ -1,10 +1,12 @@
 # How a UI calls the film harness
 
-A design note for a future Video Editor front end. **This does not design the UI.** It describes the
-seams that already exist, what shape each operation is, what the single state document holds, and
-what the epic still has to decide. What the harness does and why is
-[film-harness-overview.md](film-harness-overview.md); the operating manual is
-[film-harness.md](film-harness.md).
+An implementation note for the Film workspace now present in the Video Editor. It describes the
+shared library/CLI/route layering and the durable state documents. Operator behavior belongs in
+[film-editor.md](film-editor.md); the harness architecture and CLI manual remain in
+[film-harness-overview.md](film-harness-overview.md) and [film-harness.md](film-harness.md).
+
+Some line references below describe the original harness commit and are retained as historical
+navigation. Use the current source and router as the authority for the product routes.
 
 ## The layering today
 
@@ -13,7 +15,9 @@ apps/rust-api/src/bin/film-harness.rs      arg parsing, signal handling, printin
         │  calls
 apps/rust-api/src/{film_harness,film_planner}.rs   the ORCHESTRATION, a rust-api library module
         │  drives, through ApiTransport
-existing SceneWorks HTTP routes            projects, assets, timelines, jobs (nothing harness-specific)
+project-scoped film routes                 drafts, planning, runs, review, explicit export
+        │  call
+existing SceneWorks HTTP routes              projects, assets, timelines, jobs
 ```
 
 - The orchestration lives in the **library**: `pub mod film_harness; pub mod film_planner;`
@@ -30,8 +34,10 @@ existing SceneWorks HTTP routes            projects, assets, timelines, jobs (no
   (`apps/rust-api/src/film_harness.rs:176`), a two-method trait (`call` and `get_bytes`, `:190`),
   whose shipped implementation is `HttpTransport` (`:5897`). There is no privileged in-process
   backdoor; a UI-hosted run would use the same trait.
-- **No HTTP route exposes the harness today.** `film_harness` is referenced only by `lib.rs`, the
-  binary, `film_planner.rs` and the test modules; no route module imports it.
+- Project-scoped routes expose drafts, references, sound, preflight, planning, run lifecycle, and
+  explicit export. The review routes call the same decision, swap, replacement, repair, and bounded
+  analysis functions as the CLI. Their router registrations are in `apps/rust-api/src/lib.rs` and
+  their adapters are in `films.rs`, `film_planning.rs`, `film_lifecycle.rs`, and `film_review.rs`.
 - **There is no in-memory state beyond the files.** The record on disk is the run
   (`crates/sceneworks-core/src/film_plan.rs:3726`).
 
@@ -47,40 +53,87 @@ Every one already exists and is used by other clients:
 | jobs | `POST /api/v1/video/jobs`, `POST /api/v1/audio/jobs`, `POST /api/v1/image/jobs`, `POST /api/v1/image/vqa/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/metrics`, job cancel |
 | capability | `GET /api/v1/host-capabilities`, `GET /api/v1/models`, `GET /api/v1/loras`, `GET /api/v1/workers` |
 | LLM | `POST /api/v1/prompts/refine` |
+| film drafts | `/api/v1/projects/:project_id/films/...`: draft, render options, reference pack, sound, brief parse, planner availability, planning, preflight, run creation |
+| film runs | `/api/v1/projects/:project_id/film-runs/...`: read/list/progress, start/resume/cancel, review decisions and bounded take mutations, explicit export |
+| external planners | `/api/v1/film-planner-connections/...`: non-secret connection settings, connection test, optional model listing |
 
 Route strings are in `apps/rust-api/src/film_harness.rs`,
 `apps/rust-api/src/film_harness/{references,review}.rs` and `apps/rust-api/src/film_planner.rs`.
+
+### Render regime contract
+
+`FilmDraft.renderRegime` persists `recommended_turbo`, `quality`, or `custom`. A missing field is a
+legacy draft and preserves its current `productionPlan.model.loras` and
+`productionPlan.model.advanced.steps` without migration-time rewrites.
+
+`GET /api/v1/projects/:project_id/films/:draft_id/render-options` resolves the saved document.
+Editors preview unsaved model, resolution, conditioning, or reference changes with `POST` to the
+same route:
+
+```json
+{
+  "draftRevision": 3,
+  "productionPlan": { "...": "the edited production plan" },
+  "referencePack": { "...": "the edited reference pack" },
+  "renderRegime": "recommended_turbo"
+}
+```
+
+The response carries `selectedRegime`, `recommendedTurbo`, `quality`, and `effective`.
+`recommendedTurbo` includes `available`, concrete `adapterIds`, `effectiveSteps`, and, when it is
+unavailable, one stable reason: `model_unavailable`, `no_installed_compatible_adapter`,
+`incomplete_partition_coverage`, or `incompatible_resolution`. POST is read-only and rejects a
+stale `draftRevision`; older clients may omit `renderRegime`, which previews the legacy Custom
+semantics rather than opting the draft into Turbo. PUT of the draft remains the persistence
+boundary. Saving `recommended_turbo` materializes the live compatible recipe, saving `quality`
+clears adapters and step overrides, and saving `custom` leaves both fields exactly as authored.
 
 ## The three operation shapes
 
 A front end has to treat these differently, because they differ in duration, in failure mode and in
 who owns the result.
 
-### 1. Synchronous document transforms: `plan`, `validate`, `compile`
+### 1. Durable planning and synchronous preflight
 
-Input documents in, documents or findings out. Nothing is created in the project.
+Planning and compilation use the shared planner library, but the Film workspace wraps them in a
+durable operation. The latest operation records its stage, progress, findings, candidate, provider
+identity, thinking mode and any underlying job id. Leaving the workspace or restarting the API does
+not silently post a second planner request: startup reconciles the recorded operation and job.
 
-- `validate` (`apps/rust-api/src/film_harness.rs:1709`) reads the plan, the pack, the host, the
-  catalog and the worker list and returns findings naming the shot and the field. Seconds.
+- Preflight reads the saved plan, pack, host, catalog and worker list and returns findings naming the
+  shot and field. It also exposes the effective model, partition, adapters, steps, reference
+  encoding and budget for each selected shot. It creates no render job.
 - `compile_existing` (`apps/rust-api/src/film_planner.rs:783`) rebuilds `compiled.json` from an
   edited plan. One `prompt_refine` call per shot unless `--no-refine`, so tens of seconds to minutes.
 - `generate` (`apps/rust-api/src/film_planner.rs:667`) is the long one of the three: one full decode
-  plus one per repair round plus one rewrite per shot, bounded by `DEFAULT_LLM_JOB_TIMEOUT` of 1200 s
-  per job (`:57`). Minutes on the dev Mac.
+  plus one per repair round plus one rewrite per shot. Local planner jobs default to the
+  `DEFAULT_LLM_JOB_TIMEOUT` bound of 1200 s per job (`:57`); the Film workspace exposes that same
+  positive-seconds setting and persists its effective value with the durable operation. Minutes on
+  the dev Mac.
 
-For a UI these are request/response, but `generate` is long enough that it wants progress. Its cost
-is already persisted into `compiled.json`'s `planner` block: every `prompt_refine` job id, their
-summed wall clock, the highest peak memory their metrics reported, the rounds taken and the budget
-they ran under (runbook § *Planning from a brief*). So a UI can poll those job ids through the
-ordinary jobs routes rather than needing a new progress channel.
+The workspace starts new drafts with the built-in `prompt_refine_anubis_8b` planner. Qwen3.6-27B is
+an optional local planner that must be explicitly installed and selected; it is never downloaded or
+selected automatically. A saved OpenAI-compatible connection is a third, explicit provider. Its
+disclosure is shown before dispatch, its secret stays in the backend, and reference pixels are sent
+only after a separate opt-in. The planner selection is independent of the plan's target video model,
+and provider failure never falls back to another provider. See [film-editor.md](film-editor.md) for
+the operator flow.
+
+The workspace sends the saved `expectedDraftRevision` with preflight and run creation.
+Preflight returns `draftRevision`; creation checks the expected revision again under the project
+lock that pins the plan, references, questions, compiled requests and shot selection. A concurrent
+save returns HTTP 409 and creates no run or job. Older clients may omit the expected revision;
+the route still pins only the exact snapshot it validated, and CLI store callers validate any
+supplied compiled document against the snapshot held under that same lock.
 
 ### 2. Long-running and resumable: `run`, `resume`
 
-Hours. `run` (`apps/rust-api/src/film_harness.rs:4823`) creates a project, imports assets, speaks
-dialogue, dispatches one video job per shot attempt, assembles a timeline and exports an MP4.
+Hours. The CLI `run` (`apps/rust-api/src/film_harness.rs:4823`) can create a project, import
+assets, speak dialogue, dispatch one video job per shot attempt, assemble a timeline, and optionally
+export. The Film workspace creates its run inside the active project, delivers each completed shot
+into the editable saved timeline, and leaves export as a separate operator action.
 
-**Recommendation: a server-hosted run should be a task the API owns, with the record file as the
-only truth.** Three properties of the current design push that way and none pushes against it:
+The server-hosted run is a task the API owns, with the record file as the durable truth:
 
 - the record is rewritten atomically at **every** transition, by temp file, `sync_all` and rename
   (`apps/rust-api/src/film_harness.rs:1684`–`:1703`), and mirrored into the project at
@@ -100,9 +153,24 @@ out-of-process equivalent is `request_cancel` (`:322`), which writes a cancel re
 directory, and `clear_cancel_request` (`:338`). A hosted task would use the former for a UI cancel
 button and keep the latter working for a shell.
 
+An interrupted replacement or repair carries `activeTakeOperation` in `run.json`: its kind,
+target shot, attempt/idempotency identity, original shot bound, export choice and prior run verdict.
+The linked attempt owns the job ID. API startup and CLI resume recover that one operation outside
+the automatic run budget, adopt its existing job, and preserve the prior whole-run stop. They do
+not authorize another take or resume unrelated pending shots.
+
 ### 3. Human decisions and bounded edits
 
 Short, and all but one of them touch the API very little.
+
+Draft saving and generated-plan application materialize missing review questions. Shot renames in
+the editor carry existing questions; custom questions for detached shots remain editable in the
+draft and are excluded from a run whose plan no longer contains those shots. Only the current
+plan's questions are pinned. Review validates the requested shots and questions before HTTP 202.
+`review-operation.json`, exposed as `reviewOperation` in the review response, retains running,
+completed, rejected and failed status with actionable detail. Later transport errors and partial
+reviews stopped by a limit remain visible after reload; existing observations remain advisory.
+
 
 | verb | library entry | API cost |
 | --- | --- | --- |
@@ -190,9 +258,12 @@ frame extraction rides a **separate one-item timeline** named `film-harness revi
 the export timeline (runbook § *The two seams it drives*). A UI must keep that separation, because
 reviewing must not rewrite the thing the run is for.
 
-## A proposed thin route layer
+## Historical route proposal
 
-`/api/v1/film-harness/...`, calling the same library functions the CLI calls.
+The table below records the original route sketch and is not the current HTTP contract. The shipped
+project-scoped routes are registered in `apps/rust-api/src/lib.rs`; use those routes or the API
+helpers in `apps/web/src/api/films.js` and `apps/web/src/api/filmReview.js`. The governing rule still
+applies: routes call the same library functions the CLI calls.
 
 | route | library call | shape |
 | --- | --- | --- |
@@ -221,22 +292,21 @@ One consequence worth stating: `read_run_record` (`:378`) is a plain file read, 
 
 ## Concurrency and safety
 
-**One controller per run directory.** Nothing locks `run.json`; whichever controller holds the run
-rewrites it, so two live controllers against one directory interleave their writes. The idempotency
-keys stop a *sequential* replay from duplicating work; they are not a lock
-(`apps/rust-api/src/bin/film-harness.rs:54`, runbook § *Durable run state*). A hosted implementation
-therefore needs a real single-holder guarantee per run directory; the record cannot provide one.
+**One controller per run directory.** `ControllerLease` holds an advisory lock for every mutating
+controller. A second controller is refused before it can rewrite `run.json`. The lease file also
+records the owner while the lock is held: clean release clears the marker, while an abrupt process
+exit releases the OS lock but leaves the marker for crash-only startup adoption. Idempotency keys
+remain the protection for the separate crash window between posting a job and recording its id.
 
 What the record *does* imply:
 
 - **`run` refuses a directory that already holds a record** (runbook § *Durable run state*). A second
   run over the same `--out` would mint a new run id over the previous run's takes while the document
   copies beside it stayed from the old run. So a UI's "new run" is a new directory, always.
-- **One run per project is not enforced anywhere.** A project is adopted by the
-  `<title> (<runId>)` name, and the run id is in the name, so two runs in one project are
-  addressable and do not collide on assets or timelines. Nothing checks for it either way. The epic
-  should decide whether it wants that and, if not, enforce it in the route layer rather than
-  assuming the record does.
+- **Multiple runs per film are supported.** The Operations panel lists the draft's runs and exposes
+  a run selector. It follows the newest run until the operator explicitly chooses another, then
+  keeps that selection stable while polling. Runs remain independently addressable by run id and
+  retain their own records, assets and timelines.
 - **`replace-take` refuses outright while the shot still has an unsettled attempt** and points at
   `resume` (runbook § *Durable run state*). A UI can surface that as a disabled button rather than a
   failed call.
@@ -247,36 +317,20 @@ What the record *does* imply:
   rather than dispatching a second render beside one still on the GPU (runbook § *Validation before
   dispatch*; the constant is `CANCEL_GRACE`, `apps/rust-api/src/film_harness.rs:76`, and the cap is
   applied at `:659`–`:661`).
-- **Resume after a server restart** is the crash path, and it already works: the record is left
-  `running` with the job named in it, and `resume` adopts that job at whatever state it reached. On
-  the sc-22715 evaluation the resumed controller found the render 32 % through and simply polled it
-  to completion, enqueuing nothing. A hosted API should run that reconciliation at startup for every
-  `running` record it owns, rather than waiting for a user to press Resume.
-- **What adoption cannot see: a cleared job.** Every lookup goes through `GET /api/v1/jobs`, which
-  filters `cleared_at is null`, so a job the operator cleared out of the queue is invisible and a
-  replay will enqueue that attempt again (runbook § *Durable run state*). A UI that offers a "clear
-  queue" action near a live run should say so.
+- **Resume after a server restart is crash-only.** Startup adopts only a `running` record whose
+  unlocked controller lease still names the process that died. A cleanly released controller is not
+  restarted automatically, even when the record remains resumable; the Operations panel leaves an
+  explicit Resume action for that case. A recorded job id is read back by its exact job route, even
+  if it no longer appears in the queue listing. The idempotency-key listing is only needed when the
+  process died after posting a job but before recording its id.
 
-## Two controls this front end should expose
+## Render controls the front end exposes
 
-**`advanced.referenceImageShortEdge`.** It appears nowhere in `apps/web/src` (grep returns nothing),
-and it is the single biggest measured cost lever on the reference partition: 30–32 s/step at 1024
-against 137–140 at 2048, with no rubric loss on the two shots measured
-(`docs/film-harness-evaluation-phase-2.md`, §4.4). A film front end that cannot set it is asking its
-user to accept a 4.4x bill silently.
-
-**`model.loras` and `advanced.steps`, as plan-level declarations.** The Studio already has a LoRA
-selector (`apps/web/src/components/generationStudio.jsx:508`–`:522`); the `{ id, weight }` shape is
-what its **preset-save** payload carries, not a generation job body
-(`apps/web/src/components/generationStudio.jsx:797` feeding `buildStudioPresetPayload`,
-`apps/web/src/presetUtils.js:777`–`:786`). The
-editor rail has a steps override (`apps/web/src/components/editor/GenerationRail.jsx:292`), so these
-are not missing from the product. What is missing is the *shape a film needs*: declared **once on the
-family** and resolved **per shot** against the partition that shot resolved to
-(`crates/sceneworks-core/src/film_compile.rs:351`), with the one-recipe-per-partition rule enforced
-before a weight is read. Per-generation controls cannot express that, and hand-editing the plan JSON
-is the only way to get it today. This is the 14 h versus 1 h 19 m difference on the six-shot film
-(`docs/film-harness-evaluation-phase-2.md`, §4.6).
+The Shots view exposes the plan-level model, tier, resolution, reference short edge, adapters and
+steps, plus each shot's conditioning, intent, dialogue placement and dependencies. Capability menus
+come from the selected model and partition; preflight resolves the effective values per shot before
+rendering. The production plan and compiled request remain the shared contract, so the UI does not
+invent a second job-body shape.
 
 ## Editor concepts that map naturally
 
@@ -297,25 +351,14 @@ it is *not* a clean mapping is review: a script supervisor's note is a person's 
 one is a local vision model that both misses real faults and flags correct takes. The UI must not let
 a flag read as a verdict.
 
-## Open questions for the epic
+## Current workspace behavior
 
-1. **Who owns a run task?** If the API hosts it, what happens to a run when the API restarts mid-shot:
-   auto-reconcile every `running` record it owns, or wait for a person? What happens to a run
-   started from a shell while the API is also hosting one against the same directory? The record
-   cannot arbitrate; something has to.
-2. **Multi-user.** Nothing in the record has an author. `ProductionDecision` records `at`, `action`,
-   `shotId` and `detail` (`crates/sceneworks-core/src/film_plan.rs:3173`) and no identity. If more
-   than one person can accept takes on one run, the decision log needs a field and the schema needs a
-   version bump.
-3. **Where is the brief edited?** The planner's `ProductionBrief` is the only document with no
-   editing surface in this note. It is also the document whose defaults determine whether a user
-   lands on the turbo path, and in phase 2 the shipped brief produced no valid plan in 2 or 5 repair
-   rounds (`docs/film-harness-evaluation-phase-2.md`, §5.2). The brief editor is a first-class
-   surface, not a text box.
-4. **Streaming progress.** Today a UI would poll `run.json` plus the job routes. The record is at
-   most one transition behind and `read_run_record` is a file read, so polling is honest and cheap,
-   but per-step render progress lives on the job, not the record, and a 137 s/step shot needs
-   something between transitions. Decide whether that is job polling, an event stream, or nothing.
-5. **Where the documents live.** The CLI takes filesystem paths. A UI has a project. Whether plans
-   and packs become project-scoped documents, or stay files the API reads, changes what every route
-   above takes as its body.
+The Film workspace stores its original script, structured brief, optional reference pack, editable
+production plan and compiled plan in a project-scoped draft. Replacing the plan is an explicit
+operator action; the source text remains preserved. Planning, runs, review and export expose durable
+status in the Operations panel. Per-step progress comes from the job named by the operation or run,
+while the project record remains the recovery authority.
+
+Rendering delivers completed shots into an editable saved timeline and does not export. A timeline
+edit marks any older export stale. **Export current cut** is the explicit boundary that saves and
+renders the current timeline, reports failures and lists any audio layers that could not be mixed.

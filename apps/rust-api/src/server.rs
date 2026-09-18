@@ -15,7 +15,7 @@
 //! module reaches them through `crate::`.
 
 use std::collections::HashMap;
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -31,6 +31,7 @@ use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use sceneworks_core::jobs_store::JobsStore;
@@ -41,6 +42,7 @@ use crate::catalog_scan_supervisor::CatalogScanSupervisor;
 use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
+use crate::film_harness::FilmControllerShutdown;
 use crate::manifest::ManifestCache;
 use crate::models::{ModelCatalogCache, ModelSizeCache};
 use crate::startup::{
@@ -48,7 +50,7 @@ use crate::startup::{
 };
 use crate::tickets::TicketStore;
 use crate::{
-    create_app_with_pending_startup_maintenance, env_path_or, env_string,
+    create_app_with_pending_startup_maintenance_with_shutdowns, env_path_or, env_string,
     open_bind_override_enabled, parent_death, parent_pid_to_watch, seed_mode_for_config_dir,
     should_warn_open_bind, shutdown_signal, spawn_inprocess_utility_worker, DEFAULT_API_HOST,
     DEFAULT_CORS_ORIGINS,
@@ -167,6 +169,46 @@ pub struct Settings {
     /// loopback bind (loopback is always allowed) — see
     /// [`sceneworks_mcp::mcp_allowed_hosts`].
     pub mcp_allowed_hosts_extra: Vec<String>,
+}
+
+const API_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerDrainOutcome {
+    Drained,
+    Forced,
+}
+
+/// Axum's graceful shutdown stops accepting new connections but deliberately waits without a
+/// deadline for every existing connection. Browser `EventSource` connections are long lived, and
+/// a buggy or third-party streaming response must not hold the API process past the desktop
+/// helper's termination window. App-owned streams receive the cancellation token as well; this
+/// deadline is the fail-closed backstop for any connection that does not cooperate.
+async fn bounded_server_drain<F>(
+    server: F,
+    shutdown: CancellationToken,
+    timeout: Duration,
+) -> Result<ServerDrainOutcome, std::io::Error>
+where
+    F: Future<Output = Result<(), std::io::Error>>,
+{
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result.map(|()| ServerDrainOutcome::Drained),
+        () = shutdown.cancelled() => {
+            match tokio::time::timeout(timeout, &mut server).await {
+                Ok(result) => result.map(|()| ServerDrainOutcome::Drained),
+                Err(_) => {
+                    tracing::warn!(
+                        event = "api_connection_drain_forced",
+                        timeout_ms = timeout.as_millis(),
+                        "API connection drain exceeded its deadline; dropping remaining connections"
+                    );
+                    Ok(ServerDrainOutcome::Forced)
+                }
+            }
+        }
+    }
 }
 
 impl Settings {
@@ -295,6 +337,21 @@ fn default_mcp_api_url(host: &str, port: u16) -> String {
     format!("http://{dial_host}:{port}")
 }
 
+/// Resolve the API base used by this process's own HTTP clients after the
+/// listener has bound. Port `0` asks the OS for an available port, so the
+/// pre-bind value in [`Settings`] is not dialable. An explicit API URL remains
+/// authoritative for reverse-proxy and container deployments.
+fn mcp_api_url_for_bound_listener(
+    host: &str,
+    bound_port: u16,
+    explicit_api_url: Option<&str>,
+) -> String {
+    explicit_api_url
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_mcp_api_url(host, bound_port))
+}
+
 /// Parse a whole-seconds env var into a [`Duration`], keeping `default` when the
 /// variable is unset or not a non-negative integer (sc-10277).
 fn env_secs(name: &str, default: Duration) -> Duration {
@@ -377,6 +434,12 @@ pub struct AppState {
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
     /// Owns, deduplicates, cancels, and drains background catalog scans.
     pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
+    /// Preserves only active Film controller ownership across this API process's graceful exit.
+    /// Every process receives a fresh instance, so shutdown state never crosses a restart.
+    pub(crate) film_controller_shutdown: FilmControllerShutdown,
+    /// Process-local cancellation for long-lived HTTP response streams. The process-shutdown path
+    /// trips it before Axum begins draining so an open editor cannot hold exit indefinitely.
+    pub(crate) api_shutdown: CancellationToken,
     /// Catalog ids for which this AppState has already published an invalid
     /// persisted recovery plan. Valid scheduled recoveries remain retryable if
     /// their generation later exits incomplete.
@@ -604,7 +667,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "SceneWorks API defaulting HF_HOME"
         );
     }
-    let settings = Settings::from_env();
+    let explicit_mcp_api_url = std::env::var("SCENEWORKS_API_URL").ok();
+    let mut settings = Settings::from_env();
     // A populated builtin catalog is mandatory — model->file resolution depends on
     // it. The desktop wrapper and the Compose bind mount normally provide it; seed
     // any missing manifests here so launching the API binary directly works too,
@@ -738,6 +802,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // readiness-critical invariants are complete.
     let bound = listener.local_addr()?;
     let port = bound.port();
+    settings.mcp_api_url =
+        mcp_api_url_for_bound_listener(&settings.host, port, explicit_mcp_api_url.as_deref());
     let ready_app = Arc::new(OnceLock::new());
     let bootstrap_maintenance = StartupMaintenance::pending();
     let bootstrap = bootstrap_router(
@@ -755,15 +821,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // both the bootstrap dispatcher and, once installed, the real router's auth
     // middleware. Poll this server while readiness-critical filesystem/SQLite
     // work builds the real router on the blocking pool.
-    let serve = axum::serve(
-        listener,
-        bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .into_future();
+    let film_controller_shutdown = FilmControllerShutdown::default();
+    let api_shutdown = CancellationToken::new();
+    let serve_shutdown = film_controller_shutdown.clone();
+    let signal_shutdown = api_shutdown.clone();
+    let serve = bounded_server_drain(
+        axum::serve(
+            listener,
+            bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal(serve_shutdown, signal_shutdown))
+        .into_future(),
+        api_shutdown.clone(),
+        API_CONNECTION_DRAIN_TIMEOUT,
+    );
     tokio::pin!(serve);
-    let mut build =
-        tokio::task::spawn_blocking(move || create_app_with_pending_startup_maintenance(settings));
+    let mut build = tokio::task::spawn_blocking(move || {
+        create_app_with_pending_startup_maintenance_with_shutdowns(
+            settings,
+            film_controller_shutdown,
+            api_shutdown,
+        )
+    });
     let build_result = tokio::select! {
         result = &mut build => result?,
         result = &mut serve => {
@@ -781,6 +860,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     ready_app
         .set(app)
         .map_err(|_| "SceneWorks API router was initialized more than once")?;
+    let film_reconciliation =
+        crate::film_lifecycle::spawn_film_startup_reconciliation(state.clone());
+    let film_planning_reconciliation =
+        crate::film_planning::spawn_film_planning_startup_reconciliation(state.clone());
     tracing::info!(
         event = "api_ready",
         address = %bound,
@@ -809,6 +892,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_result = serve.await;
     state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
+    film_reconciliation.abort();
+    film_planning_reconciliation.abort();
     shutdown_catalog_scans(&state).await;
     serve_result?;
 
@@ -874,11 +959,17 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod server_tests {
-    use super::{bootstrap_router, default_mcp_api_url, env_secs};
+    use super::{
+        bootstrap_router, bounded_server_drain, default_mcp_api_url, env_secs,
+        mcp_api_url_for_bound_listener, ServerDrainOutcome,
+    };
+    use crate::film_harness::FilmControllerShutdown;
     use crate::startup::StartupMaintenance;
     use crate::tests::support::test_settings;
+    use std::future::IntoFuture;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn env_secs_parses_whole_seconds_and_falls_back() {
@@ -1005,6 +1096,138 @@ mod server_tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn api_shutdown_ends_an_open_editor_event_stream_and_drains_normally() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let shutdown = CancellationToken::new();
+        let (app, _) = crate::create_app_with_pending_startup_maintenance_with_shutdowns(
+            test_settings(&temp_dir),
+            FilmControllerShutdown::default(),
+            shutdown.clone(),
+        )
+        .expect("app creates");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("bound address reads");
+        let graceful_shutdown = shutdown.clone();
+        let drain_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            bounded_server_drain(
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(graceful_shutdown.cancelled_owned())
+                .into_future(),
+                drain_shutdown,
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        let mut open_editor_stream = reqwest::Client::new()
+            .get(format!("http://{address}/api/v1/jobs/events"))
+            .send()
+            .await
+            .expect("editor event stream connects");
+        assert_eq!(open_editor_stream.status(), reqwest::StatusCode::OK);
+        let first_chunk = tokio::time::timeout(Duration::from_secs(1), open_editor_stream.chunk())
+            .await
+            .expect("ready event arrives before timeout")
+            .expect("ready event reads")
+            .expect("ready event has a body chunk");
+        assert!(
+            String::from_utf8_lossy(&first_chunk).contains("event: ready"),
+            "the held request must be the real editor SSE stream"
+        );
+
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("cooperative event stream lets the API drain promptly")
+            .expect("server task joins")
+            .expect("server exits successfully");
+        assert_eq!(outcome, ServerDrainOutcome::Drained);
+        // The authoritative jobs/queue snapshots may already be buffered behind `ready` when
+        // shutdown closes the stream. They remain legal response bytes after the server task has
+        // drained; consume that finite buffer and require an actual EOF rather than assuming the
+        // very next chunk is empty.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while open_editor_stream
+                .chunk()
+                .await
+                .expect("closed event stream reads cleanly")
+                .is_some()
+            {}
+        })
+        .await
+        .expect("the browser stream reaches EOF after its buffered snapshots");
+    }
+
+    #[tokio::test]
+    async fn api_shutdown_forces_a_noncooperative_stream_after_the_finite_deadline() {
+        use axum::response::sse::{Event, Sse};
+        use axum::routing::get;
+        use axum::Router;
+        use std::convert::Infallible;
+
+        let app = Router::new().route(
+            "/events",
+            get(|| async {
+                let stream = futures_util::stream::unfold(true, |send_ready| async move {
+                    if send_ready {
+                        Some((
+                            Ok::<_, Infallible>(Event::default().event("ready").data("{}")),
+                            false,
+                        ))
+                    } else {
+                        std::future::pending().await
+                    }
+                });
+                Sse::new(stream)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("bound address reads");
+        let shutdown = CancellationToken::new();
+        let graceful_shutdown = shutdown.clone();
+        let drain_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            bounded_server_drain(
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(graceful_shutdown.cancelled_owned())
+                    .into_future(),
+                drain_shutdown,
+                Duration::from_millis(50),
+            )
+            .await
+        });
+        let mut noncooperative_stream = reqwest::Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await
+            .expect("noncooperative stream connects");
+        assert!(
+            noncooperative_stream
+                .chunk()
+                .await
+                .expect("ready event reads")
+                .is_some(),
+            "the response must be open before shutdown"
+        );
+
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("hard drain deadline bounds a noncooperative connection")
+            .expect("server task joins")
+            .expect("forced drain is a clean API shutdown");
+        assert_eq!(outcome, ServerDrainOutcome::Forced);
+    }
+
     #[test]
     fn default_mcp_api_url_dials_loopback_for_wildcard_and_loopback_hosts() {
         for host in [
@@ -1051,6 +1274,37 @@ mod server_tests {
         assert_eq!(
             default_mcp_api_url("[fe80::1]", 8000),
             "http://[fe80::1]:8000"
+        );
+    }
+
+    #[test]
+    fn bound_listener_url_uses_ephemeral_port_unless_explicitly_overridden() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral localhost listener binds");
+        let bound_port = listener
+            .local_addr()
+            .expect("bound localhost address reads")
+            .port();
+        assert_ne!(bound_port, 0, "the OS must assign a dialable port");
+
+        assert_eq!(
+            mcp_api_url_for_bound_listener("localhost", bound_port, None),
+            format!("http://127.0.0.1:{bound_port}"),
+            "an implicit self-call URL must follow the actual listener port"
+        );
+        assert_eq!(
+            mcp_api_url_for_bound_listener("localhost", bound_port, Some("  ")),
+            format!("http://127.0.0.1:{bound_port}"),
+            "a blank override has the same meaning as an unset override"
+        );
+        assert_eq!(
+            mcp_api_url_for_bound_listener(
+                "localhost",
+                bound_port,
+                Some("https://api.internal.example/base")
+            ),
+            "https://api.internal.example/base",
+            "an explicit proxy/container URL remains authoritative"
         );
     }
 }

@@ -24621,6 +24621,66 @@
       }
     },
     {
+      // Optional high-capability film-planning checkpoint (sc-23733). It rides the same native
+      // TextLlm provider as the built-in Anubis prompt refiner; the pinned inference engines already
+      // implement the Qwen3.6 (`qwen3_5`) architecture on MLX and Candle. This entry only makes the
+      // upstream weights explicitly installable and availability-readable. It is never selected or
+      // downloaded automatically: a new film draft continues to use prompt_refine_anubis_8b.
+      //
+      // The first published pin held only README.md and .gitattributes. A whole-repo `files: []`
+      // claim consequently made that 1.5 KB metadata snapshot look installed. Pin the first complete
+      // official snapshot and name the loader's required files so no metadata-only revision can ever
+      // advertise as usable. `breaking` applies specifically to that unusable old receipt: it must
+      // not preserve the README-only revision through the normal usable-stale path.
+      "id": "film_planner_qwen3_6_27b",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 96,
+      "name": "Film Planner (Qwen3.6-27B)",
+      "family": "film-planner",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen3.6-27B",
+          "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "breaking": true,
+          "estimatedSizeBytes": 57000000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen3.6-27B"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Film Planner (Qwen3.6-27B)",
+        "description": "Optional native film-planning LLM. Large explicit download; never required by the built-in prompt-refiner planning path.",
+        "recommendedFor": ["film_planning"],
+        "promptGuide": {
+          "title": "Qwen3.6-27B model card",
+          "path": "/prompt-guides/prompt-refine.md",
+          "sources": [
+            { "label": "Qwen/Qwen3.6-27B model card", "url": "https://huggingface.co/Qwen/Qwen3.6-27B" }
+          ]
+        }
+      }
+    },
+    {
       // Dataset captioning LLM (sc-5620, the JoyCaption twin of the sc-5605 prompt_refine gap).
       // The native captioner (`caption_jobs.rs`, the `training_caption` job used by LoRA-training
       // auto-captioning) runs JoyCaption in-process — the MLX provider on macOS (sc-3556) and
@@ -26622,7 +26682,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "e3b268ec04d49ec6b41f40b7adb8f91c2bed55f8864d32cee24070b2842e4dd1",
+              "sha256": "fb381b2482f3a124dff76ad805814664d1c9c7599093d6804be0775455987297",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26641,8 +26701,8 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 250722,
-                  "sha256": "f3a4d972a288fd40374837eac58fcdebe072e1b9622096dc1ce169f9a9a9bbfd"
+                  "byteSize": 250749,
+                  "sha256": "a5442ac7fb2c4779e4ea5c50127fbdbaf703356aa909da3c09563496775beb12"
                 },
                 {
                   "path": "Cargo.toml",
@@ -26706,8 +26766,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 190392,
-                  "sha256": "375e0bdaab84a97dd5c8fffe3f77409166822fde1ed8226f9e8b5a75039043dd"
+                  "byteSize": 200996,
+                  "sha256": "442c9bda398387ecbd1dd43d3cc790eb8bc31dfce1a16a8d2078db7be0e725b9"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",

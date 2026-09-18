@@ -21,8 +21,12 @@ use serde_json::Value;
 use crate::film_harness::review::{
     self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
 };
-use crate::film_harness::{self, RunControl};
+use crate::film_harness::{
+    self, ApiRequest, ApiTransport, BytesTransportFuture, ControllerLease, RunControl,
+    TransportFuture,
+};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
+use crate::tests::support::{huggingface_repo_cache_path, isolate_hf_cache, request, StatusCode};
 
 const REVIEW_PLAN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -58,6 +62,66 @@ fn sound_free_documents(harness: &Harness) -> (PathBuf, PathBuf) {
 fn shipped_review_plan() -> ReviewPlan {
     parse_review_plan(&std::fs::read_to_string(REVIEW_PLAN).expect("review plan reads"))
         .expect("review plan parses")
+}
+
+/// Seed the smallest structurally complete SenseNova tier and the MiniMax partition needed by a
+/// routed repair. Review tests exercise routing and lifecycle with a scripted CPU worker; they
+/// must not borrow a developer's installed weights or become red when CI supplies both HF cache
+/// variables as empty directories.
+fn seed_review_models(harness: &Harness) {
+    let write = |path: &std::path::Path, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("fixture model directory");
+        std::fs::write(path, bytes).expect("fixture model file");
+    };
+    let review_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/sensenova-u1-8b-mlx",
+    )
+    .expect("fixture repo path")
+    .join("snapshots/fixture/q4");
+    for file in ["model.safetensors", "config.json", "tokenizer.json"] {
+        write(&review_root.join(file), b"fixture");
+    }
+    let tier_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "SceneWorks/minimax-h3-mlx",
+    )
+    .expect("fixture video repo path")
+    .join("snapshots/fixture/q4");
+    let index = br#"{"weight_map":{"fixture":"model-00001-of-00001.safetensors"}}"#;
+    for partition in ["transformer", "transformer_ref"] {
+        write(&tier_root.join(partition).join("config.json"), b"{}");
+        write(
+            &tier_root
+                .join(partition)
+                .join("diffusion_pytorch_model.safetensors.index.json"),
+            index,
+        );
+        write(
+            &tier_root
+                .join(partition)
+                .join("model-00001-of-00001.safetensors"),
+            b"fixture",
+        );
+    }
+    write(&tier_root.join("text_encoder/config.json"), b"{}");
+    write(
+        &tier_root.join("text_encoder/model.safetensors.index.json"),
+        index,
+    );
+
+    let shared_root = huggingface_repo_cache_path(
+        &harness.temp_dir.path().join("data"),
+        "MiniMaxAI/MiniMax-H3",
+    )
+    .expect("fixture video shared repo path")
+    .join("snapshots/fixture");
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_SHARED_PROBED_FILES {
+        write(&shared_root.join(file), b"fixture");
+    }
+    for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+        write(&shared_root.join("FL2VA/audio_vae").join(file), b"fixture");
+    }
 }
 
 /// A run of SH010 + SH020 that completed, ready to review.
@@ -117,6 +181,37 @@ fn observed_for(record: &RunRecord, out_dir: &Path, shot_id: &str) -> ObservedSt
     let summary = shot.latest_review().expect("the shot has a review");
     review::read_observed_state(&out_dir.join(&summary.record_path))
         .expect("the observed-state document reads")
+}
+
+fn register_run_for_routes(harness: &Harness, record: &RunRecord) -> (String, String) {
+    let project_id = record.project_id.clone().expect("run has project");
+    let project_path = PathBuf::from(record.project_path.as_ref().expect("run has project path"));
+    let locator_id = format!("filmrun_route_{}", record.run_id.trim_start_matches("run_"));
+    assert_ne!(
+        locator_id, record.run_id,
+        "route and record identities differ"
+    );
+    let relative = format!("films/runs/{locator_id}");
+    let run_dir = project_path.join(&relative);
+    std::fs::create_dir_all(run_dir.parent().expect("run parent")).expect("run parent creates");
+    std::fs::rename(harness.out_dir(), &run_dir).expect("completed run moves into project");
+    std::fs::copy(REVIEW_PLAN, run_dir.join("review.jsonc")).expect("review plan pins");
+    std::fs::write(
+        run_dir.join("locator.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "id": locator_id,
+            "projectId": project_id,
+            "draftId": "film_route_fixture",
+            "draftRevision": 1,
+            "selectedShotIds": record.selected_shot_ids,
+            "recordDirectory": relative,
+            "createdAt": record.created_at,
+        }))
+        .expect("locator serializes"),
+    )
+    .expect("locator writes");
+    (project_id, locator_id)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -395,6 +490,62 @@ async fn a_review_writes_observed_state_beside_the_run_and_only_points_at_the_in
     assert_eq!(observed.backend.model, review::VQA_MODEL_ID);
     assert_eq!(observed.backend.route, review::VQA_ROUTE);
     let _ = record;
+}
+
+#[tokio::test]
+async fn a_prior_cancel_does_not_stop_a_new_review_but_a_fresh_cancel_does() {
+    let (harness, _) = rendered_two_shots().await;
+    script_answers(&harness, &agreeing_answers());
+    film_harness::request_cancel(&harness.out_dir()).expect("prior operation leaves a cancel");
+    let mut options = ReviewOptions::new(harness.out_dir());
+    options.review_plan_path = Some(PathBuf::from(REVIEW_PLAN));
+    options.poll_interval = Duration::from_millis(25);
+    options.shot_ids = vec!["SH020".to_owned()];
+    let vision = VqaVision::new(
+        &harness.transport,
+        options.poll_interval,
+        options.control.clone(),
+    );
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .expect("the newly authorized review runs");
+    let observed = observed_for(&reviewed, &harness.out_dir(), "SH020");
+    assert_eq!(
+        observed
+            .frames
+            .iter()
+            .filter(|frame| frame.shot_id == "SH020")
+            .count(),
+        shipped_review_plan().sampling.positions.len(),
+        "the prior action's cancel must not stop selected-take sampling"
+    );
+    assert!(observed.stop.is_none(), "{observed:#?}");
+
+    let lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:review:fresh")
+        .expect("a second review acquires");
+    let fresh_options = ReviewOptions {
+        shot_ids: vec!["SH020".to_owned()],
+        ..options
+    };
+    film_harness::request_cancel(&harness.out_dir())
+        .expect("a fresh cancel reaches the active review");
+    let fresh_vision = VqaVision::new(
+        &harness.transport,
+        fresh_options.poll_interval,
+        fresh_options.control.clone(),
+    );
+    let freshly_canceled =
+        review::review_with_lease(&harness.transport, &fresh_options, &fresh_vision, lease)
+            .await
+            .expect("a canceled review keeps its partial record");
+    let observed = observed_for(&freshly_canceled, &harness.out_dir(), "SH020");
+    assert!(
+        observed
+            .stop
+            .as_deref()
+            .is_some_and(|stop| stop.starts_with("canceled:")),
+        "a cancel arriving after acquisition remains effective: {observed:#?}"
+    );
 }
 
 #[tokio::test]
@@ -1045,6 +1196,184 @@ fn a_review_plan_that_declares_more_questions_than_it_budgets_for_is_refused_up_
 // ---------------------------------------------------------------------------------------------
 // The human loop
 // ---------------------------------------------------------------------------------------------
+
+fn review_route_settled(view: &Value, expected_observations: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["observations"]
+            .as_array()
+            .is_some_and(|observations| observations.len() == expected_observations)
+}
+
+fn repair_route_settled(view: &Value, expected_attempts: usize) -> bool {
+    view["run"]["controllerActive"] == serde_json::json!(false)
+        && view["run"]["record"]["shots"][0]["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts.len() == expected_attempts)
+}
+
+#[test]
+fn an_inactive_controller_is_not_settled_until_its_durable_result_is_visible() {
+    let mut view = serde_json::json!({
+        "run": {
+            "controllerActive": false,
+            "record": { "shots": [{ "attempts": [{}] }] }
+        },
+        "observations": []
+    });
+
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["observations"] = serde_json::json!([{}]);
+    assert!(review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+    view["run"]["record"]["shots"][0]["attempts"] = serde_json::json!([{}, {}]);
+    assert!(repair_route_settled(&view, 2));
+
+    view["run"]["controllerActive"] = serde_json::json!(true);
+    assert!(!review_route_settled(&view, 1));
+    assert!(!repair_route_settled(&view, 2));
+}
+
+#[tokio::test]
+async fn review_routes_expose_decisions_preflight_and_one_bounded_repair_without_auto_acceptance() {
+    let _env = isolate_hf_cache();
+    let harness = Harness::start_http(true, fast(&["SH010", "SH020"])).await;
+    seed_review_models(&harness);
+    let (status, models) = request(harness.app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{models}");
+    for model_id in ["minimax_h3", "sensenova_u1_8b"] {
+        let model = models
+            .as_array()
+            .expect("model catalog")
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .unwrap_or_else(|| panic!("missing {model_id}: {models}"));
+        assert_eq!(model["installState"], "installed", "{model}");
+    }
+    let (plan, pack) = sound_free_documents(&harness);
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(plan, pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .expect("the two-shot run completes");
+    script_answers(&harness, &agreeing_answers());
+    let original_attempts = record.shot("SH010").expect("shot").attempts.len();
+    let (project_id, run_id) = register_run_for_routes(&harness, &record);
+    let review_path = format!("/api/v1/projects/{project_id}/film-runs/{run_id}/review");
+
+    let (status, view) = request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["selections"][0]["state"], "aligned");
+    assert_eq!(
+        view["run"]["record"]["shots"][0]["attempts"]
+            .as_array()
+            .expect("take history")
+            .len(),
+        original_attempts
+    );
+
+    let (status, accepted) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("{review_path}/decision"),
+        serde_json::json!({"shotId": "SH010", "decision": "accept", "reason": "Human approved"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(
+        accepted["run"]["record"]["shots"][0]["humanDecision"]["state"],
+        "accepted"
+    );
+
+    let (status, reviewing) = request(
+        harness.app.clone(),
+        "POST",
+        &review_path,
+        serde_json::json!({"shotIds": ["SH010"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{reviewing}");
+    assert!(reviewing["actionDisabledReason"].is_string(), "{reviewing}");
+    let mut reviewed = Value::Null;
+    let mut last_review = Value::Null;
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, current) =
+            request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        if review_route_settled(&current, 1) {
+            reviewed = current;
+            break;
+        }
+        last_review = current;
+    }
+    assert_ne!(
+        reviewed,
+        Value::Null,
+        "bounded review did not settle: {last_review}"
+    );
+    assert_eq!(
+        reviewed["observations"]
+            .as_array()
+            .expect("observations")
+            .len(),
+        1
+    );
+    assert!(reviewed["reviewTimelineId"].is_string(), "{reviewed}");
+    assert_eq!(
+        reviewed["run"]["record"]["shots"][0]["humanDecision"]["state"], "accepted",
+        "advisory review cannot overwrite the human decision"
+    );
+
+    let (status, started) = request(
+        harness.app.clone(),
+        "POST",
+        &format!("{review_path}/repair"),
+        serde_json::json!({"shotId": "SH010", "reason": "Repair the parcel handoff"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    assert!(started["actionDisabledReason"].is_string(), "{started}");
+
+    let mut settled = Value::Null;
+    let mut last_repair = Value::Null;
+    for _ in 0..80 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, current) =
+            request(harness.app.clone(), "GET", &review_path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        if repair_route_settled(&current, original_attempts + 1) {
+            settled = current;
+            break;
+        }
+        last_repair = current;
+    }
+    assert_ne!(
+        settled,
+        Value::Null,
+        "bounded repair did not settle: {last_repair}"
+    );
+    let shot = &settled["run"]["record"]["shots"][0];
+    assert_eq!(
+        shot["attempts"].as_array().expect("attempt history").len(),
+        original_attempts + 1,
+        "repair appends exactly one attempt: {settled}"
+    );
+    assert!(
+        shot.get("humanDecision").is_none(),
+        "repair cannot auto-accept: {shot}"
+    );
+    assert_eq!(
+        settled["run"]["record"]["decisions"]
+            .as_array()
+            .expect("decision history")
+            .iter()
+            .filter(|decision| decision["action"] == "request_repair")
+            .count(),
+        1
+    );
+}
 
 #[tokio::test]
 async fn accepting_a_take_clears_only_that_shots_flags_and_records_the_decision() {
@@ -1983,6 +2312,96 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
     );
 }
 
+/// Advance the review clock only after one frame has landed and the next extraction is running.
+/// Real API dispatch/cancellation and fake-worker acknowledgments remain observable boundaries.
+struct BudgetBoundaryTransport<'a> {
+    harness: &'a Harness,
+    frames: std::sync::atomic::AtomicUsize,
+    expired_job: parking_lot::Mutex<Option<String>>,
+    canceled_jobs: parking_lot::Mutex<Vec<String>>,
+}
+
+impl BudgetBoundaryTransport<'_> {
+    async fn wait_for_status(&self, job_id: &str, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let (status, job) = request(
+                    self.harness.app.clone(),
+                    "GET",
+                    &format!("/api/v1/jobs/{job_id}"),
+                    Value::Null,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                if job["status"] == expected {
+                    break;
+                }
+                assert!(
+                    !["failed", "completed", "canceled"]
+                        .iter()
+                        .any(|terminal| job["status"] == *terminal),
+                    "expected {job_id} to reach {expected}: {job}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("fixture job {job_id} did not reach {expected}"));
+    }
+}
+
+impl ApiTransport for BudgetBoundaryTransport<'_> {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        let second_frame = request.method == "POST"
+            && request.path.ends_with("/frames")
+            && self
+                .frames
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1;
+        let canceled_job = (request.method == "POST")
+            .then(|| {
+                request
+                    .path
+                    .strip_prefix("/api/v1/jobs/")
+                    .and_then(|path| path.strip_suffix("/cancel"))
+                    .map(str::to_owned)
+            })
+            .flatten();
+        Box::pin(async move {
+            if second_frame {
+                let mut script = self.harness.script.lock();
+                script.frame_delay = Some(Duration::from_secs(600));
+                script.frame_reports_running = true;
+            }
+            let response = self.harness.transport.call(request).await?;
+            if second_frame {
+                assert!((200..300).contains(&response.status));
+                let job_id = response.body["id"].as_str().expect("created frame job");
+                self.wait_for_status(job_id, "running").await;
+                *self.expired_job.lock() = Some(job_id.to_owned());
+                // The first frame has landed and the second extraction is running. The fake
+                // worker's delay uses std::time, so advancing this runtime's Tokio clock expires
+                // the review budget without completing the active extraction.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(600)).await;
+                tokio::time::resume();
+            }
+            if let Some(job_id) = canceled_job {
+                assert!((200..300).contains(&response.status));
+                self.canceled_jobs.lock().push(job_id.clone());
+                // Deliver the successful cancel response after the fixture acknowledges it.
+                // Scheduler pressure cannot turn a correct API cancel into a terminal-state race.
+                self.wait_for_status(&job_id, "canceled").await;
+            }
+            Ok(response)
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.harness.transport.get_bytes(path)
+    }
+}
+
 /// (C) `limits.maxSeconds` running out DURING a frame extraction is a `review_budget` stop that
 /// keeps the frames already sampled — it used to surface as a transport error from the cancelled
 /// extraction job, with no document written at all.
@@ -1990,20 +2409,20 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
 async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sampled() {
     let (harness, _) = rendered_two_shots().await;
     script_answers(&harness, &agreeing_answers());
-    // Frames take ~0.9 s each against a 2 s budget: the first one or two land, and the budget
-    // runs out while a later one is still being extracted. Under a loaded runner even the first
-    // can miss, which is the same stop with fewer frames — the claims below hold either way.
-    harness.script.lock().frame_delay = Some(Duration::from_millis(900));
+    // Leave ordinary setup ample budget. The transport expires it at a verified active-job
+    // boundary rather than assuming scheduler-dependent 900 ms delays fit a two-second window.
     let mut options = review_options(&harness, &["SH010"]);
     options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
-        plan.limits.max_seconds = 2;
+        plan.limits.max_seconds = 600;
     }));
-    let vision = VqaVision::new(
-        &harness.transport,
-        options.poll_interval,
-        options.control.clone(),
-    );
-    let reviewed = review::review(&harness.transport, &options, &vision)
+    let transport = BudgetBoundaryTransport {
+        harness: &harness,
+        frames: std::sync::atomic::AtomicUsize::new(0),
+        expired_job: parking_lot::Mutex::new(None),
+        canceled_jobs: parking_lot::Mutex::new(Vec::new()),
+    };
+    let vision = VqaVision::new(&transport, options.poll_interval, options.control.clone());
+    let reviewed = review::review(&transport, &options, &vision)
         .await
         .expect("a budget spent mid-extraction is a stop, not an error");
     let observed = observed_for(&reviewed, &harness.out_dir(), "SH010");
@@ -2012,7 +2431,7 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
         .as_deref()
         .expect("the review says why it stopped");
     assert!(
-        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        stop.starts_with("review_budget: limits.maxSeconds is 600s"),
         "{stop}"
     );
     let sampled = observed
@@ -2020,9 +2439,24 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
         .iter()
         .filter(|frame| frame.shot_id == "SH010")
         .count();
-    assert!(
-        sampled < 3,
-        "the extraction the budget interrupted must not have produced a frame: {sampled}"
+    assert_eq!(
+        sampled, 1,
+        "the completed first frame survives; the interrupted second frame does not"
+    );
+    assert_eq!(
+        transport.frames.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "budget exhaustion prevents the third extraction from dispatching"
+    );
+    let expired_job = transport
+        .expired_job
+        .lock()
+        .clone()
+        .expect("budget advanced while the second extraction was running");
+    assert_eq!(
+        *transport.canceled_jobs.lock(),
+        vec![expired_job.clone()],
+        "the API receives cancellation for the exact extraction active at budget expiry"
     );
     assert_eq!(
         observed.frames.len(),
@@ -2038,8 +2472,9 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
     let jobs = harness.jobs().await;
     assert!(
         jobs.iter()
-            .any(|job| job["type"] == "frame_extract" && job["status"] == "canceled"),
-        "the extraction the budget interrupted was cancelled through the API"
+            .any(|job| job["id"] == expired_job && job["type"] == "frame_extract" && job["status"] == "canceled"),
+        "the extraction the budget interrupted was cancelled through the API; sampled={sampled}; extraction statuses={:?}",
+        jobs.iter().filter(|job| job["type"] == "frame_extract").map(|job| (&job["id"], &job["status"])).collect::<Vec<_>>()
     );
 }
 
@@ -2427,4 +2862,130 @@ fn every_cut_question_compares_a_reference_both_sides_of_the_cut_bind() {
             question.intended
         );
     }
+}
+
+#[tokio::test]
+async fn review_refuses_missing_questions_before_acceptance_and_persists_later_failure() {
+    let _env = isolate_hf_cache();
+    let harness = Harness::start_http(true, fast(&["SH010", "SH020"])).await;
+    seed_review_models(&harness);
+    let (plan, pack) = sound_free_documents(&harness);
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(plan, pack, Some(&["SH010", "SH020"])),
+    )
+    .await
+    .unwrap();
+    let (project_id, run_id) = register_run_for_routes(&harness, &record);
+    let files = harness
+        .state
+        .project_store
+        .film_run_files(&project_id, &run_id)
+        .unwrap();
+    let route = format!("/api/v1/projects/{project_id}/film-runs/{run_id}/review");
+    let mut review_plan = serde_json::to_value(shipped_review_plan()).unwrap();
+    review_plan["shots"]
+        .as_object_mut()
+        .unwrap()
+        .remove("SH020");
+    std::fs::write(
+        &files.review_plan,
+        serde_json::to_vec(&review_plan).unwrap(),
+    )
+    .unwrap();
+    let jobs_before = harness.jobs().await.len();
+    let (status, refusal) = request(
+        harness.app.clone(),
+        "POST",
+        &route,
+        serde_json::json!({"shotIds":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(refusal
+        .to_string()
+        .contains("asks no questions about shot SH020"));
+    assert_eq!(harness.jobs().await.len(), jobs_before);
+    let (_, refused_after_reload) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(
+        refused_after_reload["reviewOperation"]["status"],
+        "rejected"
+    );
+    assert!(refused_after_reload["reviewOperation"]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("SH020"));
+    // Valid authoring is accepted, then the bounded extraction times out after dispatch.
+    review_plan["limits"]["maxSeconds"] = serde_json::json!(1);
+    review_plan["limits"]["maxAnswerSeconds"] = serde_json::json!(1);
+    std::fs::write(
+        &files.review_plan,
+        serde_json::to_vec(&review_plan).unwrap(),
+    )
+    .unwrap();
+    harness.script.lock().frame_delay = Some(Duration::from_secs(3));
+    let (status, accepted) = request(
+        harness.app.clone(),
+        "POST",
+        &route,
+        serde_json::json!({"shotIds":["SH010"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let mut terminal = Value::Null;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, current) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+        if current["run"]["controllerActive"] == false
+            && current["reviewOperation"]["status"] == "failed"
+        {
+            terminal = current;
+            break;
+        }
+    }
+    assert_eq!(
+        terminal["reviewOperation"]["status"], "failed",
+        "{terminal}"
+    );
+    assert!(terminal["reviewOperation"]["detail"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let saved: Value = serde_json::from_slice(
+        &std::fs::read(files.directory.join(review::REVIEW_OPERATION_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved, terminal["reviewOperation"]);
+    let (_, reloaded) = request(harness.app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(reloaded["reviewOperation"], saved);
+}
+
+#[tokio::test]
+async fn reconciled_default_questions_review_both_newly_authored_shots_without_control_edits() {
+    let (harness, record) = rendered_two_shots().await;
+    let mut draft =
+        sceneworks_core::film_workspace::FilmDraft::manual_one_shot("project", "film", "Defaults");
+    draft.production_plan =
+        sceneworks_core::film_plan::read_plan_file(&PathBuf::from(&record.plan.path)).unwrap();
+    // Production plan application never touches the review controls. Defaults become real here.
+    draft.reconcile_review_plan();
+    let pinned = draft.review_plan_for_run();
+    let path = harness.out_dir().join("default-review.json");
+    std::fs::write(&path, serde_json::to_vec(&pinned).unwrap()).unwrap();
+    let mut options = review_options(&harness, &["SH010", "SH020"]);
+    options.review_plan_path = Some(path);
+    review::validate_review_request(&options).unwrap();
+    let vision = ScriptedVision::new();
+    let reviewed = review::review(&harness.transport, &options, &vision)
+        .await
+        .unwrap();
+    for id in ["SH010", "SH020"] {
+        let summary = reviewed.shot(id).unwrap().latest_review().unwrap();
+        assert!(summary.stop.is_none(), "{summary:?}");
+        assert_eq!(summary.observations, 1);
+    }
+    let operation: Value = serde_json::from_slice(
+        &std::fs::read(harness.out_dir().join(review::REVIEW_OPERATION_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(operation["status"], "completed");
 }
