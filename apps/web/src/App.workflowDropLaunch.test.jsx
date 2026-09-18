@@ -137,6 +137,14 @@ describe("App — a dropped workflow launches from either shell", () => {
     [...document.body.querySelectorAll("button")].find(
       (node) => node.textContent.trim() === label,
     );
+  const waitForButton = async (label) => {
+    let button;
+    await vi.waitFor(() => {
+      button = buttonByLabel(label);
+      expect(button).toBeTruthy();
+    });
+    return button;
+  };
   const click = async (node) => {
     await act(async () => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await settle();
@@ -147,8 +155,7 @@ describe("App — a dropped workflow launches from either shell", () => {
     expect(container.querySelector(".su-root")).toBeTruthy();
 
     await dropOnNeutralChrome();
-    const use = buttonByLabel("Use this workflow");
-    expect(use).toBeTruthy();
+    const use = await waitForButton("Use this workflow");
 
     await click(use);
 
@@ -174,7 +181,7 @@ describe("App — a dropped workflow launches from either shell", () => {
     await renderApp();
     await dropOnNeutralChrome();
 
-    await click(buttonByLabel("Use this workflow"));
+    await click(await waitForButton("Use this workflow"));
 
     expect(document.body.querySelector(".workflow-drop-modal")).toBeTruthy();
     expect(document.body.textContent).toContain("switch on a larger screen");
