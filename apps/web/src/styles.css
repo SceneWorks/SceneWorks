@@ -10840,6 +10840,7 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--bg);
 }
 .ve-film[hidden] { display: none; }
+.ve-film [role="tabpanel"][hidden] { display: none; }
 .ve-film-bar { gap: 12px; }
 .ve-film-bar .ve-toolbar-right { margin-left: auto; }
 .ve-film-draft-select { height: 32px; min-width: 140px; max-width: 220px; font-size: 12px; }
@@ -11280,6 +11281,7 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-review-questions fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
 .ve-film-review-runs, .ve-film-review-shot { display: grid; gap: 10px; }
 .ve-film-review-shot { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-review-shot.focused { border-color: var(--accent); }
 .ve-film-take-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .ve-film-take { display: grid; gap: 8px; min-width: 0; padding: 10px; background: var(--bg-2); border-radius: 7px; }
 .ve-film-take video { width: 100%; max-height: 240px; background: #000; }
@@ -11812,6 +11814,10 @@ details[open] > summary.lora-scope-group-heading::before,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ve-rail-details { display: grid; gap: 3px; margin: 0 0 9px; font-size: 11px; }
+.ve-rail-details > div { display: flex; justify-content: space-between; gap: 8px; }
+.ve-rail-details dt { opacity: 0.7; }
+.ve-rail-details dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .ve-ctx-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

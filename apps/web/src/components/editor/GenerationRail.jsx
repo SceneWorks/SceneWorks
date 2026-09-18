@@ -38,6 +38,11 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
       <div className="ve-rail-head">
         <p className="ve-rail-eyebrow">{header?.eyebrow ?? "No selection"}</p>
         <h3 className="ve-rail-title">{header?.title ?? "Timeline"}</h3>
+        {header?.details?.length ? (
+          <dl className="ve-rail-details">
+            {header.details.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+          </dl>
+        ) : null}
         <div className="ve-ctx-grid">
           {contextActions.map((action) => (
             <button

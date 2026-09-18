@@ -13,14 +13,16 @@ operator workflow in the editor.
 Open or create a project, then open **Editor**. The editor toolbar has a **Film | Timeline** switch.
 **Film** is the script-to-shots workspace described here; **Timeline** is the ordinary timeline
 editor. Both act on the same project timelines, and a project with no timeline opens on Film with
-two start paths: **Start from a script** or **Start with a blank timeline**.
+two start paths: **Start from a script** or **Start with a blank timeline**. Existing film
+drafts are listed under them as **Continue a film draft**.
 
 Film mode walks six steps down its left side: **Script**, **References**, **Plan**, **Shots**,
 **Review**, and **Sound**. Each step shows its current status, and unsaved edits survive moving
 between them. The **Cut** strip along the bottom shows every planned shot in order with its delivery
 state, and **Open in Timeline** switches to the film's timeline. In Timeline mode, clips delivered by
-a film run carry their shot ID; selecting one offers **Review this shot**, which returns to the
-Review step.
+a film run carry their shot ID; selecting one shows the shot's beat, framing, planned duration, run, and
+attempts in the right rail, and offers **Review this shot**, which opens the Review step on the
+film and run that delivered that clip. The ordinary clip actions stay available.
 
 A film draft belongs to the current project. Its script, editable brief, reference pack, shot plan,
 sound plan, review plan, and compiled preflight are saved together and versioned.

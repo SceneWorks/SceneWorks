@@ -90,7 +90,7 @@ export function describeActiveFilmShots(run) {
   }).join(" · ");
 }
 
-export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "film", modeSwitch = null, onFilmChange, onNewTimeline, onOpenTimeline, viewRequest = null } = {}) {
+export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "film", modeSwitch = null, onEngage, onFilmChange, onNewTimeline, onOpenTimeline, showStart = false, viewRequest = null } = {}) {
   const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
   const { jobs = [] } = useAppLive();
   const [drafts, setDrafts] = useState([]);
@@ -106,8 +106,15 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   const [preflight, setPreflight] = useState(null);
   const [lastRun, setLastRun] = useState(null);
   const [activeView, setActiveView] = useState("script");
+  // A project with no timeline opens on the start paths even when drafts exist; picking or
+  // creating a draft (or a hand-off from a timeline clip) is what enters the step view.
+  const [engaged, setEngaged] = useState(false);
+  const [focusShotId, setFocusShotId] = useState("");
+  const explicitRunDraftId = useRef("");
   const viewTabs = useRef([]);
   const selectedDraftId = useRef("");
+  const lastRunId = useRef("");
+  const selectDraftRef = useRef(null);
   const activeTimelineId = useRef("");
   const discoveredTimeline = useRef("");
   const selectedRunExplicit = useRef(false);
@@ -119,6 +126,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     : (requestedPlannerInstallJob ?? activeQueuePlannerInstallJob ?? queuePlannerInstallJob);
   selectedDraftId.current = draft?.id ?? "";
   activeTimelineId.current = activeTimeline?.id ?? "";
+  lastRunId.current = lastRun?.locator?.id ?? "";
 
   const acceptRunSnapshot = useCallback((run, { latest = false, select = false } = {}) => {
     const draftId = selectedDraftId.current;
@@ -131,7 +139,8 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   }, []);
 
   useEffect(() => {
-    selectedRunExplicit.current = false;
+    selectedRunExplicit.current = Boolean(draft?.id) && explicitRunDraftId.current === draft.id;
+    explicitRunDraftId.current = "";
   }, [activeProject?.id, draft?.id]);
 
   useEffect(() => {
@@ -177,6 +186,8 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     setSelectedShotIds([]);
     setPreflight(null);
     setLastRun(null);
+    setEngaged(false);
+    setFocusShotId("");
     if (!activeProject?.id) return undefined;
     apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
       .then((items) => {
@@ -282,13 +293,45 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     onFilmChange?.({ draft, run: lastRun });
   }, [draft, lastRun, onFilmChange]);
 
+  // A timeline clip hands off with the run and shot it was delivered by, so Review opens on
+  // that film even when another draft or an older run is the one currently selected.
   useEffect(() => {
-    if (viewRequest?.view) setActiveView(viewRequest.view);
-  }, [viewRequest]);
+    if (!viewRequest?.view) return undefined;
+    setActiveView(viewRequest.view);
+    setEngaged(true);
+    setFocusShotId(viewRequest.shotId ?? "");
+    const projectId = activeProject?.id;
+    const runId = viewRequest.runId;
+    if (!projectId || !runId || lastRunId.current === runId) return undefined;
+    let canceled = false;
+    (async () => {
+      try {
+        const run = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${encodeURIComponent(runId)}`, token);
+        const draftId = run?.locator?.draftId;
+        if (canceled || !draftId) return;
+        if (selectedDraftId.current !== draftId) {
+          explicitRunDraftId.current = draftId;
+          await selectDraftRef.current(draftId);
+          if (canceled) return;
+        }
+        selectedRunExplicit.current = true;
+        setLastRun(run);
+      } catch (error) {
+        if (!canceled) setNotice(`Could not open the film run for this clip: ${error.message}`);
+      }
+    })();
+    return () => { canceled = true; };
+  }, [activeProject?.id, token, viewRequest]);
 
   if (!activeProject) return null;
 
+  function engage() {
+    setEngaged(true);
+    onEngage?.();
+  }
+
   async function createDraft() {
+    engage();
     setBusy(true);
     setNotice("");
     try {
@@ -312,6 +355,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   }
 
   async function selectDraft(id) {
+    if (id) engage();
     setSelectedId(id);
     setNotice("");
     if (!id) {
@@ -335,6 +379,8 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
       setBusy(false);
     }
   }
+
+  selectDraftRef.current = selectDraft;
 
   function updateDraft(mutator) {
     setPreflight(null);
@@ -438,6 +484,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   }
 
   async function startRun() {
+    engage();
     setBusy(true);
     setNotice("");
     try {
@@ -578,7 +625,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
           {draft ? <button className="ve-export" disabled={busy || !filmTimelineId} onClick={exportCurrentCut} title={filmTimelineId ? "" : "Render a shot to create the film timeline."} type="button">Export current cut</button> : null}
         </div>
       </div>
-      {draft ? (
+      {draft && (engaged || !showStart) ? (
         <div className="ve-film-body">
           <aside className="ve-film-steps">
             <span className="ve-film-eyebrow">Film workflow</span>
@@ -680,6 +727,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
                 <FilmReview
                   active={mode === "film" && activeView === "review"}
                   draft={draft}
+                  focusShotId={focusShotId}
                   onChange={updateDraft}
                   projectId={activeProject.id}
                   refreshTimelines={refreshTimelines}

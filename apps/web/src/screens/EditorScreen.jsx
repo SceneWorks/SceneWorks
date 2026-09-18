@@ -71,11 +71,19 @@ export function EditorScreen() {
   const [film, setFilm] = useState({ draft: null, run: null });
   const [filmViewRequest, setFilmViewRequest] = useState(null);
   const modeChosen = useRef(false);
-  // Timelines hydrate after this screen mounts. Until the operator picks a mode, follow the
-  // project: an existing timeline opens on Timeline, as it did before Film mode existed.
+  // Timelines hydrate after this screen mounts. Until the operator picks a mode or works in
+  // Film, follow the project: an existing timeline opens on Timeline, as it did before Film
+  // mode existed. A film run delivering the project's first timeline must not pull the
+  // operator out of Film, so any Film interaction counts as choosing.
+  const modeProjectId = useRef(activeProject?.id);
   useEffect(() => {
-    if (activeTimeline?.id && !modeChosen.current) setMode("timeline");
-  }, [activeTimeline?.id]);
+    if (modeProjectId.current !== activeProject?.id) {
+      modeProjectId.current = activeProject?.id;
+      modeChosen.current = false;
+      setMode(activeTimeline?.id ? "timeline" : "film");
+    } else if (activeTimeline?.id && !modeChosen.current) setMode("timeline");
+  }, [activeProject?.id, activeTimeline?.id]);
+  const engageFilm = useRef(() => { modeChosen.current = true; }).current;
   // The film run is re-read every two seconds; only a changed record should re-render the editor.
   const acceptFilm = useRef((next) => setFilm((current) => (
     current.draft === next.draft && JSON.stringify(current.run) === JSON.stringify(next.run) ? current : next
@@ -664,9 +672,10 @@ export function EditorScreen() {
     setMode(next);
   }
 
-  function openFilm(view) {
+  // `target` carries the clip's run and shot so Film opens on the film that delivered it.
+  function openFilm(view, target = {}) {
     changeMode("film");
-    if (view) setFilmViewRequest({ view });
+    if (view) setFilmViewRequest({ view, ...target });
   }
 
   async function openFilmTimeline(timelineId) {
@@ -690,9 +699,11 @@ export function EditorScreen() {
   const pendingShots = [];
   if (filmOnThisTimeline) {
     let cursor = timelineDuration(activeTimeline);
+    const placed = new Set(activeTimeline.tracks.flatMap((track) => track.items ?? []).map((item) => item.filmHarness?.shotId).filter(Boolean));
     (film.draft?.productionPlan?.shots ?? []).forEach((shot, index) => {
       const state = filmSummary.states[index];
-      if (state !== "rendering" && state !== "queued") return;
+      // A replacement take lands on the shot's existing clip, not at the end of the cut.
+      if ((state !== "rendering" && state !== "queued") || placed.has(shot.id)) return;
       const seconds = Math.max(Number(shot.targetDurationSeconds) || 1, 0.1);
       pendingShots.push({ id: shot.id, seconds, start: cursor, state });
       cursor += seconds;
@@ -711,18 +722,16 @@ export function EditorScreen() {
           { id: "extract", label: "Extract frame", disabled: true, onClick: () => extractFrame() },
         ];
       }
-      if (selectedFilmShotId && selectionKind === "clip") {
-        // Accept, reject and replacement takes are gated on the run's saved-cut selection,
-        // which only the Film review step reads; the rail hands off instead of guessing.
-        return [
-          { id: "film-review", label: "Review this shot", primary: true, onClick: () => openFilm("review") },
-          { id: "film-shot", label: "Edit shot plan", onClick: () => openFilm("shots") },
-          { id: "extend", label: "Extend clip", onClick: extendSelectedClip },
-          { id: "extract", label: "Extract frame", onClick: extractFrame },
-        ];
-      }
+      // Accept, reject and replacement takes are gated on the run's saved-cut selection,
+      // which only the Film review step reads; the rail hands off instead of guessing.
+      const filmTarget = { runId: selectedItem?.filmHarness?.runId, shotId: selectedFilmShotId };
+      const filmActions = selectedFilmShotId && selectionKind === "clip" ? [
+        { id: "film-review", label: "Review this shot", primary: true, onClick: () => openFilm("review", filmTarget) },
+        { id: "film-shot", label: "Edit shot plan", onClick: () => openFilm("shots", filmTarget) },
+      ] : [];
       return [
-        { id: "extend", label: "Extend clip", primary: true, onClick: extendSelectedClip },
+        ...filmActions,
+        { id: "extend", label: "Extend clip", primary: !filmActions.length, onClick: extendSelectedClip },
         { id: "regenerate", label: "Regenerate", onClick: () => replaceSelectedItem() },
         { id: "extract", label: "Extract frame", onClick: extractFrame },
         { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
@@ -765,7 +774,19 @@ export function EditorScreen() {
     }
     if (selectionKind === "clip" && selectedItem && selectedFilmShotId) {
       const state = film.run?.locator?.id === selectedItem.filmHarness.runId ? ` · ${FILM_SHOT_STATE_LABELS[filmShotState(selectedFilmShotId, film.run)].toUpperCase()}` : "";
-      return { eyebrow: `FILM SHOT · ${selectedFilmShotId}${state}`, title: selectedFilmShot?.beat || selectedItem.displayName };
+      const attempts = film.run?.locator?.id === selectedItem.filmHarness.runId
+        ? film.run.record?.shots?.find((shot) => shot.shotId === selectedFilmShotId)?.attempts ?? []
+        : [];
+      const details = [
+        selectedFilmShot?.framing ? ["Framing", selectedFilmShot.framing] : null,
+        selectedFilmShot?.targetDurationSeconds ? ["Planned", `${selectedFilmShot.targetDurationSeconds}s`] : null,
+        ["Run", selectedItem.filmHarness.runId],
+        ...attempts.map((attempt, index) => [
+          `Attempt ${attempt.attempt ?? index + 1}`,
+          attempt.take?.assetId === selectedItem.assetId ? "in cut" : attempt.take ? "delivered" : String(attempt.status ?? "pending").replaceAll("_", " "),
+        ]),
+      ].filter(Boolean);
+      return { eyebrow: `FILM SHOT · ${selectedFilmShotId}${state}`, title: selectedFilmShot?.beat || selectedItem.displayName, details };
     }
     if (selectionKind === "clip" && selectedItem) {
       const eyebrow = isSelectedAi ? "VIDEO · AI CLIP" : selectedItem.type === "image" ? "IMAGE CLIP" : "VIDEO CLIP";
@@ -800,8 +821,10 @@ export function EditorScreen() {
       mode={mode}
       modeSwitch={modeSwitch}
       blankTimelineLabel={timelines?.length ? "Open Timeline" : "New timeline"}
+      onEngage={engageFilm}
       onFilmChange={acceptFilm}
-      onNewTimeline={timelines?.length ? () => changeMode("timeline") : handleNewTimeline}
+      onNewTimeline={timelines?.length ? () => openFilmTimeline(activeTimeline?.id ?? timelines[0].id) : handleNewTimeline}
+      showStart={!activeTimeline}
       onOpenTimeline={openFilmTimeline}
       viewRequest={filmViewRequest}
     />

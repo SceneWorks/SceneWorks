@@ -104,6 +104,12 @@ describe("styles.css: Film mode fills the editor and only its active step scroll
     expect(declaration(panels, "min-height")).toBe("0");
   });
 
+  it("keeps the hidden mode and hidden steps out of layout, since .ve-film sets its own display", () => {
+    expect(declaration(film, "display")).toBe("flex");
+    expect(declaration(ruleBody(".ve-film[hidden]"), "display")).toBe("none");
+    expect(declaration(ruleBody('.ve-film [role="tabpanel"][hidden]'), "display")).toBe("none");
+  });
+
   it("keeps the Program Monitor row tall enough to own its hit targets", () => {
     expect(declaration(upper, "flex")).toContain("240px");
     expect(declaration(upper, "min-height")).toBe("240px");

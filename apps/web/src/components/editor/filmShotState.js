@@ -29,7 +29,8 @@ export function filmShotState(shotId, run) {
     return "decide";
   }
   if (active && selected) return "queued";
-  if (last && TERMINAL_FAILURES.has(last.status)) return "failed";
+  // An automatic QC reject leaves a "rejected" attempt with no take: nothing was delivered.
+  if (last && (TERMINAL_FAILURES.has(last.status) || last.status === "rejected")) return "failed";
   return "planned";
 }
 

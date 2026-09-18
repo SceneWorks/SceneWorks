@@ -26,6 +26,7 @@ describe("filmShotState", () => {
 
   it("reports a terminal attempt with no take as failed, and no run as planned", () => {
     expect(filmShotState("SH010", run([{ shotId: "SH010", attempts: [{ attempt: 1, status: "timed_out" }] }]))).toBe("failed");
+    expect(filmShotState("SH010", run([{ shotId: "SH010", attempts: [{ attempt: 1, status: "rejected" }] }]))).toBe("failed");
     expect(filmShotState("SH010", null)).toBe("planned");
   });
 

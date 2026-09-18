@@ -136,6 +136,66 @@ describe("FilmWorkspace", () => {
     expect(workspace.hidden).toBe(true);
   });
 
+  it("with no timeline, lists existing drafts beside both start paths until the operator picks one", async () => {
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([draft(), draft({ id: "film_2", title: "Second film" })]);
+      if (path === "/api/v1/projects/project_1/films/film_2") return Promise.resolve(draft({ id: "film_2", title: "Second film" }));
+      if (path === "/api/v1/projects/project_1/film-runs") return Promise.resolve([]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      return Promise.resolve({ providers: [] });
+    });
+    const onEngage = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn() }}>
+          <FilmWorkspace onEngage={onEngage} showStart />
+        </AppContext.Provider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelectorAll(".ve-film-start-card")).toHaveLength(2);
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    const continues = [...container.querySelectorAll(".ve-film-start-drafts button")];
+    expect(continues.map((button) => button.querySelector("strong").textContent)).toEqual(["First film", "Second film"]);
+
+    await act(async () => { continues[1].click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(onEngage).toHaveBeenCalled();
+    expect(container.querySelector(".ve-film-start")).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).not.toBeNull();
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("Second film");
+  });
+
+  it("opens Review on the run and draft that delivered a timeline clip, not the draft that happens to be selected", async () => {
+    const other = draft({ id: "film_2", title: "Second film" });
+    const clipRun = { locator: { id: "filmrun_9", draftId: "film_2", selectedShotIds: ["SH010"] }, controllerActive: false, record: { shots: [] } };
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([draft(), other]);
+      if (path === "/api/v1/projects/project_1/films/film_2") return Promise.resolve(other);
+      if (path === "/api/v1/projects/project_1/film-runs/filmrun_9") return Promise.resolve(clipRun);
+      if (path === "/api/v1/projects/project_1/film-runs/filmrun_9/review") return Promise.resolve({ run: clipRun, selections: [], observations: [], assistiveNotice: "" });
+      if (path === "/api/v1/projects/project_1/film-runs") return Promise.resolve([]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      return Promise.resolve({ providers: [] });
+    });
+    root = createRoot(container);
+    const tree = (viewRequest) => (
+      <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn() }}>
+        <FilmWorkspace viewRequest={viewRequest} />
+      </AppContext.Provider>
+    );
+    await act(async () => { root.render(tree(null)); await Promise.resolve(); });
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("First film");
+
+    await act(async () => { root.render(tree({ view: "review", runId: "filmrun_9", shotId: "SH010" })); });
+    await act(async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve(); });
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("Second film");
+    expect(container.querySelector("#film-view-tab-review").getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#film-view-review").hidden).toBe(false);
+    expect(apiFetchMock.mock.calls.some(([path]) => String(path).includes("/film-runs/filmrun_9/review"))).toBe(true);
+  });
+
   it("shows every planned shot in the cut strip and routes a shot to the step that can act on it", async () => {
     const film = draft();
     film.productionPlan.shots.push({ ...film.productionPlan.shots[0], id: "SH020", beat: "Second shot" });
