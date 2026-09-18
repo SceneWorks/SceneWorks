@@ -761,7 +761,10 @@ async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_repl
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{generated}");
-    assert_eq!(generated["payload"]["sampling"]["temperature"], 0.2);
+    assert_eq!(
+        generated["payload"]["sampling"]["temperature"],
+        json!(0.2_f32)
+    );
     let generated_seed = generated["payload"]["sampling"]["seed"]
         .as_u64()
         .expect("default request persists a resolved seed");
@@ -772,7 +775,7 @@ async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_repl
             app.clone(),
             "POST",
             &format!("/api/v1/jobs/{generated_id}/{operation}"),
-            json!({}),
+            json!({"payloadChanges": {}}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");

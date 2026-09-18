@@ -1,4 +1,5 @@
 use super::*;
+use crate::dto::VectorSampling;
 
 /// The single backend this API instance can actually enqueue for — the one authority every
 /// enqueue-time capability gate must key off.

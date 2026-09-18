@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       inference_revision:
-        description: Exact merged inference commit that produced the preflight bundle.
+        description: Exact merged inference commit for the terminal controller and native runtime.
         required: true
         default: c5c8c2a73bc5fe9517200c32389c20bf4a670e3d
         type: string
@@ -116,6 +116,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
+          fetch-depth: 2
           ref: ${{ steps.preflight-transport.outputs.revision }}
           token: ${{ secrets.INFERENCE_READ_TOKEN }}
           path: inference-source
@@ -232,6 +233,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
+          fetch-depth: 2
           ref: ${{ steps.preflight-transport.outputs.revision }}
           token: ${{ secrets.INFERENCE_READ_TOKEN }}
           path: inference-source
