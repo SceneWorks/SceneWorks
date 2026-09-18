@@ -51,6 +51,9 @@ function render(ui) {
     root.render(ui);
   });
   return {
+    async rerender(nextUi) {
+      await act(async () => root.render(nextUi));
+    },
     cleanup() {
       act(() => root.unmount());
       container.remove();
@@ -117,23 +120,27 @@ describe("AssetBatchModal lazy loading", () => {
   });
 
   it("loads the batch operation controls when the interaction opens", async () => {
-    harness = render(
-      <AssetBatchModal
-        batch={{
-          availableUpscaleEngines: [{ key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] }],
-          batch: null,
-          batchItems: [],
-          batchOpen: true,
-          batchProgress: null,
-          closeBatch: vi.fn(),
-          detailModels: [],
-          editModels: [],
-          eligibleSelected: [assets[0]],
-          runBatch: vi.fn(),
-        }}
-      />,
-    );
+    const batch = {
+      availableUpscaleEngines: [{ key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] }],
+      batch: null,
+      batchItems: [],
+      batchOpen: true,
+      batchProgress: null,
+      closeBatch: vi.fn(),
+      detailModels: [],
+      editModels: [],
+      eligibleSelected: [assets[0]],
+      runBatch: vi.fn(),
+    };
+    harness = render(<AssetBatchModal batch={batch} />);
 
+    await vi.waitFor(() => {
+      expect(document.body.querySelector(".batch-ops-head")?.textContent).toContain("1 image");
+    });
+
+    await harness.rerender(<AssetBatchModal batch={{ ...batch, batchOpen: false }} />);
+    expect(document.body.querySelector(".batch-ops-head")).toBeNull();
+    await harness.rerender(<AssetBatchModal batch={batch} />);
     await vi.waitFor(() => {
       expect(document.body.querySelector(".batch-ops-head")?.textContent).toContain("1 image");
     });

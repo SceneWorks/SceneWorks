@@ -18,7 +18,7 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
-import { lazyScreen } from "./components/LazyScreen.jsx";
+import { lazyInteraction, lazyScreen } from "./components/LazyScreen.jsx";
 import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -236,10 +236,10 @@ const SimpleShell = lazyScreen(
   "SimpleShell",
   "Simple UI",
 );
-const WorkflowDropPanel = React.lazy(() =>
-  import("./components/WorkflowDropPanel.jsx").then((module) => ({
-    default: module.WorkflowDropPanel,
-  })),
+const WorkflowDropPanel = lazyInteraction(
+  () => import("./components/WorkflowDropPanel.jsx"),
+  "WorkflowDropPanel",
+  "Workflow details",
 );
 
 // Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
@@ -3299,18 +3299,16 @@ export function App() {
   // Rendered from a single place even though the app has two shells: `Modal` portals to
   // <body>, so this element does not have to sit inside whichever shell is on screen.
   const workflowDropPanel = workflowDrop.offer ? (
-    <React.Suspense fallback={null}>
-      <WorkflowDropPanel
-        assets={workflowInputAssets}
-        canImport={Boolean(activeProject)}
-        importState={workflowDrop.importState}
-        missing={workflowDrop.missing}
-        offer={workflowDrop.offer}
-        onDismiss={workflowDrop.dismiss}
-        onImport={workflowDrop.importImage}
-        onUse={workflowDrop.useWorkflow}
-      />
-    </React.Suspense>
+    <WorkflowDropPanel
+      assets={workflowInputAssets}
+      canImport={Boolean(activeProject)}
+      importState={workflowDrop.importState}
+      missing={workflowDrop.missing}
+      offer={workflowDrop.offer}
+      onDismiss={workflowDrop.dismiss}
+      onImport={workflowDrop.importImage}
+      onUse={workflowDrop.useWorkflow}
+    />
   ) : null;
 
   // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).

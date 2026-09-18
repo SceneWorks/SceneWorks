@@ -11,14 +11,15 @@ import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
 import { assetIsHdrSource, assetNativeSize, assetUrl } from "./components/assetMedia.jsx";
 import { Modal } from "./components/Modal.jsx";
+import { lazyInteraction } from "./components/LazyScreen.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
 
-const BatchOperationsPanel = React.lazy(() =>
-  import("./components/BatchOperationsPanel.jsx").then((module) => ({
-    default: module.BatchOperationsPanel,
-  })),
+const BatchOperationsPanel = lazyInteraction(
+  () => import("./components/BatchOperationsPanel.jsx"),
+  "BatchOperationsPanel",
+  "Batch operations",
 );
 
 // Sentinel "Move" target (sc-8341): selecting it promotes the assets into the Main Asset
@@ -527,18 +528,16 @@ function DiscardUpscaledDialog({ sourceCount, busy, onDiscardBoth, onDiscardUpsc
 export function AssetBatchModal({ batch }) {
   if (!batch.batchOpen) return null;
   return (
-    <React.Suspense fallback={null}>
-      <BatchOperationsPanel
-        assets={batch.eligibleSelected}
-        editModels={batch.editModels}
-        detailModels={batch.detailModels}
-        upscaleEngines={batch.availableUpscaleEngines}
-        busy={Boolean(batch.batch?.submitting)}
-        items={batch.batchItems}
-        progress={batch.batchProgress}
-        onRun={batch.runBatch}
-        onClose={batch.closeBatch}
-      />
-    </React.Suspense>
+    <BatchOperationsPanel
+      assets={batch.eligibleSelected}
+      editModels={batch.editModels}
+      detailModels={batch.detailModels}
+      upscaleEngines={batch.availableUpscaleEngines}
+      busy={Boolean(batch.batch?.submitting)}
+      items={batch.batchItems}
+      progress={batch.batchProgress}
+      onRun={batch.runBatch}
+      onClose={batch.closeBatch}
+    />
   );
 }

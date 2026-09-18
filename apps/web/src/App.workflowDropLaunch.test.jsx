@@ -171,6 +171,10 @@ describe("App — a dropped workflow launches from either shell", () => {
     expect(document.body.querySelector('[aria-label="Deselect pose Shared workflow pose 1"]')).toBeTruthy();
     expect(document.body.querySelector(".pose-thumb-placeholder")).toBeTruthy();
     expect(document.body.querySelector(".workflow-drop-modal")).toBeNull();
+
+    await dropOnNeutralChrome();
+    expect(await waitForButton("Use this workflow")).toBeTruthy();
+    expect(document.body.querySelector(".workflow-drop-modal")).toBeTruthy();
   });
 
   it("refuses, and says why, on a viewport that has Simple locked on", async () => {
