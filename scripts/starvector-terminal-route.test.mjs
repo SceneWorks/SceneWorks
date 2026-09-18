@@ -208,6 +208,34 @@ test("end-to-end timing includes create, publication and terminal polling but ex
   } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
 });
 
+test("completed jobs with unpersisted asset writes fail after the 30-second publication grace", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-publication-"));
+  const originalFetch = globalThis.fetch;
+  let clock = 0, polls = 0;
+  globalThis.fetch = async (url, init) => {
+    assert.ok(!new URL(url).pathname.endsWith("/metrics"));
+    const value = init?.method === "POST"
+      ? { id: "unsettled", type: "vector_generate" }
+      : { id: "unsettled", status: "completed", result: { assetWrites: [{ assetId: "a" }] } };
+    if (init?.method !== "POST") polls += 1;
+    return { ok: true, json: async () => value };
+  };
+  try {
+    await assert.rejects(
+      () => submitAndPoll(
+        "http://localhost",
+        { case_id: "unsettled", projectId: "p", sourceAssetId: "a", model: "starvector_1b" },
+        path.join(root, "events"),
+        {},
+        { now: () => clock, sleep: async (milliseconds) => { clock += milliseconds; } },
+      ),
+      /completed but asset publication did not settle within 30 seconds/,
+    );
+    assert.equal(clock, 30_000);
+    assert.equal(polls, 301);
+  } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
+});
+
 import { limitPassed, runLimits } from "./starvector-terminal-route.mjs";
 
 test("limit acceptance rejects labels, cancellation races and publication residue", () => {

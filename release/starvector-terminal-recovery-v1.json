@@ -68,38 +68,64 @@
     "reason": "Retired campaign selected CPU worker; require corrected GPU identity and four fresh measured tuples. Historical evidence is quarantined only."
   },
   "execution_predecessor": {
-    "stage": "upstream-reference",
-    "predecessor_campaign_id": "sc22261-252e6a7-2246088e-dab6ff70c14e4299",
-    "campaign_id": "sc22261-8e2d967-848eb1a-0605dc4993d41332",
-    "inference_revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
-    "sceneworks_revision": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
+    "stage": "native",
+    "predecessor_campaign_id": "sc22261-8e2d967-848eb1a-0605dc4993d41332",
+    "campaign_id": "sc22261-0b084cb-2326819-9869bf8aa45664a2",
+    "inference_revision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
+    "sceneworks_revision": "2326819559ca72c77b85092cdae50814b00ec2b0",
     "workflow": {
       "repository": "SceneWorks/SceneWorks",
       "path": ".github/workflows/server-candle-linux.yml",
-      "run_id": "35231778201",
+      "run_id": "35360290456",
       "run_attempt": 1,
-      "head_sha": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
+      "head_sha": "2326819559ca72c77b85092cdae50814b00ec2b0",
       "conclusion": "cancelled"
     },
     "failure": {
-      "code": "campaign_cancelled_after_upstream",
+      "code": "native_asset_publication_missing_display_name",
+      "record_type": "publication_failure_predecessor",
       "phase": "execution",
-      "evidence_schema_version": 1
+      "tuple": "mlx:1b",
+      "evidence_schema_version": 1,
+      "model_id": "starvector_1b",
+      "model_repository": "starvector/starvector-1b-im2svg",
+      "model_revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "completed_case_id": "quality-v1-0",
+      "route_record_count": 4019,
+      "completed_poll_count": 4008,
+      "generation_set_id": "genset_427ce6fe72a946adbec6461575b2534a",
+      "asset_id": "asset_912b02ba09bf44bcaa9a7aecbf4d32dd",
+      "api_status": 400,
+      "api_detail": "Missing required field: displayName",
+      "api_job_id": "job_96cd03164cda2943dafcb5d470058076",
+      "api_error_count": 1,
+      "recovery_failure_count": 7,
+      "stopped_instance_token": "923fb366d58f9fd8e35c2a13718f09efddd7af02a2d937b97799bb1470e175f4",
+      "stopped_api_pid": 92972,
+      "stopped_worker_pid": 92973,
+      "controller_failure_sha256": "41126af94a713f7ddc6dbcfd6459fbb0013f52e1e0eefd70a5482810046e8d1f"
     },
     "source_artifacts": [
       {
-        "role": "recovery",
-        "id": "10501546913",
-        "name": "starvector-recovery-sc22261-8e2d967-848eb1a-0605dc4993d41332",
-        "size": 2332696,
-        "digest": "sha256:3a2652b69f46c3cc881029e5462582665d6c036eeb9da3f8db9a8b991c7fa8c2"
+        "role": "upstream",
+        "id": "10554462216",
+        "name": "starvector-upstream-sc22261-0b084cb-2326819-9869bf8aa45664a2",
+        "size": 246562,
+        "digest": "sha256:d00ad1164befc0a83f0f94d1235d4e467a077c3a0cd59690100b5a4f4aae4993"
       },
       {
-        "role": "upstream",
-        "id": "10502732889",
-        "name": "starvector-upstream-sc22261-8e2d967-848eb1a-0605dc4993d41332",
-        "size": 240908,
-        "digest": "sha256:403f7a75b28889a1d5bae49a03118d03f039246129cabd42a2043015894c4d87"
+        "role": "raw",
+        "id": "10556326483",
+        "name": "starvector-terminal-mlx-1b-sc22261-0b084cb-2326819-9869bf8aa45664a2",
+        "size": 505414,
+        "digest": "sha256:ddaa66007213c3f5c1cf75bacb7ec7d06b97f31511d7dcf087a4ad37f833ab6a"
+      },
+      {
+        "role": "combined",
+        "id": "10555549418",
+        "name": "starvector-terminal-receipt-sc22261-0b084cb-2326819-9869bf8aa45664a2",
+        "size": 548288,
+        "digest": "sha256:ef39f7387b829cb8c7b63de4f7742dba9486b101dfc973f9718354ee1fad5bd9"
       }
     ]
   },
@@ -310,6 +336,42 @@
           "name": "starvector-terminal-receipt-sc22261-252e6a7-2246088e-dab6ff70c14e4299",
           "size": 400259,
           "digest": "sha256:9ea28327cd17552ec6caa63b8d7f432477c6ffbf0c859fd20a21032c8d25df53"
+        }
+      ]
+    },
+    {
+      "stage": "upstream-reference",
+      "predecessor_campaign_id": "sc22261-252e6a7-2246088e-dab6ff70c14e4299",
+      "campaign_id": "sc22261-8e2d967-848eb1a-0605dc4993d41332",
+      "inference_revision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
+      "sceneworks_revision": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
+      "workflow": {
+        "repository": "SceneWorks/SceneWorks",
+        "path": ".github/workflows/server-candle-linux.yml",
+        "run_id": "35231778201",
+        "run_attempt": 1,
+        "head_sha": "848eb1a6644b11c1dfe59e415fa7a3446d70826c",
+        "conclusion": "cancelled"
+      },
+      "failure": {
+        "code": "campaign_cancelled_after_upstream",
+        "phase": "execution",
+        "evidence_schema_version": 1
+      },
+      "source_artifacts": [
+        {
+          "role": "recovery",
+          "id": "10501546913",
+          "name": "starvector-recovery-sc22261-8e2d967-848eb1a-0605dc4993d41332",
+          "size": 2332696,
+          "digest": "sha256:3a2652b69f46c3cc881029e5462582665d6c036eeb9da3f8db9a8b991c7fa8c2"
+        },
+        {
+          "role": "upstream",
+          "id": "10502732889",
+          "name": "starvector-upstream-sc22261-8e2d967-848eb1a-0605dc4993d41332",
+          "size": 240908,
+          "digest": "sha256:403f7a75b28889a1d5bae49a03118d03f039246129cabd42a2043015894c4d87"
         }
       ]
     }

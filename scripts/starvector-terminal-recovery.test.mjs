@@ -230,7 +230,7 @@ test("cancelled campaign after authenticated upstream completion advances exactl
   await expectArchiveFailure({ ...archiveFiles, "upstream-reference-1b.json": JSON.stringify(wrongManifest), "upstream-controller.json": JSON.stringify(controller) }, /archive inventory differs|manifest inventory differs|manifest identity differs/);
 });
 
-test("checked-in recovery advances to the authenticated cancelled campaign without inventing the unclaimed failure", async () => {
+test("checked-in recovery advances through the authenticated publication failure", async () => {
   const config = JSON.parse(await readFile(path.join(process.cwd(), "release/starvector-terminal-recovery-v1.json")));
   const chain = [...config.execution_history, config.execution_predecessor];
   let previous = config.campaign_id;
@@ -238,9 +238,10 @@ test("checked-in recovery advances to the authenticated cancelled campaign witho
     assert.equal(value.predecessor_campaign_id, previous);
     previous = value.campaign_id;
   }
-  assert.equal(config.execution_history.at(-1).campaign_id, "sc22261-252e6a7-2246088e-dab6ff70c14e4299");
-  assert.equal(config.execution_predecessor.campaign_id, "sc22261-8e2d967-848eb1a-0605dc4993d41332");
-  assert.equal(config.execution_predecessor.failure.code, "campaign_cancelled_after_upstream");
+  assert.equal(config.execution_history.at(-1).campaign_id, "sc22261-8e2d967-848eb1a-0605dc4993d41332");
+  assert.equal(config.execution_predecessor.campaign_id, "sc22261-0b084cb-2326819-9869bf8aa45664a2");
+  assert.equal(config.execution_predecessor.failure.code, "native_asset_publication_missing_display_name");
+  assert.equal(config.execution_predecessor.failure.record_type, "publication_failure_predecessor");
   assert.ok(!chain.some((value) => value.campaign_id === "sc22261-c5c8c2a-db676be-5438020f56714566"));
 });
 
@@ -327,6 +328,118 @@ test("authenticated native failure retains upstream, raw, and combined archives 
   await expectSemanticFailure("raw+combined", { ...records, "preflight-provenance.json": JSON.stringify({ ...JSON.parse(records["preflight-provenance.json"]), tuple: "mlx:8b" }) }, /preflight provenance/);
   await expectSemanticFailure("raw+combined", { ...records, "product-service-worker.stdout.log": JSON.stringify({ event: "utility_job_failed", error: "generic infrastructure error" }) }, /receipt rejection/);
   await expectSemanticFailure("combined", { ...records, "case-bundle.json": JSON.stringify({ schema_version: 1, inference_revision: value.inference_revision, tuples: {} }) }, /combined archive substituted case-bundle/);
+});
+
+test("publication failure predecessor proves completed asset writes, displayName rejection, clean stop, and no seal", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-publication-recovery-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const value = {
+    stage: "native",
+    predecessor_campaign_id: "prior",
+    campaign_id: "failed-publication",
+    inference_revision: "c".repeat(40),
+    sceneworks_revision: "d".repeat(40),
+    workflow: { repository: "SceneWorks/SceneWorks", path: ".github/workflows/starvector-terminal.yml", run_id: "101", run_attempt: 1, head_sha: "d".repeat(40), conclusion: "cancelled" },
+    failure: {
+      code: "native_asset_publication_missing_display_name",
+      record_type: "publication_failure_predecessor",
+      phase: "execution",
+      tuple: "mlx:1b",
+      evidence_schema_version: 1,
+      model_id: "starvector_1b",
+      model_repository: "starvector/starvector-1b-im2svg",
+      model_revision: "e".repeat(40),
+      completed_case_id: "quality-v1-0",
+      route_record_count: 3,
+      completed_poll_count: 1,
+      generation_set_id: "genset_fixture",
+      asset_id: "asset_fixture",
+      api_status: 400,
+      api_detail: "Missing required field: displayName",
+      api_job_id: "job_fixture",
+      api_error_count: 1,
+      recovery_failure_count: 1,
+      stopped_instance_token: "f".repeat(64),
+      stopped_api_pid: 201,
+      stopped_worker_pid: 202,
+    },
+  };
+  const upstream = { "upstream-controller.json": JSON.stringify({ schema_version: 1, campaign_run_id: value.campaign_id, inference_revision: value.inference_revision, sceneworks_revision: value.sceneworks_revision, workflow_run_id: value.workflow.run_id, workflow_run_attempt: 1 }) };
+  const routeRows = [
+    { case_id: value.failure.completed_case_id, phase: "created", job: { status: "queued" } },
+    { case_id: value.failure.completed_case_id, phase: "polled", job: { status: "running" } },
+    { case_id: value.failure.completed_case_id, phase: "polled", job: { status: "completed", result: { generationSetId: value.failure.generation_set_id, assetWrites: [{ assetId: value.failure.asset_id, model: value.failure.model_id, type: "vector" }] } } },
+  ];
+  const apiLog = [
+    { event: "api_error", status: 400, detail: value.failure.api_detail },
+    { event: "terminal_progress_side_effect_recovery_failed", status: 400, detail: value.failure.api_detail, retry_deferred: true, job_id: value.failure.api_job_id },
+  ].map((record) => JSON.stringify(record)).join("\n") + "\n";
+  const stopped = { schema_version: 1, status: "stopped", instance_token: value.failure.stopped_instance_token, api_pid: value.failure.stopped_api_pid, worker_pid: value.failure.stopped_worker_pid };
+  const records = {
+    "controller-failure.json": JSON.stringify({ campaign_run_id: value.campaign_id, permanent_pin: value.inference_revision, tuple: value.failure.tuple, status: "failed" }),
+    "preflight-provenance.json": JSON.stringify({ campaign_run_id: value.campaign_id, inference_revision: value.inference_revision, permanent_pin: value.inference_revision, tuple: value.failure.tuple, workflow_run_id: value.workflow.run_id, workflow_run_attempt: 1, service: { sceneworks_revision: value.sceneworks_revision, inference_revision: value.inference_revision, tuple: value.failure.tuple, instance_token: value.failure.stopped_instance_token, api_pid: value.failure.stopped_api_pid, worker_pid: value.failure.stopped_worker_pid, models: { "starvector-1b": { revision: value.failure.model_revision } }, worker: { model_id: value.failure.model_id, provider_id: "mlx-starvector-1b" } } }),
+    "case-bundle.json": JSON.stringify({ schema_version: 1, inference_revision: value.inference_revision, tuples: { "mlx:1b": { image_quality: [{ model: value.failure.model_id }], deterministic_parity: [], upstream_reference: { checkpoint_revision: value.failure.model_revision } } } }),
+    "product-service-worker.stdout.log": "",
+    "product-service-api.stdout.log": apiLog,
+    "product-service-stopped.json": JSON.stringify(stopped),
+    "vector-generate-route.ndjson": routeRows.map((record) => JSON.stringify(record)).join("\n") + "\n",
+  };
+  value.failure.controller_failure_sha256 = sha(records["controller-failure.json"]);
+  const writeArchives = async (suffix, rawRecords = records, combinedRecords = rawRecords) => {
+    await writeZip(root, `upstream-publication-${suffix}`, upstream);
+    await writeZip(root, `raw-publication-${suffix}`, rawRecords);
+    await writeZip(root, `combined-publication-${suffix}`, Object.fromEntries(Object.entries(combinedRecords).map(([name, content]) => [`evidence/${name}`, content])));
+    return { upstream: path.join(root, `upstream-publication-${suffix}.zip`), raw: path.join(root, `raw-publication-${suffix}.zip`), combined: path.join(root, `combined-publication-${suffix}.zip`) };
+  };
+  const validArchives = await writeArchives("valid");
+  await validateNativeExecutionArchives(value, validArchives);
+
+  const sourceArtifacts = [
+    { role: "upstream", id: "88", name: `starvector-upstream-${value.campaign_id}`, size: 1, digest: `sha256:${"1".repeat(64)}` },
+    { role: "raw", id: "89", name: `starvector-terminal-mlx-1b-${value.campaign_id}`, size: 1, digest: `sha256:${"2".repeat(64)}` },
+    { role: "combined", id: "90", name: `starvector-terminal-receipt-${value.campaign_id}`, size: 1, digest: `sha256:${"3".repeat(64)}` },
+  ];
+  value.source_artifacts = sourceArtifacts;
+  const config = { campaign_id: "retired", execution_predecessor: value };
+  const run = { id: 101, run_attempt: 1, head_sha: value.sceneworks_revision, path: value.workflow.path, event: "workflow_dispatch", status: "completed", conclusion: "cancelled" };
+  const artifacts = sourceArtifacts.map((input) => ({ id: Number(input.id), name: input.name, size_in_bytes: input.size, digest: input.digest, expired: false, workflow_run: { id: 101, head_sha: run.head_sha } }));
+  const conclusions = new Map([
+    ["starvector-campaign / prepare-recovery", "success"], ["starvector-provision", "skipped"], ["starvector-diagnostic-candle-1b", "skipped"], ["starvector-readiness", "skipped"], ["starvector-source-closure", "skipped"], ["build-candle", "skipped"], ["starvector-campaign / upstream-reference", "success"], ["starvector-campaign / mlx-1b", "cancelled"], ["starvector-campaign / mlx-8b", "cancelled"], ["starvector-campaign / cuda-1b", "cancelled"], ["starvector-campaign / cuda-8b", "cancelled"], ["starvector-campaign / seal-receipt", "failure"],
+  ]);
+  const jobs = { total_count: conclusions.size, jobs: [...conclusions].map(([name, conclusion]) => ({ name, conclusion, head_sha: run.head_sha })) };
+  assert.deepEqual(validateExecutionPredecessor(config, run, artifacts, jobs), value);
+  assert.throws(() => validateExecutionPredecessor(config, { ...run, id: 102 }, artifacts, jobs), /workflow differs/);
+  assert.throws(() => validateExecutionPredecessor(config, { ...run, head_sha: "a".repeat(40) }, artifacts, jobs), /workflow differs/);
+  assert.throws(() => validateExecutionPredecessor(config, { ...run, conclusion: "failure" }, artifacts, jobs), /workflow differs/);
+  const acceptanceClaim = { ...config, execution_predecessor: { ...value, failure: { ...value.failure, record_type: "terminal_acceptance" } } };
+  assert.throws(() => validateExecutionPredecessor(acceptanceClaim, run, artifacts, jobs), /failure identity/);
+  const completedJob = structuredClone(jobs); completedJob.jobs.find((job) => job.name.endsWith("mlx-1b")).conclusion = "success";
+  assert.throws(() => validateExecutionPredecessor(config, run, artifacts, completedJob), /job differs/);
+
+  const wrongPin = { ...records, "preflight-provenance.json": records["preflight-provenance.json"].replace(value.inference_revision, "a".repeat(40)) };
+  const wrongPinArchives = await writeArchives("wrong-pin", wrongPin);
+  await assert.rejects(() => validateNativeExecutionArchives(value, wrongPinArchives), /preflight provenance/);
+  const missingDisplayName = { ...records, "product-service-api.stdout.log": apiLog.replaceAll("Missing required field: displayName", "different API failure") };
+  const missingDisplayNameArchives = await writeArchives("missing-display-name", missingDisplayName);
+  await assert.rejects(() => validateNativeExecutionArchives(value, missingDisplayNameArchives), /displayName failure/);
+  const summaryNeutralApiSubstitution = { ...records, "product-service-api.stdout.log": `${apiLog}${JSON.stringify({ event: "unrelated_valid_event" })}\n` };
+  const summaryNeutralApiArchives = await writeArchives("summary-neutral-api", records, summaryNeutralApiSubstitution);
+  await assert.rejects(() => validateNativeExecutionArchives(value, summaryNeutralApiArchives), /substituted product service API evidence/);
+  const noCompleted = { ...records, "vector-generate-route.ndjson": routeRows.slice(0, 2).map((record) => JSON.stringify(record)).join("\n") + "\n" };
+  const noCompletedArchives = await writeArchives("no-completed", noCompleted);
+  await assert.rejects(() => validateNativeExecutionArchives(value, noCompletedArchives), /completed generation/);
+  const noAssetWrites = structuredClone(routeRows); noAssetWrites[2].job.result.assetWrites = [];
+  const noWrites = { ...records, "vector-generate-route.ndjson": noAssetWrites.map((record) => JSON.stringify(record)).join("\n") + "\n" };
+  const noWritesArchives = await writeArchives("no-writes", noWrites);
+  await assert.rejects(() => validateNativeExecutionArchives(value, noWritesArchives), /completed asset writes/);
+  const wrongStopped = { ...records, "product-service-stopped.json": JSON.stringify({ ...stopped, instance_token: "a".repeat(64) }) };
+  const wrongStoppedArchives = await writeArchives("wrong-stopped", wrongStopped);
+  await assert.rejects(() => validateNativeExecutionArchives(value, wrongStoppedArchives), /stop identity/);
+  const forgedSeal = { ...records, "terminal-receipt.json": JSON.stringify({ status: "accepted" }) };
+  const forgedSealArchives = await writeArchives("forged-seal", forgedSeal);
+  await assert.rejects(() => validateNativeExecutionArchives(value, forgedSealArchives), /forged terminal seal/);
+  const mismatchedCombined = { ...records, "controller-failure.json": JSON.stringify({ campaign_run_id: value.campaign_id, permanent_pin: value.inference_revision, tuple: value.failure.tuple, status: "failed", error: "substituted" }) };
+  const mismatchArchives = await writeArchives("mismatch", records, mismatchedCombined);
+  await assert.rejects(() => validateNativeExecutionArchives(value, mismatchArchives), /substituted controller-failure/);
 });
 
 test("underprovisioned native campaign is bound to exact budgets and terminal outcomes", async (t) => {

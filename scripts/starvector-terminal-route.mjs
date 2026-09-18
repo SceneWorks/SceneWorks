@@ -17,6 +17,7 @@ import { validateLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
 const terminal = new Set(["completed", "failed", "cancelled", "canceled"]);
+const ASSET_SETTLE_GRACE_MS = 30_000;
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const finishReasons = new Set(["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"]);
@@ -53,8 +54,11 @@ async function request(url, init) {
   const response = await fetch(url, init); const body = await response.json();
   if (!response.ok) die(`typed vector route ${response.status}: ${JSON.stringify(body)}`); return body;
 }
-export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = {}) {
-  const started = performance.now();
+export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = {}, timing = {}) {
+  const now = timing.now ?? (() => performance.now());
+  const sleep = timing.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const started = now();
+  let assetSettleStarted = null;
   let cancellation = null;
   const cancelJob = async (id, phase, observed) => {
     const acknowledgement = await request(new URL(`/api/v1/jobs/${id}/cancel`, baseUrl), { method: "POST", headers: fetchOptions.headers });
@@ -65,7 +69,7 @@ export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = 
   if (created.type !== "vector_generate" || !created.id) die("typed vector route did not create vector_generate job");
   await appendFile(transcript, JSON.stringify({ phase: "created", case_id: record.case_id, job: created }) + "\n");
   if (record.cancel_after_create) await cancelJob(created.id, "after_create", created);
-  for (let attempt = 0; attempt < 7200; attempt += 1) {
+  for (let attempt = 0; attempt < 7200;) {
     const job = await request(new URL(`/api/v1/jobs/${created.id}`, baseUrl), { headers: fetchOptions.headers });
     await appendFile(transcript, JSON.stringify({ phase: "polled", case_id: record.case_id, job }) + "\n");
     if (record.cancel_after_progress && !cancellation && job.status === "running" && job.stage === "generating" && job.progress > 0.25) await cancelJob(created.id, "after_progress", job);
@@ -73,21 +77,24 @@ export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = 
       // Completed is stored before API asset side effects finish. Wait for the
       // public sidecars, not only the worker's terminal status.
       if (job.status === "completed" && Array.isArray(job.result?.assetWrites) && job.result.assetWrites.length) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        assetSettleStarted ??= now();
+        if (now() - assetSettleStarted >= ASSET_SETTLE_GRACE_MS) die(`vector_generate job ${created.id} completed but asset publication did not settle within 30 seconds`);
+        await sleep(100);
         continue;
       }
-      const observed = { ...job, endToEndLatencySeconds: (performance.now() - started) / 1000, ...(cancellation ? { cancellation } : {}) };
+      const observed = { ...job, endToEndLatencySeconds: (now() - started) / 1000, ...(cancellation ? { cancellation } : {}) };
       // Queued cancellation never starts a worker and has no metrics. The
       // acknowledgement and cancelled snapshot are the actual evidence.
       if (["cancelled", "canceled"].includes(job.status)) return observed;
       for (let metricAttempt = 0; metricAttempt < 60; metricAttempt += 1) {
         const metrics = await request(new URL(`/api/v1/jobs/${created.id}/metrics`, baseUrl), { headers: fetchOptions.headers });
         if (metrics && typeof metrics === "object") return { ...observed, terminalMetrics: metrics };
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await sleep(500);
       }
       die(`vector_generate job ${created.id} completed without worker metrics`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    attempt += 1;
+    await sleep(1000);
   }
   die(`vector_generate job ${created.id} did not finish within two hours`);
 }
