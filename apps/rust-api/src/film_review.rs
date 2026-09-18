@@ -209,7 +209,7 @@ async fn spawn_take_mutation(
     ensure_mutation_available(&before)?;
     let directory = run_directory(state.clone(), &project_id, &run_id).await?;
     let action = if repair { "repair" } else { "replace" };
-    let lease = ControllerLease::acquire_for_api(
+    let lease = ControllerLease::acquire_new_action_for_api(
         &directory,
         format!("api-{action}:{run_id}"),
         state.film_controller_shutdown.clone(),

@@ -47,7 +47,7 @@ pub(crate) async fn resume_film_run(
         move |store| store.film_run_files(&project_id, &run_id)
     })
     .await?;
-    let lease = ControllerLease::acquire_for_api(
+    let lease = ControllerLease::acquire_new_action_for_api(
         &files.directory,
         format!("api-resume:{run_id}"),
         state.film_controller_shutdown.clone(),
