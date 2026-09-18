@@ -12,6 +12,7 @@ import {
 import { useAppStatic } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { EditorModeSwitch } from "../components/editor/EditorModeSwitch.jsx";
 import { EditorToolbar } from "../components/editor/EditorToolbar.jsx";
 import { MediaBin } from "../components/editor/MediaBin.jsx";
 import { ProgramMonitor } from "../components/editor/ProgramMonitor.jsx";
@@ -19,6 +20,7 @@ import { GenerationRail } from "../components/editor/GenerationRail.jsx";
 import { StoryboardStrip } from "../components/editor/StoryboardStrip.jsx";
 import { Timeline } from "../components/editor/Timeline.jsx";
 import { FilmWorkspace } from "../components/editor/FilmWorkspace.jsx";
+import { FILM_SHOT_STATE_LABELS, filmRunSummary, filmShotState } from "../components/editor/filmShotState.js";
 import { useEditorGeneration } from "../components/editor/useEditorGeneration.js";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, MAIN_TRACK_ID } from "../components/editor/editorUtils.js";
 import { timelineAudioPlan } from "../timelineAudio.js";
@@ -63,6 +65,29 @@ export function EditorScreen() {
   const [trackSoloed, setTrackSoloed] = useState({});
   const [markers] = useState([]); // Local UI markers only — no persisted marker model yet (audit).
   const [timelineNotice, setTimelineNotice] = useState("");
+  // Film plans and renders shots; Timeline is the manual cut. A project with no timeline
+  // opens on Film so the script path is the first thing an operator sees.
+  const [mode, setMode] = useState(activeTimeline ? "timeline" : "film");
+  const [film, setFilm] = useState({ draft: null, run: null });
+  const [filmViewRequest, setFilmViewRequest] = useState(null);
+  const modeChosen = useRef(false);
+  // Timelines hydrate after this screen mounts. Until the operator picks a mode or works in
+  // Film, follow the project: an existing timeline opens on Timeline, as it did before Film
+  // mode existed. A film run delivering the project's first timeline must not pull the
+  // operator out of Film, so any Film interaction counts as choosing.
+  const modeProjectId = useRef(activeProject?.id);
+  useEffect(() => {
+    if (modeProjectId.current !== activeProject?.id) {
+      modeProjectId.current = activeProject?.id;
+      modeChosen.current = false;
+      setMode(activeTimeline?.id ? "timeline" : "film");
+    } else if (activeTimeline?.id && !modeChosen.current) setMode("timeline");
+  }, [activeProject?.id, activeTimeline?.id]);
+  const engageFilm = useRef(() => { modeChosen.current = true; }).current;
+  // The film run is re-read every two seconds; only a changed record should re-render the editor.
+  const acceptFilm = useRef((next) => setFilm((current) => (
+    current.draft === next.draft && JSON.stringify(current.run) === JSON.stringify(next.run) ? current : next
+  ))).current;
   const previewVideoRef = useRef(null);
   const screenActive = useScreenActive();
 
@@ -637,7 +662,54 @@ export function EditorScreen() {
   async function handleNewTimeline() {
     const count = timelines.length + 1;
     await createTimeline({ name: `Timeline ${count}`, aspectRatio: "16:9", fps: 30 });
+    changeMode("timeline");
   }
+
+  // ---- film ↔ timeline hand-off ----
+  function changeMode(next) {
+    modeChosen.current = true;
+    if (next === "film") setIsPlaying(false);
+    setMode(next);
+  }
+
+  // `target` carries the clip's run and shot so Film opens on the film that delivered it.
+  function openFilm(view, target = {}) {
+    changeMode("film");
+    if (view) setFilmViewRequest({ view, ...target });
+  }
+
+  async function openFilmTimeline(timelineId) {
+    if (!timelineId) return;
+    if (timelineId !== selectedTimelineId) {
+      await app.refreshTimelines?.(activeProject.id);
+      await handleSelectTimeline(timelineId);
+    }
+    changeMode("timeline");
+  }
+
+  const filmSummary = filmRunSummary(film.draft, film.run);
+  const filmOnThisTimeline = Boolean(activeTimeline && film.run?.record?.timeline?.timelineId === activeTimeline.id);
+  const filmStatus = film.run?.controllerActive && filmSummary.total
+    ? `${filmSummary.renderingShotId ?? "Film"} · ${filmSummary.delivered} of ${filmSummary.total}`
+    : null;
+  const selectedFilmShotId = selectedItem?.filmHarness?.shotId ?? null;
+  const selectedFilmShot = selectedFilmShotId && film.run?.locator?.id === selectedItem.filmHarness.runId
+    ? film.draft?.productionPlan?.shots?.find((shot) => shot.id === selectedFilmShotId) ?? null
+    : null;
+  const pendingShots = [];
+  if (filmOnThisTimeline) {
+    let cursor = timelineDuration(activeTimeline);
+    const placed = new Set(activeTimeline.tracks.flatMap((track) => track.items ?? []).map((item) => item.filmHarness?.shotId).filter(Boolean));
+    (film.draft?.productionPlan?.shots ?? []).forEach((shot, index) => {
+      const state = filmSummary.states[index];
+      // A replacement take lands on the shot's existing clip, not at the end of the cut.
+      if ((state !== "rendering" && state !== "queued") || placed.has(shot.id)) return;
+      const seconds = Math.max(Number(shot.targetDurationSeconds) || 1, 0.1);
+      pendingShots.push({ id: shot.id, seconds, start: cursor, state });
+      cursor += seconds;
+    });
+  }
+  const pendingSeconds = pendingShots.reduce((total, shot) => total + shot.seconds, 0);
 
   // ---- rail contextual header + actions ----
   function buildContextActions() {
@@ -650,8 +722,16 @@ export function EditorScreen() {
           { id: "extract", label: "Extract frame", disabled: true, onClick: () => extractFrame() },
         ];
       }
+      // Accept, reject and replacement takes are gated on the run's saved-cut selection,
+      // which only the Film review step reads; the rail hands off instead of guessing.
+      const filmTarget = { runId: selectedItem?.filmHarness?.runId, shotId: selectedFilmShotId };
+      const filmActions = selectedFilmShotId && selectionKind === "clip" ? [
+        { id: "film-review", label: "Review this shot", primary: true, onClick: () => openFilm("review", filmTarget) },
+        { id: "film-shot", label: "Edit shot plan", onClick: () => openFilm("shots", filmTarget) },
+      ] : [];
       return [
-        { id: "extend", label: "Extend clip", primary: true, onClick: extendSelectedClip },
+        ...filmActions,
+        { id: "extend", label: "Extend clip", primary: !filmActions.length, onClick: extendSelectedClip },
         { id: "regenerate", label: "Regenerate", onClick: () => replaceSelectedItem() },
         { id: "extract", label: "Extract frame", onClick: extractFrame },
         { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
@@ -692,6 +772,22 @@ export function EditorScreen() {
     if (selectionKind === "marker" && selectedMarker) {
       return { eyebrow: "MARKER", title: selectedMarker.label };
     }
+    if (selectionKind === "clip" && selectedItem && selectedFilmShotId) {
+      const state = film.run?.locator?.id === selectedItem.filmHarness.runId ? ` · ${FILM_SHOT_STATE_LABELS[filmShotState(selectedFilmShotId, film.run)].toUpperCase()}` : "";
+      const attempts = film.run?.locator?.id === selectedItem.filmHarness.runId
+        ? film.run.record?.shots?.find((shot) => shot.shotId === selectedFilmShotId)?.attempts ?? []
+        : [];
+      const details = [
+        selectedFilmShot?.framing ? ["Framing", selectedFilmShot.framing] : null,
+        selectedFilmShot?.targetDurationSeconds ? ["Planned", `${selectedFilmShot.targetDurationSeconds}s`] : null,
+        ["Run", selectedItem.filmHarness.runId],
+        ...attempts.map((attempt, index) => [
+          `Attempt ${attempt.attempt ?? index + 1}`,
+          attempt.take?.assetId === selectedItem.assetId ? "in cut" : attempt.take ? "delivered" : String(attempt.status ?? "pending").replaceAll("_", " "),
+        ]),
+      ].filter(Boolean);
+      return { eyebrow: `FILM SHOT · ${selectedFilmShotId}${state}`, title: selectedFilmShot?.beat || selectedItem.displayName, details };
+    }
     if (selectionKind === "clip" && selectedItem) {
       const eyebrow = isSelectedAi ? "VIDEO · AI CLIP" : selectedItem.type === "image" ? "IMAGE CLIP" : "VIDEO CLIP";
       return { eyebrow, title: selectedItem.displayName };
@@ -719,16 +815,34 @@ export function EditorScreen() {
     );
   }
 
+  const modeSwitch = <EditorModeSwitch mode={mode} onChange={changeMode} />;
+  const filmWorkspace = (
+    <FilmWorkspace
+      mode={mode}
+      modeSwitch={modeSwitch}
+      blankTimelineLabel={timelines?.length ? "Open Timeline" : "New timeline"}
+      onEngage={engageFilm}
+      onFilmChange={acceptFilm}
+      onNewTimeline={timelines?.length ? () => openFilmTimeline(activeTimeline?.id ?? timelines[0].id) : handleNewTimeline}
+      showStart={!activeTimeline}
+      onOpenTimeline={openFilmTimeline}
+      viewRequest={filmViewRequest}
+    />
+  );
+
   if (!activeTimeline) {
     return (
-      <section className="ve-editor ve-editor-empty">
-        <FilmWorkspace />
-        <div className="empty-panel">
-          <p>Create a timeline to start editing.</p>
-          <button className="ve-generate" onClick={handleNewTimeline} type="button">
-            New timeline
-          </button>
-        </div>
+      <section className="ve-editor">
+        {filmWorkspace}
+        {mode === "timeline" ? <>
+          <div className="ve-toolbar">{modeSwitch}</div>
+          <div className="empty-panel">
+            <p>Create a timeline to start editing, or switch to Film to start from a script.</p>
+            <button className="ve-generate" onClick={handleNewTimeline} type="button">
+              New timeline
+            </button>
+          </div>
+        </> : null}
       </section>
     );
   }
@@ -738,8 +852,12 @@ export function EditorScreen() {
 
   return (
     <section className="ve-editor">
-      <FilmWorkspace />
+      {filmWorkspace}
+      {mode === "timeline" ? <>
       <EditorToolbar
+        filmStatus={filmStatus}
+        modeSwitch={modeSwitch}
+        onOpenFilm={() => openFilm()}
         canRedo={future.length > 0}
         canUndo={history.length > 0}
         durationTimecode={formatTimecode(duration, activeTimeline.fps)}
@@ -845,7 +963,8 @@ export function EditorScreen() {
 
       <Timeline
         assetsById={assetsById}
-        duration={timelineDuration(activeTimeline)}
+        duration={timelineDuration(activeTimeline) + pendingSeconds}
+        pendingShots={pendingShots}
         markers={markers}
         onAddAudioTrack={addAudioTrack}
         onScrub={(seconds) => {
@@ -872,6 +991,7 @@ export function EditorScreen() {
         trackVisible={trackVisible}
         zoom={zoom}
       />
+      </> : null}
     </section>
   );
 }

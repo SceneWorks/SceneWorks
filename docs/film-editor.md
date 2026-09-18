@@ -10,9 +10,22 @@ operator workflow in the editor.
 
 ## Before you begin
 
-Open or create a project, then open **Editor**. The **Film workspace** appears above the ordinary
-timeline editor. A film draft belongs to the current project. Its script, editable brief, reference
-pack, shot plan, sound plan, review plan, and compiled preflight are saved together and versioned.
+Open or create a project, then open **Editor**. The editor toolbar has a **Film | Timeline** switch.
+**Film** is the script-to-shots workspace described here; **Timeline** is the ordinary timeline
+editor. Both act on the same project timelines, and a project with no timeline opens on Film with
+two start paths: **Start from a script** or **Start with a blank timeline**. Existing film
+drafts are listed under them as **Continue a film draft**.
+
+Film mode walks six steps down its left side: **Script**, **References**, **Plan**, **Shots**,
+**Review**, and **Sound**. Each step shows its current status, and unsaved edits survive moving
+between them. The **Cut** strip along the bottom shows every planned shot in order with its delivery
+state, and **Open in Timeline** switches to the film's timeline. In Timeline mode, clips delivered by
+a film run carry their shot ID; selecting one shows the shot's beat, framing, planned duration, run, and
+attempts in the right rail, and offers **Review this shot**, which opens the Review step on the
+film and run that delivered that clip. The ordinary clip actions stay available.
+
+A film draft belongs to the current project. Its script, editable brief, reference pack, shot plan,
+sound plan, review plan, and compiled preflight are saved together and versioned.
 
 Check these prerequisites before a real run:
 
@@ -35,12 +48,12 @@ separate choice, and the planning operation records both identities.
 
 ## Create and edit a film draft
 
-1. Choose **New film draft**, give it a title, and paste prose or screenplay text into
-   **Original prose or screenplay**.
+1. Choose **New film draft**. On the **Script** step, give it a title and paste prose or
+   screenplay text into **Original prose or screenplay**.
 2. Choose **Extract editable beats and dialogue**. SceneWorks performs a deterministic parse into a
    synopsis, visual direction, beats, and dialogue lines. Review and edit every field. Extraction is
    a starting point, not an approval step.
-3. Add, remove, reorder, or edit shots under **Shots and render controls**. Each shot has a stable
+3. On the **Shots** step, add, remove, reorder, or edit shots under **Shots and render controls**. Each shot has a stable
    ID, beat, framing, prompt, intended start and end state, duration, conditioning mode, continuity
    roles, optional dependencies, and optional dialogue placement.
 4. Choose a render regime. **Turbo (recommended)** resolves the installed adapter recipe for the
@@ -72,7 +85,7 @@ requirement to create placeholder references.
 
 To use references:
 
-1. Under **References**, choose an existing project image or upload an image.
+1. On the **References** step, choose an existing project image or upload an image.
 2. Give it a stable role name, choose its kind, describe it, and mark it **Approved** only after a
    person has checked it.
 3. Bind approved character, prop, or location roles to a shot. Bound role order is preserved in the
@@ -148,7 +161,7 @@ image-capable flag as an operator assertion about that endpoint, not automatic c
 
 ## Generate and apply a candidate plan
 
-Choose **Generate candidate plan** after saving the script and brief. Planning runs as a durable,
+On the **Plan** step, choose **Generate candidate plan** after saving the script and brief. Planning runs as a durable,
 bounded operation and never starts video rendering.
 
 The operation shows status, stage, progress, planner identity, target video model, execution
@@ -202,7 +215,8 @@ a trim conflict. Resolve it explicitly by clamping the trim to the new take, res
 to its beginning, or keeping the current take. No replacement choice alters unrelated shots or
 audio.
 
-The **Operations** area remains visible while work is active. **Cancel** stops further dispatch,
+The **Operations** area sits under the step list and remains visible on every step while work is
+active. **Cancel** stops further dispatch,
 requests cancellation of the in-flight job, and preserves completed takes and spent attempts.
 **Resume** reconciles the saved record and adopts known jobs instead of starting the run over. Only
 one controller may own a run at a time; a competing UI, API, or CLI mutation is refused.
@@ -213,7 +227,7 @@ Review is assistive, not quality assurance. A local vision model can miss real f
 correct takes. Its observations never approve, reject, condition, or regenerate a shot. A human
 decision recorded through the controller is required.
 
-Under **Review**:
+On the **Review** step:
 
 1. Expand **Review questions, frames, and limits** to edit the future-run review plan. Questions are
    scoped per shot and declare intended state, expected and contradicting answers, sampled frames,
@@ -237,7 +251,7 @@ provenance. A finding about an older attempt does not become a finding about its
 
 ## Sound and dialogue
 
-Open **Sound and dialogue** to configure the film before or during shot planning:
+Open the **Sound** step to configure the film before or during shot planning:
 
 - generated picture audio defaults to **Mute** so it does not double with placed dialogue;
 - generated dialogue supports text, voice, and the listed speech models;

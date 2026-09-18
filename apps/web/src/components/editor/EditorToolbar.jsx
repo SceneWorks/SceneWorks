@@ -25,6 +25,9 @@ export function EditorToolbar({
   saveDisabled,
   onExport,
   exportDisabled,
+  modeSwitch = null,
+  filmStatus = null,
+  onOpenFilm,
 }) {
   return (
     <div className="ve-toolbar">
@@ -37,6 +40,8 @@ export function EditorToolbar({
           <span className="ve-brand-sub">{subLabel}</span>
         </div>
       </div>
+
+      {modeSwitch ? <><div className="ve-toolbar-div" />{modeSwitch}</> : null}
 
       <div className="ve-toolbar-div" />
 
@@ -76,6 +81,7 @@ export function EditorToolbar({
       </div>
 
       <div className="ve-toolbar-right">
+        {filmStatus ? <button className="ve-film-run-chip" onClick={onOpenFilm} title="Open the Film workspace" type="button">{filmStatus}</button> : null}
         <button className="ve-ghost-btn" onClick={onZoomOut} title="Zoom out" type="button">
           <Icon.Minus size={15} />
         </button>

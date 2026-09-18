@@ -110,6 +110,131 @@ function changeValue(element, value) {
 }
 
 describe("FilmWorkspace", () => {
+  it("offers both start paths when the project has no film draft, and hides in Timeline mode", async () => {
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([]);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const onNewTimeline = vi.fn();
+    root = createRoot(container);
+    const tree = (mode) => (
+      <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn() }}>
+        <FilmWorkspace mode={mode} onNewTimeline={onNewTimeline} />
+      </AppContext.Provider>
+    );
+    await act(async () => { root.render(tree("film")); await Promise.resolve(); });
+
+    const workspace = container.querySelector('section[aria-label="Film workspace"]');
+    expect(workspace.hidden).toBe(false);
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    const buttons = [...container.querySelectorAll(".ve-film-start-card button")].map((button) => button.textContent);
+    expect(buttons).toEqual(["New film draft", "New timeline"]);
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "New timeline").click());
+    expect(onNewTimeline).toHaveBeenCalledTimes(1);
+
+    await act(async () => { root.render(tree("timeline")); });
+    expect(workspace.hidden).toBe(true);
+  });
+
+  it("with no timeline, lists existing drafts beside both start paths until the operator picks one", async () => {
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([draft(), draft({ id: "film_2", title: "Second film" })]);
+      if (path === "/api/v1/projects/project_1/films/film_2") return Promise.resolve(draft({ id: "film_2", title: "Second film" }));
+      if (path === "/api/v1/projects/project_1/film-runs") return Promise.resolve([]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      return Promise.resolve({ providers: [] });
+    });
+    const onEngage = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn() }}>
+          <FilmWorkspace onEngage={onEngage} showStart />
+        </AppContext.Provider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelectorAll(".ve-film-start-card")).toHaveLength(2);
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    const continues = [...container.querySelectorAll(".ve-film-start-drafts button")];
+    expect(continues.map((button) => button.querySelector("strong").textContent)).toEqual(["First film", "Second film"]);
+
+    await act(async () => { continues[1].click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(onEngage).toHaveBeenCalled();
+    expect(container.querySelector(".ve-film-start")).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).not.toBeNull();
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("Second film");
+  });
+
+  it("opens Review on the run and draft that delivered a timeline clip, not the draft that happens to be selected", async () => {
+    const other = draft({ id: "film_2", title: "Second film" });
+    const clipRun = { locator: { id: "filmrun_9", draftId: "film_2", selectedShotIds: ["SH010"] }, controllerActive: false, record: { shots: [] } };
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([draft(), other]);
+      if (path === "/api/v1/projects/project_1/films/film_2") return Promise.resolve(other);
+      if (path === "/api/v1/projects/project_1/film-runs/filmrun_9") return Promise.resolve(clipRun);
+      if (path === "/api/v1/projects/project_1/film-runs/filmrun_9/review") return Promise.resolve({ run: clipRun, selections: [], observations: [], assistiveNotice: "" });
+      if (path === "/api/v1/projects/project_1/film-runs") return Promise.resolve([]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      return Promise.resolve({ providers: [] });
+    });
+    root = createRoot(container);
+    const tree = (viewRequest) => (
+      <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn(), setSelectedTimelineId: vi.fn() }}>
+        <FilmWorkspace viewRequest={viewRequest} />
+      </AppContext.Provider>
+    );
+    await act(async () => { root.render(tree(null)); await Promise.resolve(); });
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("First film");
+
+    await act(async () => { root.render(tree({ view: "review", runId: "filmrun_9", shotId: "SH010" })); });
+    await act(async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve(); });
+    expect(container.querySelector(".ve-film-bar strong").textContent).toBe("Second film");
+    expect(container.querySelector("#film-view-tab-review").getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#film-view-review").hidden).toBe(false);
+    expect(apiFetchMock.mock.calls.some(([path]) => String(path).includes("/film-runs/filmrun_9/review"))).toBe(true);
+  });
+
+  it("shows every planned shot in the cut strip and routes a shot to the step that can act on it", async () => {
+    const film = draft();
+    film.productionPlan.shots.push({ ...film.productionPlan.shots[0], id: "SH020", beat: "Second shot" });
+    const filmRun = {
+      locator: { id: "filmrun_1", draftId: "film_1", selectedShotIds: ["SH010", "SH020"] }, controllerActive: false,
+      record: { state: "finished", timeline: { timelineId: "timeline_cut", revision: 1 }, shots: [
+        { shotId: "SH010", attempts: [{ attempt: 1, status: "completed", take: { assetId: "asset_1" } }], humanDecision: null },
+      ] },
+    };
+    apiFetchMock.mockImplementation((path) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path === "/api/v1/projects/project_1/film-runs") return Promise.resolve([filmRun]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      if (path.includes("/review")) return Promise.reject(new Error("No review"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const onOpenTimeline = vi.fn();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ activeProject: { id: "project_1", name: "Project" }, token: "", refreshTimelines: vi.fn().mockResolvedValue({ ok: true }), setSelectedTimelineId: vi.fn() }}>
+          <FilmWorkspace onOpenTimeline={onOpenTimeline} />
+        </AppContext.Provider>,
+      );
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+
+    const shots = [...container.querySelectorAll(".ve-film-cut-shot")];
+    expect(shots.map((shot) => shot.getAttribute("aria-label"))).toEqual(["SH010, Needs decision", "SH020, Not rendered"]);
+    await act(async () => { shots[0].click(); });
+    expect(container.querySelector("#film-view-review").hidden).toBe(false);
+    await act(async () => { shots[1].click(); });
+    expect(container.querySelector("#film-view-shots").hidden).toBe(false);
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Open in Timeline").click());
+    expect(onOpenTimeline).toHaveBeenCalledWith("timeline_cut");
+  });
+
   it("describes selected active shots from attempts without relabeling terminal or unselected outcomes", () => {
     const active = {
       locator: { selectedShotIds: ["SH010", "SH020"] },
@@ -152,9 +277,11 @@ describe("FilmWorkspace", () => {
     });
 
     const tabs = [...container.querySelectorAll('[role="tab"]')];
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["Brief", "Shots", "Review & Edit"]);
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Script", "References", "Plan", "Shots", "Review", "Sound"]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");
-    expect(container.querySelector("#film-view-brief").hidden).toBe(false);
+    expect(container.querySelector("#film-view-script").hidden).toBe(false);
+    expect(container.querySelector("#film-view-references").hidden).toBe(true);
+    expect(container.querySelector("#film-view-plan").hidden).toBe(true);
     expect(container.querySelector("#film-view-shots").hidden).toBe(true);
     expect(container.querySelector("#film-view-review").hidden).toBe(true);
     expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Render selected shots")).toBe(false);
@@ -169,9 +296,11 @@ describe("FilmWorkspace", () => {
       changeValue(script, "Unsaved courier revision.");
       changeValue(planningVideoModel, "wan_2_2");
     });
-    await act(async () => { tabs[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
+    await act(async () => { tabs[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
     expect(document.activeElement).toBe(tabs[1]);
     expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector("#film-view-references").hidden).toBe(false);
+    await act(async () => { tabs[3].click(); });
     expect(container.querySelector("#film-view-shots").hidden).toBe(false);
     expect(container.querySelector('select[aria-label="Video model"]').value).toBe("wan_2_2");
     expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Render selected shots")).toBe(true);
@@ -182,7 +311,7 @@ describe("FilmWorkspace", () => {
     await act(async () => { advanced.querySelector("summary").click(); });
     expect(advanced.open).toBe(true);
 
-    await act(async () => { tabs[2].click(); });
+    await act(async () => { tabs[4].click(); });
     expect(container.querySelector("#film-view-review").hidden).toBe(false);
     expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Export current cut")).toBe(true);
     await act(async () => { tabs[0].click(); });
@@ -275,7 +404,7 @@ describe("FilmWorkspace", () => {
     const selector = container.querySelector('select[aria-label="Review run"]');
     expect([...selector.options].map((option) => option.value)).toEqual(["filmrun_new", "filmrun_old"]);
     expect(selector.value).toBe("filmrun_new");
-    const reviewTab = [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Review & Edit");
+    const reviewTab = [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Review");
     await act(async () => { reviewTab.click(); await Promise.resolve(); await Promise.resolve(); });
     expect(reviewRequests).toContain("filmrun_new");
 

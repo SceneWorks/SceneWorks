@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { FILM_SHOT_STATE_LABELS, filmShotState } from "./filmShotState.js";
 
 const CONDITIONING_MODES = ["text_to_video", "image_to_video", "first_last_frame", "reference_to_video"];
 const DEPENDENCY_KINDS = ["conditioning", "continuity"];
@@ -55,7 +56,7 @@ function exportJson(name, value) {
   URL.revokeObjectURL(url);
 }
 
-export function FilmShots({ capabilities, compiled, disabled, draft, findings = [], models = [], onChange, onImportError, selectedShotIds, setSelectedShotIds }) {
+export function FilmShots({ capabilities, compiled, disabled, draft, findings = [], models = [], onChange, onImportError, run = null, selectedShotIds, setSelectedShotIds }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const planInput = useRef(null);
@@ -159,6 +160,7 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
             <li className={index === selectedIndex ? "selected" : ""} key={item.id}>
               <label><input aria-label={`Render ${item.id}`} checked={selectedShotIds.includes(item.id)} onChange={(event) => setSelectedShotIds((ids) => event.target.checked ? [...new Set([...ids, item.id])] : ids.filter((id) => id !== item.id))} type="checkbox" />Render</label>
               <button aria-pressed={index === selectedIndex} onClick={() => setSelectedIndex(index)} type="button"><strong>{item.id}</strong><span>{item.beat || "Untitled shot"}</span></button>
+              {run ? <em className={`ve-film-shot-state ${filmShotState(item.id, run)}`}>{FILM_SHOT_STATE_LABELS[filmShotState(item.id, run)]}</em> : null}
             </li>
           ))}
         </ol>

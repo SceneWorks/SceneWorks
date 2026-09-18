@@ -56,9 +56,10 @@ export function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ active = true, draft, onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
   const [view, setView] = useState(null);
+  const rootRef = useRef(null);
   const [pending, setPending] = useState(false);
   const [reasons, setReasons] = useState({});
   const refreshRequest = useRef(0);
@@ -109,6 +110,14 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
     };
   }, [active, pollingActive, refresh]);
 
+  // A hand-off from a timeline clip names its shot; bring that shot's takes into view.
+  const focusedShotLoaded = Boolean(focusShotId && view?.run?.record?.shots?.some((shot) => shot.shotId === focusShotId));
+  useEffect(() => {
+    if (!active || !focusedShotLoaded) return;
+    [...(rootRef.current?.querySelectorAll(".ve-film-review-shot") ?? [])]
+      .find((node) => node.dataset.shotId === focusShotId)?.scrollIntoView?.({ block: "start" });
+  }, [active, focusShotId, focusedShotLoaded]);
+
   function changePlan(mutator) {
     onChange((next) => {
       next.reviewPlan = normalizedPlan(next);
@@ -146,7 +155,7 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
   }
 
   return (
-    <section aria-labelledby="film-review-heading" className="ve-film-section ve-film-review">
+    <section aria-labelledby="film-review-heading" className="ve-film-section ve-film-review" ref={rootRef}>
       <div className="ve-film-section-heading">
         <div>
           <h3 id="film-review-heading">Review</h3>
@@ -207,7 +216,7 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
             const repairDisabled = Boolean(disabledReason || selection?.trimConflict) || !shot.attempts.some((attempt) => attempt.take);
             const repairTitle = disabledReason || (selection?.trimConflict ? "Resolve the trim conflict first." : "");
             return (
-              <article className="ve-film-review-shot" key={shot.shotId}>
+              <article className={`ve-film-review-shot${focusShotId === shot.shotId ? " focused" : ""}`} data-shot-id={shot.shotId} key={shot.shotId}>
                 <header><h4>{shot.shotId}</h4><span className={`ve-film-selection-state ${selection?.state ?? ""}`}>{selection?.state?.replaceAll("_", " ") || "selection unavailable"}</span></header>
                 {selection?.trimConflict ? <p className="ve-film-warning">Resolve the trim conflict before using the pending take. Current saved asset: {selection.timelineAssetId || "none"}.</p> : null}
                 {shot.needsReview?.length ? <ul className="ve-film-findings">{shot.needsReview.map((flag, index) => <li key={`${flag.raisedAt}-${index}`}>Dependency stale from {flag.sourceShotId} ({flag.dependency}): {flag.reason}</li>)}</ul> : null}
