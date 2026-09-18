@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provision.mjs";
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
+import { materializeLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 import { assertTerminalCudaWorkerGpuIdentity, assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
@@ -677,11 +678,15 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   const corpus = { upstream_image_quality_cases: { row_identity_sha256: rowIdentity, sources }, deterministic_parity_cases: { row_identity_sha256: parityIdentity }, sceneworks_owned_suites: { prompt_composition: { content_identity_sha256: hash(prompts.map((entry) => entry.prompt_sha256).join("\n")) } } };
   await writeFile(path.join(inference, "release", "corpus.json"), JSON.stringify(corpus));
   await writeFile(path.join(inference, "scripts", "release", "starvector_terminal_evidence.mjs"), `import { createHash } from "node:crypto"; export function validatePlan(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }\n`);
-  const lifecycle = ["load", "unload", "reload", "memory_reported"], limits = ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"];
-  const index = { schema_version: 2, inference_revision: pin, row_identity_sha256: rowIdentity, rows, lifecycle_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, lifecycle.map((operation) => ({ case_id: `${tuple}-${operation}`, operation }))])), limit_cases: Object.fromEntries(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"].map((tuple) => [tuple, limits.map((finish_reason) => ({ case_id: `${tuple}-${finish_reason}`, finish_reason }))])), prompt_composition: prompts };
+  const lifecycle = ["load", "unload", "reload", "memory_reported"], tuples = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
+  const index = { schema_version: 2, inference_revision: pin, row_identity_sha256: rowIdentity, rows, lifecycle_cases: Object.fromEntries(tuples.map((tuple) => [tuple, lifecycle.map((operation) => ({ case_id: `${tuple}-${operation}`, operation }))])), limit_cases: Object.fromEntries(tuples.map((tuple) => [tuple, materializeLimitCases(tuple)])), prompt_composition: prompts };
   await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
   const result = await validateCorpusAssets(inference, "release/corpus.json", assets, pin);
   assert.equal(result.asset_file_references, 360); assert.equal(result.prompt_sha256, corpus.sceneworks_owned_suites.prompt_composition.content_identity_sha256);
+  index.limit_cases["mlx:1b"] = ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"].map((finish_reason, case_index) => ({ case_id: `legacy-${case_index}`, case_index, finish_reason }));
+  await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
+  await assert.rejects(() => validateCorpusAssets(inference, "release/corpus.json", assets, pin), /label-only legacy scenario/);
+  index.limit_cases["mlx:1b"] = materializeLimitCases("mlx:1b");
   index.rows[0].detail_budgets["1b"].maxNewTokens = 4000; await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));
   await assert.rejects(() => validateCorpusAssets(inference, "release/corpus.json", assets, pin), /1b shipping Detail budget/);
   index.rows[0].detail_budgets = structuredClone(detail_budgets); await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index));

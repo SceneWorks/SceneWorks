@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "shipping_detail_budgets": {
+    "1b": {
+      "maxNewTokens": 7933,
+      "maxSvgBytes": 262144,
+      "maxWallTimeMs": 120000
+    },
+    "8b": {
+      "maxNewTokens": 15422,
+      "maxSvgBytes": 262144,
+      "maxWallTimeMs": 120000
+    }
+  },
+  "sampling": {
+    "temperature": 0.0,
+    "topP": 1.0,
+    "topK": 1,
+    "repetitionPenalty": 1.0,
+    "seed": 7
+  },
+  "scenarios": [
+    {
+      "scenario": "completion",
+      "source_case_index": 12,
+      "detail_budget_overrides": {}
+    },
+    {
+      "scenario": "token",
+      "source_case_index": 11,
+      "detail_budget_overrides": {
+        "maxNewTokens": 16
+      }
+    },
+    {
+      "scenario": "byte",
+      "source_case_index": 11,
+      "detail_budget_overrides": {
+        "maxSvgBytes": 1024
+      }
+    },
+    {
+      "scenario": "wall_time",
+      "source_case_index": 11,
+      "detail_budget_overrides": {
+        "maxWallTimeMs": 1000
+      }
+    },
+    {
+      "scenario": "queued_cancellation",
+      "source_case_index": 11,
+      "detail_budget_overrides": {},
+      "cancel_after_create": true,
+      "worker_unloaded": true
+    },
+    {
+      "scenario": "in_flight_cancellation",
+      "source_case_index": 11,
+      "detail_budget_overrides": {},
+      "cancel_after_progress": true
+    }
+  ]
+}
