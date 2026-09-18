@@ -4654,6 +4654,138 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    /// The optional native film planner must describe a loadable official checkpoint, not merely a
+    /// repository directory. Its first pin predated the weights and held only metadata; that exact
+    /// snapshot plus its completed download receipt must remain unavailable. The current pin is a
+    /// 15-shard indexed checkpoint, and one wildcard-matching shard is still a torn install.
+    #[test]
+    fn qwen36_film_planner_requires_the_current_complete_indexed_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let model = builtin_models_entry("film_planner_qwen3_6_27b");
+        let download = model_download(&model).expect("Qwen planner download");
+        let repo = download["repo"].as_str().unwrap();
+        let current_revision = "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9";
+        let obsolete_revision = "70215ea87f5a6ae62bb56822396c1b42f1a18e0b";
+        assert_eq!(download["revision"], current_revision);
+        assert_eq!(
+            download["files"],
+            json!([
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "model.safetensors.index.json",
+                "model-*.safetensors"
+            ])
+        );
+        assert_eq!(
+            download["breaking"], true,
+            "only the unusable README-only receipt needs stale-install refusal"
+        );
+
+        let root = huggingface_repo_cache_path(data, repo).unwrap();
+        let obsolete = root.join("snapshots").join(obsolete_revision);
+        std::fs::create_dir_all(&obsolete).unwrap();
+        std::fs::write(obsolete.join("README.md"), b"model card only").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "repo": repo,
+                "modelId": "film_planner_qwen3_6_27b",
+                "variant": "default",
+                "manifestFiles": [],
+                "resolvedFiles": ["README.md"],
+                "snapshotRevision": obsolete_revision
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let readme_only = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !readme_only.installed,
+            "an old completed receipt cannot make a metadata-only snapshot usable"
+        );
+        assert!(
+            readme_only
+                .missing_required_files
+                .iter()
+                .any(|file| file == "config.json"),
+            "missing loader artifacts stay visible: {:?}",
+            readme_only.missing_required_files
+        );
+
+        let current = root.join("snapshots").join(current_revision);
+        std::fs::create_dir_all(&current).unwrap();
+        for file in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ] {
+            std::fs::write(current.join(file), b"{}").unwrap();
+        }
+        let shard_name = |ordinal: usize| format!("model-{ordinal:05}-of-00015.safetensors");
+        std::fs::write(current.join("model.safetensors.index.json"), b"{not json").unwrap();
+        std::fs::write(current.join(shard_name(1)), b"first shard").unwrap();
+        let invalid_index =
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !invalid_index.installed
+                && invalid_index.cache_incomplete
+                && invalid_index
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model.safetensors.index.json"),
+            "an explicitly required invalid index cannot make a wildcard shard set usable: {:?}",
+            invalid_index.missing_required_files
+        );
+
+        let weight_map = (1..=15)
+            .map(|ordinal| {
+                (
+                    format!("tensor.{ordinal}"),
+                    Value::String(shard_name(ordinal)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        std::fs::write(
+            current.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({ "weight_map": weight_map })).unwrap(),
+        )
+        .unwrap();
+
+        let partial = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !partial.installed && partial.cache_incomplete,
+            "one shard matches the wildcard but cannot satisfy a 15-shard index; missing={:?}",
+            partial.missing_required_files
+        );
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file == &shard_name(15)),
+            "the index names the missing shards: {:?}",
+            partial.missing_required_files
+        );
+
+        for ordinal in 2..=15 {
+            std::fs::write(current.join(shard_name(ordinal)), b"shard").unwrap();
+        }
+        let complete = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            complete.installed,
+            "complete indexed snapshot; missing={:?}",
+            complete.missing_required_files
+        );
+        assert!(complete.missing_required_files.is_empty());
+    }
+
     /// Manifest `files` entries are match patterns, not literal names — Eros's shared Gemma
     /// encoder ships as `"gemma/*"`. Seeding must write a CONCRETE file the pattern matches:
     /// `snapshot_contains_pattern` globs the snapshot, so any real name under `gemma/` reads
@@ -5503,12 +5635,9 @@ mod download_receipt_tests {
     /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
     /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
     /// `install_state_for` never enters the backfill at all — delete the guard and that test still
-    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
-    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
-    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
-    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
-    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
-    /// declared those files and they are all there — so this fixture is the guard alone.)
+    /// passes. A flat explicit filter now also refuses the torn set at catalog-health time, so this
+    /// test calls the backfill seam directly to keep its independent guard covered, then proves the
+    /// public install state reports the same missing shard.
     #[test]
     fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
         let _env = isolate_hf_cache();
@@ -5537,29 +5666,32 @@ mod download_receipt_tests {
                 "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
             }]
         });
-        let marker = data_dir
-            .join("models")
-            .join(safe_download_dir(repo))
-            .join(".sceneworks-download-complete.json");
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
 
-        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
-        assert!(
-            state.installed,
-            "fixture precondition: every declared pattern is present, so cache health reads \
-             installed and the backfill lane is genuinely entered"
-        );
+        let context = model_download_context(&model).unwrap().unwrap();
+        backfill_current_receipt(&managed, &model, &context, data_dir);
         assert!(
             !marker.exists(),
-            "backfill must refuse to record a set whose own shard index names a file that never \
-             landed — nothing else on this lane is watching"
+            "backfill must independently refuse an index whose shard never landed"
+        );
+
+        let state = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !state.installed
+                && state.cache_incomplete
+                && state
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model-00001-of-00002.safetensors"),
+            "filtered cache health must refuse the same torn set: {:?}",
+            state.missing_required_files
         );
 
         // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
         // guard discriminates on shard completeness rather than never writing for this shape.
         std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
-        assert!(
-            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
-        );
+        assert!(install_state_for(Some(context), &model, data_dir).installed);
         let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(receipt["backfilled"], true);
         assert!(
@@ -9547,6 +9679,52 @@ fn huggingface_filtered_cache_health(
     // Whether the COARSE check found none of the filter's patterns present — the "cleanly absent
     // tier" signal, captured before the tier-completeness augmentation below can add entries.
     let coarse_all_absent = missing.len() == files.len();
+
+    // A flat sharded Transformers checkpoint commonly declares an index plus `model-*.safetensors`.
+    // The glob is satisfied by the FIRST shard, so the coarse pattern check alone can call a torn
+    // 15-shard model installed. Evaluate every candidate revision as one coherent snapshot and fold
+    // in the shard set declared by its selected index. This reuses the whole-repo/receipt validator;
+    // no tensor bytes or headers are read, only the small index and one stat per named shard.
+    let has_flat_shard_glob = files.iter().any(|pattern| {
+        !pattern.contains('/')
+            && pattern_contains_glob(pattern)
+            && pattern.to_ascii_lowercase().ends_with(".safetensors")
+    });
+    let indexed_health = has_flat_shard_glob.then(|| {
+        snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let files_on_disk = snapshot_files(snapshot);
+                let selected_indexes = files_on_disk
+                    .iter()
+                    .filter(|file| {
+                        file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX)
+                            && files.iter().any(|pattern| pattern_matches(pattern, file))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selected_indexes.is_empty() {
+                    return None;
+                }
+                let mut candidate_missing = files
+                    .iter()
+                    .filter(|pattern| !snapshot_contains_pattern(snapshot, pattern))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for shard in torn_shard_indexes_in(snapshot, &selected_indexes) {
+                    if !candidate_missing.contains(&shard) {
+                        candidate_missing.push(shard);
+                    }
+                }
+                Some(candidate_missing)
+            })
+            .min_by_key(Vec::len)
+    });
+    if let Some(Some(indexed_missing)) = indexed_health {
+        // Required metadata, index and shards must coexist in ONE revision. Replacing the coarse
+        // cross-snapshot result also prevents different revisions from satisfying different files.
+        missing = indexed_missing;
+    }
 
     // Flat diffusers snapshots (Mage-Flow's logical q4/q8/bf16 load-time choices) list the
     // root `model_index.json` plus component globs rather than one `<tier>/*` subdir. The coarse

@@ -2,7 +2,8 @@
 
 For someone who has never run it. The operating manual is
 [film-harness.md](film-harness.md); this page is the shape of the thing, why each piece exists, and
-what it cost when it was measured. The seams a front end would call are in
+what it cost when it was measured. The current editor workflow is in
+[film-editor.md](film-editor.md), and its shared API/library seams are in
 [film-harness-ui-integration.md](film-harness-ui-integration.md).
 
 Citation convention below: code is cited as `path:line` against this commit; the runbook is cited by
@@ -10,15 +11,14 @@ section, because its line numbers move and its sections do not.
 
 ## The problem it solves
 
-SceneWorks can render one clip at a time from the Video Studio. A film is not one clip. It is a shot
-list, a cast of approved reference images, a set of spoken lines, a sequence, and a person deciding
-which takes are good enough, over hours of GPU time on a machine that may be interrupted.
+SceneWorks can render one clip at a time from the Video Studio. A film is not one clip. It is an
+ordered shot list, optional approved references, optional dialogue and sound, an editable sequence,
+and a person deciding which takes are good enough over GPU work that may be interrupted.
 
-The harness is the bounded, resumable, human-controlled way to get from a shot list plus a reference
-pack to a reviewed multi-shot film through the workers SceneWorks already has, and to measure what it
-cost. It adds no renderer, no UI and no second LLM stack: "No new UI, no parallel renderer and no
-second LLM stack: every take is produced by whatever GPU worker claims the job, and every token by
-the `prompt_refine` worker that already ships" (`docs/film-harness.md`, opening paragraph).
+The harness is the bounded, resumable, human-controlled orchestration behind that work. The Film
+workspace now exposes it through project-scoped routes while the CLI remains available for document
+and automation workflows. Both use the existing workers, jobs, assets, timelines, and durable run
+record; neither introduces a second renderer.
 
 Four properties are the reason it exists at all:
 
@@ -72,9 +72,10 @@ stable ids.
 
 Two things about that shot are load-bearing. It names **roles**, never files, so the same plan runs
 against any pack that declares them (runbook § *The reference-conditioned courier plan*). And
-`continuityRoles` is the continuity claim: every shot must bind at least one approved role from the
-pack, and a shot that binds none is refused (runbook § *Editing the assembled sequence*, the
-"Continuity is canonical" paragraph).
+`continuityRoles` is the continuity claim for a reference-backed shot: every named role must exist
+in the approved pack. A script-only shot may leave both role arrays empty; explicitly requesting
+reference conditioning without an approved bindable role is refused (runbook § *Editing the
+assembled sequence*, the "Continuity is canonical" paragraph).
 
 `conditioning.referenceRoles` order is the order the compiled request's `referenceAssetIds` keeps, so
 the shipped plan writes it subject-first (`config/film-harness/courier-workshop/plan.v2.jsonc`,
@@ -148,14 +149,12 @@ the **family once** and the compiler resolves the partition per shot
 | non-empty | `minimax_h3_ref`, with `referenceAssetIds` in the plan's role order |
 | empty | `minimax_h3`, its declared mode, and no reference field at all |
 
-**What is optional is image conditioning, not the pack.** A reference pack document is always
-required: `--references` is a required argument (`apps/rust-api/src/bin/film-harness.rs:467`), and
-every shot must bind at least one **approved** pack role, through `continuityRoles` or through a
-conditioning slot, or it is refused (`crates/sceneworks-core/src/film_plan.rs:1741`–`:1758`; the
-anchor rule stated above, runbook § *Editing the assembled sequence*). What is optional is
-`conditioning.referenceRoles`, and it is optional **per shot**: a shot that names none compiles to
-the base `minimax_h3` with its declared mode and no reference field at all. A shot that declares
-`reference_to_video` and binds nothing is the contradiction, and is refused by name (runbook
+**References and image conditioning are optional.** The CLI keeps `--references` as the path to a
+reference-pack document, while the Film workspace creates and stores that document with the draft.
+Its `references` array may be empty, and a script-only shot needs no approved role. A shot that names
+no `conditioning.referenceRoles` compiles to the base `minimax_h3` with its declared mode and no
+reference field. A shot that explicitly declares `reference_to_video` still must bind approved
+character, prop, or location roles and is refused by name when it does not (runbook
 § *Partition resolution*). The compiled request's
 `model`, the dispatched body's `model` and the attempt record's `resolvedModelId` are one string read
 three times, so they cannot disagree about which checkpoint produced a take
@@ -187,20 +186,30 @@ and refuse a document that no longer matches what the run started from.
 `film-harness plan` turns a brief plus the pack into a plan in the **same schema a hand-authored plan
 uses** (runbook § *Planning from a brief*). The loop:
 
-1. **Refuse before the first token.** The hosted-credential and remote-API ban
-   (`apps/rust-api/src/film_planner.rs:65`, `:551`), the brief's structure, the pack and its files,
-   the model's catalog entry, a beat requiring a role the pack does not approve, and the brief's own
-   model block against the installed menus. The brief must declare `limits.plannerMaxMemoryGb`,
-   checked against the host's reported memory before the first token.
+1. **Refuse before the first token.** The CLI's hosted-credential and remote-API ban, the brief's
+   structure, the pack and its files, the model's catalog entry, a beat requiring a role the pack
+   does not approve, and the brief's own model block against the installed menus. The brief must
+   declare `limits.plannerMaxMemoryGb`, checked against the host's reported memory before the first
+   token.
 2. **One draft** through `POST /api/v1/prompts/refine` with `task: "film_plan"`
    (`apps/rust-api/src/film_planner.rs:60`), decoded under a valid-JSON constraint. Object shape is
    *not* enforced by the decoder; the plan schema is enforced after the decode by
    `parse_planner_output`.
 3. **Validate**, then **bounded repair rounds**, default 2, ceiling 5
    (`apps/rust-api/src/film_planner.rs:49`, `:53`). Each round hands the validator's findings back
-   verbatim and asks for the whole plan again. No round drops a beat, shortens the film or rounds a
-   duration to make a finding go away. On exhaustion the refused answer is written to
+   verbatim and asks for the whole plan again. A repair may change the number of shots or choose
+   another legal duration to meet the brief's running-time window, but it must retain every required
+   beat and pass the same full validation. On exhaustion the refused answer is written to
    `planner-rejected.txt`.
+
+The Film workspace uses the same generation, validation, repair and compile functions through a
+durable planning operation. New drafts select the built-in `prompt_refine_anubis_8b`; the optional
+local Qwen3.6-27B planner is installed and selected only on request. A saved OpenAI-compatible
+connection is also an explicit choice, with disclosure, backend-held secret and separate reference
+pixel opt-in. Planner identity and thinking mode are recorded independently of the target video
+model. There is no provider fallback, and an unavailable, canceled or exhausted operation leaves
+the draft available for manual editing. The full operator flow is in
+[film-editor.md](film-editor.md).
 
 **The capability envelope** is what the planner is held to. Whether it may write reference shots is
 decided from exactly two facts, and install state is not one of them: the catalog must serve the
@@ -292,9 +301,10 @@ Only a **resumable** stop can be resumed. A cancel or a crash is resumable; an e
 budget, an over-budget memory peak or an exhausted attempt cap is terminal, and `stop.detail` says
 which plan value to change (`crates/sceneworks-core/src/film_plan.rs:3095`, `RunStop`).
 
-**One controller per run directory.** Nothing locks `run.json`; the idempotency keys stop a
-*sequential* replay from duplicating work but are not a lock between two live controllers (runbook
-§ *Durable run state*, and `apps/rust-api/src/bin/film-harness.rs:54`).
+**One controller per run directory.** Every mutating controller holds `ControllerLease`, an
+advisory lock whose owner marker is cleared on clean release and retained after a crash. A second
+controller is refused. Idempotency keys separately prevent duplicate work when a process dies
+between posting a job and recording its id (runbook § *Durable run state*).
 
 ## Review: assistive, never deciding
 
@@ -347,10 +357,12 @@ Every decision is appended to `decisions[]` in the order it was made; replay add
 
 ## Timeline and export
 
-The assembled timeline has four tracks: `track_main` (picture), `track_dialogue`, `track_ambience`
-and `track_music`, each audio track a bus with its own `gain` and `muted`, and **the beds placed once
-for the whole sequence** so they play straight through the cuts rather than restarting at each one
-(runbook § *Sound*).
+The assembled timeline has a picture track and ordered audio lanes for dialogue, ambience, music
+and each placed effect. Each audio track is an editable bus with its own `gain` and `muted` state.
+Sequence beds are placed once so they play through cuts instead of restarting at every shot. When a
+later incremental delivery lengthens the cut, an untouched full-sequence bed extends with it;
+gain, mute, fades and item volume remain intact. An explicit placement, source-range or duration
+trim is preserved and is never stretched automatically (runbook § *Sound*).
 
 The export mixes every non-muted audio track: gain is `track.gain * item.volume`, clips are delayed
 to where they land in the *exported picture*, per-item fades become `afade`, the summed mix passes a
@@ -375,6 +387,11 @@ history and `generatedAudio`, and an item a person pointed at a foreign asset wi
 left exactly as they left it (runbook § *Editing the assembled sequence*). Each edit is appended to
 `timeline.edits` **and** to the decision log, and leaves the MP4 flagged `export.stale` unless
 `--export` re-runs it.
+
+The Film workspace always starts runs without export. It delivers each completed shot into the
+saved timeline, preserves concurrent edits with revision checks and tombstones, and exports only
+when the operator chooses **Export current cut**. The Operations panel can select among the draft's
+durable runs; choosing an older run does not move or recreate its jobs.
 
 ## Provenance recorded per attempt
 
@@ -440,7 +457,7 @@ Header: `apps/rust-api/src/bin/film-harness.rs:5`–`:27`; worker requirements a
 | `plan` | brief → LLM draft → validate → repair rounds | blocking, minutes | brief, pack, catalog | `plan.json`, `compiled.json`, `brief.json`, `planner-rejected.txt` on exhaustion |
 | `compile` | rebuild the per-shot requests from an edited plan | blocking | plan, pack, sibling brief | `compiled.json` |
 | `validate` | check plan, pack, host, catalog and workers; create nothing | blocking, seconds | plan, pack, `compiled.json` | nothing |
-| `run` | render the selected shots, assemble, export | **long-running, resumable** | plan, pack, compiled | `run.json` (+ project mirror), project assets |
+| `run` | render selected shots and assemble; CLI exports unless `--no-export` | **long-running, resumable** | plan, pack, compiled | `run.json` (+ project mirror), project assets |
 | `resume` | pick a run back up, adopting live jobs | **long-running, resumable** | `run.json` + the pinned documents | `run.json` |
 | `replace-take` | reject the carried take, render exactly one more | long-running, one attempt | `run.json` | `run.json` |
 | `request-repair` | `replace-take` with the review's flags in the reason | long-running, one attempt | `run.json`, `reviews/*.json` | `run.json` |
@@ -501,11 +518,10 @@ figure at `:103`–`:105`).
 
 ## What the harness deliberately does not do
 
-- **No new UI, no parallel renderer, no second LLM stack** (runbook, opening paragraph). Every take is
-  produced by whatever GPU worker claims the job.
-- **No HTTP route.** The orchestration is a rust-api library module
-  (`apps/rust-api/src/lib.rs:283`–`:284`) with a CLI in front of it; nothing in the running API
-  exposes it today. See [film-harness-ui-integration.md](film-harness-ui-integration.md).
+- **No parallel renderer.** The Film workspace and CLI both dispatch through the existing worker
+  and job paths. Project-scoped film routes call the shared orchestration rather than reimplementing
+  it. See [film-editor.md](film-editor.md) and
+  [film-harness-ui-integration.md](film-harness-ui-integration.md).
 - **The reviewer decides nothing.** Only `accept-take`, `reject-take`, `request-repair`,
   `replace-take` and the edit verbs change anything.
 - **No automatic regeneration of a flagged shot.** A `needsReview` flag is raised once per
@@ -514,21 +530,20 @@ figure at `:103`–`:105`).
   (`apps/rust-api/src/film_harness/review.rs:1659`–`:1660`, matching the `accept-take` row above),
   and the next upstream change raises the flag again
   (`apps/rust-api/src/film_harness.rs:5553`–`:5556`) — which is the point of resolving it.
-- **The reference pack is required at the document level.** The epic's E1 wording, "the reference
-  pack is never required", holds at the **shot** level and for **image conditioning**: a shot may
-  name no `referenceRoles` and still compile. It does not hold at the document level — the harness
-  today always requires a pack file with approved roles, and every shot must anchor to one of them.
+- **References are optional.** The editor supports script-only films with an empty pack and
+  text-only shots. The CLI still accepts a reference-pack document path, but that document need not
+  contain an approved image unless a shot actually requests reference conditioning.
 - **Nothing chains a shot on the previous shot's last frame.** `chainFromShotId` records that a shot
   continues an earlier one and rides into provenance; it is never an anchor by itself, and a chained
   shot naming no canonical role is refused (runbook § *Editing the assembled sequence*).
-- **No hosted LLM path.** The planner refuses before its first token if the environment carries a
-  hosted credential or endpoint, or if `--api` is not loopback, a private-network address, a `.local`
-  name or a bare hostname, and that rule guards every command that reaches an API, from the one
-  place the binary builds its transport (`apps/rust-api/src/film_planner.rs:65`, `:551`).
+- **External planning is explicit and has no fallback.** The CLI planner keeps its local/private
+  transport policy. The Film workspace can instead use a saved OpenAI-compatible connection when an
+  operator selects it, with bounded time/output, a separate host secret, a data disclosure, and
+  reference pixels disabled by default. Provider failure or restart never switches to a local model.
 - **No per-shot model overrides across families.** The only id resolution can produce is the declared
   model's own reference partition (runbook § *Partition resolution*).
 - **`make-references` is not a product feature.** In the product the user supplies the reference
   images; it exists so the repository can build its own fixtures.
-- **No editor UI for audio.** SC-12807 still owns the media bin, placing and trimming audio items
-  from the timeline UI, and the fader controls. The backend will mix whatever is on a track; nothing
-  in the UI puts a clip there (runbook § *What this did and did not settle for SC-12807*).
+- **Sound remains an explicit edit.** The Film workspace can stage prerecorded or synthesized
+  dialogue, ambience, music, and effects and set placement, trims, fades, gain, and mute. The saved
+  timeline remains authoritative, and export reports any audio layer it could not include.

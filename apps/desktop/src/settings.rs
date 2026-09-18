@@ -140,10 +140,9 @@ fn read_credential_secret_result(host: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Best-effort lookup retained for the macOS lazy credential socket, whose protocol
+/// Best-effort lookup for the lazy desktop credential bridge, whose protocol
 /// represents unavailable secrets as absent. Eager Linux worker reads use the
 /// fallible helpers below instead.
-#[cfg(target_os = "macos")]
 fn read_credential_secret(host: &str) -> Option<String> {
     read_credential_secret_result(host).ok().flatten()
 }
@@ -422,9 +421,8 @@ pub fn recorded_credential_hosts() -> Vec<String> {
 /// The secret token + scheme for a single recorded host, for the on-demand
 /// credential socket to serve when a worker download actually needs it (sc-5891).
 /// Gated on the non-secret `settings.json` metadata: if the host isn't recorded this
-/// returns `None` without reading the keychain. This is the single *lazy* keychain
-/// read that replaces the eager spawn-time reads on macOS.
-#[cfg(target_os = "macos")]
+/// returns `None` without reading the keychain. This is the single lazy OS-secret
+/// read used by the desktop API bridge on every platform.
 pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme)> {
     let host = host.trim().to_ascii_lowercase();
     let settings = load_settings();

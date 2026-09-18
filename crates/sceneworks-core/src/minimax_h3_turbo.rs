@@ -92,13 +92,8 @@ pub struct TurboRecipe {
     /// The SHORT EDGE of the canvas this file was distilled at (`sampling.trainingShortEdge`), when
     /// the catalog declares one — 768 for a 768p file, 544 for a 544p one.
     ///
-    /// Optional, and NO shipped entry declares it today: upstream publishes the canvas as prose in
-    /// its model-specs table rather than as a number per file, and inferring one from a filename is
-    /// the kind of guess this module exists to avoid. An undeclared canvas is GENERIC — it matches
-    /// nothing and loses nothing, which is why
-    /// [`crate::film_planner::PlannerCapabilities::with_installed_turbo_loras`] falls straight
-    /// through its canvas rule on the shipped catalog. Declaring it on an entry is the one edit
-    /// that makes that rule bite for that file.
+    /// The shipped entries declare this from the upstream model-specs table. An undeclared canvas
+    /// remains generic for user or future entries; it is never inferred from a filename.
     pub training_short_edge: Option<u32>,
 }
 
@@ -363,6 +358,19 @@ mod tests {
         let eight = turbo_recipe_for_lora_id("minimax_h3_turbo_8step").expect("the 8-step recipe");
         assert_eq!(four.steps, 4, "the file upstream calls 4-step runs 4 NFE");
         assert_eq!(eight.steps, 8, "the file upstream calls 8-step runs 8 NFE");
+    }
+
+    #[test]
+    fn shipped_turbo_recipes_declare_their_published_training_canvases() {
+        let edge = |id| {
+            turbo_recipe_for_lora_id(id)
+                .unwrap_or_else(|| panic!("{id} recipe"))
+                .training_short_edge
+        };
+        assert_eq!(edge("minimax_h3_turbo_4step_768p"), Some(768));
+        assert_eq!(edge("minimax_h3_turbo_8step"), Some(544));
+        assert_eq!(edge("minimax_h3_turbo_4step_v01"), Some(544));
+        assert_eq!(edge("minimax_h3_ref2v_turbo_4step"), Some(544));
     }
 
     /// The resolver: no accelerator ⇒ the base regime, one ⇒ its own recipe, and the recipe follows

@@ -3040,7 +3040,12 @@ def test_lora_schema_accepts_a_declared_sampling_recipe():
     authoring error."""
     entry = _sample_lora_entry()
     entry["role"] = "accelerator"
-    entry["sampling"] = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    entry["sampling"] = {
+        "steps": 4,
+        "schedulerShift": 6.0,
+        "audioSchedulerShift": 3.0,
+        "trainingShortEdge": 544,
+    }
     errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
     assert not errors, "a declared sampling recipe must be schema-valid:\n" + _format_errors(errors)
 
@@ -3053,19 +3058,27 @@ def test_lora_schema_rejects_a_malformed_sampling_recipe():
     2 h 25 m render this whole feature exists to avoid, with no error anywhere. So
     every way of writing the block wrong has to be an authoring-time red: a partial
     block (each of the three keys is load-bearing and none has a safe default), an
-    out-of-band step count, a zero shift, a string where a number belongs, a typo'd
-    key, and a non-object.
+    out-of-band step count, a zero shift, a string where a number belongs, a
+    non-positive/non-integer/out-of-u32 training edge, a typo'd key, and a non-object.
     """
-    good = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    good = {
+        "steps": 4,
+        "schedulerShift": 6.0,
+        "audioSchedulerShift": 3.0,
+        "trainingShortEdge": 544,
+    }
     cases = [
         ({key: value for key, value in good.items() if key != missing}, "required")
-        for missing in good
+        for missing in ("steps", "schedulerShift", "audioSchedulerShift")
     ]
     cases += [
         ({**good, "steps": 0}, "minimum"),
         ({**good, "steps": 4.5}, "type"),
         ({**good, "schedulerShift": 0}, "exclusiveMinimum"),
         ({**good, "audioSchedulerShift": "3.0"}, "type"),
+        ({**good, "trainingShortEdge": 0}, "minimum"),
+        ({**good, "trainingShortEdge": 544.5}, "type"),
+        ({**good, "trainingShortEdge": 4294967296}, "maximum"),
         # The sc-12288 field class, one level in: a typo'd key is silently ignored by a
         # permissive object, and `required` alone would not catch a MISSPELLED extra.
         ({**good, "schedulerShifts": 6.0}, "additionalProperties"),

@@ -12,6 +12,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import "../timelineGeneration.js";
 import { useTimelines } from "./useTimelines.js";
 
 // Programmable apiFetch: a per-test router keyed by method + path shape. Each call is
@@ -120,6 +121,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 function mount() {
@@ -221,6 +223,45 @@ describe("useTimelines dirty tracking (sc-11967)", () => {
     await settle();
 
     expect(get().api.isActiveTimelineDirty()).toBe(false);
+  });
+});
+
+describe("useTimelines film delivery polling", () => {
+  it("adopts a later clip on the same timeline revision stream without losing dirty edits or selection", async () => {
+    vi.useFakeTimers();
+    const get = mount();
+    const first = makeTimeline({
+      revision: 1,
+      filmAssembly: { runId: "run_1" },
+      tracks: [{ id: "track_main", name: "Main", items: [{ id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 }] }],
+    });
+    await loadSelected(get, first);
+    act(() => get().api.setActiveTimeline({ ...get().api.activeTimeline, name: "Unsaved title" }));
+    await settle();
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+
+    const delivered = makeTimeline({
+      revision: 2,
+      filmAssembly: { runId: "run_1" },
+      tracks: [{ id: "track_main", name: "Main", items: [
+        { id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 },
+        { id: "item_2", assetId: "asset_2", type: "video", timelineStart: 4, timelineEnd: 8 },
+      ] }],
+    });
+    apiRouter = ({ method, path }) => {
+      if (method === "GET" && path.endsWith("/timelines/tl_1")) return delivered;
+      if (method === "GET" && path.endsWith("/timelines")) return [{ id: "tl_1", name: "Main" }];
+      return delivered;
+    };
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    await settle();
+    expect(get().api.selectedTimelineId).toBe("tl_1");
+    expect(get().api.activeTimeline.name).toBe("Unsaved title");
+    expect(get().api.activeTimeline.revision).toBe(2);
+    expect(get().api.activeTimeline.tracks[0].items.map((item) => item.assetId)).toEqual(["asset_1", "asset_2"]);
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+    expect(apiCalls.some((call) => call.method === "PUT")).toBe(false);
   });
 });
 
@@ -477,4 +518,93 @@ describe("useTimelines SSE apply surfaces edit/generation conflict on deleted ta
     expect(get().api.activeTimeline.tracks.flatMap((t) => t.items).some((it) => it.assetId === "asset_gen")).toBe(true);
     expect(pushNoticeSpy.mock.calls.some((c) => c[0] === "timelineGenerationConflict" && c[1])).toBe(false);
   });
+});
+
+describe("revisioned saves (sc-23737)", () => {
+  it("rebases a stale save over a concurrently delivered shot and keeps pending edits", async () => {
+    const get = mount();
+    const base = makeTimeline({ revision: 1 });
+    await loadSelected(get, base);
+    const working = { ...base, name: "User cut" };
+    act(() => get().api.setActiveTimeline(working));
+    let stored = { ...base, revision: 2, tracks: [{ ...base.tracks[0], items: [{ id: "arrived", timelineEnd: 4 }] }] };
+    const revisions = [];
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") {
+        revisions.push(body.expectedRevision);
+        if (body.expectedRevision !== stored.revision) throw Object.assign(new Error("Changed"), { code: "timeline_revision_conflict" });
+        stored = { ...body.timeline, revision: stored.revision + 1 }; return stored;
+      }
+      if (path.endsWith("/timelines")) return [{ id: stored.id, name: stored.name }];
+      return stored;
+    };
+    await act(async () => { await get().api.saveTimeline(working); });
+    expect(revisions).toEqual([1, 2]);
+    expect(stored.name).toBe("User cut");
+    expect(stored.tracks[0].items[0].id).toBe("arrived");
+    expect(get().api.isActiveTimelineDirty()).toBe(false);
+  });
+  it("preserves a newer local edit made while save is in flight", async () => {
+    const get = mount(); const base = makeTimeline({ revision: 1 });
+    await loadSelected(get, base);
+    let release;
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") return new Promise((resolve) => { release = () => resolve({ ...body.timeline, revision: 2 }); });
+      if (path.endsWith("/timelines")) return [{ id: base.id, name: base.name }];
+      return base;
+    };
+    let saving;
+    act(() => { saving = get().api.saveTimeline(base); });
+    act(() => get().api.setActiveTimeline({ ...base, name: "Typed during save" }));
+    await act(async () => { release(); await saving; });
+    expect(get().api.activeTimeline.name).toBe("Typed during save");
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+  });
+});
+
+describe("same-item conflict resolver (sc-23737)", () => {
+  for (const keepLocal of [true, false]) it(`explicitly keeps ${keepLocal ? "local" : "stored"} trim while preserving other shots`, async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(keepLocal);
+    const get = mount();
+    const base = makeTimeline({ revision: 1, tracks: [{ id: "track_main", items: [{ id: "A", displayName: "Opening shot", sourceOut: 4 }] }] });
+    await loadSelected(get, base);
+    const working = structuredClone(base); working.tracks[0].items[0].sourceOut = 3;
+    act(() => get().api.setActiveTimeline(working));
+    let stored = structuredClone(base); stored.revision = 2; stored.tracks[0].items[0].sourceOut = 2; stored.tracks[0].items.push({ id: "B" });
+    apiRouter = ({ method, path, body }) => {
+      if (method === "PUT") {
+        if (body.expectedRevision !== stored.revision) throw Object.assign(new Error("Changed"), { code: "timeline_revision_conflict" });
+        stored = { ...body.timeline, revision: stored.revision + 1 }; return stored;
+      }
+      if (path.endsWith("/timelines")) return [{ id: stored.id, name: stored.name }];
+      return stored;
+    };
+    await act(async () => { await get().api.saveTimeline(working); });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Opening shot"));
+    expect(stored.tracks[0].items[0].sourceOut).toBe(keepLocal ? 3 : 2);
+    expect(stored.tracks[0].items[1].id).toBe("B");
+    confirm.mockRestore();
+  });
+});
+
+it("ordinary replacement keeps an incompatible trim pending until an explicit choice", async () => {
+  const get = mount();
+  let stored = makeTimeline({ revision: 1, tracks: [{ id: "track_main", items: [{ id: "item_target", assetId: "old", sourceIn: 1, sourceOut: 4, timelineStart: 0, timelineEnd: 3, speed: 1 }] }] });
+  await loadSelected(get, stored);
+  apiRouter = ({ method, path, body }) => {
+    if (method === "PUT") { stored = { ...body.timeline, revision: stored.revision + 1 }; return stored; }
+    if (path.endsWith("/timelines")) return [{ id: stored.id, name: stored.name }];
+    return stored;
+  };
+  const job = makeReplaceJob(); job.result.assets[0].file = { duration: 2 };
+  act(() => get().api.enqueueTimelineGenerationApply(job)); await settle();
+  expect(stored.tracks[0].items[0].assetId).toBe("old");
+  expect(stored.generationTrimConflicts.job_replace.choices).toEqual(["clamp", "reset", "keepCurrent"]);
+  await act(async () => { await get().api.resolveTimelineTrim(null, "job_replace", "clamp"); });
+  expect(stored.tracks[0].items[0].sourceIn).toBe(1);
+  expect(stored.tracks[0].items[0].sourceOut).toBe(2);
+  expect(get().api.activeTimeline.tracks[0].items[0].assetId).toBe("asset_replace");
+  expect(stored.generationTrimConflicts.job_replace).toBeUndefined();
+  act(() => get().api.enqueueTimelineGenerationApply(job)); await settle();
+  expect(stored.generationTrimConflicts.job_replace).toBeUndefined();
 });

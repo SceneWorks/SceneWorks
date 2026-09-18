@@ -92,6 +92,30 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: Refine
         })
 }
 
+/// Apply the JSON grammar only when it cannot capture a reasoning model inside its thinking
+/// channel. Qwen3.6 opens `<think>` in the rendered generation prompt for both `Enabled` and
+/// `Auto`; a JSON mask then rejects the `</think>` marker, so the complete JSON value lands in
+/// `TextLlmOutput::thinking` and the final-answer text is empty. A no-think request renders a closed
+/// reasoning block before generation and remains safe to constrain. Models without a thinking mode
+/// (including the default Anubis refiner) also keep the existing JSON constraint in every mode.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn json_decode_constraint(
+    emits_json: bool,
+    supports_thinking: bool,
+    thinking_mode: gen_core::core_llm::ThinkingMode,
+) -> Option<gen_core::core_llm::Constraint> {
+    use gen_core::core_llm::{Constraint, ThinkingMode};
+
+    (emits_json
+        && !(supports_thinking
+            && matches!(thinking_mode, ThinkingMode::Enabled | ThinkingMode::Auto)))
+    .then_some(Constraint::Json)
+}
+
 /// The `prompt_refine` job multiplexed FOUR tasks through five scattered booleans
 /// (`is_magic`/`is_image_caption`/`is_image_describe`/`is_vision_task`/`is_caption_task`) re-derived in
 /// six ladders — a shape where incoherent combinations were representable and which hid the F-003
@@ -1090,6 +1114,17 @@ pub(crate) async fn run_prompt_refine_job(
         .get("modelId")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let thinking_mode = match (task, payload.get("thinkingMode").and_then(Value::as_str)) {
+        (RefineTask::FilmPlan, Some("enabled")) => gen_core::core_llm::ThinkingMode::Enabled,
+        (RefineTask::FilmPlan, Some("auto")) => gen_core::core_llm::ThinkingMode::Auto,
+        (RefineTask::FilmPlan, _) => gen_core::core_llm::ThinkingMode::Disabled,
+        _ => gen_core::core_llm::ThinkingMode::Auto,
+    };
+    let thinking_mode_name = match thinking_mode {
+        gen_core::core_llm::ThinkingMode::Enabled => "enabled",
+        gen_core::core_llm::ThinkingMode::Auto => "auto",
+        gen_core::core_llm::ThinkingMode::Disabled => "disabled",
+    };
     let max_new_tokens = resolve_max_new_tokens(payload, task);
     let temperature = task.temperature();
     let work_message = task.work_message();
@@ -1191,9 +1226,10 @@ pub(crate) async fn run_prompt_refine_job(
     // set minimal.
     let emits_json = task.emits_json();
     let is_vision_task = task.is_vision();
-    // Resolution requirements (see the sc-8105 note below): only the request's output constraint —
-    // the JSON grammar for the JSON-emitting tasks, NONE for the prose `image_describe`/rewrite
-    // tasks. Built out here so it doubles as the cache key alongside the weights dir.
+    // Resolution requirements (see the sc-8105 note below): JSON-emitting tasks still select a
+    // provider that supports JSON constraints, preserving the existing provider/cache identity.
+    // After load, [`json_decode_constraint`] decides whether to apply the mask to this decode: an
+    // active thinking channel must first be allowed to close before the final JSON answer begins.
     let mut refine_reqs = gen_core::core_llm::ModelRequirements::default();
     if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
@@ -1202,7 +1238,7 @@ pub(crate) async fn run_prompt_refine_job(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
-        move |refiner| -> WorkerResult<String> {
+        move |refiner| -> WorkerResult<gen_core::core_llm::TextLlmOutput> {
             emit_event(
                 "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
@@ -1227,9 +1263,9 @@ pub(crate) async fn run_prompt_refine_job(
             // resolves on the JSON constraint ALONE (no vision filter): that selects `mlx-llama`, which then
             // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
             // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
-            let text = {
+            let output = {
                 use gen_core::core_llm::{
-                    Constraint, Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
+                    Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
                 };
                 let mut messages = Vec::with_capacity(2);
                 if !system.trim().is_empty() {
@@ -1281,8 +1317,16 @@ pub(crate) async fn run_prompt_refine_job(
                     // enforced after the decode by `film_planner::parse_planner_output`, which is the
                     // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
                     // where the FilmPlan task should take it.
-                    constraint: emits_json.then_some(Constraint::Json),
+                    // A reasoning-capable model must be allowed to close its `<think>` block before
+                    // emitting the answer. Its final answer is still parsed and validated strictly,
+                    // and the planner's existing bounded repair loop handles malformed plans.
+                    constraint: json_decode_constraint(
+                        emits_json,
+                        refiner.descriptor().capabilities.supports_thinking,
+                        thinking_mode,
+                    ),
                     cancel: blocking_cancel.clone(),
+                    thinking: thinking_mode,
                     ..Default::default()
                 };
                 // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
@@ -1319,13 +1363,12 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                let output = refiner.generate(&request, &mut on_event).map_err(|error| {
+                refiner.generate(&request, &mut on_event).map_err(|error| {
                     WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-                })?;
-                output.text
+                })?
             };
 
-            Ok(text)
+            Ok(output)
         },
     ));
 
@@ -1358,7 +1401,7 @@ pub(crate) async fn run_prompt_refine_job(
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The loop
     // yields the raw model output on clean completion.
-    let loop_result: WorkerResult<String> = async {
+    let loop_result: WorkerResult<gen_core::core_llm::TextLlmOutput> = async {
         loop {
             tokio::select! {
                 // Generation finished (the shared cache thread replied). Disarm the guard before any
@@ -1422,8 +1465,8 @@ pub(crate) async fn run_prompt_refine_job(
         }
     }
     .await;
-    let raw = match loop_result {
-        Ok(raw) => raw,
+    let output = match loop_result {
+        Ok(output) => output,
         Err(error) => {
             guard.cancel_and_join().await;
             return Err(error);
@@ -1432,11 +1475,34 @@ pub(crate) async fn run_prompt_refine_job(
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
-    let refined = finalize_refined_output(&raw, emits_json, target_model_id.as_deref());
+    let refined = finalize_refined_output(&output.text, emits_json, target_model_id.as_deref());
     if refined.is_empty() {
-        return Err(WorkerError::Engine(
-            "The prompt-refinement model returned an empty prompt.".to_owned(),
-        ));
+        let detail = empty_refine_failure_detail(
+            task,
+            output.finish_reason,
+            output.usage.generated_tokens,
+            max_new_tokens,
+        );
+        let result = refine_failure_result(
+            output.thinking.as_deref(),
+            &model,
+            backend,
+            thinking_mode_name,
+            output.finish_reason,
+            output.usage,
+            max_new_tokens,
+        );
+        let mut progress = refine_progress(
+            JobStatus::Failed,
+            ProgressStage::Failed,
+            1.0,
+            "Prompt refinement failed.",
+            Some(result),
+            backend,
+        );
+        progress.error = Some(detail);
+        update_job(api, &job.id, progress).await?;
+        return Ok(());
     }
     // sc-8105: the image-caption path validates the cleaned reply is a schema-valid Ideogram caption
     // (carries `compositional_deconstruction`) and KEEPS the element bboxes (no stripping). A malformed
@@ -1464,7 +1530,14 @@ pub(crate) async fn run_prompt_refine_job(
             ProgressStage::Completed,
             1.0,
             done_message,
-            Some(refine_result(&original_prompt, &refined)),
+            Some(refine_result(
+                &original_prompt,
+                &refined,
+                output.thinking.as_deref(),
+                &model,
+                backend,
+                thinking_mode_name,
+            )),
             backend,
         ),
     )
@@ -1577,16 +1650,236 @@ fn refine_progress(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn refine_result(original_prompt: &str, refined_prompt: &str) -> JsonObject {
+fn refine_result(
+    original_prompt: &str,
+    refined_prompt: &str,
+    thinking: Option<&str>,
+    model: &str,
+    backend: &str,
+    thinking_mode: &str,
+) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
     result.insert("refinedPrompt".to_owned(), json!(refined_prompt));
+    if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
+        result.insert("thinking".to_owned(), json!(thinking));
+    }
+    result.insert(
+        "executionIdentity".to_owned(),
+        json!({
+            "provider": "native",
+            "model": model,
+            "backend": backend,
+            "thinkingMode": thinking_mode,
+        }),
+    );
+    result
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn finish_reason_name(reason: Option<gen_core::core_llm::FinishReason>) -> &'static str {
+    use gen_core::core_llm::FinishReason;
+
+    match reason {
+        Some(FinishReason::Stop) => "stop",
+        Some(FinishReason::Length) => "length",
+        Some(FinishReason::Cancelled) => "cancelled",
+        Some(FinishReason::ContentFilter) => "content_filter",
+        None => "unknown",
+    }
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn empty_refine_failure_detail(
+    task: RefineTask,
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    generated_tokens: u32,
+    max_new_tokens: u32,
+) -> String {
+    if task == RefineTask::FilmPlan
+        && finish_reason == Some(gen_core::core_llm::FinishReason::Length)
+    {
+        return format!(
+            "The prompt-refinement model exhausted its {max_new_tokens}-token output budget before \
+             producing a final answer (generated {generated_tokens} tokens). Select Thinking \
+             disabled and try again, or continue with manual plan editing."
+        );
+    }
+    "The prompt-refinement model returned an empty prompt.".to_owned()
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn refine_failure_result(
+    thinking: Option<&str>,
+    model: &str,
+    backend: &str,
+    thinking_mode: &str,
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
+) -> JsonObject {
+    let mut result = JsonObject::new();
+    if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
+        result.insert("thinking".to_owned(), json!(thinking));
+    }
+    result.insert(
+        "generation".to_owned(),
+        json!({
+            "finishReason": finish_reason_name(finish_reason),
+            "usage": {
+                "promptTokens": usage.prompt_tokens,
+                "generatedTokens": usage.generated_tokens,
+            },
+            "maxNewTokens": max_new_tokens,
+        }),
+    );
+    result.insert(
+        "executionIdentity".to_owned(),
+        json!({
+            "provider": "native",
+            "model": model,
+            "backend": backend,
+            "thinkingMode": thinking_mode,
+        }),
+    );
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
+        let result = refine_result(
+            "brief",
+            "{\"shots\":[]}",
+            Some("private reasoning"),
+            "Qwen/Qwen3.6-27B",
+            "mlx",
+            "enabled",
+        );
+        assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
+        assert_eq!(result["thinking"], "private reasoning");
+        assert_eq!(result["executionIdentity"]["provider"], "native");
+        assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+        assert_eq!(result["executionIdentity"]["backend"], "mlx");
+        assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
+        assert!(!result["refinedPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("private reasoning"));
+    }
+
+    #[test]
+    fn empty_length_result_preserves_reasoning_usage_and_actionable_failure() {
+        use gen_core::core_llm::{FinishReason, Usage};
+
+        let result = refine_failure_result(
+            Some("private bounded reasoning"),
+            "Qwen/Qwen3.6-27B",
+            "mlx",
+            "enabled",
+            Some(FinishReason::Length),
+            Usage {
+                prompt_tokens: 2_048,
+                generated_tokens: 4_096,
+            },
+            4_096,
+        );
+        assert_eq!(result["thinking"], "private bounded reasoning");
+        assert_eq!(result["generation"]["finishReason"], "length");
+        assert_eq!(result["generation"]["usage"]["promptTokens"], 2_048);
+        assert_eq!(result["generation"]["usage"]["generatedTokens"], 4_096);
+        assert_eq!(result["generation"]["maxNewTokens"], 4_096);
+        assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+        assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
+        assert!(result.get("refinedPrompt").is_none());
+
+        let detail = empty_refine_failure_detail(
+            RefineTask::FilmPlan,
+            Some(FinishReason::Length),
+            4_096,
+            4_096,
+        );
+        assert!(detail.contains("exhausted its 4096-token output budget"));
+        assert!(detail.contains("generated 4096 tokens"));
+        assert!(detail.contains("Select Thinking disabled"));
+        assert!(detail.contains("manual plan editing"));
+    }
+
+    #[test]
+    fn empty_non_length_result_keeps_the_established_generic_failure() {
+        use gen_core::core_llm::FinishReason;
+
+        assert_eq!(
+            empty_refine_failure_detail(RefineTask::FilmPlan, Some(FinishReason::Stop), 12, 4_096,),
+            "The prompt-refinement model returned an empty prompt."
+        );
+        assert_eq!(
+            empty_refine_failure_detail(RefineTask::FilmPlan, None, 0, 4_096),
+            "The prompt-refinement model returned an empty prompt."
+        );
+        assert_eq!(
+            empty_refine_failure_detail(
+                RefineTask::ImageCaption,
+                Some(FinishReason::Length),
+                4_096,
+                4_096,
+            ),
+            "The prompt-refinement model returned an empty prompt."
+        );
+    }
+
+    #[test]
+    fn json_decode_constraint_yields_only_to_a_reasoning_capable_thinking_run() {
+        use gen_core::core_llm::{Constraint, ThinkingMode};
+
+        for mode in [ThinkingMode::Enabled, ThinkingMode::Auto] {
+            assert_eq!(
+                json_decode_constraint(true, true, mode),
+                None,
+                "a live thinking channel must be able to close before the JSON answer"
+            );
+        }
+        assert_eq!(
+            json_decode_constraint(true, true, ThinkingMode::Disabled),
+            Some(Constraint::Json),
+            "Qwen no-think generation remains JSON constrained"
+        );
+        for mode in [
+            ThinkingMode::Enabled,
+            ThinkingMode::Auto,
+            ThinkingMode::Disabled,
+        ] {
+            assert_eq!(
+                json_decode_constraint(true, false, mode),
+                Some(Constraint::Json),
+                "a non-reasoning refiner such as Anubis keeps constrained JSON"
+            );
+            assert_eq!(
+                json_decode_constraint(false, true, mode),
+                None,
+                "prose tasks remain unconstrained"
+            );
+        }
+    }
 
     #[test]
     fn downscale_to_pixel_budget_caps_large_and_keeps_small() {

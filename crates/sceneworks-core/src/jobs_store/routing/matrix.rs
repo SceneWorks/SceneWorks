@@ -16,6 +16,7 @@ use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
     WorkerSnapshot, WorkerStatus,
 };
+use crate::film_workspace::{QWEN36_FILM_PLANNER_MODEL_ID, QWEN36_FILM_PLANNER_REPO};
 use crate::jsonc::strip_jsonc_comments;
 
 use super::catalog::VIDEO_UI_MODES;
@@ -2515,6 +2516,22 @@ fn utility_model_cells(
             .collect();
     }
     let engine_request = match model.id.as_str() {
+        QWEN36_FILM_PLANNER_MODEL_ID => {
+            // The optional film planner uses the production prompt-refine TextLlm seam. `model`
+            // is the planner checkpoint; `modelId` is the target video model shaping the plan.
+            Some((
+                "prompt_refine:film_plan",
+                JobType::PromptRefine,
+                json!({
+                    "prompt": "probe",
+                    "task": "film_plan",
+                    "workflow": "video",
+                    "model": QWEN36_FILM_PLANNER_REPO,
+                    "modelId": "minimax_h3",
+                    "thinkingMode": "disabled",
+                }),
+            ))
+        }
         "real_esrgan" => Some((
             "engine:real-esrgan",
             JobType::ImageUpscale,
@@ -4970,6 +4987,7 @@ mod tests {
 
         assert_both("controlnet_tile_sdxl", "image_detail");
         assert_both("vision_caption_qwen3vl_8b", "image_caption");
+        assert_both(QWEN36_FILM_PLANNER_MODEL_ID, "prompt_refine:film_plan");
         let vision = matrix
             .models
             .iter()

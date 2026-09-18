@@ -3,18 +3,22 @@
 //! Same fixtures and fake worker as `film_harness.rs`; the real routes in-process throughout.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
 use serde_json::{json, Value};
 
 use crate::film_harness::review::{self, Decision};
-use crate::film_harness::{self, EditOptions, HarnessError, RunOptions, TimelineEdit};
+use crate::film_harness::{
+    self, ControllerLease, EditOptions, HarnessError, ResumeOptions, RunControl, RunOptions,
+    TimelineEdit,
+};
 use crate::film_planner;
 use crate::tests::film_harness::{
     close, draft_text, fast, findings_of, full_draft, harness_record, items_of, planner_llm,
-    planner_options, saved_timeline, set_plan_replies, summary, Harness, VideoBehavior,
-    BRIEF_FIXTURE, FAKE_REFINE_PEAK_BYTES, FIXTURE_DIR,
+    planner_options, saved_timeline, set_plan_replies, summary, Harness, RunningHook,
+    VideoBehavior, BRIEF_FIXTURE, FAKE_REFINE_PEAK_BYTES, FIXTURE_DIR,
 };
 use crate::tests::support::request;
 
@@ -636,6 +640,245 @@ async fn the_run_record_carries_the_audio_layers_the_export_dropped() {
     assert_eq!(on_disk["export"]["status"], "completed");
 }
 
+#[tokio::test]
+async fn an_explicit_export_records_the_exact_job_and_never_redispatches_while_running() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    run_options.export = false;
+    let record = film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("shot run assembles without exporting");
+    assert!(record.timeline.is_some());
+    assert!(
+        record.export.is_none(),
+        "shot rendering never exports implicitly"
+    );
+
+    let mut options = ResumeOptions::new(harness.out_dir());
+    options.poll_interval = Duration::from_millis(25);
+    let (running, task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("explicit export starts");
+    assert_eq!(running.export.as_ref().unwrap().job_id, task.job_id);
+    assert_eq!(running.export.as_ref().unwrap().status, "running");
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        1
+    );
+
+    let (adopted, same_task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("second controller adopts the running export");
+    assert_eq!(same_task.job_id, task.job_id);
+    assert_eq!(adopted.export.as_ref().unwrap().job_id, task.job_id);
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        1,
+        "adoption must not create a second job"
+    );
+
+    let completed = film_harness::finish_explicit_export(&harness.transport, &options, &task)
+        .await
+        .expect("explicit export settles");
+    let export = completed.export.as_ref().unwrap();
+    assert_eq!(export.status, "completed");
+    assert!(export.asset_id.is_some());
+    assert!(!export.stale);
+}
+
+#[tokio::test]
+async fn a_canceled_incremental_run_can_export_its_saved_cut_without_rendering_more_shots() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 40.0,
+                },
+            ),
+            ("SH020", VideoBehavior::Hang),
+        ],
+    )
+    .await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|plan| {
+            plan["limits"] = json!({
+                "maxRunSeconds": 600, "maxShotSeconds": 600,
+                "maxAttemptsPerShot": 2, "maxMemoryGb": 96
+            });
+        }),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    run_options.export = false;
+    let control = RunControl::watching(&harness.out_dir());
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::WriteCancelSentinel(harness.out_dir()),
+    ));
+    let canceled = film_harness::run_with_control(&harness.transport, &run_options, &control)
+        .await
+        .expect("the canceled run keeps its record");
+    assert_eq!(
+        canceled.outcome,
+        RunOutcome::Canceled,
+        "{}",
+        summary(&canceled)
+    );
+    assert!(
+        canceled.timeline.is_some(),
+        "SH010 produced an incremental cut"
+    );
+    let video_jobs = harness.api_video_job_count().await;
+
+    let _lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export")
+        .expect("the separately authorized export acquires the run");
+    let mut options = ResumeOptions::new(harness.out_dir());
+    options.poll_interval = Duration::from_millis(25);
+    let (_, task) = film_harness::start_explicit_export(&harness.transport, &options)
+        .await
+        .expect("the saved cut export starts");
+    let exported = film_harness::finish_explicit_export(&harness.transport, &options, &task)
+        .await
+        .expect("the saved cut export settles");
+    assert_eq!(exported.export.as_ref().unwrap().status, "completed");
+    assert_eq!(
+        harness.api_video_job_count().await,
+        video_jobs,
+        "exporting the retained cut must not render another shot"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_export_cancel_is_honored_and_an_explicit_retry_dispatches_exactly_once() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let mut run_options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010"]),
+    );
+    run_options.export = false;
+    film_harness::run(&harness.transport, &run_options)
+        .await
+        .expect("shot run assembles without exporting");
+    harness.script.lock().export_hangs = true;
+
+    let lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export:first")
+        .expect("first export acquires");
+    let mut first_options = ResumeOptions::new(harness.out_dir());
+    first_options.poll_interval = Duration::from_millis(25);
+    let (_, first_task) = film_harness::start_explicit_export(&harness.transport, &first_options)
+        .await
+        .expect("first export starts");
+    film_harness::request_cancel(&harness.out_dir())
+        .expect("a fresh cancel reaches the active export");
+    let canceled =
+        film_harness::finish_explicit_export(&harness.transport, &first_options, &first_task)
+            .await
+            .expect("freshly canceled export settles");
+    assert_eq!(
+        canceled.export.as_ref().unwrap().status,
+        "canceled_by_operator",
+        "a cancel arriving after the new action begins remains effective"
+    );
+    drop(lease);
+
+    harness.script.lock().export_hangs = false;
+    let _retry_lease = ControllerLease::acquire_new_action(&harness.out_dir(), "api:export:retry")
+        .expect("retry acquires");
+    let mut retry_options = ResumeOptions::new(harness.out_dir());
+    retry_options.poll_interval = Duration::from_millis(25);
+    let (_, retry_task) = film_harness::start_explicit_export(&harness.transport, &retry_options)
+        .await
+        .expect("retry starts");
+    assert_ne!(retry_task.job_id, first_task.job_id);
+    let retried =
+        film_harness::finish_explicit_export(&harness.transport, &retry_options, &retry_task)
+            .await
+            .expect("retry settles");
+    assert_eq!(retried.export.as_ref().unwrap().status, "completed");
+    assert_eq!(
+        harness
+            .jobs()
+            .await
+            .iter()
+            .filter(|job| job["type"] == "timeline_export")
+            .count(),
+        2,
+        "the retry adds exactly one export job"
+    );
+}
+
+#[tokio::test]
+async fn a_supported_sfx_bed_is_imported_with_provenance_and_placed_on_an_editable_track() {
+    let harness = Harness::start(true, fast(&["SH010"])).await;
+    let plan = harness.edited_plan(|plan| {
+        plan["sound"] = json!({
+            "generatedAudio": "mute",
+            "dialogue": {"gain": 1.0, "muted": false},
+            "sfx": [{
+                "role": "door_close", "gain": 0.65, "muted": false,
+                "startSeconds": 0.5, "sourceInSeconds": 0.1,
+                "fadeInSeconds": 0.05, "fadeOutSeconds": 0.1
+            }]
+        });
+    });
+    let pack = harness.edited_pack(|pack| {
+        pack["sound"] = json!([{
+            "role": "door_close", "kind": "sfx",
+            "file": "sound/door_close.wav", "description": "Door close"
+        }]);
+    });
+    let pack_dir = pack.parent().unwrap();
+    std::fs::create_dir_all(pack_dir.join("sound")).unwrap();
+    std::fs::copy(
+        Path::new(FIXTURE_DIR).join("sound/workshop_room_tone.wav"),
+        pack_dir.join("sound/door_close.wav"),
+    )
+    .unwrap();
+    let mut options = harness.options(plan, pack, Some(&["SH010"]));
+    options.export = false;
+    let record = film_harness::run(&harness.transport, &options)
+        .await
+        .expect("sfx film run completes");
+    assert!(record
+        .sound
+        .iter()
+        .any(|sound| sound.role == "door_close" && sound.kind == "sfx"));
+    let track = record
+        .timeline
+        .as_ref()
+        .unwrap()
+        .tracks
+        .iter()
+        .find(|track| track.role == "sfx")
+        .expect("sfx track");
+    assert_eq!(track.track_id, "track_sfx_0");
+    assert_eq!(track.gain, 0.65);
+    assert_eq!(track.items.len(), 1);
+    assert_eq!(track.items[0].timeline_start, 0.5);
+    assert!(
+        record.export.is_none(),
+        "audio placement never implicitly exports"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // [minor] E2 — an edit persists like every other controller and leaves the run's stop alone
 // ---------------------------------------------------------------------------------------------
@@ -1023,7 +1266,30 @@ async fn plan_refuses_to_overwrite_a_differing_plan_json_unless_forced() {
         .await
         .expect_err("a differing plan.json is refused");
     let message = format!("{error}");
-    assert!(matches!(error, HarnessError::Io(_)), "{error}");
+    let HarnessError::PlannerExecutionFailure { source, executions } = error else {
+        panic!("the refused write must retain the spent planner receipt: {message}");
+    };
+    assert!(matches!(*source, HarnessError::Io(_)), "{source}");
+    assert_eq!(message, source.to_string());
+    assert_eq!(executions.len(), 1);
+    let execution = &executions[0];
+    let plan_job_ids: Vec<String> = harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .filter(|(kind, _, payload)| kind == "prompt_refine" && payload["task"] == "film_plan")
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    assert_eq!(plan_job_ids.len(), 3);
+    assert_eq!(execution.job_id.as_ref(), plan_job_ids.last());
+    assert_eq!(execution.provider, "native");
+    assert_eq!(execution.model, "fixture/model-keyed-refiner");
+    assert_eq!(execution.request_timeout_seconds, Some(30));
+    assert!(execution
+        .duration_seconds
+        .is_some_and(|seconds| seconds >= 0.0));
+    assert_eq!(execution.failure_code, None);
     assert!(
         message.contains("already exists and differs") && message.contains("--force"),
         "{message}"
@@ -2240,4 +2506,104 @@ async fn the_reference_plan_resolves_every_shot_to_the_reference_partition_and_c
             .map(|request| (request.shot_id.clone(), request.model.clone()))
             .collect::<Vec<_>>()
     );
+}
+
+/// Controlled completion through real routes: an operator edits/deletes A while B still renders.
+/// Delivery B must preserve that cut, and replaying A must respect the stored deletion.
+#[tokio::test]
+async fn incremental_film_delivery_preserves_concurrent_cut_and_tombstones() {
+    let harness = Harness::start(
+        true,
+        vec![
+            (
+                "SH010",
+                VideoBehavior::Complete {
+                    delay_secs: 0,
+                    peak_pct: 20.0,
+                },
+            ),
+            (
+                "SH020",
+                VideoBehavior::Complete {
+                    delay_secs: 2,
+                    peak_pct: 20.0,
+                },
+            ),
+        ],
+    )
+    .await;
+    let mut options = harness.options(
+        harness.edited_plan(|_| {}),
+        harness.fixture_pack_without_sound(),
+        Some(&["SH010", "SH020"]),
+    );
+    options.export = false;
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    harness.script.lock().running_hook = Some((
+        "SH020".to_owned(),
+        RunningHook::Notify(second_started.clone()),
+    ));
+    // Register the waiter before the run can reach the hook, so the lifecycle edge cannot be lost.
+    // Keep polling the controller until that edge; if it exits first, report its real result rather
+    // than timing out while polling shared fixture state. Once the worker reports SH020 running,
+    // leave the controller future unpolled while the editor's concurrent save lands.
+    let second_started = second_started.notified();
+    let run = film_harness::run(&harness.transport, &options);
+    tokio::pin!(second_started);
+    tokio::pin!(run);
+    tokio::select! {
+        () = &mut second_started => {},
+        result = &mut run => panic!("incremental run ended before SH020 started: {result:?}"),
+    }
+
+    let record = harness.run_record();
+    let project_id = record["projectId"].as_str().unwrap();
+    let timeline_id = record["timeline"]["timelineId"]
+        .as_str()
+        .expect("first shot delivered before second starts");
+    let original = saved_timeline(&harness.app, project_id, timeline_id).await;
+    assert_eq!(picture_order(&original), vec!["SH010"]);
+    let mut deleted = original.clone();
+    deleted["tracks"][0]["items"] = json!([]);
+    deleted["tracks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t["kind"] == "audio")
+        .unwrap()["gain"] = json!(0.35);
+    let (status, saved) = request(
+        harness.app.clone(),
+        "PUT",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}"),
+        json!({"timeline":deleted,"expectedRevision":original["revision"]}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+    assert!(
+        !saved["filmAssembly"]["runs"][record["runId"].as_str().unwrap()]["deletedShots"]["SH010"]
+            .is_null()
+    );
+
+    let record = run.await.expect("incremental run completes");
+    let project_id = record.project_id.as_deref().unwrap();
+    let timeline_id = &record.timeline.as_ref().unwrap().timeline_id;
+    let saved = saved_timeline(&harness.app, project_id, timeline_id).await;
+    assert_eq!(picture_order(&saved), vec!["SH020"]);
+    assert_eq!(
+        saved["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["kind"] == "audio")
+            .unwrap()["gain"],
+        0.35
+    );
+    assert!(record.export.is_none());
+    assert!(!harness
+        .script
+        .lock()
+        .claimed
+        .iter()
+        .any(|(kind, _, _)| kind == "timeline_export"));
+    assert_eq!(record.timeline.as_ref().unwrap().items.len(), 1);
 }
