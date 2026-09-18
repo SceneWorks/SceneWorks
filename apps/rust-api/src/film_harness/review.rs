@@ -118,18 +118,20 @@ pub struct VisionAnswer {
 }
 
 /// What one `ask` came back with: an answer, or the fact that none arrived inside the review's
-/// `limits.maxAnswerSeconds` (sc-22715). A timeout is NOT an error and NOT a value: the reviewer
+/// startup, answer, or overall review deadline. A timeout is NOT an error and NOT a value: the reviewer
 /// records that question `unobserved` with the timeout as its note and moves on, because "the
 /// model did not answer in time" and "the model saw nothing" must both read as nothing seen,
 /// never as agreement — and one slow answer must not throw away a take's other evidence.
 #[derive(Debug, Clone)]
 pub enum VisionOutcome {
     Answered(VisionAnswer),
-    /// The backend was asked and cancelled after `after_seconds` with no answer. `detail` names
+    /// Cancellation was requested after `after_seconds` with no answer. `detail` names
     /// the job and its last status, for the note.
     TimedOut {
         after_seconds: f64,
         detail: String,
+        limit_name: &'static str,
+        limit_seconds: u64,
     },
 }
 
@@ -160,6 +162,7 @@ pub trait ReviewVision: Send + Sync {
         asset_id: &'a str,
         question: &'a str,
         limits: ReviewLimits,
+        review_deadline: Instant,
     ) -> VisionFuture<'a, VisionOutcome>;
 }
 
@@ -330,10 +333,23 @@ impl ReviewVision for VqaVision<'_> {
         asset_id: &'a str,
         question: &'a str,
         limits: ReviewLimits,
+        review_deadline: Instant,
     ) -> VisionFuture<'a, VisionOutcome> {
         Box::pin(async move {
             let started = Instant::now();
-            let max_seconds = limits.max_answer_seconds;
+            if self.control.is_canceled() {
+                return Err(HarnessError::Canceled(
+                    "Visual review canceled before dispatch".to_owned(),
+                ));
+            }
+            if started >= review_deadline {
+                return Ok(VisionOutcome::TimedOut {
+                    after_seconds: 0.0,
+                    detail: "review limit reached before VQA dispatch".to_owned(),
+                    limit_name: "maxSeconds",
+                    limit_seconds: limits.max_seconds,
+                });
+            }
             let client = self.client();
             let created = client
                 .expect_ok(
@@ -356,17 +372,54 @@ impl ReviewVision for VqaVision<'_> {
                     HarnessError::Transport(format!("vqa job response has no id: {created}"))
                 })?
                 .to_owned();
-            let deadline = started + Duration::from_secs(max_seconds);
-            let (view, poll_stop) = client
-                .wait_for_job(&job_id, poll_bounds(deadline, self.poll_interval))
-                .await?;
-            // `limits.maxAnswerSeconds` ran out: the job was cancelled through the API and this
-            // question has no answer. Reported as a timeout, never as an error (sc-22715).
+            let startup_deadline =
+                (started + Duration::from_secs(limits.startup_seconds())).min(review_deadline);
+            let mut wait_bounds = poll_bounds(startup_deadline, self.poll_interval);
+            let mut limit_name = "maxStartupSeconds";
+            let mut limit_seconds = limits.startup_seconds();
+            loop {
+                let view = client.get_job(&job_id).await?;
+                let now = Instant::now();
+                if self.control.is_canceled() || now >= startup_deadline {
+                    break;
+                }
+                // Older workers and the scripted worker use running/generating directly.
+                // New workers keep loading_model until the runtime has actually loaded.
+                if view.is_terminal()
+                    || matches!(view.stage.as_str(), "generating" | "running")
+                    || (view.stage.is_empty() && view.status == "running")
+                {
+                    limit_name = "maxAnswerSeconds";
+                    limit_seconds = limits.max_answer_seconds;
+                    wait_bounds = poll_bounds(
+                        (now + Duration::from_secs(limits.max_answer_seconds)).min(review_deadline),
+                        self.poll_interval,
+                    );
+                    break;
+                }
+                tokio::time::sleep(
+                    self.poll_interval
+                        .min(startup_deadline.saturating_duration_since(now)),
+                )
+                .await;
+            }
+            let deadline = wait_bounds.shot_deadline;
+            let (view, poll_stop) = client.wait_for_job(&job_id, wait_bounds).await?;
+            if matches!(poll_stop, PollStop::Operator) {
+                return Err(HarnessError::Canceled("Visual review canceled".to_owned()));
+            }
+            // Preserve which declared budget expired, including when the overall ceiling wins.
             if matches!(poll_stop, PollStop::ShotBudget | PollStop::RunBudget) {
+                if deadline == review_deadline {
+                    limit_name = "maxSeconds";
+                    limit_seconds = limits.max_seconds;
+                }
                 return Ok(VisionOutcome::TimedOut {
+                    limit_name,
+                    limit_seconds,
                     after_seconds: started.elapsed().as_secs_f64(),
                     detail: format!(
-                        "vqa job {job_id} was still {} and was cancelled",
+                        "cancellation requested for vqa job {job_id}; last observed status: {}",
                         view.status
                     ),
                 });
@@ -475,6 +528,7 @@ impl ReviewVision for ScriptedVision {
         _asset_id: &'a str,
         question: &'a str,
         _limits: ReviewLimits,
+        _review_deadline: Instant,
     ) -> VisionFuture<'a, VisionOutcome> {
         let (question_id, frame_id) = Self::key_of(question);
         let answer = self
@@ -508,8 +562,33 @@ fn poll_bounds(deadline: Instant, poll_interval: Duration) -> PollBounds {
 
 /// Prefix the reviewer stamps onto every question so a scripted backend can route on it and a
 /// person reading the record can tell which question an answer belongs to.
-fn tagged_question(question_id: &str, frame_id: &str, ask: &str) -> String {
-    format!("[{question_id}@{frame_id}] {ask}")
+fn tagged_question(question: &ReviewQuestion, frame_id: &str) -> String {
+    format!(
+        "[{}@{frame_id}] Intended state (a target, not evidence): {}\n\
+         Inspect the supplied image to answer this question: {}\n\
+         Judge only what is visible. If the image cannot establish the answer, say 'I cannot tell'.",
+        question.id, question.intended, question.ask
+    )
+}
+
+fn grounded_question(question: &ReviewQuestion, shot_id: &str, end_state: &str) -> ReviewQuestion {
+    let mut question = question.clone();
+    if question.id == format!("{shot_id}_action")
+        && question.ask
+            == "Does the final frame show the authored action completed? Answer yes or no."
+    {
+        if matches!(
+            question.intended.trim(),
+            "Closing state" | "Intended end state" | ""
+        ) {
+            question.intended = end_state.to_owned();
+        }
+        question.ask = format!(
+            "Does this frame show the following end state: {}? Answer yes or no, or say 'I cannot tell' if it cannot be established visually.",
+            question.intended
+        );
+    }
+    question
 }
 
 async fn import_frame_asset(
@@ -1051,7 +1130,7 @@ async fn review_one(
     options: &ReviewOptions,
 ) -> Result<ObservedState, HarnessError> {
     let started = Instant::now();
-    let limits = review_plan.limits;
+    let limits = review_plan.limits.with_startup_default();
     let deadline = started + Duration::from_secs(limits.max_seconds);
     let shot = context
         .record
@@ -1201,12 +1280,17 @@ async fn review_one(
         frames.push(evidence.clone());
     }
 
-    let questions = &review_plan.shots[shot_id].questions;
+    // Resolve legacy placeholders against the rendered shot; preserve authored review intent.
+    let questions: Vec<_> = review_plan.shots[shot_id]
+        .questions
+        .iter()
+        .map(|question| grounded_question(question, shot_id, &shot.intended.end_state))
+        .collect();
     let answered = answer_questions(
         vision,
         project_id,
         shot_id,
-        questions,
+        &questions,
         &frame_refs,
         adjacent_frame.as_ref().map(|(_, reference)| reference),
         limits,
@@ -1282,20 +1366,31 @@ async fn ask_one(
     question: &ReviewQuestion,
     frame: &FrameRef,
     limits: ReviewLimits,
+    review_deadline: Instant,
     real_model_inference: &mut bool,
 ) -> Result<Asked, HarnessError> {
     let asset_id = vision.prepare_frame(project_id, frame).await?;
-    let text = tagged_question(&question.id, &frame.id, &question.ask);
-    let answer = match vision.ask(project_id, &asset_id, &text, limits).await? {
+    let text = tagged_question(question, &frame.id);
+    let answer = match vision
+        .ask(project_id, &asset_id, &text, limits, review_deadline)
+        .await?
+    {
         VisionOutcome::Answered(answer) => answer,
         VisionOutcome::TimedOut {
             after_seconds,
             detail,
+            limit_name,
+            limit_seconds,
         } => {
+            let phase = match limit_name {
+                "maxStartupSeconds" => "startup",
+                "maxSeconds" => "review",
+                _ => "answer",
+            };
             return Ok(Asked::TimedOut(format!(
-                "answer_timeout: limits.maxAnswerSeconds is {}s and frame {} got no answer in \
+                "{phase}_timeout: limits.{limit_name} is {limit_seconds}s and frame {} got no answer in \
                  {after_seconds:.1}s ({detail}); nothing was read, so nothing is recorded as seen",
-                limits.max_answer_seconds, frame.id
+                frame.id
             )));
         }
     };
@@ -1383,6 +1478,7 @@ async fn answer_questions(
                 question,
                 frame,
                 limits,
+                deadline,
                 &mut real_model_inference,
             )
             .await?
@@ -1402,6 +1498,7 @@ async fn answer_questions(
                     question,
                     reference,
                     limits,
+                    deadline,
                     &mut real_model_inference,
                 )
                 .await?
@@ -1437,6 +1534,9 @@ async fn answer_questions(
             mismatches.push(flag);
         }
         observations.push(observation);
+    }
+    if Instant::now() >= deadline || control.is_canceled() {
+        stop.get_or_insert_with(|| review_stop_reason(control, limits));
     }
     Ok(Answered {
         observations,
@@ -2213,7 +2313,7 @@ pub async fn review_eval(
                 backend.real_model_inference &= real_model_inference;
                 backend
             },
-            limits: review_plan.limits,
+            limits: review_plan.limits.with_startup_default(),
             adjacent: None,
             frames,
             observations,
@@ -2464,4 +2564,238 @@ pub fn format_shot_reviews(shot: &ShotRunRecord) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod grounded_question_tests {
+    use super::*;
+
+    fn default_question() -> ReviewQuestion {
+        serde_json::from_value(serde_json::json!({
+            "id": "SH010_action", "topic": "action_completion", "intended": "Closing state",
+            "ask": "Does the final frame show the authored action completed? Answer yes or no.",
+            "expect": ["yes"], "contradict": ["no"], "frames": "last", "mustObserve": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn default_check_uses_rendered_end_state_in_prompt_and_observation() {
+        let original = default_question();
+        let question = grounded_question(
+            &original,
+            "SH010",
+            "Mara's hand rests on the closed red box.",
+        );
+        let prompt = tagged_question(&question, "SH010-a1-f3");
+        assert!(prompt.starts_with("[SH010_action@SH010-a1-f3]"));
+        assert!(prompt.contains("Mara's hand rests on the closed red box."));
+        assert!(question.ask.contains(&question.intended));
+        assert!(prompt.contains("not evidence"));
+        assert!(prompt.contains("I cannot tell"));
+        assert!(!prompt.contains("Closing state"));
+        assert_eq!(original.intended, "Closing state");
+    }
+
+    #[test]
+    fn authored_question_and_intent_are_preserved_and_both_sent() {
+        let mut original = default_question();
+        original.ask = "Is the box red?".to_owned();
+        original.intended = "The box is red.".to_owned();
+        let question = grounded_question(&original, "SH010", "A different end state");
+        assert_eq!(question, original);
+        let prompt = tagged_question(&question, "f1");
+        assert!(prompt.contains(&original.ask));
+        assert!(prompt.contains(&original.intended));
+    }
+
+    #[test]
+    fn default_question_preserves_a_concrete_authored_review_target() {
+        let mut original = default_question();
+        original.intended = "The box is blue.".to_owned();
+        let question = grounded_question(&original, "SH010", "Mara leaves the workshop.");
+        assert_eq!(question.intended, original.intended);
+        assert!(question.ask.contains("The box is blue."));
+    }
+}
+
+#[cfg(test)]
+mod startup_budget_tests {
+    use super::*;
+    use crate::film_harness::{ApiResponse, BytesTransportFuture, TransportFuture};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct PhasedJob {
+        started: Instant,
+        loading_seconds: u64,
+        answer_seconds: u64,
+        canceled: AtomicBool,
+    }
+
+    impl PhasedJob {
+        fn new(loading_seconds: u64, answer_seconds: u64) -> Self {
+            Self {
+                started: Instant::now(),
+                loading_seconds,
+                answer_seconds,
+                canceled: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl ApiTransport for PhasedJob {
+        fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+            Box::pin(async move {
+                let body = match (request.method, request.path.as_str()) {
+                    ("POST", "/api/v1/image/vqa/jobs") => json!({"id": "vqa"}),
+                    ("POST", "/api/v1/jobs/vqa/cancel") => {
+                        self.canceled.store(true, Ordering::SeqCst);
+                        json!({})
+                    }
+                    ("GET", "/api/v1/jobs/vqa") => {
+                        let elapsed = self.started.elapsed().as_secs();
+                        if self.canceled.load(Ordering::SeqCst) {
+                            json!({"status": "canceled", "stage": "canceled"})
+                        } else if elapsed < self.loading_seconds {
+                            json!({"status": "preparing", "stage": "loading_model"})
+                        } else if elapsed < self.loading_seconds + self.answer_seconds {
+                            json!({"status": "running", "stage": "generating"})
+                        } else {
+                            json!({"status": "completed", "stage": "completed", "result": {"answer": "Yes.", "realModelInference": false}})
+                        }
+                    }
+                    _ => panic!("unexpected request {} {}", request.method, request.path),
+                };
+                Ok(ApiResponse { status: 200, body })
+            })
+        }
+        fn get_bytes(&self, _path: String) -> BytesTransportFuture<'_> {
+            Box::pin(async { panic!("no frame downloads in timing tests") })
+        }
+    }
+
+    fn limits() -> ReviewLimits {
+        serde_json::from_value(json!({"maxSeconds": 180, "maxStartupSeconds": 120,
+            "maxAnswerSeconds": 30, "maxFramesPerShot": 3, "maxQuestionsPerShot": 8}))
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_66_second_cold_load_does_not_consume_the_answer_budget() {
+        let job = PhasedJob::new(66, 5);
+        let vision = VqaVision::new(&job, Duration::from_secs(1), RunControl::new());
+        let result = vision
+            .ask(
+                "project",
+                "frame",
+                "question",
+                limits(),
+                Instant::now() + Duration::from_secs(180),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, VisionOutcome::Answered(_)));
+        assert!(!job.canceled.load(Ordering::SeqCst));
+        assert_eq!(job.started.elapsed().as_secs(), 71);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_is_bounded_and_canceled_when_it_exceeds_its_own_limit() {
+        let job = PhasedJob::new(121, 1);
+        let vision = VqaVision::new(&job, Duration::from_secs(1), RunControl::new());
+        let result = vision
+            .ask(
+                "project",
+                "frame",
+                "question",
+                limits(),
+                Instant::now() + Duration::from_secs(180),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            VisionOutcome::TimedOut {
+                limit_name: "maxStartupSeconds",
+                ..
+            }
+        ));
+        assert!(job.canceled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_answer_does_not_borrow_unused_startup_time() {
+        let job = PhasedJob::new(2, 60);
+        let vision = VqaVision::new(&job, Duration::from_secs(1), RunControl::new());
+        let result = vision
+            .ask(
+                "project",
+                "frame",
+                "question",
+                limits(),
+                Instant::now() + Duration::from_secs(180),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            VisionOutcome::TimedOut {
+                limit_name: "maxAnswerSeconds",
+                ..
+            }
+        ));
+        assert!(job.canceled.load(Ordering::SeqCst));
+        assert!(job.started.elapsed() < Duration::from_secs(40));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_overall_review_deadline_caps_startup_and_answer() {
+        for (loading, answer, ceiling) in [(66, 5, 50), (20, 60, 25)] {
+            let job = PhasedJob::new(loading, answer);
+            let vision = VqaVision::new(&job, Duration::from_secs(1), RunControl::new());
+            let result = vision
+                .ask(
+                    "project",
+                    "frame",
+                    "question",
+                    limits(),
+                    Instant::now() + Duration::from_secs(ceiling),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                result,
+                VisionOutcome::TimedOut {
+                    limit_name: "maxSeconds",
+                    ..
+                }
+            ));
+            assert!(job.canceled.load(Ordering::SeqCst));
+            assert!(job.started.elapsed() < Duration::from_secs(ceiling + 5));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_loading_does_not_wait_out_the_startup_budget() {
+        let job = PhasedJob::new(66, 5);
+        let control = RunControl::new();
+        let cancel = control.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            cancel.cancel();
+        });
+        let vision = VqaVision::new(&job, Duration::from_secs(1), control);
+        assert!(vision
+            .ask(
+                "project",
+                "frame",
+                "question",
+                limits(),
+                Instant::now() + Duration::from_secs(180)
+            )
+            .await
+            .is_err());
+        assert!(job.canceled.load(Ordering::SeqCst));
+        assert!(job.started.elapsed() < Duration::from_secs(10));
+    }
 }

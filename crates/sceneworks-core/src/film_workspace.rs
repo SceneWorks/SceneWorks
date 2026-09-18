@@ -335,10 +335,11 @@ fn default_review_plan(draft_id: &str, shots: &[Shot]) -> Value {
                 "description": "Advisory review questions for generated takes",
                 "sampling": { "positions": [0.1, 0.5, 0.9] },
                 "limits": {
-                    "maxSeconds": 120,
+                    "maxSeconds": 180,
                     "maxFramesPerShot": 3,
                     "maxQuestionsPerShot": 8,
                     "maxAnswerSeconds": 30,
+                    "maxStartupSeconds": 120,
                     "maxNewTokens": 192,
                     "maxMemoryGb": 16.0
                 },

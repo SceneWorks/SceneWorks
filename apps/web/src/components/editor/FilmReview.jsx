@@ -12,6 +12,41 @@ import {
 
 const TOPICS = ["identity", "object_state", "action_completion", "spatial_continuity", "cut_continuity"];
 const FRAME_SCOPES = ["first", "last", "all", "any"];
+const DEFAULT_ACTION_QUESTION = "Does the final frame show the authored action completed? Answer yes or no.";
+
+function ReviewFindings({ review }) {
+  const observations = review.observations ?? [];
+  return <section aria-label={`${review.shotId} assistive findings`} className="ve-film-review-findings">
+    <strong>Review of attempt {review.attempt}</strong>
+    {review.stop ? <p>Review stopped early: {review.stop}</p> : null}
+    {observations.length ? <ul>{observations.map((observation) => {
+      const timedOut = /^(answer|startup|review)_timeout:/.test(observation.note ?? "");
+      const startupTimedOut = observation.note?.startsWith("startup_timeout:");
+      const reviewTimedOut = observation.note?.startsWith("review_timeout:");
+      const answerLimit = timedOut ? observation.note.match(/max(?:Answer|Startup)?Seconds is (\d+)s/)?.[1] : null;
+      const label = timedOut ? (startupTimedOut ? "Model startup timed out" : reviewTimedOut ? "Review time limit reached" : "Analysis timed out") : ({ match: "Matches the intended state", mismatch: "Possible mismatch", unobserved: "Could not determine" }[observation.verdict] ?? "Could not determine");
+      return <li key={observation.questionId}>
+        <strong>{label}</strong>
+        <p>Expected: {observation.intended}</p>
+        <p>Question: {observation.question}</p>
+        {observation.questionId === `${review.shotId}_action` && observation.question === DEFAULT_ACTION_QUESTION ? <p>This older review did not include the intended state in the model's question. Analyze again to check it with that context.</p> : null}
+        {observation.observed ? <p>Model answer: {observation.observed}</p> : null}
+        {observation.verdict === "mismatch" ? <p>The answer conflicts with the expected state. It does not identify which part is wrong unless the model explains it below.</p> : null}
+        {timedOut ? <>
+          <p>No answer arrived{answerLimit ? ` within the ${answerLimit}-second limit` : " before the time limit"}. {startupTimedOut ? "The model did not finish queuing and loading in time." : reviewTimedOut ? "The overall review budget was exhausted." : "No usable answer was returned."} No conclusion was reached.</p>
+          <p>Retry analysis or increase the relevant limit for a future run.</p>
+          <details><summary>Timeout details</summary><p>{observation.note}</p></details>
+        </> : observation.note ? <p>Reason: {observation.note}</p> : null}
+        {(observation.answers ?? []).map((answer, index) => {
+          const frame = review.frames?.find((item) => item.id === answer.frameId);
+          return <p key={`${answer.frameId}-${index}`}>Frame {answer.frameId}{Number.isFinite(frame?.timestampSeconds) ? ` at ${frame.timestampSeconds.toFixed(2)}s` : ""}: “{answer.answer}”</p>;
+        })}
+        {!observation.observed && !observation.note ? <p>The model did not provide a usable answer to this question.</p> : null}
+      </li>;
+    })}</ul> : review.mismatches?.length ? <ul>{review.mismatches.map((flag) => <li key={`${flag.questionId}-${flag.severity}`}><strong>{flag.severity === "unobserved" ? "Could not determine" : "Possible mismatch"}</strong><p>Expected: {flag.intended}</p><p>Model answer: {flag.observed}</p></li>)}</ul> : <p>No question results were recorded. This does not establish that the take matches the intended state.</p>}
+    <p>Model answers are advisory. Open review frames to check the evidence before changing a take.</p>
+  </section>;
+}
 
 function list(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -22,7 +57,7 @@ function defaultQuestion(shot) {
     id: `${shot.id}_action`,
     topic: "action_completion",
     intended: shot.endState || shot.beat || "Intended end state",
-    ask: "Does the final frame show the authored action completed? Answer yes or no.",
+    ask: DEFAULT_ACTION_QUESTION,
     expect: ["yes"],
     contradict: ["no"],
     frames: "last",
@@ -36,6 +71,11 @@ export function normalizedPlan(draft) {
   const shots = current.shots && typeof current.shots === "object" ? structuredClone(current.shots) : {};
   for (const shot of draft.productionPlan.shots) {
     if (!(shot.id in shots)) shots[shot.id] = { questions: [defaultQuestion(shot)] };
+    for (const question of shots[shot.id].questions ?? []) {
+      if (question.id === `${shot.id}_action` && question.ask === DEFAULT_ACTION_QUESTION && ["Closing state", "Intended end state", ""].includes(question.intended?.trim() ?? "")) {
+        question.intended = shot.endState || shot.beat || "Intended end state";
+      }
+    }
   }
   return {
     schemaVersion: current.schemaVersion ?? 1,
@@ -44,10 +84,11 @@ export function normalizedPlan(draft) {
     description: current.description || "",
     sampling: { positions: current.sampling?.positions ?? [0.1, 0.5, 0.9] },
     limits: {
-      maxSeconds: current.limits?.maxSeconds ?? 120,
+      maxSeconds: current.limits?.maxSeconds ?? 180,
       maxFramesPerShot: current.limits?.maxFramesPerShot ?? 3,
       maxQuestionsPerShot: current.limits?.maxQuestionsPerShot ?? 8,
       maxAnswerSeconds: current.limits?.maxAnswerSeconds ?? 30,
+      maxStartupSeconds: current.limits?.maxStartupSeconds ?? 120,
       maxNewTokens: current.limits?.maxNewTokens ?? 192,
       maxMemoryGb: current.limits?.maxMemoryGb ?? 16,
     },
@@ -145,7 +186,9 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
     setSelectedTimelineId(timelineId);
   }
 
-  const disabledReason = view?.actionDisabledReason || (pending ? "A review action is being saved." : "");
+  const analysisActive = Boolean(view?.run?.controllerActive && view.run.controllerOwner === `api-review:${runId}`);
+  const analysisStatus = "Analyzing selected takes. Take changes are temporarily disabled while analysis runs.";
+  const disabledReason = analysisActive ? analysisStatus : view?.actionDisabledReason || (pending ? "A review action is being saved." : "");
   const assetsById = new Map((view?.takeAssets ?? []).map((asset) => [asset.id, asset]));
   const observationsByShot = new Map();
   for (const observation of view?.observations ?? []) {
@@ -171,7 +214,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
           <label>Frame positions (0–1, comma separated)<input aria-label="Review frame positions" value={plan.sampling.positions.join(", ")} onChange={(event) => changePlan((next) => { next.sampling.positions = list(event.target.value).map(Number); })} /></label>
           {[
             ["maxSeconds", "Maximum seconds", 1], ["maxFramesPerShot", "Maximum frames per shot", 1],
-            ["maxQuestionsPerShot", "Maximum questions per shot", 1], ["maxAnswerSeconds", "Maximum answer seconds", 1],
+            ["maxQuestionsPerShot", "Maximum questions per shot", 1], ["maxStartupSeconds", "Maximum model startup seconds", 1], ["maxAnswerSeconds", "Maximum answer seconds", 1],
             ["maxNewTokens", "Maximum answer tokens", 1], ["maxMemoryGb", "Maximum memory (GB)", 0.1],
           ].map(([field, label, step]) => <label key={field}>{label}<input min={step} step={step} type="number" value={plan.limits[field]} onChange={(event) => changePlan((next) => { next.limits[field] = Number(event.target.value); })} /></label>)}
           <label>Uncertain below<input aria-label="Review uncertainty threshold" max="0.99" min="0" step="0.01" type="number" value={plan.uncertainBelow} onChange={(event) => changePlan((next) => { next.uncertainBelow = Number(event.target.value); })} /></label>
@@ -205,7 +248,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
             <button disabled={!view.run.record?.timeline?.timelineId} onClick={() => openTimeline(view.run.record.timeline.timelineId)} type="button">Open saved cut</button>
             <button disabled={!view.reviewTimelineId} onClick={() => openTimeline(view.reviewTimelineId)} type="button">Open review frames</button>
           </div>
-          {disabledReason ? <p className="ve-film-warning" role="status">Actions unavailable: {disabledReason}</p> : null}
+          {analysisActive ? <p role="status">{analysisStatus}</p> : disabledReason ? <p className="ve-film-warning" role="status">Actions unavailable: {disabledReason}</p> : null}
           {["failed", "rejected"].includes(view.reviewOperation?.status) ? <p role="alert">Assistive review failed: {view.reviewOperation.detail}. Correct the problem and analyze again; existing observations may be partial.</p> : null}
           {view.reviewOperation?.status === "running" && !view.run.controllerActive ? <p role="alert">Assistive review was interrupted. Analyze again to complete it; existing observations may be partial.</p> : null}
           {view.run.actionOperation?.status === "failed" ? <p role="alert">{view.run.actionOperation.action} failed: {view.run.actionOperation.detail}. Correct the problem and retry the action.</p> : null}
@@ -247,7 +290,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
                   <button disabled={repairDisabled} onClick={() => mutate(() => replaceFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Replacement requested.", token), `${shot.shotId} replacement requested; checking availability.`)} title={repairTitle} type="button">Render one replacement</button>
                   <button disabled={repairDisabled} onClick={() => mutate(() => repairFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Repair requested.", token), `${shot.shotId} repair requested; checking availability.`)} title={repairTitle} type="button">Repair from findings</button>
                 </div>
-                {reviews.map((review) => <section aria-label={`${shot.shotId} assistive findings`} className="ve-film-review-findings" key={review.reviewId}><strong>Review of attempt {review.attempt}</strong>{review.mismatches.length ? <ul>{review.mismatches.map((flag) => <li key={`${flag.questionId}-${flag.severity}`}><b>{flag.severity}</b> · {flag.topic}: intended “{flag.intended}”; observed “{flag.observed}” ({Math.round(flag.confidence * 100)}%). {flag.detail}</li>)}</ul> : <p>No advisory mismatches recorded.</p>}</section>)}
+                {reviews.map((review) => <ReviewFindings key={review.reviewId} review={review} />)}
                 {shot.humanDecision ? <p><strong>Human decision:</strong> {shot.humanDecision.state} attempt {shot.humanDecision.attempt} · {shot.humanDecision.reason}</p> : <p>No human decision.</p>}
               </article>
             );

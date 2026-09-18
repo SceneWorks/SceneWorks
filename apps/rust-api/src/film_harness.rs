@@ -891,6 +891,7 @@ fn api_detail(body: &Value) -> String {
 #[derive(Debug, Clone)]
 struct JobView {
     status: String,
+    stage: String,
     error: Option<String>,
     message: String,
     peak_gpu_memory_pct: Option<f64>,
@@ -902,6 +903,11 @@ impl JobView {
     fn from_snapshot(snapshot: &Value) -> Option<Self> {
         Some(Self {
             status: snapshot.get("status")?.as_str()?.to_owned(),
+            stage: snapshot
+                .get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             error: snapshot
                 .get("error")
                 .and_then(Value::as_str)
@@ -6988,6 +6994,7 @@ mod unit_tests {
     fn the_memory_peak_prefers_the_metrics_route_over_the_job_snapshot() {
         let view = |pct: Option<f64>| JobView {
             status: "completed".to_owned(),
+            stage: "completed".to_owned(),
             error: None,
             message: String::new(),
             peak_gpu_memory_pct: pct,
@@ -7026,6 +7033,7 @@ mod unit_tests {
     fn a_completed_job_is_settled_once_its_assets_are_persisted() {
         let with_result = |result: Value| JobView {
             status: "completed".to_owned(),
+            stage: "completed".to_owned(),
             error: None,
             message: String::new(),
             peak_gpu_memory_pct: None,
