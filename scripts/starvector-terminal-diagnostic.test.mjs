@@ -295,10 +295,12 @@ test("current built-in manifest supplies the exact diagnostic model and Detailed
 
 test("current source derives one exact inference pin without a workflow input", async () => {
   const pin = await readCurrentInferencePin(root);
-  assert.equal(pin, "c5c8c2a73bc5fe9517200c32389c20bf4a670e3d");
+  const campaign = JSON.parse(await readFile(new URL("../release/starvector-terminal-campaign-v1.json", import.meta.url), "utf8"));
+  assert.equal(campaign.inference_contract.repository, "SceneWorks/inference");
+  assert.equal(pin, campaign.inference_contract.revision);
   const checkWorkflow = await readFile(path.join(root, ".github/workflows/check.yml"), "utf8");
   const fetch = checkWorkflow.slice(checkWorkflow.indexOf("      - name: Fetch the exact public inference terminal contract"));
-  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=1 origin ${pin}`));
+  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=2 origin ${pin}`));
   assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${pin}`));
 });
 
