@@ -69,6 +69,21 @@ test("live manifest seals the exact frozen-tree production closure", async () =>
   assert.deepEqual(closure.entries.map(({ path }) => path).sort(), [...PRODUCTION_CLOSURE_PATHS].sort());
 });
 
+test("the API vector timeout contract is sealed and byte drift invalidates its closure", async () => {
+  const dtoPath = "apps/rust-api/src/dto.rs";
+  assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dtoPath));
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-dto-closure-"));
+  const absolute = path.join(root, dtoPath);
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, "pub const MAX_VECTOR_WALL_TIME_MS: u64 = 300_000;\n");
+  const closure = await buildProductionClosure({ root, paths: [dtoPath] });
+  await writeFile(absolute, "pub const MAX_VECTOR_WALL_TIME_MS: u64 = 120_000;\n");
+  await assert.rejects(
+    () => checkProductionClosure(closure, { root, paths: [dtoPath] }),
+    /differs from the current source tree/,
+  );
+});
+
 test("the sealed campaign worker and standalone worker keep the large-stack entry seam", async () => {
   assert.ok(PRODUCTION_CLOSURE_PATHS.includes("apps/rust-api/src/main.rs"));
   const [apiMain, workerMain] = await Promise.all([
