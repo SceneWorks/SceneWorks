@@ -66,7 +66,8 @@ jobs:
   upstream-reference:
     needs: prepare-recovery
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 180
+    # Two sequential 20-case tiers can each use 20 x 300 seconds, plus bounded setup.
+    timeout-minutes: 300
     env:
       STARVECTOR_TERMINAL_GPU_ID: "0"
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
@@ -105,7 +106,9 @@ jobs:
   mlx-1b:
     needs: upstream-reference
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
-    timeout-minutes: 720
+    # 149 routed cases can consume 740 generation minutes; publication/metrics get another minute
+    # per non-cancelled case. Setup remains bounded inside the resulting 16-hour job ceiling.
+    timeout-minutes: 960
     env:
       STARVECTOR_TERMINAL_GPU_ID: mlx
     steps:
@@ -154,7 +157,7 @@ jobs:
   mlx-8b:
     needs: mlx-1b
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
-    timeout-minutes: 720
+    timeout-minutes: 960
     env:
       STARVECTOR_TERMINAL_GPU_ID: mlx
     steps:
@@ -194,7 +197,7 @@ jobs:
   cuda-1b:
     needs: mlx-8b
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 720
+    timeout-minutes: 960
     env:
       STARVECTOR_TERMINAL_GPU_ID: "0"
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
@@ -250,7 +253,9 @@ jobs:
   cuda-8b:
     needs: cuda-1b
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 720
+    # The final tuple adds 60 raster-to-vector prompt cases to the 149 native cases. One day lets
+    # every vector stage use 300 seconds and retains bounded room for raster stages and metrics.
+    timeout-minutes: 1440
     env:
       STARVECTOR_TERMINAL_GPU_ID: "0"
       STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal

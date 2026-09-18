@@ -45,7 +45,7 @@ function vectorModel(overrides = {}) {
       acceptsTextGuidance: false,
       maxNewTokens: 7933,
       maxSvgBytes: 262144,
-      maxWallTimeMs: 120000,
+      maxWallTimeMs: 300000,
       providers: { mlx: { id: "mlx-starvector", available: true }, candle: { id: "candle-starvector", available: true } },
     },
     downloads: [{ revision: VECTOR_REVISION }],
@@ -70,13 +70,16 @@ describe("Vector Studio source boundary", () => {
       expect(preset.maxSvgBytes).toBeGreaterThan(0);
       expect(preset.maxWallTimeMs).toBeGreaterThan(0);
     }
+    expect(VECTOR_DETAIL_PRESETS.draft.maxWallTimeMs).toBe(60000);
+    expect(VECTOR_DETAIL_PRESETS.standard.maxWallTimeMs).toBe(90000);
+    expect(VECTOR_DETAIL_PRESETS.detailed.maxWallTimeMs).toBe(300000);
   });
 
   it("uses each selected model's declared context-derived detailed token cap", () => {
     expect(
       vectorDetailBudget(
         VECTOR_DETAIL_PRESETS.detailed,
-        vectorModel({ vector: { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 } }),
+        vectorModel({ vector: { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 300000 } }),
       ),
     ).toMatchObject({ maxNewTokens: 7933 });
     expect(
@@ -84,7 +87,7 @@ describe("Vector Studio source boundary", () => {
         VECTOR_DETAIL_PRESETS.detailed,
         vectorModel({
           id: "starvector_8b",
-          vector: { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 120000 },
+          vector: { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 300000 },
         }),
       ),
     ).toMatchObject({ maxNewTokens: 15422 });

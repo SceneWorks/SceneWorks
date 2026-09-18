@@ -10,20 +10,20 @@ import { terminalStatuses } from "../constants.js";
 export const VECTOR_DETAIL_PRESETS = Object.freeze({
   draft: { label: "Draft", maxNewTokens: 2048, maxSvgBytes: 131072, maxWallTimeMs: 60000 },
   standard: { label: "Standard", maxNewTokens: 3000, maxSvgBytes: 196608, maxWallTimeMs: 90000 },
-  // Detailed uses the selected model's declared context-derived cap below. This sentinel never
-  // reaches the API because `vectorDetailBudget` clamps it to that catalog limit.
+  // Detailed uses the selected model's declared context-derived cap below. The five-minute hard
+  // generation ceiling is separate from the terminal 1B p95 latency acceptance target.
   detailed: {
     label: "Detailed",
     maxNewTokens: Number.MAX_SAFE_INTEGER,
     maxSvgBytes: 262144,
-    maxWallTimeMs: 120000,
+    maxWallTimeMs: 300000,
   },
 });
 
 const VECTOR_DETAIL_FALLBACK = Object.freeze({
   maxNewTokens: 4000,
   maxSvgBytes: 262144,
-  maxWallTimeMs: 120000,
+  maxWallTimeMs: 300000,
 });
 
 // Presentation labels never cross the API's deny_unknown_fields boundary. Catalog limits are

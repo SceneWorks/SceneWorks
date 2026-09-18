@@ -190,7 +190,9 @@ test("terminal workflow is dispatch-only, serial, and seals raw evidence", () =>
   assert.equal((workflow.match(/cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease/g) ?? []).length, 5);
   assert.doesNotMatch(workflow, /RUNNER_TEMP[^\n]*\.lease/);
   assert.match(workflow, /Upload combined evidence even on failure/);
-  assert.equal((workflow.match(/timeout-minutes: 720/g) ?? []).length, 4);
+  assert.equal((workflow.match(/timeout-minutes: 300/g) ?? []).length, 1);
+  assert.equal((workflow.match(/timeout-minutes: 960/g) ?? []).length, 3);
+  assert.equal((workflow.match(/timeout-minutes: 1440/g) ?? []).length, 1);
   assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: mlx/g) ?? []).length, 2);
   assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: "0"/g) ?? []).length, 3);
   for (const tuple of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) assert.match(workflow, new RegExp(`product-service\\.mjs start[^\\n]+ ${tuple.replace(":", "\\:")}`));
@@ -668,7 +670,7 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   await mkdir(path.join(inference, "release"), { recursive: true }); await mkdir(path.join(inference, "scripts", "release"), { recursive: true }); await mkdir(assets);
   for (const [name, bytes] of [["source.svg", "svg"], ["input.png", "input"], ["reference.png", "reference"]]) await writeFile(path.join(assets, name), bytes);
   const sources = Array.from({ length: 4 }, (_, index) => ({ dataset: `starvector/dataset-${index}`, revision: String(index + 1).repeat(40), row_identity_sha256: "", parquet_path: "data/test-00000-of-00001.parquet", parquet_sha256: hash("parquet") }));
-  const detail_budgets = { "1b": { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 }, "8b": { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 120000 } };
+  const detail_budgets = { "1b": { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 300000 }, "8b": { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 300000 } };
   const rows = Array.from({ length: 120 }, (_, case_index) => ({ case_index, dataset: sources[Math.floor(case_index / 30)].dataset, revision: sources[Math.floor(case_index / 30)].revision, row_index: case_index % 30, filename: `${case_index}.svg`, svg_path: "source.svg", svg_sha256: hash("svg"), input_png_path: "input.png", png_sha256: hash("input"), reference_png: "reference.png", reference_png_sha256: hash("reference"), detail_budgets: structuredClone(detail_budgets) }));
   const record = (row) => JSON.stringify({ dataset: row.dataset, revision: row.revision, row_index: row.row_index, filename: row.filename, svg_sha256: row.svg_sha256 });
   sources.forEach((source, index) => { source.row_identity_sha256 = hash(`${rows.slice(index * 30, index * 30 + 30).map(record).join("\n")}\n`); });

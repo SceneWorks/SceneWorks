@@ -56,9 +56,10 @@ SOURCE_INDICES = [base + i for base in (0, 30, 60, 90) for i in range(5)]
 DIAGNOSTIC_CASE_INDEX = 9
 DIAGNOSTIC_CORPUS_SHA256 = 'dbfd6b6ef972f3104f7a20c2033af6157b720e49adf46c506e0b34ef612d3a59'
 DIAGNOSTIC_ROWS_SHA256 = 'f9529c2e5a86bef6644054c909c4f621991f6384d9b33a029ad46ff2e6cd3b88'
-DIAGNOSTIC_BUDGET = {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 120000}
+DIAGNOSTIC_BUDGET = {'maxNewTokens': 7933, 'maxSvgBytes': 262144, 'maxWallTimeMs': 300000}
 DIAGNOSTIC_SAMPLING = {'temperature': 0.0, 'topP': 1.0, 'topK': 1,
                        'repetitionPenalty': 1.0, 'seed': 7}
+TIER_TIMEOUT_SECONDS = 7200
 _CAIRO_HANDLES = []
 
 
@@ -292,7 +293,7 @@ def select_rows(assets_root, tier):
         budget = detail_budget['maxNewTokens']
         if sampling.get('topP') != 1.0 or sampling.get('topK') != 1 or sampling.get('repetitionPenalty') != 1.0:
             fail('parity requires the declared greedy sampling contract')
-        if detail_budget.get('maxWallTimeMs') != 120000 or detail_budget.get('maxSvgBytes') != 262144:
+        if detail_budget.get('maxWallTimeMs') != 300000 or detail_budget.get('maxSvgBytes') != 262144:
             fail('row differs from the shipping wall-time or SVG byte budget')
         if isinstance(budget, bool) or not isinstance(budget, int) or budget != expected_budget:
             fail('row differs from the model shipping new-token budget')
@@ -1152,7 +1153,8 @@ def main():
         parser.add_argument('--' + key, required=True)
     parser.add_argument('--tier', choices=['1b', '8b'], required=True)
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--timeout-seconds', type=int, default=3600)
+    # Twenty sequential cases may each consume the full five-minute generation budget.
+    parser.add_argument('--timeout-seconds', type=int, default=TIER_TIMEOUT_SECONDS)
     parser.add_argument('--max-rss-gib', type=float, default=40)
     parser.add_argument('--max-vram-gib', type=float, default=30)
     parser.add_argument('--min-free-vram-gib', type=float, default=24)

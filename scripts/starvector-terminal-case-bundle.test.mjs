@@ -34,7 +34,7 @@ test("pinned corpus row identity includes the canonical terminal newline", async
 test("source bundle refuses row identity drift and seals the resulting bytes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-bundle-")), assets = path.join(root, "assets"), output = path.join(root, "bundle.json"); await mkdir(assets);
   await writeFile(path.join(assets, "source.svg"), "svg"); await writeFile(path.join(assets, "input.png"), "input"); await writeFile(path.join(assets, "reference.png"), "reference"); await writeFile(path.join(assets, "preview.png"), "preview");
-  const detail_budgets = { "1b": { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 120000 }, "8b": { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 120000 } };
+  const detail_budgets = { "1b": { maxNewTokens: 7933, maxSvgBytes: 262144, maxWallTimeMs: 300000 }, "8b": { maxNewTokens: 15422, maxSvgBytes: 262144, maxWallTimeMs: 300000 } };
   const rows = Array.from({ length: 120 }, (_, case_index) => ({ case_index, dataset: `d${Math.floor(case_index / 30)}`, revision: "a".repeat(40), row_index: case_index % 30, filename: `${case_index}.svg`, svg_sha256: sha("svg"), png_sha256: sha("input"), reference_png_sha256: sha("reference"), preview_png_sha256: sha("preview"), svg_path: "source.svg", input_png_path: "input.png", reference_png: "reference.png", preview_png: "preview.png", asset_id: `asset-${case_index}`, detail_budgets: structuredClone(detail_budgets) }));
   const rowHash = terminalSourceRowsSha256(rows);
   const hostileGenerator = (caseIndex) => `hostile-${caseIndex}`;

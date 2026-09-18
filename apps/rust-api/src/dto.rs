@@ -851,6 +851,8 @@ pub(crate) struct VectorDetailBudget {
     pub(crate) max_wall_time_ms: u64,
 }
 
+pub(crate) const MAX_VECTOR_WALL_TIME_MS: u64 = 300_000;
+
 impl Default for VectorDetailBudget {
     fn default() -> Self {
         Self {
@@ -858,7 +860,7 @@ impl Default for VectorDetailBudget {
             // explicitly select the advertised model-specific context-derived capacity.
             max_new_tokens: 4_000,
             max_svg_bytes: 256 * 1_024,
-            max_wall_time_ms: 120_000,
+            max_wall_time_ms: MAX_VECTOR_WALL_TIME_MS,
         }
     }
 }

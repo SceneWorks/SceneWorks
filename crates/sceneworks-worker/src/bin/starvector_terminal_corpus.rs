@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(budgets["8b"]["maxNewTokens"], 15422);
         for tier in ["1b", "8b"] {
             assert_eq!(budgets[tier]["maxSvgBytes"], 262144);
-            assert_eq!(budgets[tier]["maxWallTimeMs"], 120000);
+            assert_eq!(budgets[tier]["maxWallTimeMs"], 300000);
         }
     }
 

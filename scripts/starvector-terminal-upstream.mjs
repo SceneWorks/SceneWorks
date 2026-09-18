@@ -14,6 +14,7 @@ import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 const execFile = promisify(callback);
 const json = async file => JSON.parse(await readFile(file, "utf8"));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+export const UPSTREAM_TIER_TIMEOUT_MS = 7_300 * 1_000;
 
 async function regularFile(file, description) {
   const info = await lstat(file);
@@ -120,7 +121,7 @@ export async function produceUpstreamReferences(options, output, binding, rows, 
   for (const tier of ["1b", "8b"]) {
     const args = [path.join(options.sceneWorksRoot, "scripts/starvector-terminal-upstream-oracle.py"), "prepare", "--upstream-root", options.upstreamRoot, "--weights-root", options.weightsRoot, "--assets-root", options.assetsRoot, "--output", output, "--components-root", options.componentsRoot, "--sanitizer", options.sanitizer, "--tier", tier, "--device", "cuda:0", "--defer-manifest"];
     try {
-      await execute(options.python, args, { env: { ...process.env, ...terminalGpuEnvironment(binding), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, timeout: 3700 * 1000, maxBuffer: 1024 * 1024 });
+      await execute(options.python, args, { env: { ...process.env, ...terminalGpuEnvironment(binding), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, timeout: UPSTREAM_TIER_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
     } catch (error) {
       if (error?.code !== 3) throw error;
       await verifyCollectedRejections(output, tier, rows);
