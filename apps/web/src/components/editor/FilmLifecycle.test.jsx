@@ -33,6 +33,32 @@ async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn(), props
 }
 
 describe("FilmLifecycle", () => {
+  it("reloads a refused resume without replacing the saved canceled verdict and keeps retry available", async () => {
+    apiFetchMock.mockImplementation((url) => url.endsWith("/planning")
+      ? Promise.reject(new Error("no planning operation"))
+      : Promise.resolve([{
+        locator: { id: "filmrun_1", draftId: "film_1" }, controllerActive: false,
+        record: { state: "finished", outcome: "canceled", stop: { reason: "canceled", resumable: true, detail: "Operator canceled" } },
+        actionOperation: { action: "resume", status: "failed", detail: "No video_generate worker is available" },
+      }]));
+    await renderLifecycle();
+    expect(container.textContent).toContain("Render · canceled");
+    expect(container.querySelector('[role="alert"]').textContent).toContain("resume failed: No video_generate worker");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Resume").disabled).toBe(false);
+  });
+
+  it("offers retry after an initial transport failure before a run record exists", async () => {
+    apiFetchMock.mockImplementation((url) => url.endsWith("/planning")
+      ? Promise.reject(new Error("no planning operation"))
+      : Promise.resolve([{
+        locator: { id: "filmrun_1", draftId: "film_1" }, controllerActive: false,
+        actionOperation: { action: "start", status: "failed", detail: "Host connection refused" },
+      }]));
+    await renderLifecycle();
+    expect(container.querySelector('[role="alert"]').textContent).toContain("start failed: Host connection refused");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Retry start").disabled).toBe(false);
+  });
+
   it("lists newest and older runs and selects either durable record explicitly", async () => {
     const newest = {
       locator: { id: "filmrun_new", draftId: "film_1" }, controllerActive: false,

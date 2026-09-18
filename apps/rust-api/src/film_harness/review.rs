@@ -1873,7 +1873,22 @@ pub(crate) async fn request_repair_with_lease(
     options: &super::ResumeOptions,
     shot_id: &str,
     reason: &str,
-    lease: super::ControllerLease,
+    _lease: super::ControllerLease,
+) -> Result<RunRecord, HarnessError> {
+    super::record_action(
+        &options.out_dir,
+        "repair",
+        Some(shot_id),
+        request_repair_inner(transport, options, shot_id, reason),
+    )
+    .await
+}
+
+async fn request_repair_inner(
+    transport: &dyn ApiTransport,
+    options: &super::ResumeOptions,
+    shot_id: &str,
+    reason: &str,
 ) -> Result<RunRecord, HarnessError> {
     let mut context = ReviewContext::open(&options.out_dir, None, false)?;
     let Some(shot) = context.record.shot(shot_id).cloned() else {
@@ -1895,8 +1910,7 @@ pub(crate) async fn request_repair_with_lease(
     // Written before dispatch so the authorisation survives a controller that dies during it, and
     // so `replace_take` — which re-reads the record from disk — starts from it.
     context.persist()?;
-    super::replace_take_operation_with_lease(transport, options, shot_id, &folded, "repair", lease)
-        .await
+    super::replace_take_operation(transport, options, shot_id, &folded, "repair").await
 }
 
 /// Build the repair reason: the person's words, plus the actionable flags of the most recent

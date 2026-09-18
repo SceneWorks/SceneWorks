@@ -233,6 +233,7 @@ pub struct TimelineFileDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilmRunFiles {
     pub directory: PathBuf,
+    pub authoring_snapshot: PathBuf,
     pub plan: PathBuf,
     pub reference_pack: PathBuf,
     pub compiled: PathBuf,
@@ -1360,6 +1361,7 @@ impl ProjectStore {
                 &run_dir,
                 true,
             )?;
+            write_json(&run_dir.join("authoring.json"), &draft)?;
             write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
             write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
             write_json(&run_dir.join("review.jsonc"), &draft.review_plan_for_run())?;
@@ -1380,6 +1382,7 @@ impl ProjectStore {
             draft_revision: draft.revision,
             selected_shot_ids,
             record_directory: relative_dir,
+            authoring_snapshot_path: Some(format!("films/runs/{run_locator_id}/authoring.json")),
             created_at: utc_now(),
         };
         write_json(&run_dir.join("locator.json"), &locator)?;
@@ -1403,6 +1406,42 @@ impl ProjectStore {
             ));
         }
         Ok(locator)
+    }
+
+    /// Read the complete authoring document retained for a run. Locators created before authoring
+    /// snapshots were introduced return `None`; derived render documents are never used to invent
+    /// a historical draft.
+    pub fn get_film_run_authoring_snapshot(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<Option<FilmDraft>> {
+        let locator = self.get_film_run(project_id, run_locator_id)?;
+        let Some(relative_path) = locator.authoring_snapshot_path.as_deref() else {
+            return Ok(None);
+        };
+        if !is_safe_relative_path(relative_path) {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot path must be project-relative".to_owned(),
+            ));
+        }
+        let files = self.film_run_files(project_id, run_locator_id)?;
+        let expected_path = format!("{}/authoring.json", locator.record_directory);
+        if relative_path != expected_path {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot path does not match its run directory".to_owned(),
+            ));
+        }
+        let snapshot: FilmDraft = serde_json::from_value(read_json(&files.authoring_snapshot)?)?;
+        if snapshot.id != locator.draft_id
+            || snapshot.project_id != locator.project_id
+            || snapshot.revision != locator.draft_revision
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot identity does not match its locator".to_owned(),
+            ));
+        }
+        Ok(Some(snapshot))
     }
 
     pub fn list_film_runs(&self, project_id: &str) -> ProjectStoreResult<Vec<FilmRunLocator>> {
@@ -1446,6 +1485,7 @@ impl ProjectStore {
         let project_path = self.find_project_path(project_id)?;
         let directory = project_path.join("films/runs").join(run_locator_id);
         Ok(FilmRunFiles {
+            authoring_snapshot: directory.join("authoring.json"),
             plan: directory.join("plan.json"),
             reference_pack: directory.join("references.json"),
             compiled: directory.join("compiled.json"),
@@ -7167,9 +7207,9 @@ mod tests {
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
+    use std::{fs, path::Path};
 
     fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -14429,6 +14469,166 @@ mod tests {
             );
             assert_eq!(read_json(&files.review_plan).unwrap(), newer.review_plan);
         });
+    }
+
+    #[test]
+    fn film_runs_retain_exact_authoring_revision_across_later_draft_saves() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Pinned authoring")
+            .expect("project creates");
+        let mut first = store
+            .create_film_draft(&project.id, "film_authoring", "Authoring")
+            .expect("draft creates");
+        first.original_script = "INT. WORKSHOP - NIGHT\nMIRA enters with a red parcel.".to_owned();
+        first.brief = "Keep the parcel visible throughout the handoff.".to_owned();
+        first.structured_brief.synopsis = "A courier completes a late delivery.".to_owned();
+        first.structured_brief.style_notes = "Warm practical light; restrained camera.".to_owned();
+        first.structured_brief.target_total_seconds = 12.5;
+        first.structured_brief.beats = vec![crate::film_workspace::FilmBeat {
+            id: "beat_delivery".to_owned(),
+            summary: "Mira hands over the parcel.".to_owned(),
+        }];
+        first.structured_brief.dialogue = vec![crate::film_workspace::FilmDialogueLine {
+            id: "line_delivery".to_owned(),
+            beat_id: "beat_delivery".to_owned(),
+            speaker: "MIRA".to_owned(),
+            text: "Delivery. It's on the bench.".to_owned(),
+        }];
+        first.planning.provider = "external".to_owned();
+        first.planning.connection_id = Some("connection_first".to_owned());
+        first.planning.thinking_mode = "enabled".to_owned();
+        first.planning.refine_prompts = true;
+        first.planning.send_reference_pixels = true;
+        first.production_plan.shots[0].prompt = "Mira enters with a red parcel.".to_owned();
+        let first = store
+            .save_film_draft(&project.id, "film_authoring", first)
+            .expect("first revision saves");
+        let first_locator = store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_first_authoring",
+                &first.id,
+                first.revision,
+                vec![],
+            )
+            .expect("first run pins");
+        let first_files = store
+            .film_run_files(&project.id, &first_locator.id)
+            .expect("first run files");
+        let first_render_documents = [
+            fs::read(&first_files.plan).expect("plan reads"),
+            fs::read(&first_files.reference_pack).expect("references read"),
+            fs::read(&first_files.review_plan).expect("review reads"),
+        ];
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &first_locator.id)
+                .expect("snapshot reads"),
+            Some(first.clone())
+        );
+        let snapshot_path = first_locator
+            .authoring_snapshot_path
+            .as_deref()
+            .expect("new locator names its authoring snapshot");
+        assert_eq!(
+            store
+                .project_file(&project.id, snapshot_path)
+                .expect("snapshot is readable through the contained project-file contract")
+                .path,
+            first_files.authoring_snapshot.canonicalize().unwrap()
+        );
+
+        let mut second = first.clone();
+        second.original_script = "EXT. STATION - DAWN\nMIRA boards the first train.".to_owned();
+        second.brief = "Hold on the empty platform after departure.".to_owned();
+        second.structured_brief.synopsis = "A courier leaves town after the delivery.".to_owned();
+        second.structured_brief.style_notes = "Cold dawn light; locked camera.".to_owned();
+        second.structured_brief.target_total_seconds = 18.0;
+        second.structured_brief.beats[0].summary = "Mira boards the train.".to_owned();
+        second.structured_brief.dialogue[0].text = "I made the delivery.".to_owned();
+        second.planning.connection_id = Some("connection_second".to_owned());
+        second.planning.thinking_mode = "disabled".to_owned();
+        second.planning.refine_prompts = false;
+        second.planning.send_reference_pixels = false;
+        second.production_plan.shots[0].prompt = "Mira boards a train at dawn.".to_owned();
+        let second = store
+            .save_film_draft(&project.id, "film_authoring", second)
+            .expect("second revision saves");
+        assert_eq!(second.revision, first.revision + 1);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &first_locator.id)
+                .expect("first snapshot still reads"),
+            Some(first)
+        );
+        assert_eq!(
+            first_render_documents,
+            [
+                fs::read(&first_files.plan).expect("pinned plan still reads"),
+                fs::read(&first_files.reference_pack).expect("pinned references still read"),
+                fs::read(&first_files.review_plan).expect("pinned review still reads"),
+            ],
+            "adding an authoring snapshot must not change existing pinned render documents"
+        );
+
+        let second_locator = store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_second_authoring",
+                &second.id,
+                second.revision,
+                vec![],
+            )
+            .expect("second run pins");
+        assert_eq!(second_locator.draft_revision, second.revision);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &second_locator.id)
+                .expect("second snapshot reads"),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn legacy_film_run_reports_missing_authoring_snapshot_without_fabrication() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Legacy run").expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_legacy", "Legacy")
+            .expect("draft creates");
+        let locator = store
+            .create_film_run(&project.id, "run_legacy", &draft.id, vec![], None)
+            .expect("run creates");
+        let files = store
+            .film_run_files(&project.id, &locator.id)
+            .expect("run files");
+        let locator_path = files.directory.join("locator.json");
+        let mut legacy = read_json(&locator_path).expect("locator reads");
+        legacy["schemaVersion"] = json!(1);
+        legacy
+            .as_object_mut()
+            .expect("locator object")
+            .remove("authoringSnapshotPath");
+        write_json(&locator_path, &legacy).expect("legacy locator writes");
+        fs::remove_file(&files.authoring_snapshot).expect("new-only snapshot removed");
+
+        let legacy_locator = store
+            .get_film_run(&project.id, &locator.id)
+            .expect("legacy locator remains readable");
+        assert_eq!(legacy_locator.schema_version, 1);
+        assert_eq!(legacy_locator.authoring_snapshot_path, None);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &locator.id)
+                .expect("legacy absence is readable"),
+            None
+        );
+        assert!(files.plan.is_file());
+        assert!(files.reference_pack.is_file());
+        assert!(files.review_plan.is_file());
     }
 
     #[test]

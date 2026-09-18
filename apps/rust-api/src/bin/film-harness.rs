@@ -1586,6 +1586,16 @@ fn status_command(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     };
     let out_dir = PathBuf::from(out_dir);
+    match film_harness::read_action_operation(&out_dir) {
+        Ok(Some(action)) => {
+            println!("Latest action: {} ({})", action.action, action.status);
+            if let Some(detail) = action.detail {
+                println!("Action detail: {detail}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return report_error(error),
+    }
     match film_harness::read_run_record(&out_dir) {
         Ok(record) => {
             print_record(&record, &out_dir);

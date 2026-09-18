@@ -121,7 +121,9 @@ does not switch the film-planning provider.
    desktop app the credential stays in the operating-system secret facility and reaches the API
    sidecar through credential IPC. With the standalone API it stays in the configured server
    credential store or explicitly supplied credential environment. It is not written into the film
-   draft, project files, exported media, provenance, logs, or browser storage.
+   draft, project files, exported media, provenance, logs, or browser storage. Saving, rotating, or
+   removing a desktop credential takes effect for Test, model discovery, and planning without an
+   app or API restart.
 4. If the endpoint implements `GET /models`, leave **Endpoint supports model listing** enabled and
    choose **Test and list models**. This proves model listing only; the first planning run validates
    Chat Completions. If listing is unavailable, turn it off and type the exact model ID in
@@ -272,5 +274,9 @@ export. Export again only after you decide the new saved cut is ready.
 - OpenAI-compatible behavior varies by endpoint. Model listing and image input are separately
   declared capabilities; successful model listing does not prove Chat Completions or multimodal
   support.
-- A run record and its project assets are the durable audit trail. Queue visibility is not the same
-  as run ownership: clearing a completed job from the queue does not remove its run provenance.
+- A run record, its project assets, and its locator's immutable authoring snapshot are the durable
+  audit trail. New runs retain the complete script, brief, structured authoring, planning choices,
+  and draft revision they were created from. Legacy run locators report that this snapshot is
+  absent rather than reconstructing one from render inputs.
+- Queue visibility is not the same as run ownership: clearing a completed job from the queue does
+  not remove its run provenance.

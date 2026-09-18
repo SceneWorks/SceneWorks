@@ -199,6 +199,7 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
           {disabledReason ? <p className="ve-film-warning" role="status">Actions unavailable: {disabledReason}</p> : null}
           {["failed", "rejected"].includes(view.reviewOperation?.status) ? <p role="alert">Assistive review failed: {view.reviewOperation.detail}. Correct the problem and analyze again; existing observations may be partial.</p> : null}
           {view.reviewOperation?.status === "running" && !view.run.controllerActive ? <p role="alert">Assistive review was interrupted. Analyze again to complete it; existing observations may be partial.</p> : null}
+          {view.run.actionOperation?.status === "failed" ? <p role="alert">{view.run.actionOperation.action} failed: {view.run.actionOperation.detail}. Correct the problem and retry the action.</p> : null}
           <p>{view.assistiveNotice}</p>
           {(view.run.record?.shots ?? []).map((shot) => {
             const selection = view.selections.find((item) => item.shotId === shot.shotId);
@@ -234,8 +235,8 @@ export function FilmReview({ active = true, draft, onChange, projectId, refreshT
                 </div>
                 <label>Decision or repair reason<input aria-label={`${shot.shotId} review reason`} value={reasons[shot.shotId] ?? ""} onChange={(event) => setReasons((current) => ({ ...current, [shot.shotId]: event.target.value }))} /></label>
                 <div className="ve-film-actions">
-                  <button disabled={repairDisabled} onClick={() => mutate(() => replaceFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Replacement requested.", token), `${shot.shotId} replacement started; history kept.`)} title={repairTitle} type="button">Render one replacement</button>
-                  <button disabled={repairDisabled} onClick={() => mutate(() => repairFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Repair requested.", token), `${shot.shotId} repair started; review required.`)} title={repairTitle} type="button">Repair from findings</button>
+                  <button disabled={repairDisabled} onClick={() => mutate(() => replaceFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Replacement requested.", token), `${shot.shotId} replacement requested; checking availability.`)} title={repairTitle} type="button">Render one replacement</button>
+                  <button disabled={repairDisabled} onClick={() => mutate(() => repairFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Repair requested.", token), `${shot.shotId} repair requested; checking availability.`)} title={repairTitle} type="button">Repair from findings</button>
                 </div>
                 {reviews.map((review) => <section aria-label={`${shot.shotId} assistive findings`} className="ve-film-review-findings" key={review.reviewId}><strong>Review of attempt {review.attempt}</strong>{review.mismatches.length ? <ul>{review.mismatches.map((flag) => <li key={`${flag.questionId}-${flag.severity}`}><b>{flag.severity}</b> · {flag.topic}: intended “{flag.intended}”; observed “{flag.observed}” ({Math.round(flag.confidence * 100)}%). {flag.detail}</li>)}</ul> : <p>No advisory mismatches recorded.</p>}</section>)}
                 {shot.humanDecision ? <p><strong>Human decision:</strong> {shot.humanDecision.state} attempt {shot.humanDecision.attempt} · {shot.humanDecision.reason}</p> : <p>No human decision.</p>}
