@@ -171,14 +171,16 @@ test("workflow shell blocks consume untrusted dispatch inputs only through quote
 });
 
 test("provision transport accepts only the sealed current native-preflight run and artifact", async () => {
-  const preflight = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8")).inference_preflight;
+  const selectedPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
+  const preflight = selectedPlan.inference_preflight;
+  const sourceRevision = selectedPlan.inference_contract.validator_source?.revision ?? selectedPlan.inference_contract.revision;
   const accepted = await validatePreflightTransport("release/starvector-terminal-campaign-v1.json", {
-    revision: preflight.head_sha,
+    revision: sourceRevision,
     workflowRunId: preflight.workflow_run_id,
     artifactName: preflight.artifact.name,
   });
   assert.deepEqual(accepted, {
-    revision: preflight.head_sha,
+    revision: sourceRevision,
     workflow_run_id: preflight.workflow_run_id,
     artifact_name: preflight.artifact.name,
     workflow_run_attempt: preflight.workflow_run_attempt,

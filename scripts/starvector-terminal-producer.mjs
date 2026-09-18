@@ -6,7 +6,7 @@ import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/
 import { promisify } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { INFERENCE_REVISION, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, INFERENCE_SOURCE_REVISION, INFERENCE_VALIDATOR_SOURCE, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock, validateInferenceValidatorSource, validateTerminalDispatchInputs } from "./starvector-terminal-campaign.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { bindRecoveryLineage, verifyExecutionPredecessor, verifyRecovery } from "./starvector-terminal-recovery.mjs";
@@ -40,22 +40,51 @@ export async function inventory(root, digestFile = fileSha256) {
 }
 
 async function git(root, args) { return (await execFile("git", ["-C", root, ...args])).stdout.trim(); }
+export async function verifyInferenceValidatorDiff(inferenceRoot, source) {
+  try {
+    await execFile("git", ["-C", inferenceRoot, "merge-base", "--is-ancestor", source.base_revision, source.revision]);
+  } catch {
+    die("inference validator source does not descend from the measured preflight revision");
+  }
+  const raw = (await execFile("git", ["-C", inferenceRoot, "diff", "--name-status", "-z", "--no-renames", source.base_revision, source.revision, "--"])).stdout;
+  const tokens = raw.split("\0");
+  if (tokens.at(-1) === "") tokens.pop();
+  if (tokens.length % 2 !== 0) die("inference validator source diff is malformed");
+  const changes = [];
+  for (let index = 0; index < tokens.length; index += 2) {
+    const status = tokens[index], file = tokens[index + 1];
+    if (!["A", "M"].includes(status)) die("inference validator source diff contains a non-additive tooling change");
+    changes.push({ status, path: file });
+  }
+  changes.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  if (JSON.stringify(changes.map(({ path: file }) => file)) !== JSON.stringify(source.changed_paths)) {
+    die("inference validator source diff escapes the sealed compatibility paths");
+  }
+  return { ...source, changes };
+}
+
+export async function verifyInferenceValidatorCompatibility(inferenceRoot, contract) {
+  return verifyInferenceValidatorDiff(inferenceRoot, validateInferenceValidatorSource(contract));
+}
+
 export async function verifyInferenceCheckout(inferenceRoot, contract) {
   if (!inferenceRoot) die("pinned inference checkout required");
   if (contract?.receipt_schema !== RECEIPT_SCHEMA || contract?.receipt_schema_sha256 !== RECEIPT_SCHEMA_SHA256) die("selected outcome-parity receipt profile is missing or drifted");
-  if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== INFERENCE_REVISION) die("inference checkout is not the exact terminal-contract revision");
+  const source = validateInferenceValidatorSource(contract);
+  if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== source.revision) die("inference checkout is not the exact validator-source revision");
   if (await git(inferenceRoot, ["status", "--porcelain"])) die("inference checkout must be clean");
   for (const item of ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs", contract.receipt_schema]) {
     const info = await lstat(path.join(inferenceRoot, item)).catch(() => null);
     if (!info?.isFile() || info.isSymbolicLink()) die(`missing pinned inference contract ${item}`);
   }
   if (await fileSha256(path.join(inferenceRoot, contract.receipt_schema)) !== contract.receipt_schema_sha256) die("selected outcome-parity receipt profile digest mismatch");
+  await verifyInferenceValidatorCompatibility(inferenceRoot, contract);
   return path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
 }
 
-export async function verifyPermanentPin(sceneWorksRoot, permanentPin, planRevision = INFERENCE_REVISION) {
+export async function verifyPermanentPin(sceneWorksRoot, permanentPin, planRevision = INFERENCE_SOURCE_REVISION) {
   if (!REVISION.test(permanentPin)) die("permanent pin must be an exact 40-character SHA");
-  if (permanentPin !== planRevision || permanentPin !== INFERENCE_REVISION) die("permanent pin does not equal the exact terminal inference revision");
+  if (permanentPin !== planRevision || permanentPin !== INFERENCE_SOURCE_REVISION) die("permanent pin does not equal the exact terminal inference source revision");
   if (await git(sceneWorksRoot, ["status", "--porcelain"])) die("SceneWorks checkout must be clean before terminal evidence");
   if (!REVISION.test(await git(sceneWorksRoot, ["rev-parse", "HEAD"]))) die("SceneWorks checkout HEAD is not immutable");
   const cargo = await readFile(path.join(sceneWorksRoot, "Cargo.toml"), "utf8");
@@ -179,12 +208,19 @@ async function materializeSharedArtifacts(output, pre, tuple) {
 // dispatch-only inference workflow.  Its source files are verified here before
 // the SceneWorks tuples begin; a count-only declaration cannot become receipt
 // evidence.
-export async function validateInferencePreflight(inferenceRoot, permanentPin, expectedPreflight) {
+export async function validateInferencePreflight(inferenceRoot, permanentPin, expectedPreflight, contract) {
+  const selectedContract = contract ?? {
+    revision: INFERENCE_SOURCE_REVISION,
+    validator_source: INFERENCE_VALIDATOR_SOURCE,
+  };
+  const compatibility = await verifyInferenceValidatorCompatibility(inferenceRoot, selectedContract);
+  if (permanentPin !== compatibility.revision) die("permanent pin does not equal the verified validator-source revision");
+  if (await git(inferenceRoot, ["rev-parse", "HEAD"]) !== compatibility.revision || await git(inferenceRoot, ["status", "--porcelain"])) die("inference checkout is not the exact clean validator-source revision");
   const configured = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT;
   if (!configured || !path.isAbsolute(configured)) die("exact inference preflight artifact index is required");
   const indexInfo = await lstat(configured); if (!indexInfo.isFile() || indexInfo.isSymbolicLink()) die("inference preflight artifact index must be a regular file");
   const value = await json(configured), root = path.dirname(configured);
-  if (value?.head_sha !== permanentPin || typeof value.workflow_run_id !== "string" || !value.workflow_run_id || !Number.isInteger(value.workflow_run_attempt) || value.workflow_run_attempt < 1 || !Array.isArray(value.inventory_artifacts) || value.inventory_artifacts.length !== 2 || !Array.isArray(value.hook_logs) || value.hook_logs.length !== 4) die("inference preflight identity is invalid");
+  if (value?.head_sha !== compatibility.base_revision || typeof value.workflow_run_id !== "string" || !value.workflow_run_id || !Number.isInteger(value.workflow_run_attempt) || value.workflow_run_attempt < 1 || !Array.isArray(value.inventory_artifacts) || value.inventory_artifacts.length !== 2 || !Array.isArray(value.hook_logs) || value.hook_logs.length !== 4) die("inference preflight identity is invalid");
   const inventories = new Set(), hooks = new Set(), sources = {};
   for (const entry of value.inventory_artifacts) {
     if (!["1b", "8b"].includes(entry?.tier) || inventories.has(entry.tier)) die("inference preflight inventory tiers are invalid");
@@ -204,7 +240,7 @@ export async function validateInferencePreflight(inferenceRoot, permanentPin, ex
     hook_logs: expectedPreflight.hook_logs.map(({ backend, tier, sha256 }) => ({ backend, tier, sha256 })),
   };
   if (!expectedReceipt || JSON.stringify(receipt) !== JSON.stringify(expectedReceipt)) die("inference preflight does not equal the sealed terminal plan provenance");
-  return { receipt, sources };
+  return { receipt, sources, compatibility };
 }
 
 export async function verifyRouteClosure(sceneWorksRoot, command) {
@@ -228,10 +264,11 @@ async function verifyProductService(output, sceneWorksRoot, permanentPin, tuple)
 
 export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weightsRoot, metricsRoot, permanentPin, command, leaseHelper, output, tuple }) {
   const { plan, metrics_lock_sha256 } = await readPlanAndLock(planPath);
-  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
+  const validatorSource = validateInferenceValidatorSource(plan.inference_contract);
+  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, validatorSource.revision);
   if (!weightsRoot || !metricsRoot) die("pre-provisioned weights and metrics roots required; network acquisition is forbidden");
   await stat(leaseHelper).catch(() => die("current-tree fs2 lease helper is missing"));
-  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin, tuple), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
+  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin, tuple), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin, plan.inference_preflight, plan.inference_contract), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
 }
 
 async function failureArtifact(output, context, error) {
@@ -259,7 +296,7 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
     await claimTupleMarker(leaseRoot, permanentPin, campaignRunId, tuple);
     await materializeSharedArtifacts(output, pre, tuple);
     const route = { ...pre.route }; delete route.root;
-    const controllerContext = { campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, tuple, workflow_run_id: process.env.GITHUB_RUN_ID ?? null, workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) || null, service: pre.service, route, inference_preflight: pre.inference_preflight.receipt, metrics: { metrics_lock_sha256: pre.metrics_lock_sha256, packages: pre.metrics.packages, weights: pre.metrics.weights, clip: pre.metrics.clip }, prompt_raster: Object.fromEntries(Object.entries(pre.weights.prompt_raster).filter(([key]) => key !== "inventory_source")), model_revisions: pre.plan.model_snapshot_revisions, controller_started_at: new Date().toISOString() };
+    const controllerContext = { campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, tuple, workflow_run_id: process.env.GITHUB_RUN_ID ?? null, workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) || null, service: pre.service, route, inference_preflight: pre.inference_preflight.receipt, inference_preflight_compatibility: pre.inference_preflight.compatibility, metrics: { metrics_lock_sha256: pre.metrics_lock_sha256, packages: pre.metrics.packages, weights: pre.metrics.weights, clip: pre.metrics.clip }, prompt_raster: Object.fromEntries(Object.entries(pre.weights.prompt_raster).filter(([key]) => key !== "inventory_source")), model_revisions: pre.plan.model_snapshot_revisions, controller_started_at: new Date().toISOString() };
     const contextPath = path.join(output, "preflight-provenance.json");
     await writeFile(contextPath, JSON.stringify(controllerContext, null, 2) + "\n", { flag: "wx" });
     try {
@@ -297,8 +334,8 @@ function canonicalRun(raw, tuple) {
   return raw.run;
 }
 async function canonicalModule(inferenceRoot) { return import(pathToFileURL(path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs")).href); }
-export async function artifactManifestFromFiles(receipt, corpus, evidenceRoot, validator) {
-  const expected = validator.currentArtifactReferences(receipt, corpus);
+export async function artifactManifestFromFiles(receipt, corpus, evidenceRoot, validator, expectedPreflightRevision) {
+  const expected = validator.currentArtifactReferences(receipt, corpus, expectedPreflightRevision);
   const sizes = new Map();
   const expectedPaths = new Set(expected.map((entry) => entry.path));
   for (const entry of expected) {
@@ -311,7 +348,7 @@ export async function artifactManifestFromFiles(receipt, corpus, evidenceRoot, v
   for (const root of ["runs", "hostile", "prompt", "metrics", "preflight", "producer"]) {
     const directory = path.join(evidenceRoot, root); try { for (const name of await readdir(directory, { recursive: true })) { const relative = `${root}/${name.split(path.sep).join("/")}`; if ((await lstat(path.join(directory, name))).isFile() && !expectedPaths.has(relative)) die(`unreferenced canonical artifact: ${relative}`); } } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
-  return validator.buildArtifactManifest(receipt, corpus, sizes);
+  return validator.buildArtifactManifest(receipt, corpus, sizes, expectedPreflightRevision);
 }
 
 async function validateSuiteProvenance(suites, sceneWorksRoot, route) {
@@ -322,8 +359,8 @@ async function validateSuiteProvenance(suites, sceneWorksRoot, route) {
   if (!producer || producer.command !== route.path || !SHA256.test(producer.transcript_sha256)) die("suite producer does not bind current-tree route closure");
 }
 
-export async function consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, suiteRoot) {
-  const expected = validator.currentArtifactReferences ? validator.currentArtifactReferences(receipt, corpus) : validator.buildArtifactManifest(receipt, corpus).entries;
+export async function consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, suiteRoot, expectedPreflightRevision) {
+  const expected = validator.currentArtifactReferences ? validator.currentArtifactReferences(receipt, corpus, expectedPreflightRevision) : validator.buildArtifactManifest(receipt, corpus, undefined, expectedPreflightRevision).entries;
   for (const entry of expected) {
     const match = entry.path.match(/^runs\/([^/]+:[^/]+)\//);
     const sourceRoot = match ? tupleRoots.get(match[1]) : suiteRoot;
@@ -335,7 +372,8 @@ export async function consolidateCanonicalArtifacts(receipt, corpus, validator, 
 export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin, syntheticFixture = false }) {
   const { plan } = await readPlanAndLock(planPath);
   validateTerminalDispatchInputs(plan, permanentPin, campaignRunId);
-  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
+  const validatorSource = validateInferenceValidatorSource(plan.inference_contract);
+  await verifyInferenceCheckout(inferenceRoot, plan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin, validatorSource.revision);
   const rows = await readdir(evidenceRoot, { recursive: true });
   const rawFiles = rows.filter((name) => name.endsWith("raw-results.json"));
   const suiteFiles = rows.filter((name) => name.endsWith("terminal-suites.json"));
@@ -361,13 +399,13 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   else {
     const canonicalRoot = path.join(output, "canonical-evidence");
     await bindRecoveryLineage(receipt, await json(path.join(sceneWorksRoot, "release/starvector-terminal-recovery-v1.json")), (process.env.STARVECTOR_TERMINAL_RECOVERY_ROOT ?? path.join(process.env.RUNNER_TEMP ?? "", "starvector-recovery")), canonicalRoot);
-    await consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, path.dirname(suitePath));
-    manifest = await artifactManifestFromFiles(receipt, corpus, canonicalRoot, validator);
+    await consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, path.dirname(suitePath), validatorSource.base_revision);
+    manifest = await artifactManifestFromFiles(receipt, corpus, canonicalRoot, validator, validatorSource.base_revision);
   }
   receipt.artifact_manifest = manifest; receipt.producer.artifact_manifest_sha256 = manifest.aggregate_sha256;
   await mkdir(output, { recursive: true }); const receiptPath = path.join(output, "terminal-receipt.json"); await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
   const validatorPath = path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
-  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision, ...(syntheticFixture ? [] : ["--evidence-root", path.join(output, "canonical-evidence"), "--profile-schema", path.join(inferenceRoot, plan.inference_contract.receipt_schema), "--profile-sha256", plan.inference_contract.receipt_schema_sha256])]);
+  await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision, ...(syntheticFixture ? [] : ["--evidence-root", path.join(output, "canonical-evidence"), "--profile-schema", path.join(inferenceRoot, plan.inference_contract.receipt_schema), "--profile-sha256", plan.inference_contract.receipt_schema_sha256, "--preflight-inference-revision", validatorSource.base_revision])]);
   await writeFile(path.join(output, "terminal-artifacts.json"), JSON.stringify(await inventory(syntheticFixture ? evidenceRoot : path.join(output, "canonical-evidence")), null, 2) + "\n");
   return receipt;
 }

@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { inventory } from "./starvector-terminal-producer.mjs";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
-import { INFERENCE_REVISION, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, INFERENCE_SOURCE_REVISION, RECEIPT_SCHEMA, RECEIPT_SCHEMA_SHA256, readPlanAndLock, validateInferenceValidatorSource } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, assertTerminalPinPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
@@ -149,7 +149,7 @@ export async function downloadExact(url, destination, expected, fetcher = fetch)
 }
 
 export async function prepareCorpusInputs({ inferenceRoot, assetsRoot, permanentPin, parquetRoot, corpusRelative = "release/starvector-terminal-corpus-v1.json" }, acquire = downloadExact) {
-  if (permanentPin !== INFERENCE_REVISION) die("corpus inputs require the exact permanent inference pin");
+  if (permanentPin !== INFERENCE_SOURCE_REVISION) die("corpus inputs require the exact permanent inference source pin");
   if (!/^release\/[A-Za-z0-9_.-]+\.json$/.test(corpusRelative)) die("invalid corpus contract path");
   const existing = await lstat(assetsRoot).catch(error => { if (error.code === "ENOENT") return null; throw error; });
   if (existing) {
@@ -185,11 +185,11 @@ async function validatePublishedCheckout(destination, revision) {
   }
   if (head !== revision || dirty) die("published inference checkout is not exact and clean");
   const closure = ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"];
-  if (revision === INFERENCE_REVISION) closure.push(RECEIPT_SCHEMA);
+  if (revision === INFERENCE_SOURCE_REVISION) closure.push(RECEIPT_SCHEMA);
   for (const relative of closure) {
     const info = await lstat(path.join(destination, relative)).catch(() => null); if (!info?.isFile() || info.isSymbolicLink()) die(`inference checkout lacks ${relative}`);
   }
-  if (revision === INFERENCE_REVISION && await fileSha256(path.join(destination, RECEIPT_SCHEMA)) !== RECEIPT_SCHEMA_SHA256) die("published inference checkout outcome-parity receipt profile digest mismatch");
+  if (revision === INFERENCE_SOURCE_REVISION && await fileSha256(path.join(destination, RECEIPT_SCHEMA)) !== RECEIPT_SCHEMA_SHA256) die("published inference checkout outcome-parity receipt profile digest mismatch");
   return head;
 }
 
@@ -299,6 +299,7 @@ export async function installPinnedCheckout(source, hostRoot, revision) {
 
 export async function validatePreflightTransport(planPath, transport) {
   const { plan } = await readPlanAndLock(planPath);
+  const source = validateInferenceValidatorSource(plan.inference_contract);
   const expected = plan.inference_preflight;
   const observed = {
     revision: transport.revision,
@@ -306,7 +307,7 @@ export async function validatePreflightTransport(planPath, transport) {
     artifact_name: transport.artifactName,
   };
   const accepted = {
-    revision: plan.inference_contract.revision,
+    revision: source.revision,
     workflow_run_id: expected.workflow_run_id,
     artifact_name: expected.artifact.name,
   };
@@ -401,13 +402,14 @@ export async function assemblePreflight(source, destination, revision) {
 
 export async function assemblePinnedPreflight(source, hostRoot, planPath) {
   const { plan } = await readPlanAndLock(planPath);
+  const validatorSource = validateInferenceValidatorSource(plan.inference_contract);
   const expected = plan.inference_preflight;
   const observed = await json(path.join(source, "starvector-terminal-preflight.json"));
   validateSealedPreflightIndex(observed, expected);
-  const roots = await assertTerminalPinPhysicalContainment(hostRoot, plan.inference_contract.revision);
+  const roots = await assertTerminalPinPhysicalContainment(hostRoot, validatorSource.revision);
   await ensureTerminalPhysicalDirectory(roots.hostRoot, roots.pinRoot);
   await assertTerminalPhysicalContainment(roots.hostRoot, roots.preflightRoot);
-  return assemblePreflight(source, roots.preflightRoot, plan.inference_contract.revision);
+  return assemblePreflight(source, roots.preflightRoot, expected.head_sha);
 }
 
 export async function assembleWeights({ hostRoot, serviceAppData, serviceHfHome, promptProvider, promptModel, promptRevision }) {
