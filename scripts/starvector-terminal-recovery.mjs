@@ -118,9 +118,56 @@ with zipfile.ZipFile(archive) as z:
     fail(`cannot inspect failed execution route: ${error.message}`);
   }
 }
+async function boundedPublicationRouteSummary(archive) {
+  const program = String.raw`import collections,hashlib,json,pathlib,stat,sys,zipfile
+archive=pathlib.Path(sys.argv[1]); names=set(); total=0
+with zipfile.ZipFile(archive) as z:
+ infos=z.infolist()
+ if len(infos)>20000: raise ValueError('archive entry limit')
+ for i in infos:
+  p=pathlib.PurePosixPath(i.filename); total+=i.file_size
+  if p.is_absolute() or '..' in p.parts or '\\' in i.filename or i.filename in names or stat.S_ISLNK(i.external_attr>>16) or total>512*1024*1024: raise ValueError('unsafe failed execution archive')
+  names.add(i.filename)
+ matches=[i for i in infos if not i.is_dir() and (i.filename=='vector-generate-route.ndjson' or i.filename.endswith('/vector-generate-route.ndjson'))]
+ if len(matches)!=1 or matches[0].file_size>64*1024*1024: raise ValueError('missing, ambiguous, or oversized route record')
+ digest=hashlib.sha256(); phase_counts=collections.Counter(); status_counts=collections.Counter(); cases=set(); completed=collections.Counter(); records=0
+ with z.open(matches[0]) as stream:
+  for raw in stream:
+   if len(raw)>2*1024*1024: raise ValueError('oversized route line')
+   digest.update(raw); record=json.loads(raw); records+=1
+   case_id=record.get('case_id'); phase=record.get('phase'); job=record.get('job') or {}; status=job.get('status')
+   if not isinstance(case_id,str): raise ValueError('route case lacks identity')
+   cases.add(case_id); phase_counts[str(phase)]+=1; status_counts[str(status)]+=1
+   if status=='completed':
+    result=job.get('result') or {}; writes=result.get('assetWrites') or []
+    signature={'case_id':case_id,'generation_set_id':result.get('generationSetId'),'asset_count':len(writes)}
+    if len(writes)==1:
+     asset=writes[0]; signature.update({'asset_id':asset.get('assetId'),'asset_model':asset.get('model'),'asset_type':asset.get('type'),'asset_has_display_name':'displayName' in asset})
+    completed[json.dumps(signature,sort_keys=True,separators=(',',':'))]+=1
+ print(json.dumps({'sha256':digest.hexdigest(),'size':matches[0].file_size,'record_count':records,'phase_counts':phase_counts,'status_counts':status_counts,'case_ids':sorted(cases),'completed_signatures':[{'value':json.loads(key),'count':count} for key,count in sorted(completed.items())]},separators=(',',':'))) `;
+  try {
+    return JSON.parse((await execFile(python(), ["-c", program, archive], { maxBuffer: 8 * 1024 * 1024 })).stdout);
+  } catch (error) {
+    fail(`cannot inspect failed publication route: ${error.message}`);
+  }
+}
 const parseRecord = (records, name) => {
   try { return JSON.parse(records[name]); } catch { fail(`invalid failed execution ${name}`); }
 };
+
+function publicationApiSummary(bytes) {
+  const summary = { api_errors: 0, recovery_failures: 0, job_ids: new Set() };
+  for (const line of bytes.toString("utf8").trim().split("\n").filter(Boolean)) {
+    let record;
+    try { record = JSON.parse(line); } catch { fail("invalid publication API evidence log"); }
+    if (record.event === "api_error" && record.status === 400 && record.detail === "Missing required field: displayName") summary.api_errors += 1;
+    if (record.event === "terminal_progress_side_effect_recovery_failed" && record.status === 400 && record.detail === "Missing required field: displayName" && record.retry_deferred === true) {
+      summary.recovery_failures += 1;
+      if (typeof record.job_id === "string") summary.job_ids.add(record.job_id);
+    }
+  }
+  return { api_errors: summary.api_errors, recovery_failures: summary.recovery_failures, job_ids: [...summary.job_ids].sort() };
+}
 
 export async function validateNativeExecutionArchives(value, archives) {
   if (!archives?.upstream || !archives?.raw || !archives?.combined) fail("native execution archives are incomplete");
@@ -139,6 +186,30 @@ export async function validateNativeExecutionArchives(value, archives) {
   if (provenance.campaign_run_id !== value.campaign_id || provenance.inference_revision !== value.inference_revision || provenance.permanent_pin !== value.inference_revision || provenance.tuple !== expected.tuple || String(provenance.workflow_run_id) !== value.workflow.run_id || provenance.workflow_run_attempt !== value.workflow.run_attempt || provenance.service?.sceneworks_revision !== value.sceneworks_revision || provenance.service?.inference_revision !== value.inference_revision || provenance.service?.tuple !== expected.tuple || provenance.service?.worker?.model_id !== expected.model_id || provenance.service?.worker?.provider_id !== "mlx-starvector-1b" || provenance.service?.models?.["starvector-1b"]?.revision !== expected.model_revision) fail("native preflight provenance differs from failed execution");
   const controller = parseRecord(rawRecords, "controller-failure.json");
   if (controller.campaign_run_id !== value.campaign_id || controller.permanent_pin !== value.inference_revision || controller.tuple !== expected.tuple || controller.status !== "failed") fail("native controller failure identity differs");
+  if (expected.code === "native_asset_publication_missing_display_name") {
+    // This record advances recovery lineage only. A completed first generation
+    // and its raw asset write do not establish model-quality or terminal acceptance.
+    const publicationRecords = ["product-service-api.stdout.log", "product-service-stopped.json"];
+    const rawPublication = await boundedArchiveRecords(archives.raw, publicationRecords), combinedPublication = await boundedArchiveRecords(archives.combined, publicationRecords);
+    if (!rawPublication["product-service-stopped.json"].equals(combinedPublication["product-service-stopped.json"])) fail("combined archive substituted product service stop evidence");
+    const rawRoute = await boundedPublicationRouteSummary(archives.raw), combinedRoute = await boundedPublicationRouteSummary(archives.combined);
+    if (rawRoute.sha256 !== combinedRoute.sha256 || rawRoute.size !== combinedRoute.size || stable(rawRoute) !== stable(combinedRoute)) fail("combined archive substituted publication route evidence");
+    if (rawRoute.record_count !== expected.route_record_count || rawRoute.status_counts.completed !== expected.completed_poll_count || stable(rawRoute.case_ids) !== stable([expected.completed_case_id]) || rawRoute.completed_signatures.length !== 1) fail("publication route does not prove one completed generation");
+    const completed = rawRoute.completed_signatures[0];
+    if (completed.count !== expected.completed_poll_count || stable(completed.value) !== stable({ asset_count: 1, asset_has_display_name: false, asset_id: expected.asset_id, asset_model: expected.model_id, asset_type: "vector", case_id: expected.completed_case_id, generation_set_id: expected.generation_set_id })) fail("publication route completed asset writes differ");
+    const rawApi = publicationApiSummary(rawPublication["product-service-api.stdout.log"]), combinedApi = publicationApiSummary(combinedPublication["product-service-api.stdout.log"]);
+    const apiExpected = { api_errors: expected.api_error_count, recovery_failures: expected.recovery_failure_count, job_ids: [expected.api_job_id] };
+    if (stable(rawApi) !== stable(apiExpected) || stable(combinedApi) !== stable(apiExpected)) fail("publication API log does not prove the declared displayName failure");
+    const stopped = parseRecord(rawPublication, "product-service-stopped.json");
+    if (stopped.schema_version !== 1 || stopped.status !== "stopped" || stopped.instance_token !== expected.stopped_instance_token || stopped.api_pid !== expected.stopped_api_pid || stopped.worker_pid !== expected.stopped_worker_pid) fail("publication product service stop identity differs");
+    if (provenance.service?.instance_token !== stopped.instance_token || provenance.service?.api_pid !== stopped.api_pid || provenance.service?.worker_pid !== stopped.worker_pid) fail("publication stopped instance differs from preflight service");
+    if (sha(rawRecords["controller-failure.json"]) !== expected.controller_failure_sha256) fail("publication controller failure bytes differ from the declared execution");
+    for (const archive of [archives.raw, archives.combined]) {
+      const inventory = await boundedArchiveInventory(archive);
+      if (inventory.some((entry) => ["terminal-receipt.json", "terminal-artifacts.json"].includes(path.posix.basename(entry.path)))) fail("publication failure archive contains a forged terminal seal");
+    }
+    return value;
+  }
   if (expected.code === "native_quality_budget_underprovisioned") {
     const rawRoute = await boundedRouteSummary(archives.raw), combinedRoute = await boundedRouteSummary(archives.combined);
     if (rawRoute.sha256 !== combinedRoute.sha256 || rawRoute.size !== combinedRoute.size) fail("combined archive substituted vector route evidence");
@@ -314,13 +385,48 @@ export function validateExecutionPredecessor(config, run, artifact, jobs) {
   }
   const receiptFailure = value.failure?.code === "native_model_receipt_unproven";
   const budgetFailure = value.failure?.code === "native_quality_budget_underprovisioned" && value.failure.configured_max_new_tokens === 4000 && value.failure.required_max_new_tokens === 7933 && value.failure.observed_quality_cases === 20 && value.failure.accepted_quality_cases === 11 && value.failure.rejected_quality_cases === 9 && value.failure.token_limit_quality_cases === 7 && value.failure.sanitizer_quality_cases === 2 && value.failure.required_accepted_quality_cases === 114 && value.failure.max_possible_accepted_quality_cases === 111 && /^[a-f0-9]{64}$/.test(value.failure.controller_failure_sha256 ?? "");
-  if ((!receiptFailure && !budgetFailure) || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b" || value.failure.evidence_schema_version !== 1 || value.failure.model_id !== "starvector_1b" || value.failure.model_repository !== "starvector/starvector-1b-im2svg" || !/^[a-f0-9]{40}$/.test(value.failure.model_revision ?? "")) fail("invalid native execution failure identity");
+  const publicationFailure = value.failure?.code === "native_asset_publication_missing_display_name"
+    && value.failure.record_type === "publication_failure_predecessor"
+    && value.failure.api_status === 400
+    && value.failure.api_detail === "Missing required field: displayName"
+    && /^[a-f0-9]{64}$/.test(value.failure.controller_failure_sha256 ?? "")
+    && /^[A-Za-z0-9_-]+$/.test(value.failure.completed_case_id ?? "")
+    && /^[A-Za-z0-9_-]+$/.test(value.failure.generation_set_id ?? "")
+    && /^[A-Za-z0-9_-]+$/.test(value.failure.asset_id ?? "")
+    && /^[A-Za-z0-9_-]+$/.test(value.failure.api_job_id ?? "")
+    && /^[a-f0-9]{64}$/.test(value.failure.stopped_instance_token ?? "")
+    && [value.failure.route_record_count, value.failure.completed_poll_count, value.failure.api_error_count, value.failure.recovery_failure_count, value.failure.stopped_api_pid, value.failure.stopped_worker_pid].every((item) => Number.isSafeInteger(item) && item > 0);
+  if ((!receiptFailure && !budgetFailure && !publicationFailure) || value.failure.phase !== "execution" || value.failure.tuple !== "mlx:1b" || value.failure.evidence_schema_version !== 1 || value.failure.model_id !== "starvector_1b" || value.failure.model_repository !== "starvector/starvector-1b-im2svg" || !/^[a-f0-9]{40}$/.test(value.failure.model_revision ?? "")) fail("invalid native execution failure identity");
   const expectedRoles = ["upstream", "raw", "combined"], inputs = value.source_artifacts, artifacts = Array.isArray(artifact) ? artifact : [];
   if (!Array.isArray(inputs) || inputs.length !== expectedRoles.length || artifacts.length !== expectedRoles.length) fail("native execution artifact census differs");
   for (const [index, role] of expectedRoles.entries()) {
     const expected = inputs[index], observed = artifacts[index];
     const name = role === "upstream" ? `starvector-upstream-${value.campaign_id}` : role === "raw" ? `starvector-terminal-mlx-1b-${value.campaign_id}` : `starvector-terminal-receipt-${value.campaign_id}`;
     if (expected?.role !== role || !/^[1-9][0-9]*$/.test(expected.id ?? "") || expected.name !== name || !Number.isSafeInteger(expected.size) || expected.size < 1 || !/^sha256:[a-f0-9]{64}$/.test(expected.digest ?? "") || String(observed?.id) !== expected.id || observed.name !== expected.name || observed.size_in_bytes !== expected.size || observed.digest !== expected.digest || observed.expired !== false || String(observed.workflow_run?.id) !== workflow.run_id || observed.workflow_run?.head_sha !== workflow.head_sha) fail(`authenticated native ${role} artifact differs`);
+  }
+  if (publicationFailure) {
+    if (workflow.conclusion !== "cancelled") fail("publication failure predecessor requires a cancelled workflow");
+    const expected = new Map([
+      ["starvector-campaign / prepare-recovery", "success"],
+      ["starvector-provision", "skipped"],
+      ["starvector-diagnostic-candle-1b", "skipped"],
+      ["starvector-readiness", "skipped"],
+      ["starvector-source-closure", "skipped"],
+      ["build-candle", "skipped"],
+      ["starvector-campaign / upstream-reference", "success"],
+      ["starvector-campaign / mlx-1b", "cancelled"],
+      ["starvector-campaign / mlx-8b", "cancelled"],
+      ["starvector-campaign / cuda-1b", "cancelled"],
+      ["starvector-campaign / cuda-8b", "cancelled"],
+      ["starvector-campaign / seal-receipt", "failure"],
+    ]);
+    if (jobs.jobs.length !== expected.size) fail("publication failure predecessor job census differs");
+    for (const job of jobs.jobs) {
+      if (expected.get(job.name) !== job.conclusion || job.head_sha !== workflow.head_sha) fail(`publication failure predecessor job differs: ${job.name}`);
+      expected.delete(job.name);
+    }
+    if (expected.size) fail("publication failure predecessor job census differs");
+    return value;
   }
   const expectedConclusions = receiptFailure ? [["upstream-reference", "success"], ["mlx-1b", "failure"], ["mlx-8b", "skipped"], ["cuda-1b", "skipped"], ["cuda-8b", "skipped"], ["seal-receipt", "failure"]] : [["upstream-reference", "success"], ["mlx-1b", "cancelled"], ["mlx-8b", "cancelled"], ["cuda-1b", "cancelled"], ["cuda-8b", "cancelled"], ["seal-receipt", "failure"]];
   for (const [stage, conclusion] of expectedConclusions) {
