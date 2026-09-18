@@ -313,3 +313,6 @@ film-harness-review-eval/
 # — reproducible from the pack, and different bytes on every host and every model revision — so it
 # is deliberately not checked in. A pack that means to keep a recording pins `file` instead.
 *.tts-*.wav
+
+# Design-tool export preview (extensionless WebP); fails check-source-control-bytes classification
+design/system/.thumbnail
