@@ -8,8 +8,10 @@ const text = async (name) => readFile(path.join(root, "scripts", name), "utf8");
 
 test("terminal metrics bind actual product attachments rather than corpus preview fixtures", async () => {
   const metrics = await text("starvector-terminal-metrics.py");
-  assert.match(metrics, /actual product quality preview/);
+  assert.match(metrics, /actual product quality/);
   assert.match(metrics, /previewPngPath/);
+  assert.match(metrics, /comparisonPngPath/);
+  assert.match(metrics, /comparisonPngSha256/);
   assert.match(metrics, /sourceRasterPath/);
   assert.match(metrics, /consumed a raster other than the sealed submitted input/);
   assert.doesNotMatch(metrics, /case\["preview_png"\]/);

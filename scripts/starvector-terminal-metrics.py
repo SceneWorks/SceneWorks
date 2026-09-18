@@ -93,6 +93,21 @@ def compare(reference, preview):
     return {"ssim": ssim, "lpips": distance}
 
 
+def comparison_attachment(evidence, label):
+    """Verify the fixed-canvas render without substituting for the product preview."""
+    product = verified_file(
+        evidence.get("previewPngPath"), evidence.get("previewPngSha256"),
+        label + " product preview",
+    )
+    comparison = verified_file(
+        evidence.get("comparisonPngPath"), evidence.get("comparisonPngSha256"),
+        label + " comparison render",
+    )
+    if product == comparison:
+        fail(label + " comparison render must be separate from the product preview")
+    return comparison
+
+
 def event_evidence(event, label):
     job = event.get("job", {})
     value = job.get("result", {}).get("terminalEvidence") if isinstance(job.get("result"), dict) else None
@@ -231,10 +246,12 @@ def main():
             fail("quality worker evidence consumed a raster other than the sealed submitted input")
         verified_file(observed.get("sourceRasterPath"), observed.get("sourceRasterSha256"), "actual product quality raster")
         if observed.get("accepted") is True:
-            preview = verified_file(observed.get("previewPngPath"), observed.get("previewPngSha256"), "actual product quality preview")
-            facts.append({"case_id": case["case_id"], **compare(reference, preview)})
+            comparison = comparison_attachment(observed, "actual product quality")
+            facts.append({"case_id": case["case_id"], **compare(reference, comparison)})
         else:
-            if observed.get("canonicalSvgPath") is not None or observed.get("previewPngPath") is not None:
+            if any(observed.get(key) is not None for key in [
+                    "canonicalSvgPath", "canonicalSvgSha256", "previewPngPath",
+                    "previewPngSha256", "comparisonPngPath", "comparisonPngSha256"]):
                 fail("non-publishable quality outcome exposed an attachment")
             facts.append({"case_id": case["case_id"], "ssim": None, "lpips": None})
     parity_facts = []
@@ -258,7 +275,7 @@ def main():
                 "upstream_rejection_reason": None, "native_rejection_stage": native_stage,
                 "native_rejection_code": native_code, "native_rejection_reason": native_reason}
         if native_outcome == "accepted":
-            native_file = verified_file(native.get("previewPngPath"), native.get("previewPngSha256"), "actual native parity preview")
+            native_file = comparison_attachment(native, "actual native parity")
             upstream_file = verified_file(case.get("upstream_preview_png"), case.get("upstream_preview_png_sha256"), "independent upstream parity preview")
             verified_file(case.get("upstream_svg"), case.get("upstream_svg_sha256"), "independent upstream SVG")
             fact["rendered_ssim"] = compare(native_file, upstream_file)["ssim"]
@@ -268,7 +285,9 @@ def main():
                 fail("upstream parity rejection code is not normalized")
             if native_stage != upstream_stage or native_code != upstream_code:
                 fail("native/upstream parity rejection reason differs")
-            if any(native.get(key) is not None for key in ["canonicalSvgPath", "canonicalSvgSha256", "previewPngPath", "previewPngSha256"]):
+            if any(native.get(key) is not None for key in [
+                    "canonicalSvgPath", "canonicalSvgSha256", "previewPngPath",
+                    "previewPngSha256", "comparisonPngPath", "comparisonPngSha256"]):
                 fail("rejected native parity outcome exposed a published attachment")
             if native_stage == "sanitizer":
                 verified_file(native.get("rejectedSvgPath"), native.get("rejectedSvgSha256"), "native rejected SVG")
