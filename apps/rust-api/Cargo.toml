@@ -66,6 +66,8 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 backend-candle = ["sceneworks-worker/backend-candle"]
 
 [dev-dependencies]
+# Advance only a fixture runtime clock at verified job boundaries in cancellation tests.
+tokio = { version = "1.40", features = ["test-util"] }
 # Construct SQLite BUSY errors directly in the API error-contract test without
 # adding rusqlite to the production API dependency surface.
 rusqlite = { version = "0.32", features = ["bundled"] }

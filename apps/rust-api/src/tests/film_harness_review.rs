@@ -21,7 +21,10 @@ use serde_json::Value;
 use crate::film_harness::review::{
     self, Decision, EvalOptions, ReviewOptions, ScriptedVision, VqaVision,
 };
-use crate::film_harness::{self, ControllerLease, RunControl};
+use crate::film_harness::{
+    self, ApiRequest, ApiTransport, BytesTransportFuture, ControllerLease, RunControl,
+    TransportFuture,
+};
 use crate::tests::film_harness::{fast, harness_record, Harness, FIXTURE_DIR};
 use crate::tests::support::{huggingface_repo_cache_path, isolate_hf_cache, request, StatusCode};
 
@@ -2309,6 +2312,96 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
     );
 }
 
+/// Advance the review clock only after one frame has landed and the next extraction is running.
+/// Real API dispatch/cancellation and fake-worker acknowledgments remain observable boundaries.
+struct BudgetBoundaryTransport<'a> {
+    harness: &'a Harness,
+    frames: std::sync::atomic::AtomicUsize,
+    expired_job: parking_lot::Mutex<Option<String>>,
+    canceled_jobs: parking_lot::Mutex<Vec<String>>,
+}
+
+impl BudgetBoundaryTransport<'_> {
+    async fn wait_for_status(&self, job_id: &str, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let (status, job) = request(
+                    self.harness.app.clone(),
+                    "GET",
+                    &format!("/api/v1/jobs/{job_id}"),
+                    Value::Null,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                if job["status"] == expected {
+                    break;
+                }
+                assert!(
+                    !["failed", "completed", "canceled"]
+                        .iter()
+                        .any(|terminal| job["status"] == *terminal),
+                    "expected {job_id} to reach {expected}: {job}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("fixture job {job_id} did not reach {expected}"));
+    }
+}
+
+impl ApiTransport for BudgetBoundaryTransport<'_> {
+    fn call(&self, request: ApiRequest) -> TransportFuture<'_> {
+        let second_frame = request.method == "POST"
+            && request.path.ends_with("/frames")
+            && self
+                .frames
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1;
+        let canceled_job = (request.method == "POST")
+            .then(|| {
+                request
+                    .path
+                    .strip_prefix("/api/v1/jobs/")
+                    .and_then(|path| path.strip_suffix("/cancel"))
+                    .map(str::to_owned)
+            })
+            .flatten();
+        Box::pin(async move {
+            if second_frame {
+                let mut script = self.harness.script.lock();
+                script.frame_delay = Some(Duration::from_secs(600));
+                script.frame_reports_running = true;
+            }
+            let response = self.harness.transport.call(request).await?;
+            if second_frame {
+                assert!((200..300).contains(&response.status));
+                let job_id = response.body["id"].as_str().expect("created frame job");
+                self.wait_for_status(job_id, "running").await;
+                *self.expired_job.lock() = Some(job_id.to_owned());
+                // The first frame has landed and the second extraction is running. The fake
+                // worker's delay uses std::time, so advancing this runtime's Tokio clock expires
+                // the review budget without completing the active extraction.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(600)).await;
+                tokio::time::resume();
+            }
+            if let Some(job_id) = canceled_job {
+                assert!((200..300).contains(&response.status));
+                self.canceled_jobs.lock().push(job_id.clone());
+                // Deliver the successful cancel response after the fixture acknowledges it.
+                // Scheduler pressure cannot turn a correct API cancel into a terminal-state race.
+                self.wait_for_status(&job_id, "canceled").await;
+            }
+            Ok(response)
+        })
+    }
+
+    fn get_bytes(&self, path: String) -> BytesTransportFuture<'_> {
+        self.harness.transport.get_bytes(path)
+    }
+}
+
 /// (C) `limits.maxSeconds` running out DURING a frame extraction is a `review_budget` stop that
 /// keeps the frames already sampled — it used to surface as a transport error from the cancelled
 /// extraction job, with no document written at all.
@@ -2316,20 +2409,20 @@ async fn a_review_that_spends_its_wall_clock_budget_stops_with_review_budget_and
 async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sampled() {
     let (harness, _) = rendered_two_shots().await;
     script_answers(&harness, &agreeing_answers());
-    // Frames take ~0.9 s each against a 2 s budget: the first one or two land, and the budget
-    // runs out while a later one is still being extracted. Under a loaded runner even the first
-    // can miss, which is the same stop with fewer frames — the claims below hold either way.
-    harness.script.lock().frame_delay = Some(Duration::from_millis(900));
+    // Leave ordinary setup ample budget. The transport expires it at a verified active-job
+    // boundary rather than assuming scheduler-dependent 900 ms delays fit a two-second window.
     let mut options = review_options(&harness, &["SH010"]);
     options.review_plan_path = Some(review_plan_with_limits(&harness, |plan| {
-        plan.limits.max_seconds = 2;
+        plan.limits.max_seconds = 600;
     }));
-    let vision = VqaVision::new(
-        &harness.transport,
-        options.poll_interval,
-        options.control.clone(),
-    );
-    let reviewed = review::review(&harness.transport, &options, &vision)
+    let transport = BudgetBoundaryTransport {
+        harness: &harness,
+        frames: std::sync::atomic::AtomicUsize::new(0),
+        expired_job: parking_lot::Mutex::new(None),
+        canceled_jobs: parking_lot::Mutex::new(Vec::new()),
+    };
+    let vision = VqaVision::new(&transport, options.poll_interval, options.control.clone());
+    let reviewed = review::review(&transport, &options, &vision)
         .await
         .expect("a budget spent mid-extraction is a stop, not an error");
     let observed = observed_for(&reviewed, &harness.out_dir(), "SH010");
@@ -2338,7 +2431,7 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
         .as_deref()
         .expect("the review says why it stopped");
     assert!(
-        stop.starts_with("review_budget: limits.maxSeconds is 2s"),
+        stop.starts_with("review_budget: limits.maxSeconds is 600s"),
         "{stop}"
     );
     let sampled = observed
@@ -2346,9 +2439,24 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
         .iter()
         .filter(|frame| frame.shot_id == "SH010")
         .count();
-    assert!(
-        sampled < 3,
-        "the extraction the budget interrupted must not have produced a frame: {sampled}"
+    assert_eq!(
+        sampled, 1,
+        "the completed first frame survives; the interrupted second frame does not"
+    );
+    assert_eq!(
+        transport.frames.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "budget exhaustion prevents the third extraction from dispatching"
+    );
+    let expired_job = transport
+        .expired_job
+        .lock()
+        .clone()
+        .expect("budget advanced while the second extraction was running");
+    assert_eq!(
+        *transport.canceled_jobs.lock(),
+        vec![expired_job.clone()],
+        "the API receives cancellation for the exact extraction active at budget expiry"
     );
     assert_eq!(
         observed.frames.len(),
@@ -2364,8 +2472,9 @@ async fn a_budget_that_runs_out_mid_extraction_stops_with_the_frames_already_sam
     let jobs = harness.jobs().await;
     assert!(
         jobs.iter()
-            .any(|job| job["type"] == "frame_extract" && job["status"] == "canceled"),
-        "the extraction the budget interrupted was cancelled through the API"
+            .any(|job| job["id"] == expired_job && job["type"] == "frame_extract" && job["status"] == "canceled"),
+        "the extraction the budget interrupted was cancelled through the API; sampled={sampled}; extraction statuses={:?}",
+        jobs.iter().filter(|job| job["type"] == "frame_extract").map(|job| (&job["id"], &job["status"])).collect::<Vec<_>>()
     );
 }
 

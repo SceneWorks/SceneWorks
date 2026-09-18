@@ -114,7 +114,9 @@ pub(crate) async fn record_action<T>(
     };
     persist(&receipt)?;
     let result = operation.await;
-    receipt.status = if result.is_ok() {
+    receipt.status = if matches!(&result, Err(HarnessError::Canceled(_))) {
+        "canceled"
+    } else if result.is_ok() {
         "completed"
     } else {
         "failed"
@@ -232,9 +234,8 @@ impl ControllerLease {
     ///
     /// Acquisition must happen first: otherwise a competing action could erase a fresh cancel
     /// while the controller it targets still owns the run. A cancel written after this returns is
-    /// retained and observed by the new action's watching [`RunControl`]. Startup adoption and
-    /// resume deliberately use their existing acquisition paths because they have separate
-    /// recovery rules.
+    /// retained and observed by the new action's watching [`RunControl`]. Automatic startup
+    /// adoption uses interrupted acquisition instead: it continues the canceled operation.
     pub fn acquire_new_action(
         run_dir: &Path,
         owner: impl Into<String>,
@@ -251,6 +252,18 @@ impl ControllerLease {
     ) -> Result<Self, HarnessError> {
         let (path, lock) = Self::lock(run_dir)?;
         Self::claim(path, owner.into(), lock, Some(api_shutdown))
+    }
+
+    /// Explicit API actions consume only the previous controller's cancellation, before any
+    /// asynchronous admission or accepted response, while retaining shutdown recovery metadata.
+    pub(crate) fn acquire_new_action_for_api(
+        run_dir: &Path,
+        owner: impl Into<String>,
+        api_shutdown: FilmControllerShutdown,
+    ) -> Result<Self, HarnessError> {
+        let lease = Self::acquire_for_api(run_dir, owner, api_shutdown)?;
+        clear_cancel_request(run_dir)?;
+        Ok(lease)
     }
 
     /// Acquire a run only when its unlocked lease still names the controller that crashed.
@@ -511,6 +524,8 @@ pub enum HarnessError {
     /// resumable, its documents no longer hash to what the run was started from, or it names no
     /// such shot. Nothing was dispatched (sc-22711).
     Refused(String),
+    /// An accepted action was canceled before it could create work.
+    Canceled(String),
     Io(String),
 }
 
@@ -538,6 +553,7 @@ impl std::fmt::Display for HarnessError {
             Self::PlannerResponse { detail, .. } => write!(f, "transport error: {detail}"),
             Self::PlannerExecutionFailure { source, .. } => write!(f, "{source}"),
             Self::Refused(message) => write!(f, "refused: {message}"),
+            Self::Canceled(message) => write!(f, "canceled: {message}"),
             Self::Io(message) => write!(f, "io error: {message}"),
         }
     }
@@ -3256,6 +3272,15 @@ impl Session<'_> {
                 index
             }
             other => {
+                if self.canceled() {
+                    self.halt(
+                        RunOutcome::Canceled,
+                        "canceled",
+                        format!("canceled before the dialogue line for {role:?} was synthesized"),
+                        true,
+                    );
+                    return Ok(None);
+                }
                 let attempt = other
                     .map(|index| self.record.synthesized_sound[index].attempt + 1)
                     .unwrap_or(1);
@@ -3313,16 +3338,6 @@ impl Session<'_> {
             }
         };
         let key = self.record.synthesized_sound[index].idempotency_key.clone();
-        if self.canceled() {
-            self.halt(
-                RunOutcome::Canceled,
-                "canceled",
-                format!("canceled before the dialogue line for {role:?} was synthesized"),
-                true,
-            );
-            return Ok(None);
-        }
-
         // 2. The job. Adopt one already created under this key before creating anything.
         let mut job_id = self.record.synthesized_sound[index].job_id.clone();
         if job_id.is_none() {
@@ -3333,6 +3348,14 @@ impl Session<'_> {
         }
         let created_here = job_id.is_none();
         if job_id.is_none() {
+            if self.canceled() {
+                let detail =
+                    format!("canceled before the dialogue line for {role:?} was synthesized");
+                self.record.synthesized_sound[index].error = Some(detail.clone());
+                self.halt(RunOutcome::Canceled, "canceled", detail, true);
+                self.persist()?;
+                return Ok(None);
+            }
             let mut body = json!({
                 "projectId": project_id,
                 "prompt": text,
@@ -3992,6 +4015,16 @@ impl Session<'_> {
         // attempt has been in flight for zero seconds however old its record is.
         let created_here = job_id.is_none();
         if job_id.is_none() {
+            if self.canceled() {
+                // Keep this undispatched intention pending under its original key. Resume must
+                // not spend another attempt just because cancellation won the enqueue race.
+                let detail = format!("canceled before shot {} was dispatched", shot.id);
+                self.record.shots[shot_index].attempts[attempt_index].error = Some(detail.clone());
+                self.record.shots[shot_index].outcome = ShotOutcome::Canceled;
+                self.halt(RunOutcome::Canceled, "canceled", detail, true);
+                self.persist()?;
+                return Ok(false);
+            }
             let assets = self.record.shots[shot_index].conditioning_assets.clone();
             // The body is the COMPILED request's, always (sc-22713): the document a reviewer reads
             // in `compiled.json` is what the route receives, on a resume and a replacement exactly
@@ -4873,7 +4906,14 @@ impl Session<'_> {
                 return Ok(true);
             }
         }
-        if self.canceled() {
+        if self.canceled()
+            && self.record.export_pending.is_none()
+            && !self
+                .record
+                .export
+                .as_ref()
+                .is_some_and(|export| export.status == "running")
+        {
             self.halt(
                 RunOutcome::Canceled,
                 "canceled",
@@ -4945,6 +4985,16 @@ impl Session<'_> {
         let export_job_id = match existing {
             Some(job_id) => job_id,
             None => {
+                if self.canceled() {
+                    self.halt(
+                        RunOutcome::Canceled,
+                        "canceled",
+                        "canceled before the timeline export was dispatched".to_owned(),
+                        true,
+                    );
+                    self.persist()?;
+                    return Ok(false);
+                }
                 let export_job = self
                     .client
                     .expect_ok(
@@ -5247,9 +5297,89 @@ impl Session<'_> {
         }
     }
 
+    /// Cancellation does not abandon jobs an interrupted controller may already have created.
+    /// Resolve durable intentions (including lost POST responses) and settle existing jobs under
+    /// the usual grace. Each worker's dispatch boundary refuses to create a missing job.
+    async fn reconcile_canceled_work(&mut self) -> Result<(), HarnessError> {
+        let Some(project_id) = self.record.project_id.clone() else {
+            self.halt(
+                RunOutcome::Canceled,
+                "canceled",
+                "canceled before project creation".to_owned(),
+                true,
+            );
+            return Ok(());
+        };
+        let entries: Vec<_> = self
+            .pack
+            .sound
+            .iter()
+            .filter(|entry| {
+                self.record
+                    .synthesized_sound
+                    .iter()
+                    .any(|line| line.role == entry.role && !line.is_terminal())
+            })
+            .cloned()
+            .collect();
+        for entry in entries {
+            self.synthesize_dialogue(&project_id, &entry).await?;
+        }
+        for shot in self.plan.shots.clone() {
+            let Some(index) = self
+                .record
+                .shots
+                .iter()
+                .position(|record| record.shot_id == shot.id)
+            else {
+                continue;
+            };
+            for attempt in 0..self.record.shots[index].attempts.len() {
+                if !TERMINAL_ATTEMPT_STATUSES
+                    .contains(&self.record.shots[index].attempts[attempt].status.as_str())
+                {
+                    self.work_attempt(&shot, index, attempt, false).await?;
+                    if self.record.shots[index].selected_attempt.is_none()
+                        && matches!(
+                            self.record.shots[index].attempts[attempt].status.as_str(),
+                            "canceled" | "canceled_by_operator"
+                        )
+                    {
+                        self.record.shots[index].outcome = ShotOutcome::Canceled;
+                    }
+                }
+            }
+        }
+        if self.record.export_pending.is_some()
+            || self
+                .record
+                .export
+                .as_ref()
+                .is_some_and(|export| export.status == "running")
+        {
+            self.run_export().await?;
+        }
+        self.halt(
+            RunOutcome::Canceled,
+            "canceled",
+            "operator canceled; existing jobs reconciled without new dispatch".to_owned(),
+            true,
+        );
+        Ok(())
+    }
+
     /// Project -> references -> shots -> timeline -> export -> close.
     async fn drive(mut self) -> Result<RunRecord, HarnessError> {
-        let outcome = self.drive_inner().await;
+        let outcome = if self.canceled() {
+            self.reconcile_canceled_work().await.map(|()| false)
+        } else {
+            let result = self.drive_inner().await;
+            if result.is_ok() && self.canceled() {
+                self.reconcile_canceled_work().await.map(|()| false)
+            } else {
+                result
+            }
+        };
         match outcome {
             Ok(export_ok) => {
                 self.finish(export_ok)?;
@@ -5740,7 +5870,7 @@ pub async fn resume(
     transport: &dyn ApiTransport,
     options: &ResumeOptions,
 ) -> Result<RunRecord, HarnessError> {
-    let lease = ControllerLease::acquire(
+    let lease = ControllerLease::acquire_new_action(
         &options.out_dir,
         format!("resume_{}", uuid::Uuid::new_v4().simple()),
     )?;
@@ -5768,7 +5898,6 @@ async fn resume_inner(
     let started = Instant::now();
     let continued = continue_run(transport, options).await?;
     if continued.record.active_take_operation.is_some() {
-        clear_cancel_request(&options.out_dir)?;
         return recover_take_operation(transport, options, continued, started).await;
     }
     if !continued.record.is_resumable() {
@@ -5783,8 +5912,6 @@ async fn resume_inner(
             continued.record.run_id
         )));
     }
-    // A cancel that stopped the previous controller must not cancel this one on its first poll.
-    clear_cancel_request(&options.out_dir)?;
     let remaining =
         (continued.plan.limits.max_run_seconds as f64 - continued.record.elapsed_seconds).max(0.0);
     let run_deadline = started + Duration::from_secs_f64(remaining);
@@ -5801,7 +5928,9 @@ async fn resume_inner(
         ),
     );
     session.persist()?;
-    if remaining <= 0.0 {
+    // Even an exhausted run can still own a job. A pending Cancel must settle that job;
+    // a later explicit resume still encounters the unchanged exhausted budget.
+    if remaining <= 0.0 && !session.canceled() {
         session.halt(
             RunOutcome::StoppedRunBudget,
             "run_budget",
@@ -5831,7 +5960,7 @@ pub async fn replace_take(
     shot_id: &str,
     reason: &str,
 ) -> Result<RunRecord, HarnessError> {
-    let lease = ControllerLease::acquire(
+    let lease = ControllerLease::acquire_new_action(
         &options.out_dir,
         format!("replace_{}", uuid::Uuid::new_v4().simple()),
     )?;
@@ -5910,7 +6039,11 @@ async fn replace_take_operation(
             continued.record.run_id
         )));
     }
-    clear_cancel_request(&options.out_dir)?;
+    if options.control.is_canceled() {
+        return Err(HarnessError::Canceled(
+            "take action canceled during admission; the previous take and attempt budget are unchanged".to_owned(),
+        ));
+    }
     // One replacement runs OUTSIDE the run budget (sc-22715): the attempt is bounded by the
     // per-shot budget and the re-export by its own, and neither is charged to `elapsedSeconds` —
     // the human just authorised this one attempt, and a replacement that spent the run's remaining
@@ -6127,6 +6260,21 @@ async fn complete_take_operation(
     reason: &str,
     prior_verdict: (RunOutcome, Option<RunStop>),
 ) -> Result<RunRecord, HarnessError> {
+    if session.canceled()
+        && session
+            .record
+            .active_take_operation
+            .as_ref()
+            .is_some_and(|operation| {
+                session.record.shots[index]
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.attempt == operation.attempt && attempt.job_id.is_none())
+            })
+    {
+        session.finish(false)?;
+        return Ok(session.record);
+    }
     let replaced = session.record.shots[index].selected_attempt.is_some();
     session.record.shots[index].outcome = if replaced {
         ShotOutcome::Rendered
@@ -8115,6 +8263,13 @@ pub async fn start_explicit_export(
                 .await?
         }
         None => {
+            if options.control.is_canceled() {
+                return record_action(&options.out_dir, "export", None, async {
+                    Err(HarnessError::Canceled(
+                        "export canceled before dispatch; the saved cut and pending export identity are retained".to_owned(),
+                    ))
+                }).await;
+            }
             let height = saved
                 .get("height")
                 .and_then(Value::as_u64)

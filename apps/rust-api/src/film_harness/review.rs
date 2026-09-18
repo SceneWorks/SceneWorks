@@ -1861,7 +1861,7 @@ pub async fn request_repair(
     shot_id: &str,
     reason: &str,
 ) -> Result<RunRecord, HarnessError> {
-    let lease = super::ControllerLease::acquire(
+    let lease = super::ControllerLease::acquire_new_action(
         &options.out_dir,
         format!("repair_{}", uuid::Uuid::new_v4().simple()),
     )?;
