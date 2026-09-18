@@ -4,13 +4,15 @@
 // canonical evidence.
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { appendFile, lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readdir, realpath, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { assertTerminalProductWorkerReady, unloadOwnedWorker, reloadOwnedWorker } from "./starvector-terminal-product-service.mjs";
 import { observeTerminalMemory, startTerminalMemorySampler, terminalHardwareFromSamples } from "./lib/starvector-terminal-memory.mjs";
+
+import { validateLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 
 const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
@@ -36,8 +38,7 @@ export function validateBundle(bundle, tuple) {
   }
   const expectedModel = tuple.endsWith(":8b") ? "starvector_8b" : "starvector_1b";
   for (const [name, records] of Object.entries(entry)) if (["image_quality", "deterministic_parity", "lifecycle", "limits"].includes(name) && records.some((record) => record?.model !== expectedModel || !record.projectId || !record.sourceAssetId)) die(`${tuple} ${name} route identity differs from the selected tuple`);
-  const kinds = new Set(entry.limits.map((record) => record.finish_reason));
-  if (kinds.size !== finishReasons.size || [...finishReasons].some((kind) => !kinds.has(kind))) die(`${tuple} must exercise every typed finish reason`);
+  validateLimitCases(entry.limits, tuple.split(":")[1]);
   if (tuple === "candle-cuda:8b") for (const [name, count] of [["hostile_sanitizer", 200], ["prompt_composition", 60]]) if (!Array.isArray(bundle[name]) || bundle[name].length !== count) die(`terminal bundle must carry exactly ${count} ${name} records`);
   return entry;
 }
@@ -53,17 +54,35 @@ async function request(url, init) {
   if (!response.ok) die(`typed vector route ${response.status}: ${JSON.stringify(body)}`); return body;
 }
 export async function submitAndPoll(baseUrl, record, transcript, fetchOptions = {}) {
+  const started = performance.now();
+  let cancellation = null;
+  const cancelJob = async (id, phase, observed) => {
+    const acknowledgement = await request(new URL(`/api/v1/jobs/${id}/cancel`, baseUrl), { method: "POST", headers: fetchOptions.headers });
+    cancellation = { phase, observed, acknowledgement };
+    await appendFile(transcript, JSON.stringify({ phase: "cancel_requested", case_id: record.case_id, cancellation }) + "\n");
+  };
   const created = await request(new URL("/api/v1/image/vectorize/jobs", baseUrl), { method: "POST", headers: { "content-type": "application/json", ...fetchOptions.headers }, body: JSON.stringify(vectorRequest(record)) });
   if (created.type !== "vector_generate" || !created.id) die("typed vector route did not create vector_generate job");
   await appendFile(transcript, JSON.stringify({ phase: "created", case_id: record.case_id, job: created }) + "\n");
-  if (record.cancel_after_create) await request(new URL(`/api/v1/jobs/${created.id}/cancel`, baseUrl), { method: "POST", headers: fetchOptions.headers });
+  if (record.cancel_after_create) await cancelJob(created.id, "after_create", created);
   for (let attempt = 0; attempt < 7200; attempt += 1) {
     const job = await request(new URL(`/api/v1/jobs/${created.id}`, baseUrl), { headers: fetchOptions.headers });
     await appendFile(transcript, JSON.stringify({ phase: "polled", case_id: record.case_id, job }) + "\n");
+    if (record.cancel_after_progress && !cancellation && job.status === "running" && job.stage === "generating" && job.progress > 0.25) await cancelJob(created.id, "after_progress", job);
     if (terminal.has(job.status)) {
+      // Completed is stored before API asset side effects finish. Wait for the
+      // public sidecars, not only the worker's terminal status.
+      if (job.status === "completed" && Array.isArray(job.result?.assetWrites) && job.result.assetWrites.length) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
+      const observed = { ...job, endToEndLatencySeconds: (performance.now() - started) / 1000, ...(cancellation ? { cancellation } : {}) };
+      // Queued cancellation never starts a worker and has no metrics. The
+      // acknowledgement and cancelled snapshot are the actual evidence.
+      if (["cancelled", "canceled"].includes(job.status)) return observed;
       for (let metricAttempt = 0; metricAttempt < 60; metricAttempt += 1) {
         const metrics = await request(new URL(`/api/v1/jobs/${created.id}/metrics`, baseUrl), { headers: fetchOptions.headers });
-        if (metrics && typeof metrics === "object") return { ...job, terminalMetrics: metrics };
+        if (metrics && typeof metrics === "object") return { ...observed, terminalMetrics: metrics };
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       die(`vector_generate job ${created.id} completed without worker metrics`);
@@ -78,6 +97,78 @@ async function runCases(baseUrl, records, transcript, fetchOptions, suite, outpu
   for (const record of records) { const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions); await preserveTerminalDiagnostics(output, suite, record.case_id, job); completed.push({ case_id: record.case_id, suite, request: vectorRequest(record), job }); }
   return completed;
 }
+// Cancellation is an API/worker lifecycle observation, not a provider finish
+// record. Observe the owned project's public assets and private output tree.
+export async function cancellationFootprint(baseUrl, record, fetchOptions, output, service) {
+  const project = await request(new URL(`/api/v1/projects/${record.projectId}`, baseUrl), { headers: fetchOptions.headers });
+  const projectsRoot = await realpath(path.resolve(output, service.state_root, "data", "projects"));
+  const projectRoot = await realpath(project.path);
+  const relative = path.relative(projectsRoot, projectRoot);
+  if (project.id !== record.projectId || !relative || relative.startsWith("..") || path.isAbsolute(relative)) die("cancellation project escapes the owned product service");
+  const assets = await request(new URL(`/api/v1/projects/${record.projectId}/assets?includeRejected=true&includeTrashed=true`, baseUrl), { headers: fetchOptions.headers });
+  if (!Array.isArray(assets)) die("cancellation asset inventory is not an array");
+  const files = [];
+  for (const subtree of ["assets/images", ".terminal-evidence"]) {
+    const root = path.join(projectRoot, subtree);
+    const info = await lstat(root).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+    if (!info) continue;
+    if (!info.isDirectory() || info.isSymbolicLink()) die("cancellation output tree is not a regular directory");
+    for (const name of (await readdir(root, { recursive: true })).sort()) {
+      const file = path.join(root, name), info = await lstat(file);
+      if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) die("cancellation output tree contains a non-regular path");
+      // Empty generation-set directories are not published or staged output.
+      if (info.isFile() || path.basename(name).endsWith(".tmp")) files.push({ path: `${subtree}/${name.split(path.sep).join("/")}`, size: info.isFile() ? info.size : null, sha256: info.isFile() ? sha(await readFile(file)) : null });
+    }
+  }
+  return { assets: assets.map((asset) => ({ id: asset.id, jobId: asset.lineage?.jobId ?? null })).sort((a, b) => a.id.localeCompare(b.id)), files };
+}
+
+export function limitPassed(event, record) {
+  if (record.scenario.endsWith("cancellation")) {
+    const job = event.job, cancellation = job?.cancellation, observed = cancellation?.observed, acknowledgement = cancellation?.acknowledgement;
+    const queued = record.scenario === "queued_cancellation";
+    const phaseObserved = queued
+      ? cancellation?.phase === "after_create" && observed?.status === "queued" && !observed.workerId && event.workerUnloaded?.exited === true
+      : cancellation?.phase === "after_progress" && observed?.status === "running" && observed.stage === "generating" && observed.progress > 0.25 && !!observed.workerId;
+    const noOutput = (value) => !value || Object.keys(value).length === 0;
+    const before = event.publicationBefore, after = event.publicationAfter;
+    return !!(phaseObserved && acknowledgement?.id === job.id && acknowledgement.cancelRequested === true && ["canceled", "cancelled"].includes(job.status) && job.cancelRequested === true && job.canceledAt && noOutput(job.result) && before && after && JSON.stringify(before) === JSON.stringify(after) && !after.assets.some((asset) => asset.jobId === job.id) && !after.files.some((file) => file.path.split("/").some((part) => part.endsWith(".tmp"))));
+  }
+  const item = evidence(event, "limit");
+  if (record.scenario === "completion") return item.accepted === true && ["complete_root", "eos"].includes(item.finishReason);
+  const expected = { token: "token_limit", byte: "byte_limit", wall_time: "wall_time_limit" }[record.scenario];
+  return !!expected && item.finishReason === expected && item.accepted === false && item.canonicalSvgPath === null && item.previewPngPath === null && item.comparisonPngPath === null;
+}
+
+export async function runLimits(baseUrl, records, transcript, fetchOptions, output, { unload, reload, snapshot, submit = submitAndPoll, preserve = preserveTerminalDiagnostics }) {
+  const events = [];
+  for (const record of records) {
+    let workerUnloaded;
+    if (record.worker_unloaded) {
+      workerUnloaded = await unload();
+      if (workerUnloaded?.exited !== true || workerUnloaded.status !== "succeeded") die("queued cancellation requires the owned worker to exit");
+    }
+    const cancelling = record.scenario.endsWith("cancellation");
+    try {
+      const publicationBefore = cancelling ? await snapshot(record) : null;
+      const job = await submit(baseUrl, record, transcript, fetchOptions);
+      await preserve(output, "limits", record.case_id, job);
+      const publicationAfter = cancelling ? await snapshot(record) : null;
+      const event = { case_id: record.case_id, suite: "limits", scenario: record.scenario, request: vectorRequest(record), job, ...(cancelling ? { publicationBefore, publicationAfter } : {}), ...(workerUnloaded ? { workerUnloaded } : {}) };
+      await appendFile(transcript, JSON.stringify({ phase: "limit_observed", event }) + "\n");
+      if (!limitPassed(event, record)) die(`bounded scenario ${record.scenario} did not observe its required behavior`);
+      events.push(event);
+    } finally {
+      if (workerUnloaded) {
+        const result = await reload();
+        if (result?.status !== "succeeded" || !Number.isSafeInteger(result.worker_pid) || result.worker_pid === result.previous_worker_pid) die("queued cancellation worker reload failed");
+        await appendFile(transcript, JSON.stringify({ phase: "cancel_worker_reloaded", case_id: record.case_id, result }) + "\n");
+      }
+    }
+  }
+  return events;
+}
+
 async function runParityCases(baseUrl, records, transcript, fetchOptions, output) {
   const completed = [];
   for (const record of records) { const job = await submitAndPoll(baseUrl, record, transcript, fetchOptions); await preserveTerminalDiagnostics(output, "deterministic_parity", record.case_id, job); completed.push({ case_id: record.case_id, seed: record.seed, job }); }
@@ -131,7 +222,7 @@ async function runHostileSanitizer(records, output, transcript) {
   }
   return results;
 }
-function promptWorkflowRequest(record) {
+export function promptWorkflowRequest(record) {
   if (!record?.projectId || !record.prompt || !record.raster_model || !record.vector_model) die("prompt case requires project, disclosed prompt, raster model, and vector model");
   return { projectId: record.projectId, projectName: record.projectName, prompt: record.prompt, negativePrompt: record.negative_prompt ?? "", rasterModel: record.raster_model, vectorModel: record.vector_model, seed: record.seed, width: record.width, height: record.height, sampling: record.sampling, detailBudget: record.detail_budget, expectedRasterRevision: record.expected_raster_revision, expectedVectorRevision: record.expected_vector_revision };
 }
@@ -208,7 +299,7 @@ async function materializeRunArtifacts(output, tuple, entry, events, run) {
     await materializeArtifact(output, `${prefix}/provider_transcript_sha256`, item.providerTranscriptPath, record.provider_transcript_sha256);
     if (record.accepted) {
       await materializeArtifact(output, `${prefix}/canonical`, item.canonicalSvgPath, record.canonical_svg_sha256);
-      await materializeArtifact(output, `${prefix}/preview`, item.previewPngPath, record.preview_png_sha256);
+      await materializeArtifact(output, `${prefix}/preview`, item.comparisonPngPath, record.preview_png_sha256);
     }
   }
   for (const role of ["config", "processor", "transcript"]) {
@@ -219,7 +310,7 @@ async function materializeRunArtifacts(output, tuple, entry, events, run) {
     await materializeArtifact(output, `${prefix}/input`, native.sourceRasterPath, record.input_png_sha256);
     await materializeArtifact(output, `${prefix}/native-transcript`, native.providerTranscriptPath, record.native_provider_transcript_sha256);
     if (record.native_outcome === "accepted") {
-      await materializeArtifact(output, `${prefix}/native-preview`, native.previewPngPath, record.native_preview_png_sha256);
+      await materializeArtifact(output, `${prefix}/native-preview`, native.comparisonPngPath, record.native_preview_png_sha256);
       await materializeArtifact(output, `${prefix}/upstream-svg`, golden.upstream_svg, record.upstream_svg_sha256);
       await materializeArtifact(output, `${prefix}/upstream-preview`, golden.upstream_preview_png, record.upstream_preview_png_sha256);
     } else {
@@ -252,10 +343,10 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
   const imageCases = events.image_quality.map((event, case_index) => {
     const item = evidence(event, `quality ${case_index}`), fact = facts.get(event.case_id); if (!fact) die(`missing metric fact ${event.case_id}`);
     const accepted = item.accepted === true, finish = item.finishReason;
-    if (!finishReasons.has(finish) || typeof item.latencySeconds !== "number" || item.latencySeconds < 0) die("invalid typed quality outcome");
+    if (!finishReasons.has(finish) || !Number.isFinite(event.job.endToEndLatencySeconds) || event.job.endToEndLatencySeconds < 0) die("invalid typed quality outcome");
     if (accepted && !["complete_root", "eos"].includes(finish)) die("accepted quality case has non-complete finish");
     if (item.sourceRasterSha256 !== entry.image_quality[case_index].input_png_sha256 || typeof item.sourceRasterPath !== "string") die("worker terminal evidence does not bind the submitted project raster");
-    return { case_index, source: sourceFor(case_index), source_svg_sha256: entry.image_quality[case_index].source_svg_sha256, input_png_sha256: entry.image_quality[case_index].input_png_sha256, provider_transcript_sha256: item.providerTranscriptSha256, finish_reason: finish, canonical_svg_sha256: accepted ? item.canonicalSvgSha256 : null, preview_png_sha256: accepted ? item.previewPngSha256 : null, accepted, ssim: accepted ? fact.ssim : null, lpips: accepted ? fact.lpips : null, latency_seconds: item.latencySeconds };
+    return { case_index, source: sourceFor(case_index), source_svg_sha256: entry.image_quality[case_index].source_svg_sha256, input_png_sha256: entry.image_quality[case_index].input_png_sha256, provider_transcript_sha256: item.providerTranscriptSha256, finish_reason: finish, canonical_svg_sha256: accepted ? item.canonicalSvgSha256 : null, preview_png_sha256: accepted ? item.comparisonPngSha256 : null, accepted, ssim: accepted ? fact.ssim : null, lpips: accepted ? fact.lpips : null, latency_seconds: event.job.endToEndLatencySeconds };
   });
   const parityMetrics = new Map(metricResult.deterministic_parity_facts.map((fact) => [fact.case_id, fact]));
   if (parityMetrics.size !== 20) die("metric script did not emit 20 unique deterministic parity facts");
@@ -268,9 +359,9 @@ export function assembleRun(tuple, entry, events, metricFacts, parityFacts = [])
     const item = evidence(event, "lifecycle");
     return [event.operation, item.accepted === true && ["complete_root", "eos"].includes(item.finishReason) && (event.operation !== "memory_reported" || typeof event.job.terminalMetrics?.peakMemoryBytes === "number")];
   }));
-  const limits = Object.fromEntries(events.limits.map((event, index) => { const item = evidence(event, "limit"), expected = entry.limits[index]?.finish_reason; const map = { complete_root: "complete_root", eos: "eos", token_limit: "token", byte_limit: "byte", wall_time_limit: "wall_time", cancelled: "cancellation" }; const unpublished = ["token_limit", "byte_limit", "wall_time_limit", "cancelled"].includes(item.finishReason) ? item.canonicalSvgPath === null && item.previewPngPath === null : true; return [map[expected], item.finishReason === expected && unpublished]; }));
+  const limits = Object.fromEntries(events.limits.map((event, index) => [entry.limits[index]?.scenario, limitPassed(event, entry.limits[index])]));
   for (const key of ["load", "unload", "reload", "memory_reported"]) if (lifecycle[key] !== true) die(`missing lifecycle ${key}`);
-  for (const key of ["complete_root", "eos", "token", "byte", "wall_time", "cancellation"]) if (limits[key] !== true) die(`missing bounded outcome ${key}`);
+  for (const key of ["completion", "token", "byte", "wall_time", "queued_cancellation", "in_flight_cancellation"]) if (limits[key] !== true) die(`missing bounded outcome ${key}`);
   const identity = evidence(events.image_quality[0], "run identity"), hardware = metricResult.runtime?.hardware;
   if (!identity?.modelId || !identity?.modelRepository || !identity?.modelRevision || !identity?.providerId || !hardware || !metricResult.runtime?.inventory_sha256 || !metricResult.runtime?.lifecycle_memory_transcript_sha256) die("run lacks observed provider/model/hardware identity");
   const [backend, tier] = tuple.split(":"), expectedNativeBackend = backend === "candle-cuda" ? "candle" : "mlx";
@@ -283,8 +374,8 @@ export function assembleParityRecord(case_index, seed, native, golden, fact) {
   if (!Number.isInteger(seed) || native.sourceRasterSha256 !== golden.input_png_sha256 || typeof native.providerTranscriptSha256 !== "string" || !fact || fact.native_outcome !== fact.upstream_outcome || fact.upstream_outcome !== golden.upstream_outcome) die("invalid upstream parity event");
   const common = { case_index, seed, input_png_sha256: native.sourceRasterSha256, native_outcome: fact.native_outcome, upstream_outcome: fact.upstream_outcome, native_provider_transcript_sha256: native.providerTranscriptSha256 };
   if (fact.native_outcome === "accepted") {
-    if (typeof native.previewPngSha256 !== "string" || typeof fact.rendered_ssim !== "number") die("accepted upstream parity event lacks render evidence");
-    return { ...common, native_preview_png_sha256: native.previewPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
+    if (typeof native.comparisonPngSha256 !== "string" || typeof fact.rendered_ssim !== "number") die("accepted upstream parity event lacks render evidence");
+    return { ...common, native_preview_png_sha256: native.comparisonPngSha256, upstream_svg_sha256: golden.upstream_svg_sha256, upstream_preview_png_sha256: golden.upstream_preview_png_sha256, rendered_ssim: fact.rendered_ssim };
   }
   if (fact.rendered_ssim !== null || !["sanitizer", "generation_limit"].includes(fact.native_rejection_stage) || fact.native_rejection_stage !== fact.upstream_rejection_stage || fact.native_rejection_code !== fact.upstream_rejection_code) die("rejected upstream parity event lacks matching typed reason");
   return { ...common, native_preview_png_sha256: null, upstream_svg_sha256: null, upstream_preview_png_sha256: null, rendered_ssim: null, native_rejection_stage: fact.native_rejection_stage, native_rejection_code: fact.native_rejection_code, native_rejection_reason: fact.native_rejection_reason, native_raw_svg_sha256: fact.native_rejection_stage === "sanitizer" ? native.rejectedSvgSha256 : null, upstream_rejection_stage: fact.upstream_rejection_stage, upstream_rejection_code: fact.upstream_rejection_code, upstream_rejection_reason: fact.upstream_rejection_reason, upstream_raw_svg_sha256: golden.upstream_raw_svg_sha256, upstream_sanitizer_stdout_sha256: fact.upstream_rejection_stage === "sanitizer" ? golden.upstream_sanitizer_stdout_sha256 : null, upstream_sanitizer_stderr_sha256: fact.upstream_rejection_stage === "sanitizer" ? golden.upstream_sanitizer_stderr_sha256 : null };
@@ -296,7 +387,7 @@ async function liveRuntime(output, tuple, events, observation, service) {
   const hardware = terminalHardwareFromSamples({ samples: observation.samples, allocatorPeaks: observed, platform: process.platform, arch: process.arch, runnerName: process.env.RUNNER_NAME ?? `${process.platform}-self-hosted` });
   const probePath = path.join(output, "runtime-probe.json"), lifecyclePath = path.join(output, "lifecycle-memory.json");
   const processLifecycle = await json(path.join(output, "product-service-worker-lifecycle.json"));
-  await writeFile(lifecyclePath, JSON.stringify({ tuple, lifecycle: events.lifecycle, process_lifecycle: processLifecycle, provider_allocator_peak_bytes: observed, provider_metric: "JobMetrics.peakMemoryBytes: MLX allocator or CUDA device high-water; never process RSS", observation }, null, 2) + "\n");
+  await writeFile(lifecyclePath, JSON.stringify({ tuple, lifecycle: events.lifecycle, limits: events.limits, process_lifecycle: processLifecycle, provider_allocator_peak_bytes: observed, provider_metric: "JobMetrics.peakMemoryBytes: MLX allocator or CUDA device high-water; never process RSS", observation }, null, 2) + "\n");
   await writeFile(probePath, JSON.stringify({ tuple, service, hardware, observation }, null, 2) + "\n");
   hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
   const runtime = { hardware, inventory_sha256: tuple.endsWith(":1b") ? service.models?.["starvector-1b"]?.inventory_sha256 : service.models?.["starvector-8b"]?.inventory_sha256, raw_probe_path: probePath, lifecycle_memory_transcript_path: lifecyclePath, lifecycle_memory_transcript_sha256: sha(await readFile(lifecyclePath)) };
@@ -363,7 +454,11 @@ async function main() {
         reload: async () => { let result; await sampler.transition(async () => { result = await reloadOwnedWorker(root, output); service.worker_pid = result.worker_pid; service.worker = result.worker; }); return result; },
         preserve: (record, job) => preserveTerminalDiagnostics(output, "lifecycle", record.case_id, job),
       }),
-      limits: await runCases(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, "limits", output),
+      limits: await runLimits(baseUrl, cases.limits, transcript, bundle.fetch ?? {}, output, {
+        unload: async () => { let result; await sampler.transition(async () => { result = await unloadOwnedWorker(output); service.worker_pid = null; }); return result; },
+        reload: async () => { let result; await sampler.transition(async () => { result = await reloadOwnedWorker(root, output); service.worker_pid = result.worker_pid; service.worker = result.worker; }); return result; },
+        snapshot: (record) => cancellationFootprint(baseUrl, record, bundle.fetch ?? {}, output, service),
+      }),
     };
   } finally { observation = await sampler.stop(); }
   // Optional raster composition is a different workload and cannot author the

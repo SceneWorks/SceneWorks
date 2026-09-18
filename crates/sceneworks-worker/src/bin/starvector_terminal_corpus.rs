@@ -7,6 +7,9 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const LIMIT_CASE_CONTRACT: &str =
+    include_str!("../../../../scripts/lib/starvector-terminal-limit-cases.json");
+
 fn shipping_detail_budgets() -> Result<Value, Box<dyn std::error::Error>> {
     let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
@@ -48,6 +51,120 @@ fn shipping_detail_budgets() -> Result<Value, Box<dyn std::error::Error>> {
         );
     }
     Ok(Value::Object(budgets))
+}
+
+fn materialize_limit_cases(
+    shipping_budgets: &Value,
+) -> Result<serde_json::Map<String, Value>, Box<dyn std::error::Error>> {
+    let contract: Value = serde_json::from_str(LIMIT_CASE_CONTRACT)?;
+    if contract.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(fail("limit-case contract schema is unsupported"));
+    }
+    let sampling = contract
+        .get("sampling")
+        .ok_or_else(|| fail("limit-case sampling is missing"))?;
+    if sampling
+        != &json!({"temperature": 0.0, "topP": 1.0, "topK": 1, "repetitionPenalty": 1.0, "seed": 7})
+    {
+        return Err(fail("limit-case deterministic sampling drifted"));
+    }
+    let scenarios = contract
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .ok_or_else(|| fail("limit-case scenarios are missing"))?;
+    let expected = [
+        ("completion", 12_u64),
+        ("token", 11),
+        ("byte", 11),
+        ("wall_time", 11),
+        ("queued_cancellation", 11),
+        ("in_flight_cancellation", 11),
+    ];
+    if scenarios.len() != expected.len() {
+        return Err(fail("limit-case contract must contain six scenarios"));
+    }
+    for (index, ((name, source_case_index), template)) in expected.iter().zip(scenarios).enumerate()
+    {
+        if template.get("scenario").and_then(Value::as_str) != Some(*name)
+            || template.get("source_case_index").and_then(Value::as_u64) != Some(*source_case_index)
+        {
+            return Err(fail(format!(
+                "limit-case scenario {index} identity drifted"
+            )));
+        }
+    }
+    if scenarios[4]
+        .get("cancel_after_create")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || scenarios[4].get("worker_unloaded").and_then(Value::as_bool) != Some(true)
+        || scenarios[5]
+            .get("cancel_after_progress")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(fail("limit-case cancellation controls are incomplete"));
+    }
+
+    let tuples = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
+    let mut materialized = serde_json::Map::new();
+    for tuple in tuples {
+        let tier = tuple
+            .split_once(':')
+            .map(|(_, tier)| tier)
+            .ok_or_else(|| fail("limit-case tuple lacks a tier"))?;
+        let shipping = shipping_budgets
+            .get(tier)
+            .ok_or_else(|| fail(format!("shipping budget for {tier} is missing")))?;
+        if contract.pointer(&format!("/shipping_detail_budgets/{tier}")) != Some(shipping) {
+            return Err(fail(format!(
+                "limit-case {tier} shipping budget drifted from the compiled manifest"
+            )));
+        }
+        let mut records = Vec::with_capacity(scenarios.len());
+        for (case_index, template) in scenarios.iter().enumerate() {
+            let mut detail_budget = shipping
+                .as_object()
+                .cloned()
+                .ok_or_else(|| fail(format!("shipping budget for {tier} is invalid")))?;
+            let overrides = template
+                .get("detail_budget_overrides")
+                .and_then(Value::as_object)
+                .ok_or_else(|| fail(format!("limit-case scenario {case_index} lacks a budget")))?;
+            for (key, value) in overrides {
+                if !detail_budget.contains_key(key) || value.as_u64().is_none() {
+                    return Err(fail(format!(
+                        "limit-case scenario {case_index} has an invalid budget override"
+                    )));
+                }
+                detail_budget.insert(key.clone(), value.clone());
+            }
+            let scenario = template["scenario"]
+                .as_str()
+                .expect("validated limit scenario");
+            let mut record = json!({
+                "case_id": format!("limit-{tuple}-{scenario}"),
+                "case_index": case_index,
+                "source_case_index": template["source_case_index"],
+                "scenario": scenario,
+                "sampling": sampling,
+                "detailBudget": detail_budget,
+            });
+            let object = record.as_object_mut().expect("limit record object");
+            for key in [
+                "cancel_after_create",
+                "cancel_after_progress",
+                "worker_unloaded",
+            ] {
+                if let Some(value) = template.get(key) {
+                    object.insert(key.to_owned(), value.clone());
+                }
+            }
+            records.push(record);
+        }
+        materialized.insert(tuple.to_owned(), Value::Array(records));
+    }
+    Ok(materialized)
 }
 
 struct StagingDir(PathBuf);
@@ -119,7 +236,9 @@ fn write_png(svg: &str, destination: &Path) -> Result<Vec<u8>, Box<dyn std::erro
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
     let source = tree.size();
     let scale = (512.0 / source.width()).min(512.0 / source.height());
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    let x = (512.0 - source.width() * scale) / 2.0;
+    let y = (512.0 - source.height() * scale) / 2.0;
+    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     pixmap.save_png(destination)?;
     Ok(fs::read(destination)?)
@@ -319,7 +438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let tuples = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
     let lifecycle = tuples.iter().map(|tuple| (tuple.to_string(), Value::Array(["load", "unload", "reload", "memory_reported"].iter().enumerate().map(|(index, operation)| json!({"case_id": format!("lifecycle-{tuple}-{index}"), "operation": operation, "case_index": index})).collect()))).collect::<serde_json::Map<_, _>>();
-    let limits = tuples.iter().map(|tuple| (tuple.to_string(), Value::Array(["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"].iter().enumerate().map(|(index, finish)| json!({"case_id": format!("limit-{tuple}-{index}"), "finish_reason": finish, "case_index": index})).collect()))).collect::<serde_json::Map<_, _>>();
+    let limits = materialize_limit_cases(&detail_budgets)?;
     let names = [
         "geometric badge",
         "isometric folder",
@@ -365,7 +484,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::shipping_detail_budgets;
+    use super::{materialize_limit_cases, shipping_detail_budgets, write_png};
+
+    #[test]
+    fn terminal_corpus_centers_non_square_renders_on_the_fixed_canvas() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("wide.png");
+        let bytes = write_png(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="#ff0000"/></svg>"##,
+            &destination,
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
+
+        assert_eq!(pixels.dimensions(), (512, 512));
+        assert_eq!(pixels.get_pixel(256, 0).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 127).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 128).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(256, 383).0, [255, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(256, 384).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(256, 511).0, [255, 255, 255, 255]);
+    }
 
     #[test]
     fn terminal_detailed_budgets_come_from_the_embedded_shipping_manifest() {
@@ -375,6 +514,34 @@ mod tests {
         for tier in ["1b", "8b"] {
             assert_eq!(budgets[tier]["maxSvgBytes"], 262144);
             assert_eq!(budgets[tier]["maxWallTimeMs"], 120000);
+        }
+    }
+
+    #[test]
+    fn terminal_limit_cases_are_executable_and_tier_specific() {
+        let budgets = shipping_detail_budgets().unwrap();
+        let limits = materialize_limit_cases(&budgets).unwrap();
+        for tuple in ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"] {
+            let records = limits[tuple].as_array().unwrap();
+            assert_eq!(records.len(), 6);
+            assert_eq!(records[0]["scenario"], "completion");
+            assert_eq!(records[0]["source_case_index"], 12);
+            assert_eq!(records[1]["scenario"], "token");
+            assert_eq!(records[1]["source_case_index"], 11);
+            assert_eq!(records[1]["detailBudget"]["maxNewTokens"], 16);
+            assert_eq!(records[2]["detailBudget"]["maxSvgBytes"], 1024);
+            assert_eq!(records[3]["detailBudget"]["maxWallTimeMs"], 1000);
+            assert_eq!(records[4]["cancel_after_create"], true);
+            assert_eq!(records[4]["worker_unloaded"], true);
+            assert_eq!(records[5]["cancel_after_progress"], true);
+            for record in records {
+                assert_eq!(record["sampling"]["temperature"], 0.0);
+                assert_eq!(record["sampling"]["topP"], 1.0);
+                assert_eq!(record["sampling"]["topK"], 1);
+                assert_eq!(record["sampling"]["repetitionPenalty"], 1.0);
+                assert_eq!(record["sampling"]["seed"], 7);
+                assert!(record.get("finish_reason").is_none());
+            }
         }
     }
 }

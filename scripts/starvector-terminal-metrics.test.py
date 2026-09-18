@@ -1,5 +1,7 @@
+import hashlib
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 
 
@@ -10,6 +12,40 @@ SPEC.loader.exec_module(METRICS)
 
 
 class ParityOutcomeTests(unittest.TestCase):
+    def test_fixed_comparison_attachment_preserves_intrinsic_product_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            product = root / "preview.png"
+            comparison = root / "comparison-512.png"
+            product.write_bytes(b"intrinsic-product-preview")
+            comparison.write_bytes(b"fixed-512-comparison-render")
+
+            def digest(path):
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            evidence = {
+                "previewPngPath": str(product),
+                "previewPngSha256": digest(product),
+                "comparisonPngPath": str(comparison),
+                "comparisonPngSha256": digest(comparison),
+            }
+            selected = METRICS.comparison_attachment(evidence, "fixture")
+            self.assertEqual(selected, comparison)
+
+    def test_comparison_attachment_requires_independent_bound_path_and_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            product = pathlib.Path(directory) / "preview.png"
+            product.write_bytes(b"same-file")
+            digest = hashlib.sha256(product.read_bytes()).hexdigest()
+            evidence = {
+                "previewPngPath": str(product),
+                "previewPngSha256": digest,
+                "comparisonPngPath": str(product),
+                "comparisonPngSha256": digest,
+            }
+            with self.assertRaises(SystemExit):
+                METRICS.comparison_attachment(evidence, "fixture")
+
     def test_explicit_generation_limit_is_a_typed_rejection(self):
         native = {
             "accepted": False,

@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url";
 import { INFERENCE_REVISION, TUPLES, readPlanAndLock, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { terminalGpuBinding } from "./lib/starvector-terminal-gpu.mjs";
+import { validateLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import {
   validateInferencePreflight,
@@ -142,7 +143,12 @@ export async function validateCorpusAssets(inferenceRoot, corpusRelative, assets
   if (terminalSourceRowsSha256(parityRows) !== corpus.deterministic_parity_cases.row_identity_sha256) die("deterministic parity row identities drifted from the pinned corpus");
 
   const lifecycle = exactCases(index, "lifecycle_cases", ["load", "unload", "reload", "memory_reported"], "operation");
-  const limits = exactCases(index, "limit_cases", ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"], "finish_reason");
+  const limits = {};
+  for (const tuple of TUPLES) {
+    const records = validateLimitCases(index.limit_cases?.[tuple], tuple.split(":")[1]);
+    records.forEach((entry, position) => validateHashFields(entry, `${tuple}.limit_cases[${position}]`));
+    limits[tuple] = sha(stable(records));
+  }
   if (!Array.isArray(index.prompt_composition) || index.prompt_composition.length !== 60) die("terminal index must carry exactly 60 prompt-composition records");
   const promptHashes = [];
   index.prompt_composition.forEach((entry, caseIndex) => {

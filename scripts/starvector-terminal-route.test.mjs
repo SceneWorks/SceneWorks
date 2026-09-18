@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { assembleParityRecord, assembleRun, assembleSuites, preserveTerminalDiagnostics, validateBundle, vectorRequest } from "./starvector-terminal-route.mjs";
 
+import { materializeLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
+
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 
 test("route runner can only construct the typed project-owned vector_generate request", () => {
@@ -31,7 +33,7 @@ test("rejected provider bytes are copied and sealed before worker cleanup", asyn
 test("route refuses a count-only or incomplete terminal bundle before product calls", () => {
   process.env.STARVECTOR_TERMINAL_PERMANENT_PIN = "81fda3bd5a9d5920ad9cdc62796df3305be96742";
   const records = (count, prefix) => Array.from({ length: count }, (_, index) => ({ case_id: `${prefix}-${index}`, projectId: "p", sourceAssetId: `a-${index}`, model: "starvector_8b" }));
-  const bundle = { schema_version: 1, inference_revision: process.env.STARVECTOR_TERMINAL_PERMANENT_PIN, corpus_sha256: "a".repeat(64), tuples: { "candle-cuda:8b": { image_quality: records(120, "quality"), deterministic_parity: records(20, "parity"), lifecycle: records(4, "lifecycle"), limits: ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"].map((finish_reason, index) => ({ ...records(1, "limit")[0], case_id: `limit-${index}`, finish_reason })) } }, hostile_sanitizer: records(200, "hostile"), prompt_composition: records(60, "prompt") };
+  const bundle = { schema_version: 1, inference_revision: process.env.STARVECTOR_TERMINAL_PERMANENT_PIN, corpus_sha256: "a".repeat(64), tuples: { "candle-cuda:8b": { image_quality: records(120, "quality"), deterministic_parity: records(20, "parity"), lifecycle: records(4, "lifecycle"), limits: materializeLimitCases("candle-cuda:8b").map((record) => ({ ...records(1, "limit")[0], ...record })) } }, hostile_sanitizer: records(200, "hostile"), prompt_composition: records(60, "prompt") };
   assert.equal(validateBundle(bundle, "candle-cuda:8b"), bundle.tuples["candle-cuda:8b"]);
   bundle.tuples["candle-cuda:8b"].limits[0].model = "starvector_1b"; assert.throws(() => validateBundle(bundle, "candle-cuda:8b"), /route identity differs/); bundle.tuples["candle-cuda:8b"].limits[0].model = "starvector_8b";
   bundle.hostile_sanitizer.pop(); assert.throws(() => validateBundle(bundle, "candle-cuda:8b"), /200 hostile/);
@@ -43,7 +45,7 @@ test("route refuses missing raw metric facts and missing terminal suite output",
 });
 
 test("parity receipt records accepted renders and matched typed rejections without substitution", () => {
-  const hash = "a".repeat(64), native = { sourceRasterSha256: hash, providerTranscriptSha256: "b".repeat(64), previewPngSha256: "c".repeat(64), rejectedSvgSha256: "d".repeat(64) };
+  const hash = "a".repeat(64), native = { sourceRasterSha256: hash, providerTranscriptSha256: "b".repeat(64), comparisonPngSha256: "c".repeat(64), rejectedSvgSha256: "d".repeat(64) };
   const acceptedGolden = { input_png_sha256: hash, upstream_outcome: "accepted", upstream_svg_sha256: "e".repeat(64), upstream_preview_png_sha256: "f".repeat(64) };
   const accepted = assembleParityRecord(0, 0, native, acceptedGolden, { native_outcome: "accepted", upstream_outcome: "accepted", rendered_ssim: .996 });
   assert.equal(accepted.rendered_ssim, .996);
@@ -162,4 +164,125 @@ test("lifecycle requires observed worker exit and a new process before provider 
     await assert.rejects(() => runLifecycle("http://unused", records, path.join(root, "rejected"), {}, { ...dependencies, unload: async () => ({ ok: true }) }), /did not exit/);
     await assert.rejects(() => runLifecycle("http://unused", records, path.join(root, "reused"), {}, { ...dependencies, reload: async () => ({ status: "succeeded", previous_worker_pid: 13, worker_pid: 13 }) }), /new observed PID/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+import { submitAndPoll } from "./starvector-terminal-route.mjs";
+
+test("queued cancellation returns acknowledged terminal state without requiring worker metrics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-cancel-"));
+  const originalFetch = globalThis.fetch, calls = [];
+  const job = { id: "cancelled-job", type: "vector_generate", status: "queued", result: {} };
+  globalThis.fetch = async (url, init) => {
+    calls.push([new URL(url).pathname, init?.method]);
+    assert.ok(!new URL(url).pathname.endsWith("/metrics"));
+    const value = init?.method === "POST" && !new URL(url).pathname.endsWith("/cancel") ? job : { ...job, status: "canceled", cancelRequested: true };
+    return { ok: true, json: async () => value };
+  };
+  try {
+    const result = await submitAndPoll("http://localhost", { case_id: "cancel", projectId: "p", sourceAssetId: "a", model: "starvector_1b", cancel_after_create: true }, path.join(root, "events"));
+    assert.equal(result.status, "canceled");
+    assert.equal(result.cancellation.acknowledgement.cancelRequested, true);
+    assert.equal(result.cancellation.phase, "after_create");
+    assert.equal(result.terminalMetrics, undefined);
+    assert.equal(calls.length, 3);
+  } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
+});
+
+test("end-to-end timing includes create, publication and terminal polling but excludes metrics wait", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-timing-"));
+  const originalFetch = globalThis.fetch;
+  let polls = 0;
+  globalThis.fetch = async (url, init) => {
+    let value;
+    if (new URL(url).pathname.endsWith("/metrics")) { await new Promise((resolve) => setTimeout(resolve, 100)); value = { peakMemoryBytes: 1 }; }
+    else if (init?.method === "POST") { await new Promise((resolve) => setTimeout(resolve, 25)); value = { id: "timed", type: "vector_generate" }; }
+    else { polls++; value = { id: "timed", status: "completed", result: polls === 1 ? { assetWrites: [{ id: "a" }] } : { assetIds: ["a"], terminalEvidence: { latencySeconds: .001 } } }; }
+    return { ok: true, json: async () => value };
+  };
+  try {
+    const result = await submitAndPoll("http://localhost", { case_id: "timed", projectId: "p", sourceAssetId: "a", model: "starvector_1b" }, path.join(root, "events"));
+    assert.equal(polls, 2);
+    assert.ok(result.endToEndLatencySeconds >= .125);
+    assert.ok(result.endToEndLatencySeconds > result.result.terminalEvidence.latencySeconds);
+    assert.equal(result.terminalMetrics.peakMemoryBytes, 1);
+  } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
+});
+
+import { limitPassed, runLimits } from "./starvector-terminal-route.mjs";
+
+test("limit acceptance rejects labels, cancellation races and publication residue", () => {
+  const empty = { assets: [], files: [] };
+  const queued = { scenario: "queued_cancellation" };
+  const event = { workerUnloaded: { exited: true }, publicationBefore: empty, publicationAfter: empty, job: { id: "j", status: "canceled", cancelRequested: true, canceledAt: "2026-09-18T00:00:00Z", result: {}, cancellation: { phase: "after_create", observed: { status: "queued", workerId: null }, acknowledgement: { id: "j", cancelRequested: true } } } };
+  assert.equal(limitPassed(event, queued), true);
+  const residue = structuredClone(event); residue.publicationAfter.files.push({ path: "assets/images/g/.a.tmp/vector.svg" });
+  assert.equal(limitPassed(residue, queued), false);
+  const race = structuredClone(event); race.job.status = "completed";
+  assert.equal(limitPassed(race, queued), false);
+  const inflight = structuredClone(event); inflight.job.cancellation.phase = "after_progress"; inflight.job.cancellation.observed = { status: "running", stage: "generating", progress: .26, workerId: "w" };
+  assert.equal(limitPassed(inflight, { scenario: "in_flight_cancellation" }), true);
+  inflight.job.cancellation.observed.progress = .25;
+  assert.equal(limitPassed(inflight, { scenario: "in_flight_cancellation" }), false);
+  const limited = { job: { terminalEvidence: { accepted: false, finishReason: "token_limit", canonicalSvgPath: null, previewPngPath: null, comparisonPngPath: null } } };
+  assert.equal(limitPassed(limited, { scenario: "token" }), true);
+  assert.equal(limitPassed(limited, { scenario: "byte" }), false);
+  assert.equal(limitPassed({ job: { terminalEvidence: { accepted: true, finishReason: "eos" } } }, { scenario: "completion" }), true);
+});
+
+test("queued cancellation unloads the worker before submission and reloads even after failed proof", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-limit-worker-")), order = [];
+  const record = { ...materializeLimitCases("mlx:1b").find((item) => item.scenario === "queued_cancellation"), projectId: "p", sourceAssetId: "a", model: "starvector_1b" };
+  try {
+    await assert.rejects(() => runLimits("http://unused", [record], path.join(root, "events"), {}, root, {
+      unload: async () => { order.push("unload"); return { status: "succeeded", exited: true }; },
+      reload: async () => { order.push("reload"); return { status: "succeeded", worker_pid: 2, previous_worker_pid: 1 }; },
+      snapshot: async () => { order.push("snapshot"); return { assets: [], files: [] }; },
+      submit: async () => { order.push("submit"); return { id: "j", status: "completed" }; },
+      preserve: async () => {},
+    }), /did not observe/);
+    assert.deepEqual(order, ["unload", "snapshot", "submit", "snapshot", "reload"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("in-flight cancellation is sent only after observed generating progress", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-inflight-")), originalFetch = globalThis.fetch;
+  const running = { id: "j", type: "vector_generate", status: "running", stage: "generating", progress: .26, workerId: "w", result: {} };
+  let cancelled = false;
+  globalThis.fetch = async (url, init) => {
+    const route = new URL(url).pathname;
+    assert.ok(!route.endsWith("/metrics"));
+    let value = running;
+    if (route.endsWith("/cancel")) { cancelled = true; value = { ...running, cancelRequested: true }; }
+    else if (init?.method === "POST") value = { id: "j", type: "vector_generate", status: "queued" };
+    else if (cancelled) value = { ...running, status: "canceled", cancelRequested: true, canceledAt: "2026-09-18T00:00:00Z" };
+    return { ok: true, json: async () => value };
+  };
+  try {
+    const result = await submitAndPoll("http://localhost", { case_id: "inflight", projectId: "p", sourceAssetId: "a", model: "starvector_1b", cancel_after_progress: true }, path.join(root, "events"));
+    assert.equal(result.cancellation.phase, "after_progress");
+    assert.equal(result.cancellation.observed.workerId, "w");
+    assert.equal(result.cancellation.observed.progress, .26);
+    assert.equal(result.status, "canceled");
+  } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
+});
+
+import { cancellationFootprint } from "./starvector-terminal-route.mjs";
+import { mkdir } from "node:fs/promises";
+
+test("cancellation footprint observes unregistered staging files inside the owned project", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "terminal-publication-")), originalFetch = globalThis.fetch;
+  const project = path.join(root, "service", "data", "projects", "p");
+  await mkdir(path.join(project, "assets", "images"), { recursive: true });
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => new URL(url).pathname.endsWith("/assets") ? [{ id: "source", lineage: {} }] : { id: "p", path: project } });
+  try {
+    const args = ["http://localhost", { projectId: "p" }, {}, root, { state_root: "service" }];
+    const before = await cancellationFootprint(...args);
+    assert.deepEqual(before.files, []);
+    const staging = path.join(project, "assets", "images", "g", ".vector.tmp");
+    await mkdir(staging, { recursive: true }); await writeFile(path.join(staging, "vector.svg"), "partial");
+    const after = await cancellationFootprint(...args);
+    assert.equal(after.files.length, 2);
+    assert.ok(after.files.some((entry) => entry.path.endsWith(".tmp")));
+    assert.notDeepEqual(after, before);
+  } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
 });

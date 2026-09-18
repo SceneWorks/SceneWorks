@@ -9,6 +9,8 @@ import { INFERENCE_REVISION, terminalSourceRowsSha256 } from "./starvector-termi
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { loadUpstreamReference, verifyUpstreamExecution } from "./lib/starvector-terminal-upstream-reference.mjs";
 
+import { validateLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
+
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
@@ -38,10 +40,13 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   const route = (row, suffix, tier = "1b") => { const asset = imported.get(row.case_index), detailBudget = row.detail_budgets?.[tier]; if (!asset?.asset_id || asset.input_png_sha256 !== row.input_png.sha256) die("imported project asset identity mismatches source row"); if (detailBudget?.maxNewTokens !== shippingMaxNewTokens[tier] || detailBudget.maxSvgBytes !== 262144 || detailBudget.maxWallTimeMs !== 120000) die(`corpus row lacks the ${tier} shipping Detail budget`); return { case_id: `quality-v1-${row.case_index}${suffix}`, projectId: binding.project_id, sourceAssetId: asset.asset_id, model: tier === "8b" ? "starvector_8b" : "starvector_1b", source_svg: row.svg.path, source_svg_sha256: row.svg.sha256, input_png: row.input_png.path, input_png_sha256: row.input_png.sha256, reference_png: row.reference.path, reference_png_sha256: row.reference.sha256, sampling: row.sampling, detailBudget }; };
   const routeScenarios = (records, label, tier) => {
     if (!Array.isArray(records)) die(`pre-provisioned ${label} cases are missing`);
+    if (label === "limit") validateLimitCases(records, tier);
     return records.map((record, index) => {
       const scenario = {};
-      for (const key of ["case_id", "case_index", "operation", "finish_reason", "sampling", "detailBudget", "cancel_after_create"]) if (record[key] !== undefined) scenario[key] = record[key];
-      return { ...route(rows[index % rows.length], `-${label}`, tier), ...scenario };
+      for (const key of ["case_id", "case_index", "operation", "finish_reason", "sampling", "detailBudget", "cancel_after_create", "cancel_after_progress", "worker_unloaded", "source_case_index", "scenario"]) if (record[key] !== undefined) scenario[key] = record[key];
+      const sourceIndex = record.source_case_index ?? record.case_index ?? index;
+      if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= rows.length) die(`${label} source case index is invalid`);
+      return { ...route(rows[sourceIndex], `-${label}`, tier), ...scenario };
     });
   };
   const parityRows = corpus.upstream_image_quality_cases.sources.flatMap((_, sourceIndex) => rows.slice(sourceIndex * 30, sourceIndex * 30 + 5));
@@ -84,7 +89,7 @@ export async function materializeBundle({ corpusPath, assetsRoot, output, perman
   // hostile generators cannot load the inference module and retain a local
   // byte digest solely for their isolated fixture.
   const corpus_sha256 = validator ? validator.validatePlan(corpus) : sha(await readFile(corpusPath));
-  const bundle = { schema_version: 1, inference_revision: INFERENCE_REVISION, corpus_sha256, row_identity_sha256: rowHash, tuples, hostile_sanitizer, prompt_composition: index.prompt_composition };
+  const bundle = { schema_version: 1, inference_revision: INFERENCE_REVISION, corpus_sha256, row_identity_sha256: rowHash, tuples, hostile_sanitizer, prompt_composition: index.prompt_composition.map((record) => ({ ...record, projectId: binding.project_id })) };
   await mkdir(path.dirname(output), { recursive: true }); const bytes = JSON.stringify(bundle, null, 2) + "\n"; await writeFile(output, bytes); await writeFile(`${output}.sha256`, sha(bytes) + "\n"); return bundle;
 }
 if (isExecutedModule(import.meta.url)) { const [corpusPath, assetsRoot, output, permanentPin, bindingPath] = process.argv.slice(2); materializeBundle({ corpusPath, assetsRoot, output, permanentPin, bindingPath }).catch((error) => { console.error(error.message); process.exitCode = 1; }); }

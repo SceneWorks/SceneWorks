@@ -1,4 +1,4 @@
-import { INFERENCE_REVISION } from "./starvector-terminal-campaign.mjs";
+import { INFERENCE_REVISION, INFERENCE_SOURCE_REVISION } from "./starvector-terminal-campaign.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
+import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyInferenceValidatorDiff, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 
 // CI supplies an exact pinned inference checkout; the local default preserves
 // the focused fixture without embedding a developer-specific worktree path.
@@ -17,7 +17,8 @@ const campaignPlan = JSON.parse(await readFile("release/starvector-terminal-camp
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const digest = sha("artifact");
 const inferenceRevision = INFERENCE_REVISION;
-const permanentPin = inferenceRevision;
+const permanentPin = INFERENCE_SOURCE_REVISION;
+const preflightRevision = campaignPlan.inference_contract.validator_source?.base_revision ?? inferenceRevision;
 const sources = [["starvector/svg-stack-simple", "1d2a96a17cc0c4c1f337b7631adc8c5885bc72ea"], ["starvector/svg-icons-simple", "e1918a27ba6649e856e5db0710d8a6c7046762c1"], ["starvector/svg-emoji-simple", "fa75b3617872ae57e6f3cb450aee65dbccbd69e0"], ["starvector/svg-fonts-simple", "453c739ea13ad2685127f721c333f14d99485299"]];
 const models = { "1b": ["starvector-1b-im2svg", "starvector/starvector-1b-im2svg", "380ab95d25a8e9ab1dc825debe238b4953ae13b9"], "8b": ["starvector-8b-im2svg", "starvector/starvector-8b-im2svg", "518beea8dcb5f7a37c5911e92d1d62a76beee7f9"] };
 const providers = { "mlx:1b": "mlx-starvector-1b", "mlx:8b": "mlx-starvector-8b", "candle-cuda:1b": "candle-starvector-1b", "candle-cuda:8b": "candle-starvector-8b" };
@@ -27,14 +28,14 @@ function suites() { const prompts = ["geometric badge", "isometric folder", "rou
 async function golden(root, sceneWorksRoot) { const validator = await import(pathToFileURL(path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs")).href); const corpus = JSON.parse(await (await import("node:fs/promises")).readFile(path.join(inferenceRoot, "release/starvector-terminal-corpus-v1.json"), "utf8")); const payload = suites(); payload.execution.head_sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sceneWorksRoot }).toString().trim(); const ownedHostile = Array.from({ length: 200 }, (_, case_index) => ({ case_index, case_id: `hostile-v1-${case_index}`, input_sha256: sha(validator.hostilePayload(case_index)), expected_policy: "reject_or_sanitize_inert", outcome: "rejected", error_code: "rejected", canonical_svg_sha256: null, preview_png_sha256: null, published_paths: [], staging_residue: [], result_contains_inline_svg: false })); const promptNames = ["geometric badge", "isometric folder", "rounded calendar", "minimal rocket", "layered landscape", "abstract flower"]; const ownedPrompt = Array.from({ length: 60 }, (_, case_index) => ({ case_index, case_id: `prompt-v1-${case_index}`, prompt_sha256: sha(`Create a ${promptNames[Math.floor(case_index / 10)]} vector illustration, variant ${case_index % 10}, with clear silhouette, balanced composition, and no text.`), raster_png_sha256: digest, vector_provider_transcript_sha256: digest, canonical_svg_sha256: digest, preview_png_sha256: digest, accepted: true, raster_prompt_cosine: .98, preview_prompt_cosine: .97, alignment_loss: .01 })); payload.hostile_sanitizer.corpus_sha256 = sha(ownedHostile.map((entry) => entry.input_sha256).join("\n")); payload.hostile_sanitizer.cases = ownedHostile; payload.prompt_composition.corpus_sha256 = sha(ownedPrompt.map((entry) => entry.prompt_sha256).join("\n")); payload.prompt_composition.cases = ownedPrompt;
   for (const [key, lpips] of [["mlx:1b", .1], ["mlx:8b", .08], ["candle-cuda:1b", .1], ["candle-cuda:8b", .08]]) { const dir = path.join(root, key); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, "raw-results.json"), JSON.stringify({ tuple: key, run: run(key, lpips) })); }
   await mkdir(path.join(root, "suites"), { recursive: true }); await writeFile(path.join(root, "suites", "terminal-suites.json"), JSON.stringify(payload)); const draft = { schema_version: 1, campaign_run_id: "campaign", inference_revision: inferenceRevision, sceneworks_revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: sceneWorksRoot }).toString().trim(), corpus_sha256: validator.validatePlan(corpus), execution: { ...payload.execution, head_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: sceneWorksRoot }).toString().trim() }, producer: payload.producer, metric_identity: payload.metric_identity, inference_preflight: payload.inference_preflight, runs: [["mlx:1b", .1], ["mlx:8b", .08], ["candle-cuda:1b", .1], ["candle-cuda:8b", .08]].map(([key, value]) => run(key, value)), hostile_sanitizer: payload.hostile_sanitizer, prompt_composition: payload.prompt_composition, artifact_manifest: null }; for (const entry of validator.buildArtifactManifest(draft, corpus).entries) { const tuple = entry.path.match(/^runs\/([^/]+:[^/]+)\//)?.[1], sourceRoot = tuple ? path.join(root, tuple) : path.join(root, "suites"), portable = entry.path.split("/").map((part) => part.replaceAll(":", "__colon__")); const file = path.join(sourceRoot, ...portable); const hostileMatch = entry.path.match(/^hostile\/(\d+)\/input$/), promptMatch = entry.path.match(/^prompt\/(\d+)\/prompt_sha256$/); const bytes = hostileMatch ? validator.hostilePayload(Number(hostileMatch[1])) : promptMatch ? `Create a ${promptNames[Math.floor(Number(promptMatch[1]) / 10)]} vector illustration, variant ${Number(promptMatch[1]) % 10}, with clear silhouette, balanced composition, and no text.` : "artifact"; await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, bytes); } return { validator, corpus, payload }; }
-async function fakeSceneWorks(root) { await mkdir(path.join(root, "scripts"), { recursive: true }); await writeFile(path.join(root, "Cargo.toml"), `[workspace]\n[workspace.dependencies]\ncandle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "${inferenceRevision}" }\n`); await writeFile(path.join(root, "scripts", "starvector-terminal-route.mjs"), "export {};\n"); await writeFile(path.join(root, "scripts", "starvector-terminal-metrics.py"), "# fixture\n"); execFileSync("git", ["init", "-q"], { cwd: root }); execFileSync("git", ["config", "user.email", "fixture@example.invalid"], { cwd: root }); execFileSync("git", ["config", "user.name", "fixture"], { cwd: root }); execFileSync("git", ["add", "Cargo.toml", "scripts"], { cwd: root }); execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root }); return root; }
-async function pinnedInferenceCheckout(root) { const checkout = path.join(root, "pinned-inference"); execFileSync("git", ["-C", inferenceRepository, "worktree", "add", "--detach", "-q", checkout, inferenceRevision]); return checkout; }
+async function fakeSceneWorks(root) { await mkdir(path.join(root, "scripts"), { recursive: true }); await writeFile(path.join(root, "Cargo.toml"), `[workspace]\n[workspace.dependencies]\ncandle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "${permanentPin}" }\n`); await writeFile(path.join(root, "scripts", "starvector-terminal-route.mjs"), "export {};\n"); await writeFile(path.join(root, "scripts", "starvector-terminal-metrics.py"), "# fixture\n"); execFileSync("git", ["init", "-q"], { cwd: root }); execFileSync("git", ["config", "user.email", "fixture@example.invalid"], { cwd: root }); execFileSync("git", ["config", "user.name", "fixture"], { cwd: root }); execFileSync("git", ["add", "Cargo.toml", "scripts"], { cwd: root }); execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root }); return root; }
+async function pinnedInferenceCheckout(root) { const checkout = path.join(root, "pinned-inference"); execFileSync("git", ["-C", inferenceRepository, "worktree", "add", "--detach", "-q", checkout, permanentPin]); return checkout; }
 async function removePinnedInference(checkout) { execFileSync("git", ["-C", inferenceRepository, "worktree", "remove", "--force", checkout]); }
 
 test("required CI fetches the exact terminal inference revision", async () => {
   const workflow = await readFile(".github/workflows/check.yml", "utf8");
-  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=1 origin ${inferenceRevision}`));
-  assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${inferenceRevision}`));
+  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=2 origin ${permanentPin}`));
+  assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${permanentPin}`));
 });
 
 test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : false }, async () => {
@@ -72,26 +73,46 @@ test("sealer reconstructs exact colon-bearing canonical paths from portable tupl
 test("preflight requires the exact clean inference checkout and current Cargo permanent pin", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-scene-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks"));
   await verifyInferenceCheckout(inferenceRoot, campaignPlan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin);
-  await assert.rejects(() => verifyPermanentPin(sceneWorksRoot, "0".repeat(40)), /terminal inference revision/);
+  await assert.rejects(() => verifyPermanentPin(sceneWorksRoot, "0".repeat(40)), /terminal inference source revision/);
   await removePinnedInference(inferenceRoot); inferenceRoot = inferenceRepository;
 });
 
+test("validator compatibility permits only the exact additive tooling diff from the measured revision", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-validator-source-"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "fixture@example.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "fixture"], { cwd: root });
+  await writeFile(path.join(root, "tool.mjs"), "old\n");
+  execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
+  const base_revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root }).toString().trim();
+  await writeFile(path.join(root, "tool.mjs"), "new\n"); await writeFile(path.join(root, "README.md"), "contract\n");
+  execFileSync("git", ["add", "."], { cwd: root }); execFileSync("git", ["commit", "-qm", "validator"], { cwd: root });
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root }).toString().trim();
+  const source = { base_revision, revision, changed_paths: ["README.md", "tool.mjs"] };
+  assert.deepEqual((await verifyInferenceValidatorDiff(root, source)).changes, [{ status: "A", path: "README.md" }, { status: "M", path: "tool.mjs" }]);
+  await assert.rejects(() => verifyInferenceValidatorDiff(root, { ...source, changed_paths: ["tool.mjs"] }), /escapes the sealed compatibility paths/);
+  execFileSync("git", ["rm", "README.md"], { cwd: root }); execFileSync("git", ["commit", "-qm", "delete"], { cwd: root });
+  const deletion = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root }).toString().trim();
+  await assert.rejects(() => verifyInferenceValidatorDiff(root, { base_revision: revision, revision: deletion, changed_paths: ["README.md"] }), /non-additive tooling change/);
+});
+
 test("inference preflight requires every exact inventory and native-hook artifact", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-preflight-"));
-  const file = async (name) => { await writeFile(path.join(root, name), "artifact"); return { path: name, sha256: digest }; };
-  const index = { workflow_run_id: "run", workflow_run_attempt: 1, head_sha: permanentPin, inventory_artifacts: [{ tier: "1b", ...(await file("one")) }, { tier: "8b", ...(await file("eight")) }], hook_logs: [] };
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-preflight-")), artifacts = path.join(root, "artifacts"), checkout = await pinnedInferenceCheckout(root); await mkdir(artifacts);
+  const file = async (name) => { await writeFile(path.join(artifacts, name), "artifact"); return { path: name, sha256: digest }; };
+  const index = { workflow_run_id: "run", workflow_run_attempt: 1, head_sha: preflightRevision, inventory_artifacts: [{ tier: "1b", ...(await file("one")) }, { tier: "8b", ...(await file("eight")) }], hook_logs: [] };
   for (const key of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) { const [backend, tier] = key.split(":"); index.hook_logs.push({ backend, tier, ...(await file(key.replace(":", "-"))) }); }
   const sealed = structuredClone(index);
-  const source = path.join(root, "preflight.json"); await writeFile(source, JSON.stringify(index));
+  const source = path.join(artifacts, "preflight.json"); await writeFile(source, JSON.stringify(index));
   const previous = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = source;
-  const verified = await validateInferencePreflight(root, permanentPin, sealed); assert.equal(Object.keys(verified.sources).length, 6);
-  await writeFile(path.join(root, "mlx-1b"), "drift"); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /missing or mismatched/);
-  await writeFile(path.join(root, "mlx-1b"), "artifact"); await symlink(path.join(root, "mlx-1b"), path.join(root, "linked-hook")); index.hook_logs[0].path = "linked-hook"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /missing or mismatched/);
+  const verified = await validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract); assert.equal(Object.keys(verified.sources).length, 6);
+  await writeFile(path.join(artifacts, "mlx-1b"), "drift"); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /missing or mismatched/);
+  await writeFile(path.join(artifacts, "mlx-1b"), "artifact"); await symlink(path.join(artifacts, "mlx-1b"), path.join(artifacts, "linked-hook")); index.hook_logs[0].path = "linked-hook"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /missing or mismatched/);
   index.hook_logs[0].path = "mlx-1b";
-  index.workflow_run_id = "other-run"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /sealed terminal plan provenance/);
+  index.workflow_run_id = "other-run"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /sealed terminal plan provenance/);
   index.workflow_run_id = sealed.workflow_run_id;
-  index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(root, permanentPin, sealed), /identity is invalid/);
+  index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /identity is invalid/);
   if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous;
+  await removePinnedInference(checkout);
 });
 
 

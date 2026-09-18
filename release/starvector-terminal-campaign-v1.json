@@ -2,10 +2,20 @@
   "schema_version": 1,
   "inference_contract": {
     "repository": "SceneWorks/inference",
-    "revision": "c5c8c2a73bc5fe9517200c32389c20bf4a670e3d",
-    "receipt_schema": "release/starvector-terminal-receipt-v2-outcome-parity.schema.json",
-    "receipt_schema_sha256": "fc11cf850f46ed6553a387dd2b6e7b3471a729f40e5116bd39c8fec2c6899e35",
-    "corpus": "release/starvector-terminal-corpus-v1.json"
+    "revision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
+    "receipt_schema": "release/starvector-terminal-receipt-v2-outcome-parity-limit-behaviors.schema.json",
+    "receipt_schema_sha256": "829c941e076aefeccbdc3c79eaa7ae05889447766dd2defadfa392ca2eb08320",
+    "corpus": "release/starvector-terminal-corpus-v1.json",
+    "validator_source": {
+      "base_revision": "c5c8c2a73bc5fe9517200c32389c20bf4a670e3d",
+      "revision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
+      "changed_paths": [
+        "release/starvector-terminal-README.md",
+        "release/starvector-terminal-receipt-v2-outcome-parity-limit-behaviors.schema.json",
+        "scripts/release/starvector_terminal_evidence.mjs",
+        "scripts/tests/starvector_terminal_evidence.test.mjs"
+      ]
+    }
   },
   "inference_preflight": {
     "repository": "SceneWorks/inference",

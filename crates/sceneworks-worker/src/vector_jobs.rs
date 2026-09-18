@@ -53,6 +53,7 @@ const MAX_PREVIEW_DIMENSION: u32 = 2_048;
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 const VECTOR_SANITIZER_VERSION: &str = "sceneworks-inert-svg-v1";
 const VECTOR_RENDERER_VERSION: &str = "resvg-0.45";
+const TERMINAL_COMPARISON_SIZE: u32 = 512;
 const CANCEL_MESSAGE: &str = "Vector generation canceled before publication.";
 const STARVECTOR_ADAPTER_ID: &str = "starvector";
 
@@ -62,8 +63,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn terminal_result(
     terminal: &TerminalProviderOutcome,
+    product_latency_seconds: Option<f64>,
     canonical: Option<(&Path, &[u8])>,
     preview: Option<(&Path, &[u8])>,
+    comparison: Option<(&Path, &[u8])>,
     transcript: Option<(&Path, &[u8])>,
 ) -> Value {
     json!({
@@ -71,7 +74,11 @@ fn terminal_result(
         "finishReason": terminal.finish_reason,
         "generatedTokens": terminal.generated_tokens,
         "generatedBytes": terminal.generated_bytes,
+        // Retain the original key for historical receipts. It has always measured only the
+        // native provider call, not completed product output.
         "latencySeconds": terminal.latency_seconds,
+        "providerLatencySeconds": terminal.latency_seconds,
+        "productLatencySeconds": product_latency_seconds,
         "providerId": terminal.provider_id,
         "modelId": terminal.model_id,
         "modelRepository": terminal.model_repository,
@@ -83,12 +90,15 @@ fn terminal_result(
         "canonicalSvgSha256": canonical.map(|(_, bytes)| sha256_hex(bytes)),
         "previewPngPath": preview.map(|(path, _)| path.to_string_lossy().into_owned()),
         "previewPngSha256": preview.map(|(_, bytes)| sha256_hex(bytes)),
+        "comparisonPngPath": comparison.map(|(path, _)| path.to_string_lossy().into_owned()),
+        "comparisonPngSha256": comparison.map(|(_, bytes)| sha256_hex(bytes)),
         "resultContainsInlineSvg": false,
     })
 }
 
 fn terminal_generation_limit_result(
     terminal: &TerminalProviderOutcome,
+    product_latency_seconds: f64,
     transcript: (&Path, &[u8]),
 ) -> WorkerResult<Value> {
     if !matches!(
@@ -99,7 +109,14 @@ fn terminal_generation_limit_result(
             "terminal generation rejection lacks a typed bounded finish reason".to_owned(),
         ));
     }
-    let mut evidence = terminal_result(terminal, None, None, Some(transcript));
+    let mut evidence = terminal_result(
+        terminal,
+        Some(product_latency_seconds),
+        None,
+        None,
+        None,
+        Some(transcript),
+    );
     let object = evidence.as_object_mut().ok_or_else(|| {
         WorkerError::Engine("terminal generation rejection evidence must be an object".to_owned())
     })?;
@@ -133,6 +150,7 @@ fn terminal_transcript_bytes(terminal: &TerminalProviderOutcome) -> WorkerResult
         "generatedTokens": terminal.generated_tokens,
         "generatedBytes": terminal.generated_bytes,
         "latencySeconds": terminal.latency_seconds,
+        "providerLatencySeconds": terminal.latency_seconds,
     }))
     .map_err(|error| {
         WorkerError::Engine(format!("serialize StarVector terminal transcript: {error}"))
@@ -967,6 +985,12 @@ pub(crate) async fn run_vector_job_with_provider(
     job: &JobSnapshot,
     provider: Arc<dyn MultimodalVectorProviderAdapter>,
 ) -> WorkerResult<()> {
+    // This worker-local product timer includes request decoding, source loading, generation,
+    // sanitization, both renders, atomic publication, and sealed-artifact read-back. The route
+    // measures submit-to-Completed separately because queue time and the completion update live
+    // outside this function's observable interval.
+    let product_started = Instant::now();
+    let terminal_campaign = std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1");
     let payload: VectorJobPayload = serde_json::from_value(Value::Object(job.payload.clone()))
         .map_err(|error| WorkerError::InvalidPayload(format!("invalid VectorRequest: {error}")))?;
     if !manifest_declares_mode(&payload) {
@@ -1110,6 +1134,7 @@ pub(crate) async fn run_vector_job_with_provider(
             "terminalEvidence": add_source_raster_evidence(
                 terminal_generation_limit_result(
                     &terminal,
+                    product_started.elapsed().as_secs_f64(),
                     (&transcript_path, &transcript),
                 )?,
                 source_raster.as_ref().map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
@@ -1180,8 +1205,14 @@ pub(crate) async fn run_vector_job_with_provider(
                 let _ = tokio::fs::remove_dir_all(&staging).await;
             }
             evidence_write?;
-            let mut terminal_evidence =
-                terminal_result(terminal, None, None, Some((&transcript_path, &transcript)));
+            let mut terminal_evidence = terminal_result(
+                terminal,
+                Some(product_started.elapsed().as_secs_f64()),
+                None,
+                None,
+                None,
+                Some((&transcript_path, &transcript)),
+            );
             let object = terminal_evidence.as_object_mut().ok_or_else(|| {
                 WorkerError::Engine("terminal rejection evidence must be an object".to_owned())
             })?;
@@ -1242,6 +1273,7 @@ pub(crate) async fn run_vector_job_with_provider(
     let published = base.join(&asset_id);
     let svg_path = staging.join("vector.svg");
     let preview_path = staging.join("preview.png");
+    let comparison_path = staging.join("comparison-512.png");
     let transcript_path = staging.join("provider-terminal.json");
 
     let publish_result: WorkerResult<()> = async {
@@ -1254,6 +1286,16 @@ pub(crate) async fn run_vector_job_with_provider(
             &preview_path,
         )
         .await?;
+        if terminal_campaign {
+            render_preview_with_size(
+                &canonical.svg,
+                canonical.width,
+                canonical.height,
+                &comparison_path,
+                Some(TERMINAL_COMPARISON_SIZE),
+            )
+            .await?;
+        }
         if let Some(terminal) = &collected.terminal {
             tokio::fs::write(&transcript_path, terminal_transcript_bytes(terminal)?).await?;
         }
@@ -1267,7 +1309,7 @@ pub(crate) async fn run_vector_job_with_provider(
     }
     publish_result?;
 
-    let terminal_evidence = if std::env::var("SCENEWORKS_TERMINAL_CAMPAIGN").as_deref() == Ok("1") {
+    let terminal_evidence = if terminal_campaign {
         let terminal = collected.terminal.as_ref().ok_or_else(|| {
             WorkerError::Engine(
                 "terminal campaign native result lacks provider terminal evidence".to_owned(),
@@ -1275,15 +1317,19 @@ pub(crate) async fn run_vector_job_with_provider(
         })?;
         let canonical_disk_path = published.join("vector.svg");
         let preview_disk_path = published.join("preview.png");
+        let comparison_disk_path = published.join("comparison-512.png");
         let transcript_disk_path = published.join("provider-terminal.json");
         let canonical_bytes = tokio::fs::read(&canonical_disk_path).await?;
         let preview_bytes = tokio::fs::read(&preview_disk_path).await?;
+        let comparison_bytes = tokio::fs::read(&comparison_disk_path).await?;
         let transcript_bytes = tokio::fs::read(&transcript_disk_path).await?;
         Some(add_source_raster_evidence(
             terminal_result(
                 terminal,
+                Some(product_started.elapsed().as_secs_f64()),
                 Some((&canonical_disk_path, &canonical_bytes)),
                 Some((&preview_disk_path, &preview_bytes)),
+                Some((&comparison_disk_path, &comparison_bytes)),
                 Some((&transcript_disk_path, &transcript_bytes)),
             ),
             source_raster
@@ -4430,6 +4476,7 @@ mod tests {
         };
         let result = terminal_generation_limit_result(
             &terminal,
+            0.25,
             (Path::new("provider-terminal.json"), b"transcript"),
         )
         .expect("typed generation rejection");
@@ -4441,6 +4488,10 @@ mod tests {
         assert_ne!(result["providerTranscriptSha256"], Value::Null);
         assert!(result["canonicalSvgPath"].is_null());
         assert!(result["previewPngPath"].is_null());
+        assert!(result["comparisonPngPath"].is_null());
+        assert_eq!(result["latencySeconds"], 0.01);
+        assert_eq!(result["providerLatencySeconds"], 0.01);
+        assert_eq!(result["productLatencySeconds"], 0.25);
         assert_eq!(result["providerTranscriptPath"], "provider-terminal.json");
         assert_eq!(result["resultContainsInlineSvg"], false);
 
@@ -4450,9 +4501,40 @@ mod tests {
         };
         assert!(terminal_generation_limit_result(
             &cancelled,
+            0.25,
             (Path::new("provider-terminal.json"), b"transcript"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn accepted_terminal_evidence_binds_product_and_comparison_renders_separately() {
+        let terminal = TerminalProviderOutcome {
+            finish_reason: "complete_root",
+            generated_tokens: 7,
+            generated_bytes: 23,
+            latency_seconds: 0.01,
+            provider_id: "mlx-starvector-1b".to_owned(),
+            model_id: "starvector_1b",
+            model_repository: "starvector/starvector-1b-im2svg",
+            model_revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+            backend: "mlx",
+        };
+        let result = terminal_result(
+            &terminal,
+            Some(0.25),
+            Some((Path::new("vector.svg"), b"canonical")),
+            Some((Path::new("preview.png"), b"intrinsic")),
+            Some((Path::new("comparison-512.png"), b"fixed")),
+            Some((Path::new("provider-terminal.json"), b"transcript")),
+        );
+        assert_eq!(result["previewPngPath"], "preview.png");
+        assert_eq!(result["previewPngSha256"], sha256_hex(b"intrinsic"));
+        assert_eq!(result["comparisonPngPath"], "comparison-512.png");
+        assert_eq!(result["comparisonPngSha256"], sha256_hex(b"fixed"));
+        assert_ne!(result["previewPngSha256"], result["comparisonPngSha256"]);
+        assert_eq!(result["latencySeconds"], result["providerLatencySeconds"]);
+        assert_eq!(result["productLatencySeconds"], 0.25);
     }
 
     #[test]
@@ -5506,11 +5588,25 @@ mod tests {
         .expect("valid fixture");
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("preview.png");
+        let comparison_path = temp.path().join("comparison-512.png");
         render_preview(&canonical.svg, canonical.width, canonical.height, &path)
             .await
             .expect("preview writes");
+        render_preview_with_size(
+            &canonical.svg,
+            canonical.width,
+            canonical.height,
+            &comparison_path,
+            Some(TERMINAL_COMPARISON_SIZE),
+        )
+        .await
+        .expect("comparison render writes");
         let preview = image::open(&path).expect("preview decodes").to_rgba8();
+        let comparison = image::open(&comparison_path)
+            .expect("comparison render decodes")
+            .to_rgba8();
         assert_eq!(preview.dimensions(), (12, 8));
+        assert_eq!(comparison.dimensions(), (512, 512));
         assert!(
             preview.get_pixel(0, 0)[0] > 200,
             "preview rendered the red rectangle"

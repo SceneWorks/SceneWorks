@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { serializeTerminalSourceRows, terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
+import { materializeLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 import { materializeBundle } from "./starvector-terminal-case-bundle.mjs";
-import { vectorRequest } from "./starvector-terminal-route.mjs";
+import { promptWorkflowRequest, vectorRequest } from "./starvector-terminal-route.mjs";
 
 const pin = INFERENCE_REVISION, sha = (value) => createHash("sha256").update(value).digest("hex");
 const pinnedSources = [
@@ -41,11 +42,11 @@ test("source bundle refuses row identity drift and seals the resulting bytes", a
   const corpus = { upstream_image_quality_cases: { row_identity_sha256: rowHash, sources: Array.from({ length: 4 }, (_, sourceIndex) => ({ dataset: `d${sourceIndex}` })) }, sceneworks_owned_suites: { hostile_sanitizer: { content_identity_sha256: hostileIdentity } } }; await writeFile(path.join(root, "corpus.json"), JSON.stringify(corpus));
   const lifecycle = ["load", "unload", "reload", "memory_reported"].map((operation, case_index) => ({ case_id: `lifecycle-${case_index}`, case_index, operation, detailBudget: "detailed" }));
   Object.assign(lifecycle[0], { model: "starvector_8b", projectId: "substituted", sourceAssetId: "substituted", source_svg_sha256: "f".repeat(64) });
-  const finishReasons = ["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"];
-  const limits = finishReasons.map((finish_reason, case_index) => ({ case_id: `limit-${case_index}`, case_index, finish_reason, sampling: { maxNewTokens: case_index + 1 }, cancel_after_create: finish_reason === "cancelled" }));
   const tuples = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
-  const index = { schema_version: 2, inference_revision: pin, row_identity_sha256: rowHash, rows, lifecycle_cases: Object.fromEntries(tuples.map((key) => [key, lifecycle])), limit_cases: Object.fromEntries(tuples.map((key) => [key, limits])), run_identity: {}, hardware: {}, hostile_sanitizer: [], prompt_composition: [] }; await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index)); const bindingPath = path.join(root, "binding.json"); await writeFile(bindingPath, JSON.stringify({ project_id: "project", assets: rows.map((row) => ({ case_index: row.case_index, asset_id: `asset-${row.case_index}`, input_png_sha256: row.png_sha256 })) }));
+  const index = { schema_version: 2, inference_revision: pin, row_identity_sha256: rowHash, rows, lifecycle_cases: Object.fromEntries(tuples.map((key) => [key, lifecycle])), limit_cases: Object.fromEntries(tuples.map((key) => [key, materializeLimitCases(key)])), run_identity: {}, hardware: {}, hostile_sanitizer: [], prompt_composition: [{ case_id: "prompt-v1-0", projectId: "stale-project", prompt: "An icon", raster_model: "flux_schnell", vector_model: "starvector_8b", seed: 7 }] }; await writeFile(path.join(assets, "starvector-terminal-row-index-v1.json"), JSON.stringify(index)); const bindingPath = path.join(root, "binding.json"); await writeFile(bindingPath, JSON.stringify({ project_id: "project", assets: rows.map((row) => ({ case_index: row.case_index, asset_id: `asset-${row.case_index}`, input_png_sha256: row.png_sha256 })) }));
   const bundle = await materializeBundle({ corpusPath: path.join(root, "corpus.json"), assetsRoot: assets, output, permanentPin: pin, bindingPath, hostileGenerator }); assert.equal(bundle.row_identity_sha256, rowHash); assert.match(await readFile(`${output}.sha256`, "utf8"), /^[a-f0-9]{64}/); assert.equal(bundle.hostile_sanitizer.length, 200); assert.equal(await readFile(bundle.hostile_sanitizer[199].input_path, "utf8"), "hostile-199");
+  assert.equal(promptWorkflowRequest(bundle.prompt_composition[0]).projectId, "project");
+  assert.equal(bundle.prompt_composition[0].seed, 7);
   const parityCaseIds = bundle.tuples["mlx:1b"].deterministic_parity.map((record) => record.case_id);
   assert.deepEqual(parityCaseIds, [0, 30, 60, 90].flatMap((start) => Array.from({ length: 5 }, (_, offset) => `quality-v1-${start + offset}-parity`)));
   for (const tuple of tuples) {
@@ -59,7 +60,11 @@ test("source bundle refuses row identity drift and seals the resulting bytes", a
       assert.equal(request.model, model);
     }
     assert.deepEqual(bundle.tuples[tuple].lifecycle.map(({ operation, detailBudget }) => ({ operation, detailBudget })), lifecycle.map(({ operation, detailBudget }) => ({ operation, detailBudget })));
-    assert.deepEqual(bundle.tuples[tuple].limits.map(({ finish_reason, sampling, cancel_after_create }) => ({ finish_reason, sampling, cancel_after_create })), limits.map(({ finish_reason, sampling, cancel_after_create }) => ({ finish_reason, sampling, cancel_after_create })));
+    for (const [index, expected] of materializeLimitCases(tuple).entries()) {
+      const record = bundle.tuples[tuple].limits[index];
+      for (const [key, value] of Object.entries(expected)) assert.deepEqual(record[key], value);
+      assert.equal(record.sourceAssetId, `asset-${expected.source_case_index}`);
+    }
     const expectedTokens = tuple.endsWith(":8b") ? 15422 : 7933;
     for (const record of [...bundle.tuples[tuple].image_quality, ...bundle.tuples[tuple].deterministic_parity]) assert.equal(record.detailBudget.maxNewTokens, expectedTokens);
     assert.equal(bundle.tuples[tuple].lifecycle[0].projectId, "project");
