@@ -809,8 +809,9 @@ pub(crate) async fn export_film_run(
         move |store| store.film_run_files(&project_id, &run_id)
     })
     .await?;
-    let lease = ControllerLease::acquire(&files.directory, format!("api-export:{run_id}"))
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let lease =
+        ControllerLease::acquire_new_action(&files.directory, format!("api-export:{run_id}"))
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
     let base_url = state.settings.mcp_api_url.clone();
     let token = state.settings.access_token.clone();
     let transport = HttpTransport::new(&base_url, Some(token.clone()))

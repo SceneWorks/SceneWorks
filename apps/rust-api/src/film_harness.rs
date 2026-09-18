@@ -227,6 +227,23 @@ impl ControllerLease {
         Self::claim(path, owner.into(), lock, None)
     }
 
+    /// Acquire the controller for a separately authorized action and consume the cancel request
+    /// addressed to the previous controller.
+    ///
+    /// Acquisition must happen first: otherwise a competing action could erase a fresh cancel
+    /// while the controller it targets still owns the run. A cancel written after this returns is
+    /// retained and observed by the new action's watching [`RunControl`]. Startup adoption and
+    /// resume deliberately use their existing acquisition paths because they have separate
+    /// recovery rules.
+    pub fn acquire_new_action(
+        run_dir: &Path,
+        owner: impl Into<String>,
+    ) -> Result<Self, HarnessError> {
+        let lease = Self::acquire(run_dir, owner)?;
+        clear_cancel_request(run_dir)?;
+        Ok(lease)
+    }
+
     pub(crate) fn acquire_for_api(
         run_dir: &Path,
         owner: impl Into<String>,

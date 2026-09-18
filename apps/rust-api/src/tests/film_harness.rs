@@ -52,6 +52,26 @@ fn a_second_new_run_controller_is_refused_while_the_first_holds_the_directory() 
 }
 
 #[test]
+fn a_new_action_cannot_consume_the_cancel_request_for_a_competing_controller() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let directory = temporary.path().join("run");
+    std::fs::create_dir_all(&directory).expect("run dir");
+    std::fs::write(directory.join("run.json"), "{}").expect("run record");
+    let active = film_harness::ControllerLease::acquire(&directory, "api:active")
+        .expect("active controller acquires");
+    let sentinel = film_harness::request_cancel(&directory).expect("active controller is canceled");
+
+    let refused = film_harness::ControllerLease::acquire_new_action(&directory, "api:new-action")
+        .expect_err("a competing action cannot acquire the run");
+    assert!(refused.to_string().contains("another controller"));
+    assert!(
+        sentinel.exists(),
+        "the refused action must not consume the active controller's cancel"
+    );
+    drop(active);
+}
+
+#[test]
 fn an_unlocked_crash_metadata_file_is_recovered_without_an_age_guess() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let directory = temporary.path().join("run");
