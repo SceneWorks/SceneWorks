@@ -15263,6 +15263,23 @@ mod tests {
             REFERENCE_PACK_SCHEMA_VERSION
         );
         assert_eq!(updated.reference_pack.references.len(), 1);
+
+        // The entry this route authors names BOTH the library asset it came from and the file it
+        // was stored as. `validate_reference_pack` refuses a `sourceAssetId` with no `file`
+        // (sc-24025), so a route that wrote only the asset id would author a draft the workspace
+        // then rejects — and the pack is validated inside `add_film_reference`, so this test is
+        // the reason that refusal can never reach the UI's own add path.
+        let added = &updated.reference_pack.references[0];
+        assert_eq!(
+            added.source_asset_id.as_deref(),
+            Some(asset["id"].as_str().expect("asset id"))
+        );
+        assert_eq!(
+            added.file(),
+            Some(format!("references/{}.png", asset["id"].as_str().expect("asset id")).as_str()),
+            "an image-backed role must name the file it is stored as"
+        );
+        assert!(crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty());
     }
 
     #[test]

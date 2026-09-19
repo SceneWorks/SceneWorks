@@ -3509,6 +3509,98 @@ mod tests {
         );
     }
 
+    /// A DESCRIBED-ONLY role reaches the planner with the ONE rule that governs it, and a beat
+    /// that requires one is repaired into `continuityRoles` ALONE (sc-24025).
+    ///
+    /// The two halves are the same rule read from two places. The envelope line is what stops the
+    /// planner naming a fileless role in `referenceRoles` in the first place; the coverage hint's
+    /// bindability filter is what stops the REPAIRER being handed an array
+    /// `validate_plan_against_pack` then refuses — a copy-only repairer can never converge on
+    /// that, so the loop would burn every round and give up.
+    #[test]
+    fn a_described_only_role_is_offered_for_continuity_only_and_repaired_there() {
+        let pack: ReferencePack = serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "described-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/courier.png",
+                  "description": "Blue jacket." },
+                // No `file`: words alone.
+                { "role": "recipient", "kind": "character", "description": "Grey apron." }
+            ]
+        }))
+        .expect("the described pack parses");
+        let brief = brief();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+
+        assert!(
+            request.contains(
+                "- recipient (character): Grey apron. (no image: name this role in \
+                 continuityRoles only — never in referenceRoles.)"
+            ),
+            "a described-only role must be offered with its one rule on its own line: {request}"
+        );
+        assert!(
+            request.contains("- courier (character): Blue jacket.\n"),
+            "an image-backed role is told nothing about having no image: {request}"
+        );
+
+        // A beat that REQUIRES the fileless role, on a `reference_to_video` shot that binds only
+        // the courier. The repair may not name `referenceRoles`: `recipient` is refused there.
+        let mut brief = brief;
+        brief.required_beats[1].required_roles = vec!["courier".to_owned(), "recipient".to_owned()];
+        let mut delivery = draft_shot("SH020", "delivery");
+        delivery["conditioning"] =
+            json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+        delivery["continuityRoles"] = json!(["courier"]);
+        let draft: PlannerDraft = serde_json::from_value(json!({
+            "shots": [draft_shot("SH010", "arrival"), delivery, draft_shot("SH030", "discovery")]
+        }))
+        .expect("draft parses");
+
+        let findings = role_coverage_findings(&brief, &draft_to_plan(&brief, &draft), &pack);
+        let texts = messages(&findings);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains(
+                "write [\"courier\", \"recipient\"] into SH020's continuityRoles and describe"
+            ) && !texts[0].contains("referenceRoles"),
+            "the hint must not ask for a binding the validator refuses: {}",
+            texts[0]
+        );
+
+        // One round of a repairer that does nothing but copy the array clears coverage, and the
+        // plan it produced is one the pack validator accepts.
+        let mut repaired_draft = draft.clone();
+        assert_eq!(
+            copy_arrays_from_findings(&mut repaired_draft, &findings),
+            1,
+            "{}",
+            texts[0]
+        );
+        let repaired = draft_to_plan(&brief, &repaired_draft);
+        assert!(
+            role_coverage_findings(&brief, &repaired, &pack).is_empty(),
+            "{:?}",
+            messages(&role_coverage_findings(&brief, &repaired, &pack))
+        );
+        assert!(
+            messages(&crate::film_plan::validate_plan_against_pack(
+                &repaired, &pack
+            ))
+            .iter()
+            .all(|message| !message.contains("DESCRIBED-ONLY")),
+            "{:?}",
+            messages(&crate::film_plan::validate_plan_against_pack(
+                &repaired, &pack
+            ))
+        );
+    }
+
     /// 🔴 sc-23406 review. The reference rule now tells the planner to bind "any other approved
     /// role in frame", and an approved `style` or `plate` is such a role — so both the envelope
     /// section and the output contract (the request AND every repair round) must say that a style

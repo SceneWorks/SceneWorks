@@ -122,7 +122,10 @@ take. A version 1 pack is refused by version, naming the edit that fixes it.
 `continuityRoles`, and that is where it earns its keep: for every shot, the compiler writes the
 pack's `description` of each continuity role the shot does **not** bind to an image into the prompt
 **word for word**, identically every time (the **text identity lock**). With no picture anywhere,
-that repetition is the only thing holding a subject together across cuts. See
+that repetition is the only thing holding a subject together across cuts. One exception, and it is
+the shared-file case below: if a continuity role's `file` is the file of a picture the shot *is*
+binding, its image is already being supplied, so it gets that picture's **binding** sentence with
+its locator instead of a description of its own. See
 [film-harness.md](film-harness.md) for the full rule, and
 `config/film-harness/courier-workshop/plan.described.jsonc` for a six-shot film that uses no
 references at all.

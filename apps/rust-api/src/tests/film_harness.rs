@@ -15,6 +15,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::Request;
 use parking_lot::Mutex;
+use sceneworks_core::film_compile::InsertedTextPlacement;
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
 use sceneworks_core::film_workspace::FilmDraft;
 use serde_json::{json, Value};
@@ -8314,16 +8315,27 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     .await
     .expect("the edited plan recompiles");
     let first = &artifacts.compiled.requests[0];
-    // Verbatim, with the compiler's own audio sentence trailing it (sc-24026) — the hand-written
-    // text itself is untouched, which is what `--no-refine` promises.
     // Verbatim and intact. NOT `starts_with`: since sc-24025 the compiler's identity text leads a
     // shot that names continuity roles it does not bind, and `--no-refine` promises the authored
-    // text is untouched, not that nothing the compiler owns is written around it.
-    assert!(
-        first
-            .prompt
-            .contains("A hand-written prompt the planner never wrote."),
-        "{}",
+    // text is untouched, not that nothing the compiler owns is written around it. So everything
+    // ahead of the authored text must be RECORDED inserted text — `contains` alone would permit
+    // arbitrary unattributed prose, which is precisely what `--no-refine` forbids.
+    const AUTHORED: &str = "A hand-written prompt the planner never wrote.";
+    let authored_at = first
+        .prompt
+        .find(AUTHORED)
+        .unwrap_or_else(|| panic!("the hand-written text survives verbatim: {}", first.prompt));
+    let leading = first
+        .inserted_text
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Leading)
+        .map(|piece| piece.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        first.prompt[..authored_at].trim(),
+        leading.trim(),
+        "only the compiler's own recorded insertions may precede the authored prompt: {}",
         first.prompt
     );
     assert!(

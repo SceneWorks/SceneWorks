@@ -139,6 +139,18 @@ description in its binding sentence and is never described twice. Role kind is i
 (`approved` defaults to true, so `false` is an explicit "do not use this", and prompt text shapes a
 render as surely as conditioning does), and so does an empty description on an image-backed role.
 
+**A continuity role that shares a bound picture's `file` is bound, not described.** When a role is
+not in the shot's `referenceRoles` but its `file` is the file of a picture the shot *is* binding —
+one photograph of two people, of whom this shot binds one — its image is already being supplied
+inside that `<Picture N>`. Describing it on its own would name a subject visibly present in a
+supplied picture without tying it to that picture, which is exactly the second-subject ambiguity
+`locator` exists to remove. So the compiler writes its **binding** sentence instead, with its
+locator and that picture's number ("The recipient is the man on the right in `<Picture 1>`."),
+after the listed roles' binding sentences for that picture and recorded as
+`reference_binding`. It gets **no** identity sentence — its description is already in the binding
+sentence, and a description is never stated twice. The picture order, the `<Picture N>` numbering
+and the dispatched `referenceAssetIds` are unchanged: the image was already being sent.
+
 This exists because reference images are optional: with no picture anywhere, the only thing keeping
 a subject the same subject across six cuts is that the same words are used for it every time.
 Identical input therefore gives **byte-identical** text in every shot, ordered by the shot's own

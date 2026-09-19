@@ -61,9 +61,19 @@ pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[PLAN_SCHEMA_VERSION];
 /// carries it too would dispatch it twice. One constant, so the check and the text it guards can
 /// never disagree about the spelling.
 pub const AUDIO_PROMPT_PREFIX: &str = "Audio:";
-/// Schema version of [`ReferencePack`] documents this module reads and writes. Version 2 (sc-24024)
-/// adds `references[].locator` — the phrase that picks one subject out of an image several roles
-/// share ("the woman on the left").
+/// Schema version of [`ReferencePack`] documents this module reads and writes.
+///
+/// Version 2 adds two things, and both are ADDITIVE — a version 1 document needs no edit for
+/// either unless two of its roles share one file:
+///
+///   * (sc-24024) `references[].locator` — the phrase that picks one subject out of an image
+///     several roles share ("the woman on the left").
+///   * (sc-24025) `references[].file` itself becomes OPTIONAL. An entry with no file is a
+///     DESCRIBED-ONLY role: a subject the pack describes but has no picture of, carried into
+///     every shot that names it by the compiler's identity lock rather than by an image.
+///
+/// This is the same wording [`validate_reference_pack`] refuses a wrong version with, so the
+/// constant and the message an author actually reads cannot drift.
 ///
 /// Only the current version is read. The harness is unreleased, so a version 1 document is refused
 /// by version rather than migrated on read: the alternative is a build that silently accepts a pack
@@ -2009,6 +2019,26 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                             "reference {:?} has no `file` but declares a `locator`; a locator \
                              picks one subject out of an IMAGE (\"the woman on the left\"), and \
                              this role has none — put the words in `description` instead",
+                            entry.role
+                        ),
+                    ));
+                }
+                // An entry that names an IMAGE anywhere is not described-only, whatever the
+                // missing `file` says. `sourceAssetId` and a `generation` block both describe a
+                // picture that exists, and `file` is the only thing that says where the run reads
+                // it: without one, `ensure_references` imports nothing, `films.rs` leaves the
+                // reference partition out of the request, and anyone who binds the role is refused
+                // by name. Silently reclassifying it is the one outcome nobody could debug, so it
+                // is refused here instead. The Film workspace's own add-reference route
+                // (`ProjectStore::add_film_reference`) always writes both, so this can never
+                // refuse a draft the UI authored.
+                if entry.source_asset_id.is_some() || entry.generated || entry.generation.is_some()
+                {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.file"),
+                        format!(
+                            "reference {:?} declares sourceAssetId/generation but no `file`; a \
+                             role backed by an image must name the file it is stored as",
                             entry.role
                         ),
                     ));
@@ -5483,6 +5513,71 @@ mod tests {
                 .any(|m| m.contains("locator") && m.contains("'<' or '>'")),
             "{findings:?}"
         );
+    }
+
+    /// DESCRIBED-ONLY is decided by the ABSENCE of an image, and `file` is not the only place an
+    /// entry claims one (sc-24025). An entry carrying `sourceAssetId`, `generated: true` or a
+    /// `generation` block has a picture behind it, and `file` is the only thing that says where
+    /// the run reads it — so with no `file` it is refused rather than silently reclassified into a
+    /// role whose image is dropped from `ensure_references`, left out of the route's partition
+    /// request, and refused by name to anyone who binds it.
+    #[test]
+    fn a_fileless_entry_that_claims_an_image_is_refused_rather_than_called_described_only() {
+        let generation = json!({
+            "model": "flux_krea", "mode": "text_to_image", "prompt": "a courier",
+            "width": 1024, "height": 1024, "jobId": "job-1", "assetId": "asset-1",
+            "sha256": "abc", "createdAt": "2026-09-19T00:00:00Z"
+        });
+        let fileless = |edit: &dyn Fn(&mut Value)| -> Vec<String> {
+            let mut value = json!({
+                "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": [{
+                    "role": "courier", "kind": "character",
+                    "description": "The courier: blue jacket."
+                }]
+            });
+            edit(&mut value);
+            let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: words and nothing else is exactly what a described-only role is.
+        assert!(fileless(&|_| {}).is_empty(), "{:?}", fileless(&|_| {}));
+
+        for (name, edit) in [
+            (
+                "sourceAssetId",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["sourceAssetId"] = json!("asset-1");
+                }) as Box<dyn Fn(&mut Value)>,
+            ),
+            (
+                "generated",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["generated"] = json!(true);
+                }),
+            ),
+            (
+                "generation",
+                Box::new({
+                    let generation = generation.clone();
+                    move |value: &mut Value| {
+                        value["references"][0]["generation"] = generation.clone();
+                    }
+                }),
+            ),
+        ] {
+            let findings = fileless(&*edit);
+            assert!(
+                findings.iter().any(|message| {
+                    message.contains("\"courier\"")
+                        && message.contains("sourceAssetId/generation but no `file`")
+                }),
+                "{name} with no `file` must be refused by name: {findings:?}"
+            );
+        }
     }
 
     /// Sharing is decided by comparing `file` LITERALLY, so a path the filesystem would resolve to
