@@ -439,7 +439,13 @@ pub struct UploadAsset {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilmReferenceInput {
     pub draft_revision: u32,
-    pub asset_id: String,
+    /// The project-library image this role is backed by, or `None` for a DESCRIBED-ONLY role
+    /// (sc-24025): one the pack states in words because no photograph of it exists. A fileless
+    /// role is how the Film workspace authors the subjects the compiler holds steady by repeating
+    /// their `description`, so the panel that adds them posts to this same route with no
+    /// `assetId` rather than through a second path with a second validator.
+    #[serde(default)]
+    pub asset_id: Option<String>,
     pub role: String,
     pub kind: String,
     #[serde(default)]
@@ -1103,13 +1109,24 @@ impl ProjectStore {
     /// Copy a project-library image into a draft-owned reference pack and persist the new draft
     /// revision. Runs later copy from this immutable draft input rather than reading mutable asset
     /// library state.
+    ///
+    /// With no [`FilmReferenceInput::asset_id`] this authors a DESCRIBED-ONLY role instead
+    /// (sc-24025): no image is resolved, none is copied, and the entry names neither a `file` nor a
+    /// `sourceAssetId`. Both shapes are checked by the one [`validate_reference_pack`] below, so a
+    /// described-only role with no `description` is refused in the core's own words rather than by
+    /// a rule this route states a second time.
     pub fn add_film_reference(
         &self,
         project_id: &str,
         draft_id: &str,
         input: FilmReferenceInput,
     ) -> ProjectStoreResult<FilmDraft> {
-        if !is_safe_id(draft_id) || !is_safe_id(&input.asset_id) {
+        if !is_safe_id(draft_id)
+            || input
+                .asset_id
+                .as_deref()
+                .is_some_and(|asset_id| !is_safe_id(asset_id))
+        {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid film draft or source asset ID".to_owned(),
             ));
@@ -1120,17 +1137,25 @@ impl ProjectStore {
                 REFERENCE_KINDS.join(", ")
             )));
         }
-        let source = self.resolve_asset_media_path(project_id, &input.asset_id)?;
-        let extension = source
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
-            .ok_or_else(|| {
-                ProjectStoreError::BadRequest(
-                    "Film references must use a PNG, JPEG, or WebP image asset".to_owned(),
-                )
-            })?;
+        // Resolved BEFORE the project lock exactly as it always was, and only for a role that
+        // names an image. A described-only role has no bytes to find, stat or copy.
+        let image = match input.asset_id.as_deref() {
+            Some(asset_id) => {
+                let source = self.resolve_asset_media_path(project_id, asset_id)?;
+                let extension = source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+                    .ok_or_else(|| {
+                        ProjectStoreError::BadRequest(
+                            "Film references must use a PNG, JPEG, or WebP image asset".to_owned(),
+                        )
+                    })?;
+                Some((source, format!("references/{asset_id}.{extension}")))
+            }
+            None => None,
+        };
 
         let (project_path, _guard) = self.lock_project(project_id)?;
         let draft_path = project_path
@@ -1154,15 +1179,15 @@ impl ProjectStore {
             )));
         }
 
-        let relative_file = format!("references/{}.{}", input.asset_id, extension);
         draft.reference_pack.references.push(ReferenceEntry {
             role: input.role,
             kind: input.kind,
-            // This route creates a reference FROM an image asset the project already holds, so it
-            // always names a file. A described-only role is authored in the pack document itself
-            // (sc-24025); nothing about this path changes.
-            file: Some(relative_file.clone()),
-            source_asset_id: Some(input.asset_id.clone()),
+            // BOTH or NEITHER (sc-24025). An entry naming a `sourceAssetId` with no `file` is
+            // refused by `validate_reference_pack` as an image-backed role that forgot where its
+            // picture is, so the described-only shape has to drop the asset id too — which it
+            // does by construction here, because both are read from the one `image` above.
+            file: image.as_ref().map(|(_, file)| file.clone()),
+            source_asset_id: input.asset_id,
             description: input.description,
             locator: input.locator,
             approved: input.approved,
@@ -1181,14 +1206,16 @@ impl ProjectStore {
             ));
         }
 
-        let destination = project_path
-            .join("films/draft-assets")
-            .join(draft_id)
-            .join(&relative_file);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
+        if let Some((source, relative_file)) = image {
+            let destination = project_path
+                .join("films/draft-assets")
+                .join(draft_id)
+                .join(&relative_file);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &destination)?;
         }
-        fs::copy(&source, &destination)?;
         draft.revision = draft.revision.saturating_add(1);
         draft.production_plan.version = draft.revision;
         draft.updated_at = utc_now();
@@ -15249,7 +15276,7 @@ mod tests {
                 "film_legacy_pack",
                 FilmReferenceInput {
                     draft_revision: draft.revision,
-                    asset_id: asset["id"].as_str().expect("asset id").to_owned(),
+                    asset_id: Some(asset["id"].as_str().expect("asset id").to_owned()),
                     role: "workshop_plate".to_owned(),
                     kind: "plate".to_owned(),
                     description: "Wide plate.".to_owned(),
@@ -15280,6 +15307,205 @@ mod tests {
             "an image-backed role must name the file it is stored as"
         );
         assert!(crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty());
+    }
+
+    /// sc-24028. The Film workspace authors a DESCRIBED-ONLY role (sc-24025) through this same
+    /// route with no `assetId`: the panel has no second path and no second validator, so the
+    /// entry it stores has to be fileless, survive a re-read, and pass the core's own pack check.
+    #[test]
+    fn add_film_reference_without_an_asset_stores_a_described_only_role() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Described roles")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_described", "Described")
+            .expect("draft creates");
+
+        let updated = store
+            .add_film_reference(
+                &project.id,
+                "film_described",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: None,
+                    role: "courier".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The courier: blue jacket, carries the parcel.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect("a role with no image is authored from its description alone");
+
+        let added = &updated.reference_pack.references[0];
+        assert!(
+            added.is_described_only(),
+            "a role added with no assetId must have no file: {added:?}"
+        );
+        assert!(
+            added.source_asset_id.is_none(),
+            "a fileless entry may not name an image asset either: {added:?}"
+        );
+        assert_eq!(
+            added.description,
+            "The courier: blue jacket, carries the parcel."
+        );
+        assert!(
+            crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty(),
+            "the stored pack must pass the core validator unchanged"
+        );
+
+        // It survives the round trip the workspace reloads through.
+        let reloaded = store
+            .get_film_draft(&project.id, "film_described")
+            .expect("draft reads back");
+        assert_eq!(
+            reloaded.reference_pack.references,
+            updated.reference_pack.references
+        );
+        assert!(reloaded.reference_pack.references[0].is_described_only());
+
+        // And a described-only role with nothing said about it is refused in the CORE's words,
+        // not in a sentence this route invents.
+        let refused = store
+            .add_film_reference(
+                &project.id,
+                "film_described",
+                FilmReferenceInput {
+                    draft_revision: reloaded.revision,
+                    asset_id: None,
+                    role: "silent".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "   ".to_owned(),
+                    locator: None,
+                    approved: false,
+                },
+            )
+            .expect_err("a role with neither an image nor words says nothing");
+        let message = refused.to_string();
+        assert!(
+            message.contains("no `file` and no `description`"),
+            "expected the core's described-only refusal, got {message:?}"
+        );
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_described")
+                .expect("draft reads")
+                .reference_pack
+                .references
+                .len(),
+            1,
+            "a refused add must not leave a partial entry behind"
+        );
+    }
+
+    /// sc-24028. Two roles on ONE library image (sc-24024): the pack ends up with one `file`
+    /// under two roles, and the core requires a distinct locator on each — which is the refusal
+    /// the reference panel surfaces under its locator field.
+    #[test]
+    fn add_film_reference_twice_on_one_asset_shares_a_file_and_requires_locators() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Shared image")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_shared", "Shared")
+            .expect("draft creates");
+        let source = temp.path().join("pair.png");
+        fs::write(&source, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "pair.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let first = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "courier".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The courier: blue jacket.".to_owned(),
+                    locator: Some("the woman on the left".to_owned()),
+                    approved: true,
+                },
+            )
+            .expect("the first role on an image needs no locator, but may carry one");
+
+        // A second role on the same asset with NO locator is refused, naming both roles.
+        let refused = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: first.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "guard".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The guard: grey coat.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect_err("two roles on one image cannot both be unlocated");
+        let message = refused.to_string();
+        assert!(
+            message.contains("share the file") && message.contains("locator"),
+            "expected the core's shared-file locator refusal, got {message:?}"
+        );
+
+        let second = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: first.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "guard".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The guard: grey coat.".to_owned(),
+                    locator: Some("the man on the right".to_owned()),
+                    approved: true,
+                },
+            )
+            .expect("a distinct locator on each role admits both");
+
+        let shared_file = format!("references/{asset_id}.png");
+        let files: Vec<Option<&str>> = second
+            .reference_pack
+            .references
+            .iter()
+            .map(crate::film_plan::ReferenceEntry::file)
+            .collect();
+        assert_eq!(
+            files,
+            vec![Some(shared_file.as_str()), Some(shared_file.as_str())],
+            "adding one asset twice must produce ONE file under two roles"
+        );
+        assert!(crate::film_plan::validate_reference_pack(&second.reference_pack).is_empty());
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_shared")
+                .expect("draft reads")
+                .reference_pack
+                .references,
+            second.reference_pack.references,
+            "both roles survive the reload the workspace does"
+        );
     }
 
     #[test]

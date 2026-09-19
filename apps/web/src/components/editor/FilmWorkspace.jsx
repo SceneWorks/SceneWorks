@@ -674,6 +674,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
                   assets={assets}
                   busy={busy}
                   draft={draft}
+                  findings={preflight?.findings}
                   importAsset={importAsset}
                   onDraftChange={updateDraft}
                   onReplaceDraft={replaceDraft}
@@ -745,6 +746,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
                     assets={assets}
                     disabled={busy}
                     draft={draft}
+                    findings={preflight?.findings}
                     onChange={updateDraft}
                     onReplaceDraft={replaceDraft}
                     saveDraft={saveDraft}
