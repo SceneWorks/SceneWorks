@@ -1353,19 +1353,50 @@ async fn compile_and_write(
     result.map_err(|error| cost.preserve_on_error(error))
 }
 
-/// The prompt guide to forward on every rewrite of this compile.
+/// What the FILM path tells the refiner on top of the model's own guide (sc-24029).
+///
+/// The guide the harness forwards is the product's own `minimax-h3.md`, and that guide teaches
+/// `<Picture N>` as the way to give a reference a job — "the woman from `<Picture 1>`". It is
+/// right for a person writing one prompt against references they chose, and wrong for this path:
+/// here the numbering is assigned by [`sceneworks_core::film_compile::shot_reference_pictures`]
+/// from the shot's own `referenceRoles`, and the binding sentences are written by the compiler
+/// AFTER the rewrite. A label the refiner writes therefore names a picture by a number nothing
+/// assigned, and the worker's marker filter deliberately keeps `<Picture N>` rather than stripping
+/// it.
+///
+/// Said HERE, in the film path's own text, rather than in the worker's embedded rewrite asset:
+/// that asset belongs to every caller of `prompt_refine` (the "Refine" button included), where the
+/// guide's advice is correct, and its file is hash-pinned into the StarVector production closure.
+/// This block is appended after the guide so it is the last word on the subject.
+///
+/// It is guidance, not a guarantee — a language model may write a label anyway. The GUARANTEE is
+/// `film_compile::compile_shot`, which refuses a refined prompt containing one.
+const FILM_REFINE_LABEL_RULE: &str = "\
+# Film harness rules (these override the guide above)
+
+- NEVER write an engine media label — `<Picture 1>`, `<Audio 1>`, `<Video 1>`, or any `<...>` of \
+that shape — into the rewritten prompt. In this pipeline the labels are assigned and written by \
+the compiler AFTER your rewrite, numbered from the shot's own reference list, so a label you write \
+names a picture the request does not supply and the rewrite is rejected.
+- Describe the subject in plain words instead (\"the courier\", \"the workshop\"). The compiler \
+adds the sentence that ties each subject to its picture.";
+
+/// The prompt guide to forward on every rewrite of this compile, plus the film path's own rules.
 ///
 /// `--prompt-guide FILE` wins and is an ERROR when unreadable — a guide the caller named and did
 /// not get is not the same run as one they never asked for. Otherwise the catalog entry's own
 /// `ui.promptGuide.path` is resolved against this checkout's web assets, so a local run gets the
 /// guide with no flag; the rust-api serves that path only in an `embed-web` build, so it cannot be
 /// fetched from `--api` in general and is read from disk or not at all.
+///
+/// [`FILM_REFINE_LABEL_RULE`] is appended whichever guide was resolved, and is forwarded ALONE
+/// when none was: the hazard it addresses is a property of this path, not of the guide.
 fn resolve_prompt_guide(
     options: &PlannerOptions,
     entry: &JsonObject<String, Value>,
 ) -> Result<Option<String>, HarnessError> {
-    if let Some(path) = options.prompt_guide_path.as_deref() {
-        let text = std::fs::read_to_string(path).map_err(|error| {
+    let guide = if let Some(path) = options.prompt_guide_path.as_deref() {
+        Some(std::fs::read_to_string(path).map_err(|error| {
             HarnessError::Validation(vec![PlanDiagnostic::plan(
                 "planner.promptGuide",
                 format!(
@@ -1373,10 +1404,16 @@ fn resolve_prompt_guide(
                     path.display()
                 ),
             )])
-        })?;
-        return Ok(Some(text));
-    }
-    Ok(declared_prompt_guide_path(entry).and_then(|path| std::fs::read_to_string(path).ok()))
+        })?)
+    } else {
+        declared_prompt_guide_path(entry).and_then(|path| std::fs::read_to_string(path).ok())
+    };
+    Ok(Some(match guide {
+        Some(guide) if !guide.trim().is_empty() => {
+            format!("{}\n\n{FILM_REFINE_LABEL_RULE}", guide.trim_end())
+        }
+        _ => FILM_REFINE_LABEL_RULE.to_owned(),
+    }))
 }
 
 /// Where this checkout keeps the web asset a catalog entry's `ui.promptGuide.path` names, if the

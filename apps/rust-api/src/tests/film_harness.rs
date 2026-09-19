@@ -8807,7 +8807,32 @@ async fn the_prompt_guide_reaches_the_rewrite_the_way_video_studio_sends_it() {
     assert_eq!(jobs.len(), 2, "{jobs:?}");
     // The planning turn carries no guide: its system turn is the plan contract, not prompt advice.
     assert!(jobs[0].get("guide").is_none(), "{:?}", jobs[0]);
-    assert_eq!(jobs[1]["guide"], "# H3\nWrite one paragraph.");
+    let guide = jobs[1]["guide"]
+        .as_str()
+        .expect("the rewrite carries a guide");
+    assert!(
+        guide.starts_with("# H3\nWrite one paragraph."),
+        "the model's own guide rides with the rewrite, verbatim and first: {guide:?}"
+    );
+    // And the FILM path's own rules follow it (sc-24029). The guide teaches `<Picture N>` as the
+    // way to give a reference a job, which is right for a person writing one prompt against
+    // references they chose and wrong here: the compiler assigns and writes every label AFTER the
+    // rewrite. Said in the film path's own text rather than in the worker's rewrite asset, which
+    // belongs to every caller of `prompt_refine` and is hash-pinned into the StarVector closure.
+    // LAST, so it is the last word on a subject the guide above has already spoken on.
+    assert!(
+        guide.contains("NEVER write an engine media label")
+            && guide.contains("`<Picture 1>`")
+            && guide.contains("assigned and written by the compiler AFTER your rewrite"),
+        "the film path tells the refiner not to write a label: {guide:?}"
+    );
+    assert!(
+        guide
+            .find("# Film harness rules")
+            .expect("the block is present")
+            > guide.find("Write one paragraph.").unwrap(),
+        "the film rules come after the model guide they override: {guide:?}"
+    );
 
     // A guide the caller NAMED and that is not there is an error, not a guide-less rewrite.
     let mut missing = options.clone();
@@ -10549,4 +10574,146 @@ async fn r15_explicit_replace_and_repair_consume_only_previous_cancellation() {
         );
         assert_eq!(record.shot("SH010").unwrap().automatic_attempts(), 1);
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// sc-24029 — the feature-end review's findings
+// -------------------------------------------------------------------------------------------
+
+/// The shipped fixture plan, pack and reference plates copied somewhere editable, with a compiled
+/// document beside them that is current against both.
+///
+/// Returns the run options the CLI's `validate` takes, so the test edits a DOCUMENT and asks the
+/// real subcommand — the path a person is on when they change a pack by hand.
+fn editable_fixture_with_compiled(temp: &Path) -> RunOptions {
+    let plan_path = temp.join("plan.jsonc");
+    let pack_path = temp.join("references.jsonc");
+    std::fs::copy(Path::new(FIXTURE_DIR).join("plan.jsonc"), &plan_path).unwrap();
+    std::fs::copy(Path::new(FIXTURE_DIR).join("references.jsonc"), &pack_path).unwrap();
+    // The plates AND the sound beds: `validate_all` is given the pack's own directory, so every
+    // file the pack names has to be beside it or the refusal is about missing media rather than
+    // about the compiled document.
+    for directory in ["references", "sound"] {
+        std::fs::create_dir_all(temp.join(directory)).unwrap();
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join(directory)).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), temp.join(directory).join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    let plan_bytes = std::fs::read(&plan_path).unwrap();
+    let plan = sceneworks_core::film_plan::parse_plan_document(
+        &String::from_utf8(plan_bytes.clone()).unwrap(),
+    )
+    .expect("the fixture plan parses");
+    let pack = sceneworks_core::film_plan::parse_reference_pack(
+        &std::fs::read_to_string(&pack_path).unwrap(),
+    )
+    .expect("the fixture pack parses");
+    let requests: Vec<Value> = plan
+        .shots
+        .iter()
+        .map(|shot| {
+            json!({
+                "shotId": shot.id,
+                "beat": shot.beat,
+                "mode": shot.conditioning.mode,
+                "model": plan.model.id,
+                "prompt": shot.prompt,
+                "promptSource": "authored",
+                "durationSeconds": shot.target_duration_seconds,
+                "fps": 24,
+                "width": 576,
+                "height": 320
+            })
+        })
+        .collect();
+    let compiled = json!({
+        "schemaVersion": sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
+        "planId": plan.id,
+        "planVersion": plan.version,
+        // The CLI hashes the plan FILE's bytes, which is the identity `validate` recomputes.
+        "planSha256": crate::film_harness::sha256_hex(&plan_bytes),
+        "referencePackId": pack.id,
+        "referencePackVersion": pack.version,
+        // The pack's identity is the PARSED pack, which is what makes the comment-only edit below
+        // a non-event and the description edit a real one.
+        "referencePackSha256":
+            sceneworks_core::film_compile::reference_pack_sha256(&pack).expect("the pack hashes"),
+        "compiledAt": "2026-09-19T00:00:00Z",
+        "model": {"id": plan.model.id, "tier": plan.model.tier, "fps": 24, "lane": "mlx"},
+        "requests": requests
+    });
+    let compiled_path = temp.join("compiled.json");
+    std::fs::write(
+        &compiled_path,
+        serde_json::to_vec_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
+
+    RunOptions {
+        plan_path,
+        reference_pack_path: pack_path,
+        compiled_path: Some(compiled_path),
+        project_id: None,
+        shot_ids: None,
+        out_dir: temp.join("out"),
+        poll_interval: Duration::from_millis(10),
+        export: false,
+        require_installed: false,
+    }
+}
+
+/// sc-24029, E5/E7. From the CLI too: a compiled document is refused once the pack DOCUMENT's
+/// description changes, and is NOT refused by a comment-only edit of the same file.
+///
+/// The pair is the whole point of hashing the parsed pack rather than the file's bytes. The CLI
+/// reads a JSONC document whose comments and spacing belong to its author, while the workspace
+/// holds a typed pack that was never a file; a byte hash would give one pack two identities and
+/// stale a compile every time somebody wrote a note in it.
+#[tokio::test]
+async fn a_pack_description_edit_stales_the_cli_compiled_document_and_a_comment_does_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let options = editable_fixture_with_compiled(temp.path());
+
+    film_harness::validate(None, &options)
+        .await
+        .expect("the untouched documents validate");
+
+    let original = std::fs::read_to_string(&options.reference_pack_path).unwrap();
+
+    // A COMMENT ONLY. Nothing the compiler reads has changed.
+    std::fs::write(
+        &options.reference_pack_path,
+        format!("// A note from whoever owns this pack.\n{original}"),
+    )
+    .unwrap();
+    film_harness::validate(None, &options)
+        .await
+        .expect("a comment is not a pack change");
+
+    // A DESCRIPTION. This is text the compiler repeats into every prompt that names the role.
+    assert!(original.contains("door camera-left."));
+    std::fs::write(
+        &options.reference_pack_path,
+        original.replace("door camera-left.", "door camera-right."),
+    )
+    .unwrap();
+    let error = film_harness::validate(None, &options)
+        .await
+        .expect_err("an edited description stales the compile");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|finding| finding
+            .message
+            .contains("the reference pack changed since these requests were compiled")
+            && finding
+                .message
+                .contains("recompile, or use authored prompts")),
+        "{findings:?}"
+    );
 }

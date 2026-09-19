@@ -744,6 +744,22 @@ impl ReferenceEntry {
         self.file().is_none()
     }
 
+    /// Whether this entry may actually be BOUND as a `reference_to_video` subject: approved, with
+    /// an image, of a [`BINDABLE_REFERENCE_KINDS`] kind (sc-24029).
+    ///
+    /// THE one spelling of the three-part question, because three places ask it and a pack that
+    /// answered differently in any of them would be a pack the workspace offers a partition for
+    /// and the validator then refuses a binding in: the workspace's reference-partition demand
+    /// (`films::reference_partition_requested`), the planner envelope's narrowing
+    /// (`film_planner::PlannerCapabilities::narrowed_to_pack`) and the brief's role-coverage rule
+    /// (`film_planner::role_coverage_findings`). Behaviour is unchanged at all three — each was
+    /// already this conjunction, written out.
+    pub fn is_bindable_image(&self) -> bool {
+        self.approved
+            && !self.is_described_only()
+            && BINDABLE_REFERENCE_KINDS.contains(&self.kind.as_str())
+    }
+
     /// This entry's locator, trimmed, or `None` when it declares none or declares only whitespace.
     /// The one reading of the field, so the validator that REQUIRES one on a shared file and the
     /// compiler that writes one into a sentence agree on what "has a locator" means.
@@ -880,18 +896,32 @@ pub fn parse_plan_document(text: &str) -> Result<ProductionPlan, PlanDiagnostic>
     let stripped = strip_jsonc_comments(text);
     let scouted: Value = serde_json::from_str(&stripped)
         .map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))?;
-    if let Some(version) = scouted.get("schemaVersion").and_then(Value::as_u64) {
-        let version = u32::try_from(version).unwrap_or(u32::MAX);
-        if !SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&version) {
-            return Err(PlanDiagnostic::plan(
-                "schemaVersion",
-                unsupported_plan_schema_message(version),
-            ));
-        }
+    if let Some(finding) = plan_document_version_finding(&scouted) {
+        return Err(finding);
     }
     // Decoded from the text rather than from `scouted` so a genuine structural error still carries
     // serde's line and column.
     serde_json::from_str(&stripped).map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+}
+
+/// The version pre-scan of [`parse_plan_document`], over an already-parsed JSON value.
+///
+/// Exposed because a plan DOCUMENT reaches this build by two routes and both must refuse the same
+/// way (sc-24029). The CLI hands over text and gets the scan for free; the workspace receives a
+/// plan inside a `FilmDraft` PUT body, which axum has already decoded as JSON, and without this it
+/// would run the typed decode first and answer `unknown field \`sound\`` at a byte offset instead
+/// of the one line that fixes the document.
+///
+/// A DOCUMENT only. A stored draft's `productionPlan` is state with no author, and is carried
+/// forward on read instead — see `ProjectStore::carry_film_draft_forward`.
+///
+/// A value with no `schemaVersion`, or one that is not a number, is not judged here: it is the
+/// typed decode's to refuse, which it does with the field name.
+pub fn plan_document_version_finding(document: &Value) -> Option<PlanDiagnostic> {
+    let version = document.get("schemaVersion").and_then(Value::as_u64)?;
+    let version = u32::try_from(version).unwrap_or(u32::MAX);
+    (!SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&version))
+        .then(|| PlanDiagnostic::plan("schemaVersion", unsupported_plan_schema_message(version)))
 }
 
 /// Parse a plan from JSON/JSONC text. [`parse_plan_document`] with the diagnostic flattened, for
@@ -1625,6 +1655,55 @@ fn inserted_prose_findings(field: &str, noun: &str, text: &str) -> Vec<(String, 
         ));
     }
     findings
+}
+
+/// The keywords of the angle-bracket labels the ENGINE owns, lower-cased for a case-insensitive
+/// scan. MiniMax-H3 applies `<Picture N>` positionally to the references a request supplies, and
+/// the same grammar names its other media slots; the compiler is the only thing in this pipeline
+/// that may write one (`film_compile::inserted_text_for_shot`).
+pub const ENGINE_MEDIA_LABELS: &[&str] = &["picture", "audio", "video"];
+
+/// The byte offset of the first engine label in `text`, or `None`.
+///
+/// Matched at each `<` by skipping ASCII whitespace and comparing the keyword that follows,
+/// case-insensitively — not as a substring, because the engine reads `< Picture 1 >` and
+/// `<\tpicture 1>` as the label too, and a `contains("<picture")` test lets exactly the spellings
+/// an author is most likely to produce by accident through unflagged.
+///
+/// THE ONE implementation, here beside [`inserted_prose_findings`] because every rule about text
+/// that must not forge a label is stated in this module: the planner asks it of a DRAFT
+/// (`film_planner::anchoring_findings`), and the compiler asks it of the REFINER's rewrite and of
+/// the middle it recovers from a dispatched prompt (`film_compile`). A second copy would let the
+/// three drift into three different readings of the same grammar.
+pub fn engine_label_at(text: &str) -> Option<usize> {
+    text.char_indices()
+        .filter(|(_, ch)| *ch == '<')
+        .find_map(|(start, _)| -> Option<usize> {
+            let after = text[start + 1..].trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+            ENGINE_MEDIA_LABELS
+                .iter()
+                .any(|label| {
+                    after
+                        .get(..label.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(label))
+                })
+                .then_some(start)
+        })
+}
+
+/// The label as it was written, for quoting back: from the `<` of the first engine label to its
+/// closing `>`, or to the end of a short run when the author never closed it.
+///
+/// Beside [`engine_label_at`] and for the same reason: a finding that quotes the label is how both
+/// the planner's repair round and the compiler's refusal say WHICH label they found.
+pub fn quoted_engine_label(text: &str) -> String {
+    let start = engine_label_at(text).unwrap_or(0);
+    let rest = &text[start..];
+    match rest.find('>') {
+        Some(end) => rest[..=end].to_owned(),
+        // Unclosed: quote a bounded run rather than the rest of the paragraph.
+        None => rest.chars().take(24).collect(),
+    }
 }
 
 /// THE rule for every pack-authored phrase the compiler repeats into a prompt, as a plan-level

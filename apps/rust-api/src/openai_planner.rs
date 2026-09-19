@@ -765,7 +765,20 @@ mod tests {
         for payload in &payloads {
             assert_ne!(payload["task"], "film_plan");
             assert_eq!(payload["modelId"], "minimax_h3");
-            assert_eq!(payload["guide"], "Exact target model guide");
+            let guide = payload["guide"]
+                .as_str()
+                .expect("the rewrite carries a guide");
+            assert!(
+                guide.starts_with("Exact target model guide"),
+                "the TARGET model's guide rides with the rewrite, verbatim and first: {guide:?}"
+            );
+            // The film path's own rules follow it on the external planner's rewrites too
+            // (sc-24029): the refiner here is the same native, model-keyed one, and the label it
+            // must not write is numbered by the compiler whichever planner drafted the plan.
+            assert!(
+                guide.contains("NEVER write an engine media label"),
+                "the film path tells this refiner not to write a label either: {guide:?}"
+            );
             assert_eq!(payload["workflow"], "video");
         }
         let cost = artifacts.compiled.planner.as_ref().unwrap();

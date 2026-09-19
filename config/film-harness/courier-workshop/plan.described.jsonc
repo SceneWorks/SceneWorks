@@ -20,6 +20,16 @@
   //
   // No sound pack, so no beds and no placed dialogue: the shots state their own sound in `audio`,
   // which is what MiniMax-H3 scores from. Schema 3 (sc-24026): `audio` is required on every shot.
+  //
+  // THIS IS THE TURBO NO-REFERENCE EVALUATION FILM (sc-24029). Turbo is the path a user takes —
+  // the 50-step base regime renders this film in hours — so the evaluation of the text identity
+  // lock is done on the regime it will actually be read on, and the plan declares the accelerator
+  // itself rather than leaving it to a flag nobody passes. `model.loras` names only the BASE
+  // partition's adapter because that is the only partition this film has: no shot binds a
+  // reference role, so every shot resolves to `minimax_h3`. `model.advanced.steps` is deliberately
+  // unset, exactly as in `plan.v2.turbo.jsonc` — omitted, the recipe's own 4 governs, and setting
+  // it would override the count the adapter was distilled for. `plan.jsonc` remains the 50-step
+  // base regime a turbo take is judged against.
   "schemaVersion": 3,
   "id": "courier-workshop-described",
   "version": 1,
@@ -29,7 +39,13 @@
     "id": "minimax_h3",
     "tier": "q4",
     "fps": 24,
-    "resolution": "576x320"
+    "resolution": "576x320",
+    // Declared once on the FAMILY, as `plan.v2.turbo.jsonc` declares its pair; the compiler routes
+    // each id to the partitions its catalog entry allows. Only the base-partition entry is named
+    // here because no shot in this film binds a reference role, so `minimax_h3` is the only
+    // partition anything dispatches as. 4 NFE, video shift 12, audio shift 3, 544p training canvas
+    // — the same v0.1 schedule the reference film's turbo pair uses, so the two are comparable.
+    "loras": ["minimax_h3_turbo_4step_v01"]
   },
   "limits": {
     "maxRunSeconds": 7200,

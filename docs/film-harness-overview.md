@@ -332,11 +332,21 @@ not change; what changed is that a repair became something a copy-only model can
 
 `film-harness compile` writes `compiled.json`: one request per shot with mode, prompt, duration,
 fps, geometry, seed and reference bindings exactly as they will be dispatched.
-`COMPILED_PLAN_SCHEMA_VERSION` is 4 (`crates/sceneworks-core/src/film_compile.rs`,
-`COMPILED_PLAN_SCHEMA_VERSION`); a document at any earlier schema version — v1, v2 or v3 — is
-refused by version rather than read (`CompiledPlan::staleness_findings`), because a stale document
-read under this build would have its derived fields defaulted and then be blamed as hand-edited.
-The remedy either way is to recompile.
+`COMPILED_PLAN_SCHEMA_VERSION` is 7 (`crates/sceneworks-core/src/film_compile.rs`,
+`COMPILED_PLAN_SCHEMA_VERSION`, which is the value to read rather than this sentence); a document at
+any *earlier* schema version is refused by version rather than read
+(`CompiledPlan::staleness_findings`), because a stale document read under this build would have its
+derived fields defaulted and then be blamed as hand-edited. The remedy either way is to recompile.
+
+A compiled document is also tied to the **reference pack** it was compiled against, by the
+`referencePackSha256` of the parsed pack (sc-24029). The pack decides what the compiler writes into
+a prompt, so editing a pack description — a first-class action in the Film workspace — invalidates
+every compiled document made before it. `staleness_findings` says so directly: *the reference pack
+changed since these requests were compiled; recompile, or use authored prompts*. In the workspace
+the remedy is the **Use authored prompts** button or a re-plan; from the CLI it is `film-harness
+compile`. Hashing the *parsed* pack rather than the document's bytes is what lets the CLI's JSONC
+file and the workspace's typed draft agree on one identity, and is why a comment- or
+whitespace-only edit of the document does not stale a compile.
 
 Per shot it carries the resolved partition and its `partitionReason`
 (`crates/sceneworks-core/src/film_compile.rs`, `CompiledRequest::model` and
