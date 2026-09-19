@@ -992,3 +992,151 @@ async fn a3_a_described_only_role_cannot_be_bound_and_an_empty_role_is_refused()
         "a locator on a role with no image must be refused by name: {findings:?}"
     );
 }
+
+/// sc-24027. The PLANNER's half of the epic, end to end on BOTH shipped pack shapes, with the
+/// model's answer scripted: what this asserts is the request the planner is given, the plan the
+/// harness accepts from it and the prompts that plan compiles to — not whether a real 8B model
+/// follows the instruction, which is the epic's own real-LLM acceptance test.
+///
+/// The two shapes are the two the epic ships. A pack with IMAGES plans reference shots: the labels
+/// in the dispatched prompt are the COMPILER's, written after the planner answered, and the
+/// planner's own prose carries none. A pack of DESCRIBED-ONLY roles approves words rather than
+/// pixels, so nothing about a reference may be offered — not the mode, not the cap, not the
+/// accelerator for a partition the film never dispatches — and the plan stays on the base
+/// checkpoint throughout.
+#[tokio::test]
+async fn the_planner_plans_both_shipped_pack_shapes_with_audio_and_no_labels_of_its_own() {
+    use crate::tests::film_harness::{
+        draft_text, full_draft, reference_draft, refine_job_payloads, set_plan_replies,
+    };
+
+    // ── The image pack ──────────────────────────────────────────────────────────────────────
+    let harness = Harness::start(true, Vec::new()).await;
+    set_plan_replies(&harness, vec![draft_text(&reference_draft())]);
+    let artifacts = film_planner::generate(
+        &harness.transport,
+        &planner_llm(&harness),
+        &planner_options(&harness, "anchoring-planned-images"),
+    )
+    .await
+    .expect("a reference-binding draft with audio on every shot is a plan");
+    assert_eq!(artifacts.repair_rounds, 0);
+
+    let planning = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(
+        planning.contains("audio is REQUIRED on every shot")
+            && planning.contains("audio NEVER begins with \"Audio:\""),
+        "{planning}"
+    );
+    assert!(
+        planning.contains("Never write \"<Picture 1>\", \"<Audio 1>\", \"<Video 1>\""),
+        "{planning}"
+    );
+
+    for shot in &artifacts.plan.shots {
+        assert!(!shot.audio.trim().is_empty(), "{}", shot.id);
+        assert!(
+            !shot.prompt.contains("<Picture"),
+            "{}: the planner writes no labels: {}",
+            shot.id,
+            shot.prompt
+        );
+    }
+    for request in &artifacts.compiled.requests {
+        let shot = artifacts
+            .plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot");
+        assert_eq!(request.model, "minimax_h3_ref", "{}", request.shot_id);
+        // The labels in the dispatched prompt are the compiler's, and the audio sentence trails it.
+        assert!(
+            request.prompt.contains("<Picture 1>"),
+            "{}: {}",
+            request.shot_id,
+            request.prompt
+        );
+        assert!(
+            request
+                .prompt
+                .trim_end()
+                .ends_with(&expected_audio_tail(shot)),
+            "{}: {}",
+            request.shot_id,
+            request.prompt
+        );
+    }
+
+    // ── The described-only pack ─────────────────────────────────────────────────────────────
+    let harness = Harness::start(true, Vec::new()).await;
+    // Every shipped accelerator installed, so "the reference partition's adapter is not offered"
+    // is a statement about the pack rather than about an empty host.
+    harness.install_turbo_loras();
+    let mut draft = full_draft();
+    // The base partition's offered recipe, which is the only one this film could use.
+    draft["loras"] = json!(["minimax_h3_turbo_4step_v01"]);
+    set_plan_replies(&harness, vec![draft_text(&draft)]);
+    let mut options = planner_options(&harness, "anchoring-planned-described");
+    options.reference_pack_path = Path::new(FIXTURE_DIR).join("references.described.jsonc");
+    let artifacts = film_planner::generate(&harness.transport, &planner_llm(&harness), &options)
+        .await
+        .expect("a text-to-video draft against a described-only pack is a plan");
+    assert_eq!(artifacts.repair_rounds, 0);
+
+    let planning = refine_job_payloads(&harness, true)
+        .first()
+        .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
+        .expect("a planning job was created");
+    assert!(
+        planning.contains("Reference conditioning: THIS CHECKPOINT HAS NONE"),
+        "a pack of words approves no picture to condition on: {planning}"
+    );
+    assert!(
+        !planning.contains("minimax_h3_ref"),
+        "neither the reference partition nor its adapter is offered for a film that never \
+         dispatches it: {planning}"
+    );
+    assert!(
+        planning.contains("(no image: name this role in continuityRoles only"),
+        "the described-only roles are still offered, for continuity: {planning}"
+    );
+
+    assert_eq!(
+        artifacts.plan.model.loras,
+        vec!["minimax_h3_turbo_4step_v01"]
+    );
+    for request in &artifacts.compiled.requests {
+        let shot = artifacts
+            .plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("every request is a shot");
+        assert_eq!(request.model, "minimax_h3", "{}", request.shot_id);
+        assert_eq!(request.mode, "text_to_video", "{}", request.shot_id);
+        assert!(
+            request.reference_roles.is_empty(),
+            "{}: nothing is bound",
+            request.shot_id
+        );
+        assert!(
+            !request.prompt.contains("<Picture"),
+            "{}: nothing is conditioned, so no picture is named: {}",
+            request.shot_id,
+            request.prompt
+        );
+        assert!(
+            request
+                .prompt
+                .trim_end()
+                .ends_with(&expected_audio_tail(shot)),
+            "{}: {}",
+            request.shot_id,
+            request.prompt
+        );
+    }
+}
