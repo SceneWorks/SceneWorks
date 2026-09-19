@@ -83,9 +83,9 @@ header comment).
 
 ### 2. The reference pack: what it may be conditioned on
 
-`ReferencePack` (`crates/sceneworks-core/src/film_plan.rs:484`), schema version 1 (`:47`). A separate
+`ReferencePack` (`crates/sceneworks-core/src/film_plan.rs:484`), schema version 2 (`:47`). A separate
 document with its own version, so approved references stay addressable independently of any generated
-take.
+take. A version 1 pack is refused by version, naming the edit that fixes it.
 
 ```jsonc
 // config/film-harness/courier-workshop/references.jsonc
@@ -103,6 +103,35 @@ take.
   { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav" }
 ]
 ```
+
+**Several roles may name the same `file`** (sc-24024) — one photograph holding two people is one
+image with two subjects in it. Then each sharing role must carry a `locator`, the phrase that picks
+its subject out of that image, and the pack is refused naming the roles and the file if any does not:
+
+```jsonc
+{ "role": "courier",   "kind": "character", "file": "references/pair.png",
+  "locator": "the woman on the left" },
+{ "role": "recipient", "kind": "character", "file": "references/pair.png",
+  "locator": "the man on the right" }
+```
+
+A `locator` is a **noun phrase including its article**: it completes the sentence "The courier is …",
+which the compiler writes verbatim and adds nothing to. Write `"the woman on the left"`, not
+`"woman on the left"` — the latter is accepted (a locator is free prose; nothing can check it) and
+reads "The courier is woman on the left in `<Picture 1>`."
+
+"The same file" is the `file` string compared **literally** — nothing canonicalizes through the
+filesystem, so two entries meaning one image must spell its path one way. To make that enforceable
+rather than a convention, a `file` is refused unless it is already in canonical form: no leading
+`./`, no `.` component, no doubled or trailing `/`, no `\`. Two entries whose paths differ only by
+ASCII case are refused too, because a case-insensitive volume holds one file where the pack declares
+two. A shared file is imported as
+**one** project asset that every sharing role resolves to, supplied to the engine **once** under one
+`<Picture N>`, and each role's binding sentence carries its own locator ("The courier is the woman on
+the left in `<Picture 1>`."). Because the file is supplied once, `limits.maxReferenceAssets` counts
+**distinct files**: a shot binding ten roles across nine files fits MiniMax-H3's cap of nine. Sharing
+roles must also agree on `approved` and on their generation provenance — one image carries one of
+each.
 
 `referenceRoles` may bind only the **subject** kinds (`character`, `prop`, `location`) because
 Ref2VA treats every bound image as a subject to depict; a `style` or a `plate` bound there is refused

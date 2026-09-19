@@ -43,8 +43,14 @@ use crate::MAX_PROMPT_CHARS;
 pub const PLAN_SCHEMA_VERSION: u32 = 2;
 /// Plan schema versions this build accepts.
 pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[1, 2];
-/// Schema version of [`ReferencePack`] documents this module reads and writes.
-pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
+/// Schema version of [`ReferencePack`] documents this module reads and writes. Version 2 (sc-24024)
+/// adds `references[].locator` — the phrase that picks one subject out of an image several roles
+/// share ("the woman on the left").
+///
+/// Only the current version is read. The harness is unreleased, so a version 1 document is refused
+/// by version rather than migrated on read: the alternative is a build that silently accepts a pack
+/// whose author could not have known about the rule that now governs shared files.
+pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 2;
 /// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
 /// durable resume state: `state`, `stop`, per-attempt idempotency keys and rejections, per-shot
 /// take selection and review flags, and the human decision log.
@@ -576,7 +582,35 @@ pub struct ReferenceEntry {
     pub role: String,
     pub kind: String,
     /// Image path relative to the pack document's directory.
+    ///
+    /// SEVERAL roles may name the SAME file (sc-24024) — one photograph holding two people is one
+    /// image with two subjects in it. The file is then supplied to the engine ONCE, under one
+    /// `<Picture N>` that every role sharing it is bound to, and imported as ONE project asset.
+    /// "The same file" means this string, compared literally: bindings in this repo are keyed on
+    /// the configured path, and resolving through the filesystem would make two packs that read
+    /// identically behave differently depending on symlinks and case folding.
     pub file: String,
+    /// The phrase that picks THIS role's subject out of [`ReferenceEntry::file`] — "the woman on
+    /// the left", "the parcel on the bench" (sc-24024).
+    ///
+    /// Required on every role that shares its file with another, because a picture holding two
+    /// people cannot bind two roles without saying which is which: the compiler writes "The courier
+    /// is the woman on the left in `<Picture 1>`." Optional on a role with an image to itself,
+    /// where "the person shown in `<Picture 1>`" is already unambiguous — but honoured when given,
+    /// since a lone reference may still be a crowded photograph.
+    ///
+    /// **A noun phrase, with its article, that completes "The courier is …".** The compiler drops
+    /// the phrase in verbatim and adds nothing of its own, so the leading "the"/"a" is the
+    /// author's to supply: "the woman on the left" reads "The courier is the woman on the left in
+    /// `<Picture 1>`.", while "woman on the left" reads "The courier is woman on the left in
+    /// `<Picture 1>`." Nothing can check this — a locator is free prose — so it is stated here,
+    /// in the refusal that asks for one, and in the pack documentation.
+    ///
+    /// Repeated into the dispatched prompt, so it is held to the same rules as
+    /// [`ReferenceEntry::description`]: no `<` or `>`, no control characters, whitespace
+    /// normalized by `film_compile::normalized_description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
     /// Project-library asset this reference was copied from, when it entered through the Film
     /// workspace. The copied file remains the runnable input; this id is provenance and lets the
     /// authoring UI identify the original without making a pinned run depend on mutable library
@@ -601,6 +635,18 @@ pub struct ReferenceEntry {
     /// and asset it came out of. Present only on a `generated` entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GeneratedReference>,
+}
+
+impl ReferenceEntry {
+    /// This entry's locator, trimmed, or `None` when it declares none or declares only whitespace.
+    /// The one reading of the field, so the validator that REQUIRES one on a shared file and the
+    /// compiler that writes one into a sentence agree on what "has a locator" means.
+    pub fn locator(&self) -> Option<&str> {
+        self.locator
+            .as_deref()
+            .map(str::trim)
+            .filter(|locator| !locator.is_empty())
+    }
 }
 
 /// Provenance of one generated reference plate (sc-23403).
@@ -1362,25 +1408,41 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
 /// write — they are collapsed to single spaces by `film_compile::normalized_description` before they
 /// reach a prompt. Every other control character is a byte no author typed on purpose.
 fn reference_description_findings(field: &str, description: &str) -> Vec<PlanDiagnostic> {
+    reference_prose_findings(field, "description", description)
+}
+
+/// The same rules for [`ReferenceEntry::locator`] (sc-24024). A locator is repeated into the
+/// binding sentence exactly as a description is — "The courier is **the woman on the left** in
+/// `<Picture 1>`." — so a locator that forged a marker would forge one just as effectively.
+fn reference_locator_findings(field: &str, locator: Option<&str>) -> Vec<PlanDiagnostic> {
+    locator
+        .map(|locator| reference_prose_findings(field, "locator", locator))
+        .unwrap_or_default()
+}
+
+/// THE rule for every pack-authored phrase the compiler repeats into a prompt. One function over
+/// both fields because they are repeated by the same code into the same sentence, and a check that
+/// covered only `description` would let a `locator` say `<Picture 3>`.
+fn reference_prose_findings(field: &str, name: &str, text: &str) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
-    if description.contains(['<', '>']) {
+    if text.contains(['<', '>']) {
         findings.push(PlanDiagnostic::plan(
-            format!("{field}.description"),
+            format!("{field}.{name}"),
             format!(
-                "description {description:?} must not contain '<' or '>': it is repeated into the \
+                "{name} {text:?} must not contain '<' or '>': it is repeated into the \
                  dispatched prompt, where a marker like <Picture 1> would bind the model to media \
                  this shot never supplies"
             ),
         ));
     }
-    if description
+    if text
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
     {
         findings.push(PlanDiagnostic::plan(
-            format!("{field}.description"),
+            format!("{field}.{name}"),
             format!(
-                "description {description:?} must not contain control characters: it is repeated \
+                "{name} {text:?} must not contain control characters: it is repeated \
                  into the dispatched prompt verbatim apart from whitespace"
             ),
         ));
@@ -1414,6 +1476,44 @@ fn reference_image_file_findings(field: &str, file: &str) -> Vec<PlanDiagnostic>
         return vec![PlanDiagnostic::plan(
             format!("{field}.file"),
             format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    // ONE path may be spelled ONE way (sc-24024). Everything that decides whether two roles share
+    // an image compares this string LITERALLY — `film_compile::shot_reference_pictures`,
+    // `shared_reference_file_findings`, `Session::ensure_references` — so `references/pair.png`
+    // and `./references/pair.png` (likewise `references//pair.png`, `references/./pair.png`,
+    // `references/pair.png/`, a `\` separator) would import ONE photograph of two people twice,
+    // number it `<Picture 1>` and `<Picture 2>`, and require a `locator` on neither: exactly the
+    // silent ambiguity this feature exists to remove, and nothing downstream catches it — the
+    // import keys on role, so even an identical sha256 does not collapse them.
+    //
+    // Refused rather than canonicalized on read, for the reason the literal comparison exists in
+    // the first place: a pack document has to mean the same thing on every machine, and a
+    // normalizing read would quietly make two entries one without the author ever seeing it.
+    let forward_slashed = file.replace('\\', "/");
+    let canonical = std::path::Path::new(&forward_slashed)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if canonical.is_empty() {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    if canonical != file {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must be spelled in canonical form, as {canonical:?}: no leading \
+                 \"./\", no \".\" component, no doubled '/', no trailing '/', no '\\'. Roles \
+                 share one image when this string matches LITERALLY, so a second spelling of one \
+                 path is imported and numbered as a second image"
+            ),
         )];
     }
     if file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
@@ -1492,6 +1592,131 @@ fn generated_reference_findings(field: &str, entry: &ReferenceEntry) -> Vec<Plan
     findings
 }
 
+/// The rules that apply to a FILE several roles name, and to nothing else (sc-24024).
+///
+/// Sharing is the point of the feature — one photograph of two people is one image with two
+/// subjects — and each of these rules exists because the shared file collapses something that was
+/// per-role into something per-image:
+///
+///   * **Every sharing role needs a `locator`.** The roles are bound to ONE `<Picture N>`, so
+///     "The courier is the person shown in `<Picture 1>`. The recipient is the person shown in
+///     `<Picture 1>`." tells the model nothing. The finding names every role and the file, because
+///     the author is looking at a document whose entries they know by name.
+///   * **Their locators must differ.** Two roles picking the same subject out of one image is the
+///     same ambiguity written out longhand.
+///   * **They must agree on `approved`.** One file is imported as ONE project asset, and the asset
+///     carries exactly one approval tag; roles that disagree would make the tag depend on which of
+///     them the import happened to reach last.
+///   * **They must agree on `generated` / `generation`.** That provenance describes the FILE — the
+///     job that rendered it, its sha256 — so two roles on one file cannot honestly claim two.
+fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
+    let mut groups: BTreeMap<&str, Vec<&ReferenceEntry>> = BTreeMap::new();
+    for entry in &pack.references {
+        groups.entry(entry.file.as_str()).or_default().push(entry);
+    }
+    let mut findings = Vec::new();
+    // Two spellings that differ only by ASCII case are ONE file on a case-insensitive volume —
+    // which APFS and NTFS are by default — while every comparison in this feature is literal. The
+    // compiler would number two pictures of one photograph and require a locator on neither, so
+    // the pack has to pick a spelling rather than have one picked for it.
+    let mut by_fold: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for entry in &pack.references {
+        let spellings = by_fold.entry(entry.file.to_ascii_lowercase()).or_default();
+        if !spellings.contains(&entry.file.as_str()) {
+            spellings.push(entry.file.as_str());
+        }
+    }
+    for spellings in by_fold.values() {
+        if spellings.len() < 2 {
+            continue;
+        }
+        findings.push(PlanDiagnostic::plan(
+            "referencePack.references.file",
+            format!(
+                "files {} differ only by ASCII case, so a case-insensitive volume holds ONE file \
+                 while this pack is read as {}; spell one path one way, or the roles naming them \
+                 will be bound to two pictures of the same image",
+                spellings
+                    .iter()
+                    .map(|spelling| format!("{spelling:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                spellings.len()
+            ),
+        ));
+    }
+    for (file, entries) in groups {
+        if entries.len() < 2 {
+            continue;
+        }
+        let roles = entries
+            .iter()
+            .map(|entry| format!("{:?}", entry.role))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let missing: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.locator().is_none())
+            .map(|entry| format!("{:?}", entry.role))
+            .collect();
+        if !missing.is_empty() {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.locator",
+                format!(
+                    "roles {roles} share the file {file:?}, so each of them needs a `locator` \
+                     saying which subject in that image it names: a phrase that completes \"The \
+                     {} is …\", article included, e.g. \"the woman on the left\" — the compiler \
+                     writes the phrase in verbatim and supplies no article of its own; {} declare \
+                     none",
+                    entries[0].role,
+                    missing.join(", ")
+                ),
+            ));
+        } else {
+            let mut locators: Vec<&str> =
+                entries.iter().filter_map(|entry| entry.locator()).collect();
+            let before = locators.len();
+            locators.sort_unstable();
+            locators.dedup();
+            if locators.len() != before {
+                findings.push(PlanDiagnostic::plan(
+                    "referencePack.references.locator",
+                    format!(
+                        "roles {roles} share the file {file:?} but do not all have a DIFFERENT \
+                         `locator`; two roles picking the same subject out of one image is the \
+                         ambiguity a locator exists to remove"
+                    ),
+                ));
+            }
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.approved != entries[0].approved)
+        {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.approved",
+                format!(
+                    "roles {roles} share the file {file:?} but disagree on `approved`; the file is \
+                     imported as ONE asset carrying ONE approval, so it is approved for all of \
+                     them or for none"
+                ),
+            ));
+        }
+        if entries.iter().any(|entry| {
+            entry.generated != entries[0].generated || entry.generation != entries[0].generation
+        }) {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.generation",
+                format!(
+                    "roles {roles} share the file {file:?} but declare different generation \
+                     provenance; the provenance describes the IMAGE, so one file has one"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     if pack.schema_version != REFERENCE_PACK_SCHEMA_VERSION {
@@ -1499,7 +1724,10 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             "referencePack.schemaVersion",
             format!(
                 "unsupported reference pack schema version {} (this build reads \
-                 {REFERENCE_PACK_SCHEMA_VERSION})",
+                 {REFERENCE_PACK_SCHEMA_VERSION}); set \"schemaVersion\": \
+                 {REFERENCE_PACK_SCHEMA_VERSION} — version 2 only ADDS the optional \
+                 references[].locator, so a version 1 document needs no other edit unless two of \
+                 its roles share one file",
                 pack.schema_version
             ),
         ));
@@ -1558,8 +1786,10 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
         }
         findings.extend(reference_image_file_findings(&field, &entry.file));
         findings.extend(reference_description_findings(&field, &entry.description));
+        findings.extend(reference_locator_findings(&field, entry.locator.as_deref()));
         findings.extend(generated_reference_findings(&field, entry));
     }
+    findings.extend(shared_reference_file_findings(pack));
     // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
     // because the two are placed through different slots and a collision would make
     // `referenceRoles: ["theme"]` resolve to something a video model cannot take.
@@ -2855,8 +3085,12 @@ pub fn shot_resolution(
 /// `reference_to_video` shot against the base entry would refuse a shot the route would have
 /// accepted, and judging a `text_to_video` shot against the reference entry would refuse one the
 /// base checkpoint renders every day.
+///
+/// Takes the PACK because one of those rules — `limits.maxReferenceAssets` — counts the images a
+/// shot supplies, and only the pack says which of a shot's roles share one (sc-24024).
 pub fn validate_plan_against_model(
     plan: &ProductionPlan,
+    pack: &ReferencePack,
     entries: &ModelEntries<'_>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
@@ -2961,14 +3195,22 @@ pub fn validate_plan_against_model(
                 ),
             ));
         }
-        let references = shot.conditioning.reference_roles.len();
-        if references > caps.images {
+        // PICTURES, not roles (sc-24024). `maxReferenceAssets` bounds the images the request
+        // SUPPLIES, and roles that share a file are supplied once — so a ten-role shot over nine
+        // files is inside a cap of nine, and counting roles would refuse a request the route
+        // accepts. Counted by the one function that decides the supply order, so the number checked
+        // here is the length of the list `resolve_conditioning` will build.
+        let pictures =
+            crate::film_compile::shot_reference_pictures(&shot.conditioning.reference_roles, pack)
+                .len();
+        if pictures > caps.images {
+            let roles = shot.conditioning.reference_roles.len();
             findings.push(PlanDiagnostic::shot(
                 id,
                 "conditioning.referenceRoles",
                 format!(
-                    "{references} reference roles exceed {model_id}'s limits.maxReferenceAssets \
-                     of {}",
+                    "{roles} reference roles supply {pictures} distinct images, exceeding \
+                     {model_id}'s limits.maxReferenceAssets of {}",
                     caps.images
                 ),
             ));
@@ -3086,7 +3328,7 @@ pub fn validate_all(
         findings.extend(validate_reference_pack_files(pack, dir));
     }
     if let Some((entries, lane)) = model_entry {
-        findings.extend(validate_plan_against_model(plan, entries, lane));
+        findings.extend(validate_plan_against_model(plan, pack, entries, lane));
     }
     findings
 }
@@ -3921,7 +4163,7 @@ mod tests {
 
     fn pack_json() -> Value {
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -4217,6 +4459,7 @@ mod tests {
         assert!(validate_plan_against_pack(&plan, &pack).is_empty());
         assert!(validate_plan_against_model(
             &plan,
+            &pack,
             &single_entries(&model_entry()),
             ModelLane::Mlx
         )
@@ -4531,6 +4774,7 @@ mod tests {
         );
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4573,6 +4817,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &single_entries(&model_entry()),
             ModelLane::Mlx,
         ));
@@ -4641,6 +4886,7 @@ mod tests {
         // reference_to_video and 9 images), the bare one against `minimax_h3`.
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4666,6 +4912,7 @@ mod tests {
         // dispatched at the base checkpoint, and the shot that binds nothing is untouched.
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &single_entries(&base),
             ModelLane::Mlx,
         ));
@@ -4698,6 +4945,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4716,6 +4964,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &ModelEntries::single("ltx_2_5", &base),
             ModelLane::Mlx,
         ));
@@ -4745,8 +4994,273 @@ mod tests {
         // References are OPTIONAL: a shot that binds none is never refused for it.
         let plan: ProductionPlan = serde_json::from_value(plan_json()).unwrap();
         assert!(
-            validate_plan_against_model(&plan, &entries, ModelLane::Mlx).is_empty(),
+            validate_plan_against_model(&plan, &pack(), &entries, ModelLane::Mlx).is_empty(),
             "a plan with no reference shots must still validate on a split family"
+        );
+    }
+
+    /// A pack of `roles` character entries over `files` distinct plates: the first
+    /// `roles - files + 1` roles share plate 0 and carry locators, the rest get one each
+    /// (sc-24024).
+    fn crowded_pack(roles: usize, files: usize) -> ReferencePack {
+        assert!(files <= roles && files >= 1);
+        let shared = roles - files + 1;
+        let entries: Vec<Value> = (0..roles)
+            .map(|index| {
+                let plate = index
+                    .saturating_sub(shared.saturating_sub(1))
+                    .min(files - 1);
+                let mut entry = json!({
+                    "role": format!("role_{index}"),
+                    "kind": "character",
+                    "file": format!("references/plate_{plate}.png"),
+                });
+                if index < shared && shared > 1 {
+                    entry["locator"] = json!(format!("the {index}th person from the left"));
+                }
+                entry
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "crowded-refs",
+            "version": 1,
+            "references": entries,
+        }))
+        .expect("the crowded pack parses")
+    }
+
+    /// `limits.maxReferenceAssets` bounds the IMAGES a request supplies, and roles sharing a file
+    /// are supplied once (sc-24024). So ten roles over nine files fit a cap of nine, and ten roles
+    /// over ten files do not — the one difference between the two runs below is which pack the
+    /// same plan is counted against.
+    #[test]
+    fn the_reference_cap_counts_distinct_files_not_bound_roles() {
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"]["referenceRoles"] =
+            json!((0..10).map(|i| format!("role_{i}")).collect::<Vec<_>>());
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+
+        let nine_files = crowded_pack(10, 9);
+        assert!(
+            validate_reference_pack(&nine_files).is_empty(),
+            "{:?}",
+            messages(&validate_reference_pack(&nine_files))
+        );
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &nine_files,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.is_empty(),
+            "ten roles over nine files supply nine images, inside a cap of nine: {findings:?}"
+        );
+
+        let ten_files = crowded_pack(10, 10);
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &ten_files,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("10 distinct images")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains('9')),
+            "{findings:?}"
+        );
+    }
+
+    /// The rules a FILE several roles name has to satisfy (sc-24024), each refused by naming the
+    /// roles and the file the author has to go and look at.
+    #[test]
+    fn roles_sharing_one_file_need_distinct_locators_and_one_approval() {
+        let shared = |edit: &dyn Fn(&mut Value)| -> ReferencePack {
+            let mut value = json!({
+                "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "pair-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character", "file": "references/pair.png",
+                        "locator": "the woman on the left"
+                    },
+                    {
+                        "role": "recipient", "kind": "character", "file": "references/pair.png",
+                        "locator": "the man on the right"
+                    }
+                ]
+            });
+            edit(&mut value);
+            serde_json::from_value(value).expect("the pair pack parses")
+        };
+
+        // The control: two roles on one file, each saying which subject it is, is legal.
+        assert!(
+            validate_reference_pack(&shared(&|_| {})).is_empty(),
+            "{:?}",
+            messages(&validate_reference_pack(&shared(&|_| {})))
+        );
+
+        // A locator that is absent, or present but blank, is no locator.
+        for blank in [json!(null), json!("   ")] {
+            let pack = shared(&|value: &mut Value| {
+                value["references"][1]["locator"] = blank.clone();
+            });
+            let findings = messages(&validate_reference_pack(&pack));
+            assert!(
+                findings.iter().any(|m| m.contains("locator")
+                    && m.contains("\"courier\"")
+                    && m.contains("\"recipient\"")
+                    && m.contains("references/pair.png")),
+                "{blank} must be refused, naming both roles and the file: {findings:?}"
+            );
+        }
+
+        // Two roles picking the SAME subject out of one image says nothing either.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][1]["locator"] = json!("the woman on the left");
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("locator") && m.contains("DIFFERENT")),
+            "{findings:?}"
+        );
+
+        // One asset carries one approval, so the roles on it cannot disagree about it.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][1]["approved"] = json!(false);
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("approved") && m.contains("references/pair.png")),
+            "{findings:?}"
+        );
+
+        // A locator reaches the dispatched prompt verbatim, so it may no more forge a picture
+        // marker than a description may.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][0]["locator"] = json!("the woman in <Picture 3>");
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("locator") && m.contains("'<' or '>'")),
+            "{findings:?}"
+        );
+    }
+
+    /// Sharing is decided by comparing `file` LITERALLY, so a path the filesystem would resolve to
+    /// one image but this pack spells two ways is refused (sc-24024). Left unrefused, one
+    /// photograph of two people is imported twice, numbered `<Picture 1>` and `<Picture 2>`, and
+    /// — because the entries never group — neither role is asked for a locator: the exact
+    /// ambiguity the feature removes, reintroduced by a stray `./`.
+    #[test]
+    fn a_reference_file_must_already_be_in_canonical_lexical_form() {
+        let with_file = |file: &str| -> Vec<String> {
+            let mut value = pack_json();
+            value["references"][0]["file"] = json!(file);
+            let pack: ReferencePack =
+                serde_json::from_value(value).expect("the pack parses whatever the path says");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: the spelling every checked-in pack uses is accepted.
+        assert!(
+            with_file("references/workshop_plate.png").is_empty(),
+            "{:?}",
+            with_file("references/workshop_plate.png")
+        );
+
+        for spelling in [
+            "./references/workshop_plate.png",
+            "references//workshop_plate.png",
+            "references/./workshop_plate.png",
+            "references/workshop_plate.png/",
+            "references\\workshop_plate.png",
+        ] {
+            let findings = with_file(spelling);
+            assert!(
+                findings.iter().any(|m| m.contains("canonical form")
+                    && m.contains("\"references/workshop_plate.png\"")),
+                "{spelling:?} must be refused, naming the canonical spelling: {findings:?}"
+            );
+        }
+    }
+
+    /// Two spellings that differ only by case are ONE file on APFS and two in this pack, so the
+    /// pack is refused rather than read as two pictures of one photograph (sc-24024).
+    #[test]
+    fn two_reference_files_differing_only_by_case_are_refused() {
+        let mut value = pack_json();
+        value["references"][0]["file"] = json!("references/plate.png");
+        value["references"][1]["file"] = json!("references/Plate.png");
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("differ only by ASCII case")
+                    && m.contains("\"references/plate.png\"")
+                    && m.contains("\"references/Plate.png\"")),
+            "{findings:?}"
+        );
+    }
+
+    /// A locator is free prose, so nothing can check that it reads as a noun phrase — but the
+    /// refusal that ASKS for one has to say that the article is the author's to supply, because
+    /// "woman on the left" yields "The courier is woman on the left in <Picture 1>." in silence.
+    #[test]
+    fn the_missing_locator_refusal_says_the_article_is_the_authors_to_supply() {
+        let value = json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "pair-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/pair.png" },
+                { "role": "recipient", "kind": "character", "file": "references/pair.png" }
+            ]
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pair pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings.iter().any(|m| m.contains("locator")
+                && m.contains("The courier is …")
+                && m.contains("the woman on the left")),
+            "{findings:?}"
+        );
+    }
+
+    /// A version 1 pack is refused BY VERSION, and the refusal says what to do about it (E6).
+    #[test]
+    fn a_version_1_reference_pack_is_refused_by_version() {
+        let mut value = pack_json();
+        value["schemaVersion"] = json!(1);
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referencePack.schemaVersion"
+                    && finding.message.contains("version 1")
+                    && finding.message.contains("schemaVersion")
+                    && finding.message.contains("locator")
+            }),
+            "{:?}",
+            messages(&findings)
         );
     }
 
@@ -4765,6 +5279,7 @@ mod tests {
         );
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -5358,7 +5873,7 @@ mod tests {
     /// A pack carrying exactly `sound`, so the findings under test are the sound findings.
     fn sound_pack(entries: Value) -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "pack",
             "version": 1,
             "references": [

@@ -121,6 +121,8 @@ describe("FilmReferences", () => {
       setControl(container.querySelector('[aria-label="Reference project image"]'), asset.id);
       setControl(container.querySelector('[aria-label="Reference role name"]'), "courier");
       setControl(container.querySelector('[aria-label="Reference description"]'), "Blue jacket");
+      // sc-24024: which subject in the image this role names, for the pair of roles that share one.
+      setControl(container.querySelector('[aria-label="Reference locator"]'), "the woman on the left");
       container.querySelector('.ve-film-reference-check input').click();
     });
     const add = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add asset");
@@ -137,6 +139,7 @@ describe("FilmReferences", () => {
       role: "courier",
       kind: "character",
       description: "Blue jacket",
+      locator: "the woman on the left",
       approved: true,
     }));
     expect(latestDraft.referencePack.references[0].sourceAssetId).toBe("asset_courier");

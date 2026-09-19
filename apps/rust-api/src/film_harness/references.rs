@@ -699,6 +699,12 @@ async fn generate_into(
             file: role.file.clone(),
             source_asset_id: None,
             description: role.description.clone(),
+            // A GENERATED plate is one role's own image: `validate_reference_spec` refuses two spec
+            // roles that write the same `file`, and each role here is rendered from its own prompt.
+            // So no generated entry can be part of a shared-file group, and none needs a locator
+            // (sc-24024). The INHERITED entries are copied verbatim from their source pack and
+            // carry whatever locators that pack declared.
+            locator: None,
             approved: true,
             generated: true,
             generation: Some(GeneratedReference {
