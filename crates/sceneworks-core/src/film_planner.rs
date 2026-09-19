@@ -832,9 +832,16 @@ fn normalize_draft(value: &mut Value) {
                 }
             }
         }
-        // `audio` is deliberately absent: it is REQUIRED (sc-24026), so dropping a blank one would
-        // turn a shot that said nothing about sound into a decode failure instead of a finding that
-        // names it.
+        // `audio` is REQUIRED (sc-24026) and `DraftShot::audio` has no serde default, so a shot
+        // that OMITS the key would fail the whole-draft decode at a byte offset: the entire
+        // planner round is thrown away and the repair round is handed `missing field "audio"`
+        // with no shot id to act on. Materialized blank instead, so the shot decodes and
+        // `validate_plan_structure` refuses it by name — the same finding a shot that wrote `""`
+        // gets, which is what the repair round knows how to fix. For the same reason `audio` is
+        // absent from the `drop_if_blank` list below: dropping a blank one would put the key back
+        // where it started.
+        shot.entry("audio")
+            .or_insert_with(|| Value::String(String::new()));
         for field in ["dialogue", "negativePrompt", "resolution", "beatId"] {
             drop_if_blank(shot, field);
         }
@@ -2424,6 +2431,47 @@ mod tests {
         assert_eq!(
             draft_to_plan(&brief(), &draft).model.loras,
             vec!["minimax_h3_turbo_4step_v01"]
+        );
+    }
+
+    /// sc-24026. `DraftShot::audio` is required and has no serde default, so a model that OMITS
+    /// the key on one shot would throw the whole round away at an anonymous byte offset and hand
+    /// the repair round `missing field "audio"` with no shot id in it. Materialized blank instead,
+    /// so the draft survives to become a plan and the refusal arrives as the finding that NAMES
+    /// the shot — which is a repair the planner can actually make.
+    #[test]
+    fn a_draft_shot_that_omits_audio_becomes_the_finding_that_names_it_not_a_decode_failure() {
+        let mut first = draft_shot("SH010", "arrival");
+        first.as_object_mut().unwrap().remove("audio");
+        let draft = parse_planner_output(
+            &json!({ "shots": [first, draft_shot("SH020", "delivery"), draft_shot("SH030", "discovery")] })
+                .to_string(),
+        )
+        .expect("a shot with no audio key still decodes");
+        assert_eq!(draft.shots[0].audio, "");
+        assert_eq!(draft.shots[1].audio, "room tone, no music");
+
+        let plan = draft_to_plan(&brief(), &draft);
+        let findings = crate::film_plan::validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert_eq!(findings[0].field, "audio");
+
+        // A shot that wrote `""` and a shot that omitted the key reach the repair round as the
+        // same finding, which is the point of materializing it.
+        let mut blank = draft_shot("SH010", "arrival");
+        blank["audio"] = json!("");
+        let explicit = parse_planner_output(
+            &json!({ "shots": [blank, draft_shot("SH020", "delivery"), draft_shot("SH030", "discovery")] })
+                .to_string(),
+        )
+        .expect("an explicitly blank audio decodes too");
+        assert_eq!(
+            messages(&crate::film_plan::validate_plan_structure(&draft_to_plan(
+                &brief(),
+                &explicit
+            ))),
+            messages(&findings)
         );
     }
 

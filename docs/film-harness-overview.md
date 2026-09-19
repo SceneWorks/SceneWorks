@@ -283,10 +283,20 @@ renders the picture from. The author's words are repeated with their whitespace 
 nothing else changed; the compiler never reads the prose, so a shot that states silence gets exactly
 that sentence. When the shot also **places** a dialogue line — a `dialogueClip`, whether
 `ensure_sound` speaks it through TTS or imports a recording, since both put our own voice on the
-dialogue bus — one further fixed sentence follows it, `film_compile::NO_SPEECH_SENTENCE`, so H3 does
-not lay a second voice over ours. A shot with no placed clip gets nothing: it has no voice to
-double, and `dialogue` beside it is intent prose the run never plays. Both are written after the
-refine rewrite and recorded as their own `insertedText` kinds (`audio`, `no_speech`).
+dialogue bus — one further fixed sentence follows it, `film_compile::NO_SPEECH_SENTENCE` ("No
+spoken dialogue in the generated audio; no voices on the soundtrack."), so H3 does not lay a second
+voice over ours. It constrains the **soundtrack** and says nothing about the picture: these are
+exactly the shots where someone *is* speaking on camera, so a sentence phrased as a statement about
+what is shown would ask for closed mouths under our own dialogue track. A shot with no placed clip
+gets nothing: it has no voice to double, and `dialogue` beside it is intent prose the run never
+plays. Both are written after the refine rewrite and recorded as their own `insertedText` kinds
+(`audio`, `no_speech`).
+
+Each trailing sentence is joined to what precedes it by a **sentence boundary**, not a bare space:
+neither the authored prompt, the refiner's rewrite nor the author's `audio` text is guaranteed to
+end in terminal punctuation, so the compiler supplies the missing `.` rather than dispatching
+`...a courier enters Audio: Room tone`. The `Audio: ` label is compiler-owned, and a plan whose
+`audio` value starts with it is refused naming the shot rather than dispatching it twice.
 
 Two properties earn it its own file. It is **what the engine sees**: each prompt is run through the
 model's own `prompt_refine` rewrite with `modelId` set to the plan's model, and the authored text is

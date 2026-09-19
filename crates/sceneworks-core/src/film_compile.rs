@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::film_plan::{
     is_reference_partition_id, plan_lora_payload_entries, plan_loras_for_partition,
     shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferenceEntry,
-    ReferencePack, Shot,
+    ReferencePack, Shot, AUDIO_PROMPT_PREFIX,
 };
 use crate::minimax_h3_turbo::resolve_turbo_recipe;
 use crate::video_request::effective_reference_image_short_edge;
@@ -62,7 +62,14 @@ pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 5;
 /// saying different things at once, which no downstream check can detect and no mix can undo.
 /// FIXED wording, chosen once: it is compiler-owned text, so it must read the same on every shot of
 /// every plan rather than varying with whoever authored the audio sentence.
-pub const NO_SPEECH_SENTENCE: &str = "No one speaks on camera; no voices.";
+///
+/// It constrains the SOUNDTRACK and nothing else (sc-24026). These are exactly the shots that DO
+/// have someone speaking on camera — our own line is about to play over them — so a sentence
+/// phrased as a statement about the picture ("no one speaks on camera") would tell H3 to render
+/// closed mouths under our dialogue track. The wording names the generated audio explicitly so the
+/// model reads it as a constraint on what it scores, not on what it renders.
+pub const NO_SPEECH_SENTENCE: &str =
+    "No spoken dialogue in the generated audio; no voices on the soundtrack.";
 
 /// Serialize a production plan exactly as the project store and harness persist it, then hash
 /// those bytes. Keeping this beside the compiler prevents the editor preflight and CLI harness
@@ -227,14 +234,16 @@ fn role_phrase(role: &str) -> String {
 /// of spaces collapsed to a single space, and the ends trimmed (sc-24023).
 ///
 /// THE one place a description is normalized, because every kind of inserted text repeats one — the
-/// reference binding sentences here, and the audio bindings a later story adds — and a description
-/// that carried a newline or a control run would otherwise land raw in the dispatched prompt inside
-/// the one field [`CompiledPlan::conformance_findings`] treats as the compiler's own authored text
-/// and therefore never re-reads.
+/// reference binding sentences here and the shot's own `audio` sentence ([`audio_text`], sc-24026)
+/// — and a description that carried a newline or a control run would otherwise land raw in the
+/// dispatched prompt inside the one field [`CompiledPlan::conformance_findings`] treats as the
+/// compiler's own authored text and therefore never re-reads.
 ///
-/// WHITESPACE only. `<`, `>` and genuine control characters are refused at the document boundary by
-/// [`crate::film_plan::reference_pack_findings`], because a description that forges `<Picture 3>` is
-/// an authoring mistake to name rather than something to silently rewrite.
+/// WHITESPACE only. `<`, `>` and genuine control characters are refused at the document boundary:
+/// a pack entry's `description` by [`crate::film_plan::reference_pack_findings`] and a shot's
+/// `audio` by `validate_shot_structure`, both through the shared `inserted_prose_findings` helper
+/// — because text that forges `<Picture 3>` is an authoring mistake to name rather than something
+/// to silently rewrite.
 pub fn normalized_description(description: &str) -> String {
     description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -291,7 +300,7 @@ fn audio_text(shot: &Shot) -> Option<InsertedText> {
     let audio = normalized_description(&shot.audio);
     (!audio.is_empty()).then(|| InsertedText {
         kind: InsertedTextKind::Audio,
-        text: format!("Audio: {audio}"),
+        text: format!("{AUDIO_PROMPT_PREFIX} {audio}"),
     })
 }
 
@@ -321,8 +330,45 @@ fn inserted_text_for_shot(shot: &Shot, pictures: &[ReferencePicture<'_>]) -> Vec
         .collect()
 }
 
+/// Does `text` already end a sentence? (sc-24026)
+///
+/// A trailing insertion is appended after text nobody guaranteed was punctuated — an authored
+/// prompt, a refiner rewrite, or the author's own `audio` sentence — and a bare space between them
+/// produces a run-on the model reads as one clause: `...a courier enters Audio: Room tone`. The
+/// answer is the last non-whitespace character, accepting a closing quote or bracket that itself
+/// closes a punctuated sentence (`"...he said." )`).
+fn ends_sentence(text: &str) -> bool {
+    let mut chars = text.trim_end().chars().rev();
+    let Some(last) = chars.next() else {
+        // Nothing to join to: the caller writes no separator before the first piece anyway.
+        return true;
+    };
+    let terminal = |value: char| matches!(value, '.' | '!' | '?' | '…');
+    terminal(last)
+        || (matches!(last, '"' | '\'' | ')' | ']' | '»' | '”' | '’')
+            && chars.next().is_some_and(terminal))
+}
+
+/// Push the separator between the text composed so far and the next trailing insertion: a sentence
+/// boundary, supplying the missing `.` when the composed text does not already end one (sc-24026).
+fn push_sentence_break(composed: &mut String) {
+    if composed.trim_end().is_empty() {
+        // Nothing precedes this piece, so there is no boundary to draw and no leading space to add.
+        return;
+    }
+    if !ends_sentence(composed) {
+        composed.push('.');
+    }
+    composed.push(' ');
+}
+
 /// The prompt the engine receives: the leading insertions, in order, then the refined or authored
 /// prompt, then the trailing ones.
+///
+/// Trailing pieces are joined by a SENTENCE boundary rather than a bare space, because neither the
+/// authored prompt, the refiner's rewrite nor the author's `audio` text is guaranteed to end in
+/// terminal punctuation and the compiler's own sentences must not be swallowed into whatever
+/// precedes them (sc-24026).
 fn apply_inserted_text(prompt: &str, inserted: &[InsertedText]) -> String {
     if inserted.is_empty() {
         return prompt.to_owned();
@@ -340,7 +386,7 @@ fn apply_inserted_text(prompt: &str, inserted: &[InsertedText]) -> String {
         .iter()
         .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Trailing)
     {
-        composed.push(' ');
+        push_sentence_break(&mut composed);
         composed.push_str(piece.text.trim());
     }
     composed
@@ -1301,11 +1347,11 @@ fn quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::film_plan::{parse_plan, parse_reference_pack};
+    use crate::film_plan::{parse_plan, parse_reference_pack, PLAN_SCHEMA_VERSION};
 
     fn plan_text() -> String {
         serde_json::to_string(&json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 2,
             "title": "Courier",
@@ -1416,7 +1462,10 @@ mod tests {
         assert_eq!(compiled.reference_pack_version, 3);
         assert_eq!(compiled.model.fps, 24);
         let first = compiled.request("SH010").unwrap();
-        assert_eq!(first.prompt, "a courier enters Audio: Room tone, no music.");
+        assert_eq!(
+            first.prompt,
+            "a courier enters. Audio: Room tone, no music."
+        );
         assert_eq!(first.prompt_source, PromptSource::Authored);
         assert_eq!(first.authored_prompt, None);
         assert_eq!((first.width, first.height), (576, 320));
@@ -1559,7 +1608,7 @@ mod tests {
         assert_eq!(body["mode"], "text_to_video");
         assert_eq!(
             body["prompt"],
-            "a courier enters Audio: Room tone, no music."
+            "a courier enters. Audio: Room tone, no music."
         );
         assert_eq!(body["duration"], 5.1667);
         assert_eq!(body["fps"], 24);
@@ -1642,7 +1691,7 @@ mod tests {
         assert_eq!(first.prompt_source, PromptSource::Refined);
         assert_eq!(
             first.prompt,
-            "integrated_multimodal_description: a courier enters a warm workshop Audio: Room tone, no music."
+            "integrated_multimodal_description: a courier enters a warm workshop. Audio: Room tone, no music."
         );
         assert_eq!(first.authored_prompt.as_deref(), Some("a courier enters"));
         // The untouched shot still compiles its authored prompt.
@@ -1906,7 +1955,7 @@ mod tests {
     /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402, AC1).
     fn mixed_plan_text() -> String {
         serde_json::to_string(&json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 2,
             "title": "Courier",
@@ -2430,7 +2479,7 @@ mod tests {
         assert_eq!(
             referenced.prompt,
             "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
-             <Picture 2>. a courier enters Audio: Room tone, no music."
+             <Picture 2>. a courier enters. Audio: Room tone, no music."
         );
         assert!(
             referenced
@@ -2496,7 +2545,7 @@ mod tests {
         );
         assert_eq!(
             plain.prompt,
-            "places the parcel Audio: Room tone, no music."
+            "places the parcel. Audio: Room tone, no music."
         );
         let body = plain.to_job_body(&context).expect("SH020 body");
         assert!(body.get("referenceAssetIds").is_none(), "{body}");
@@ -2564,7 +2613,7 @@ mod tests {
         assert_eq!(
             referenced.prompt,
             "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
-             <Picture 2>. integrated_multimodal_description: a courier steps into a warm workshop \
+             <Picture 2>. integrated_multimodal_description: a courier steps into a warm workshop. \
              Audio: Room tone, no music."
         );
         // The authored prompt is the PLAN's, with no compiler text in it: the insertion happened
@@ -2682,6 +2731,163 @@ mod tests {
             );
         }
         assert_eq!(compiled.requests.len(), plan.shots.len());
+    }
+
+    /// sc-24026. A trailing insertion follows text nobody guaranteed was punctuated — an authored
+    /// prompt, a refiner rewrite, or the author's own `audio` sentence. Joined by a bare space it
+    /// reads as one clause (`...a courier enters Audio: Room tone`), so the compiler supplies the
+    /// missing `.` — exactly one, and only when one is missing.
+    #[test]
+    fn an_unpunctuated_prompt_is_joined_to_its_audio_sentence_by_exactly_one_sentence_break() {
+        // Each case: the prompt, the audio sentence, and the exact tail the dispatched text must
+        // have. Shot 0 of the mixed plan takes no reference bindings' worth of rewriting here —
+        // only the trailing join is under test.
+        for (prompt, audio, expected_tail) in [
+            // No terminal punctuation at all: the compiler writes the boundary.
+            (
+                "a courier enters",
+                "Room tone, no music.",
+                "a courier enters. Audio: Room tone, no music.",
+            ),
+            // Already a sentence: nothing is added, and there is no ".." anywhere.
+            (
+                "a courier enters.",
+                "Room tone, no music.",
+                "a courier enters. Audio: Room tone, no music.",
+            ),
+            // The other terminals, and trailing whitespace, count as ended too.
+            (
+                "does he knock?",
+                "Room tone.",
+                "does he knock? Audio: Room tone.",
+            ),
+            ("he knocks!  ", "Room tone.", "he knocks! Audio: Room tone."),
+            (
+                "he trails off…",
+                "Room tone.",
+                "he trails off… Audio: Room tone.",
+            ),
+            // A closing quote or bracket that itself closes a punctuated sentence.
+            (
+                "she says \"open it.\"",
+                "Room tone.",
+                "she says \"open it.\" Audio: Room tone.",
+            ),
+            ("(he waits.)", "Room tone.", "(he waits.) Audio: Room tone."),
+            // A closing quote with NO punctuation inside it is still unfinished.
+            (
+                "she says \"open it\"",
+                "Room tone.",
+                "she says \"open it\". Audio: Room tone.",
+            ),
+        ] {
+            let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+            document["shots"][0]["prompt"] = json!(prompt);
+            document["shots"][0]["audio"] = json!(audio);
+            let plan = parse_plan(&document.to_string()).unwrap();
+            let base = entry();
+            let reference = reference_entry();
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &mixed_entries(&base, &reference),
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &BTreeMap::new(),
+                },
+            )
+            .expect("the mixed plan compiles");
+            let request = compiled.request(&plan.shots[0].id).unwrap();
+            assert!(
+                request.prompt.ends_with(expected_tail),
+                "{prompt:?} + {audio:?}\n  wanted tail: {expected_tail:?}\n  got:         {:?}",
+                request.prompt
+            );
+            // Exactly ONE `. ` joins the prompt to the label — never a doubled period and never a
+            // bare space.
+            assert!(
+                !request.prompt.contains(".. Audio:") && !request.prompt.contains("  Audio:"),
+                "{:?}",
+                request.prompt
+            );
+            let before_label = &request.prompt[..request.prompt.find("Audio:").unwrap()];
+            assert!(
+                before_label.ends_with(". ")
+                    || before_label.ends_with("? ")
+                    || before_label.ends_with("! ")
+                    || before_label.ends_with("… ")
+                    || before_label.ends_with("\" ")
+                    || before_label.ends_with(") "),
+                "the label is preceded by a finished sentence and one space: {before_label:?}"
+            );
+        }
+    }
+
+    /// The same boundary rule applies to the AUTHOR's audio text before the fixed no-speech
+    /// sentence, which is the other place compiler-owned text follows prose it did not write
+    /// (sc-24026).
+    #[test]
+    fn an_unpunctuated_audio_sentence_is_joined_to_the_no_speech_sentence_by_a_sentence_break() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["prompt"] = json!("a courier enters");
+        document["shots"][0]["audio"] = json!("room tone and a low hum");
+        document["shots"][0]["dialogueClip"] =
+            json!({ "role": "courier_line", "offsetSeconds": 0.5 });
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles");
+        let request = compiled.request(&plan.shots[0].id).unwrap();
+        assert!(
+            request.prompt.ends_with(&format!(
+                "a courier enters. Audio: room tone and a low hum. {NO_SPEECH_SENTENCE}"
+            )),
+            "{:?}",
+            request.prompt
+        );
+        // The recorded insertion is still the author's own words: the boundary is composition, not
+        // a rewrite of what `insertedText` says was added.
+        assert_eq!(
+            request
+                .inserted_text
+                .iter()
+                .find(|piece| piece.kind == InsertedTextKind::Audio)
+                .unwrap()
+                .text,
+            "Audio: room tone and a low hum"
+        );
+    }
+
+    /// sc-24026. The no-speech sentence constrains the SOUNDTRACK. These are exactly the shots with
+    /// someone speaking on camera, so wording it as a statement about the picture would tell H3 to
+    /// render closed mouths under our own dialogue track.
+    #[test]
+    fn the_no_speech_sentence_constrains_the_soundtrack_and_never_the_picture() {
+        assert_eq!(
+            NO_SPEECH_SENTENCE,
+            "No spoken dialogue in the generated audio; no voices on the soundtrack."
+        );
+        let lowered = NO_SPEECH_SENTENCE.to_ascii_lowercase();
+        for picture_word in ["on camera", "mouth", "lips", "silently", "no one speaks"] {
+            assert!(
+                !lowered.contains(picture_word),
+                "the sentence must not direct the picture: {picture_word:?}"
+            );
+        }
+        assert!(lowered.contains("generated audio") && lowered.contains("soundtrack"));
     }
 
     /// sc-24026. The no-speech sentence is keyed on a PLACED dialogue line — `dialogueClip`, which

@@ -31,6 +31,11 @@ function newShot(shots) {
   return {
     id, beat: "New shot", framing: "wide", prompt: "", targetDurationSeconds: 5.1667,
     startState: "Opening state", endState: "Closing state",
+    // Required by plan schema 3 (sc-24026), and blank like `prompt` is: the draft PUT decodes into
+    // a Rust `Shot` where `audio` has no default, so omitting the key makes the draft unsaveable
+    // with an anonymous decode error instead of the shot-named finding the Audio field shows.
+    // Matches `FilmDraft::manual_one_shot`.
+    audio: "",
     conditioning: { mode: "text_to_video", referenceRoles: [] },
     continuityRoles: [], dependsOn: [],
   };

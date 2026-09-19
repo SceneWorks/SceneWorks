@@ -109,6 +109,31 @@ describe("FilmShots", () => {
     expect(container.textContent).toContain("target minimax_h3");
   });
 
+  // sc-24026. `audio` is required on every shot by plan schema 3, and this textarea is the only
+  // place in the workspace it can be written or repaired.
+  it("edits the required audio sentence into the shot the draft saves", async () => {
+    await render();
+    const audio = container.querySelector('textarea[aria-label="Shot SH010 audio"]');
+    expect(audio.value).toBe("Room tone. No music.");
+    await act(async () => change(audio, "A door latch clicking. No music."));
+    expect(latest.draft.productionPlan.shots[0].audio).toBe("A door latch clicking. No music.");
+    // The edit lands on the selected shot only.
+    expect(latest.draft.productionPlan.shots[1].audio).toBe("Room tone. No music.");
+
+    // Clearing it is allowed in the editor — a blank value is refused by the server as a finding
+    // that names the shot, not blocked here, so the user can retype it in place.
+    await act(async () => change(container.querySelector('textarea[aria-label="Shot SH010 audio"]'), ""));
+    expect(latest.draft.productionPlan.shots[0].audio).toBe("");
+  });
+
+  it("shows a shot-named audio finding under the audio field", async () => {
+    await render({ findings: [{ shotId: "SH010", field: "audio", message: "audio is required: say what this shot sounds like" }] });
+    const audio = container.querySelector('textarea[aria-label="Shot SH010 audio"]');
+    const findings = audio.closest("label").nextElementSibling;
+    expect(findings?.className).toContain("ve-film-findings");
+    expect(findings.textContent).toContain("audio is required: say what this shot sounds like");
+  });
+
   it("imports supported production and compiled documents without a JSON-only editing path", async () => {
     await render();
     const importedPlan = makeDraft().productionPlan;

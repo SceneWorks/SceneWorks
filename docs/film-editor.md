@@ -60,8 +60,15 @@ separate choice, and the planning operation records both identities.
    synopsis, visual direction, beats, and dialogue lines. Review and edit every field. Extraction is
    a starting point, not an approval step.
 3. On the **Shots** step, add, remove, reorder, or edit shots under **Shots and render controls**. Each shot has a stable
-   ID, beat, framing, prompt, intended start and end state, duration, conditioning mode, continuity
-   roles, optional dependencies, and optional dialogue placement.
+   ID, beat, framing, prompt, **Audio**, intended start and end state, duration, conditioning mode,
+   continuity roles, optional dependencies, and optional dialogue placement.
+
+   **Audio is required on every shot.** MiniMax-H3 generates its soundtrack from the same prompt it
+   renders the picture from, so anything the prompt leaves unsaid the model invents. Say what the
+   shot sounds like — diegetic sound, ambience, music or "no music". Stating silence is a valid
+   answer: write "No audio. Silence." and that is exactly what the compiler dispatches; the text is
+   never pattern-matched. Leaving it blank is not, and surfaces as a finding naming the shot until
+   you fill it in. Do not begin the value with "Audio:" — the compiler writes that label itself.
 4. Choose a render regime. **Turbo (recommended)** resolves the installed adapter recipe for the
    current model, output canvas, and reference-conditioned partitions and shows its concrete adapter
    IDs and effective step count. **Full quality** explicitly clears accelerator and step overrides

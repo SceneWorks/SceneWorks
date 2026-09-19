@@ -53,6 +53,14 @@ use crate::MAX_PROMPT_CHARS;
 pub const PLAN_SCHEMA_VERSION: u32 = 3;
 /// Plan schema versions this build accepts.
 pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[PLAN_SCHEMA_VERSION];
+/// The label `film_compile::audio_text` writes in front of a shot's [`Shot::audio`] when it
+/// composes the dispatched prompt (sc-24026).
+///
+/// Declared here rather than in the compiler because it is also what `validate_shot_structure`
+/// refuses an authored value for starting with: the compiler owns the prefix, so a plan that
+/// carries it too would dispatch it twice. One constant, so the check and the text it guards can
+/// never disagree about the spelling.
+pub const AUDIO_PROMPT_PREFIX: &str = "Audio:";
 /// Schema version of [`ReferencePack`] documents this module reads and writes.
 pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
 /// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
@@ -708,14 +716,63 @@ pub fn read_plan_file(path: &Path) -> Result<ProductionPlan, PlanDiagnostic> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         PlanDiagnostic::plan("plan", format!("cannot read {}: {error}", path.display()))
     })?;
-    parse_plan(&text)
-        .map_err(|error| PlanDiagnostic::plan("plan", format!("{}: {error}", path.display())))
+    parse_plan_document(&text).map_err(|diagnostic| {
+        PlanDiagnostic::plan(
+            diagnostic.field,
+            format!("{}: {}", path.display(), diagnostic.message),
+        )
+    })
 }
 
-/// Parse a plan from JSON/JSONC text.
-pub fn parse_plan(text: &str) -> Result<ProductionPlan, String> {
+/// The message [`validate_plan_structure`] and the document pre-scan both report for a plan this
+/// build does not read — written once so the refusal names the same remedy wherever it surfaces.
+fn unsupported_plan_schema_message(version: u32) -> String {
+    format!(
+        "unsupported plan schema version {version} (this build reads \
+         {SUPPORTED_PLAN_SCHEMA_VERSIONS:?}); a version 1 or 2 plan predates the required \
+         shots[].audio sentence — set \"schemaVersion\": {PLAN_SCHEMA_VERSION} and give every shot \
+         an \"audio\" value saying what it sounds like (or that it is silent)"
+    )
+}
+
+/// Parse a plan document, reporting a version this build cannot read BEFORE the typed decode
+/// (sc-24026).
+///
+/// The pre-scan is what makes the version refusal reachable at all. Schema version 3 renamed
+/// `shots[].sound` to a required `shots[].audio`, and [`Shot`] is `deny_unknown_fields`, so a
+/// version 1 or 2 document fails inside serde with `unknown field \`sound\`` at a byte offset —
+/// [`validate_plan_structure`]'s remedy sentence is never reached, and the operator is handed a
+/// parser position instead of the one line that fixes it. Every plan DOCUMENT comes through here:
+/// the CLI's `--plan`, and the `plan.json` each run pins and reads back on resume, replace-take and
+/// review.
+///
+/// Refusal, never migration: a document has an author who can edit it, and a version 2 plan carried
+/// forward under an empty default would dispatch a silent prompt on every shot while reporting
+/// clean. Project-store DRAFTS are the other case and are carried forward on read instead, because
+/// a draft's `schemaVersion` is state with no author and no way to edit it — see
+/// `ProjectStore::carry_film_draft_forward`.
+pub fn parse_plan_document(text: &str) -> Result<ProductionPlan, PlanDiagnostic> {
     let stripped = strip_jsonc_comments(text);
-    serde_json::from_str(&stripped).map_err(|error| error.to_string())
+    let scouted: Value = serde_json::from_str(&stripped)
+        .map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))?;
+    if let Some(version) = scouted.get("schemaVersion").and_then(Value::as_u64) {
+        let version = u32::try_from(version).unwrap_or(u32::MAX);
+        if !SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&version) {
+            return Err(PlanDiagnostic::plan(
+                "schemaVersion",
+                unsupported_plan_schema_message(version),
+            ));
+        }
+    }
+    // Decoded from the text rather than from `scouted` so a genuine structural error still carries
+    // serde's line and column.
+    serde_json::from_str(&stripped).map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+}
+
+/// Parse a plan from JSON/JSONC text. [`parse_plan_document`] with the diagnostic flattened, for
+/// the callers that only print one string.
+pub fn parse_plan(text: &str) -> Result<ProductionPlan, String> {
+    parse_plan_document(text).map_err(|diagnostic| diagnostic.message)
 }
 
 /// Read and parse a reference pack document (JSONC tolerated).
@@ -762,13 +819,7 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
     if !SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&plan.schema_version) {
         findings.push(PlanDiagnostic::plan(
             "schemaVersion",
-            format!(
-                "unsupported plan schema version {} (this build reads \
-                 {SUPPORTED_PLAN_SCHEMA_VERSIONS:?}); a version 1 or 2 plan predates the required \
-                 shots[].audio sentence — set \"schemaVersion\": {PLAN_SCHEMA_VERSION} and give \
-                 every shot an \"audio\" value saying what it sounds like (or that it is silent)",
-                plan.schema_version
-            ),
+            unsupported_plan_schema_message(plan.schema_version),
         ));
     }
     if !is_safe_plan_id(&plan.id) {
@@ -1377,6 +1428,25 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
             "audio is required: say what this shot sounds like (diegetic sound, ambience, music or \
              \"no music\"), or state that it is silent — MiniMax-H3 scores the prompt it is given, \
              so anything left unsaid is invented",
+        ));
+    } else if shot
+        .audio
+        .trim_start()
+        .get(..AUDIO_PROMPT_PREFIX.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(AUDIO_PROMPT_PREFIX))
+    {
+        // sc-24026. The compiler writes the `Audio: ` prefix itself (`film_compile::audio_text`),
+        // so an author who wrote it too would dispatch `Audio: Audio: room tone`. Refused rather
+        // than stripped: a value that opens with the label is an author who misread the field, and
+        // silently rewriting authored prose would make the plan a false record of itself.
+        findings.push(PlanDiagnostic::shot(
+            id,
+            "audio",
+            format!(
+                "audio must not start with {AUDIO_PROMPT_PREFIX:?}: the compiler writes that \
+                 prefix into the dispatched prompt itself, so keeping it here would send it twice \
+                 — state only what the shot sounds like"
+            ),
         ));
     }
     findings.extend(
@@ -3459,6 +3529,13 @@ pub struct IntendedState {
     pub fps: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
+    /// What the shot was declared to sound like: [`Shot::audio`], the same sentence the compiler
+    /// dispatched (sc-24026). Since schema version 3 it is always present, because `audio` is
+    /// required on every shot.
+    ///
+    /// The FIELD keeps the name `sound` for run-record compatibility: it is serialized into run
+    /// records already on disk, written when it held the optional version-2 `shots[].sound` prose,
+    /// and renaming it would make every one of those records fail to read back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
     /// The generated-audio policy this shot resolved to — its own override if it declared one,
@@ -4286,6 +4363,67 @@ mod tests {
         bad["shots"][0]["framng"] = json!("wide");
         let error = parse_plan(&bad.to_string()).expect_err("unknown field refused");
         assert!(error.contains("framng"), "{error}");
+    }
+
+    /// sc-24026. Every run pins its `plan.json` and reads it back on resume, replace-take and
+    /// review. A run pinned before schema version 3 holds a version 2 document with
+    /// `shots[].sound`, and `Shot` is `deny_unknown_fields` — so without the pre-scan the read dies
+    /// inside serde at a byte offset, `validate_plan_structure` is never reached, and the operator
+    /// is handed a parser position with no remedy in it. The pre-scan is what makes the version
+    /// refusal the thing they actually see.
+    #[test]
+    fn a_version_2_plan_document_is_refused_by_version_with_the_remedy_not_by_serde_position() {
+        let mut value = plan_json();
+        value["schemaVersion"] = json!(2);
+        for shot in value["shots"].as_array_mut().unwrap() {
+            let shot = shot.as_object_mut().unwrap();
+            shot.remove("audio");
+            shot.insert("sound".to_owned(), json!("Room tone. No music."));
+        }
+        let document = value.to_string();
+
+        let diagnostic =
+            parse_plan_document(&document).expect_err("a version 2 plan document is refused");
+        assert_eq!(diagnostic.field, "schemaVersion");
+        assert!(
+            diagnostic
+                .message
+                .contains("unsupported plan schema version 2")
+                && diagnostic.message.contains("shots[].audio")
+                && diagnostic
+                    .message
+                    .contains(&format!("\"schemaVersion\": {PLAN_SCHEMA_VERSION}")),
+            "the refusal names the version and the edit that fixes it: {diagnostic:?}"
+        );
+        assert!(
+            !diagnostic.message.contains("unknown field")
+                && !diagnostic.message.contains("missing field")
+                && !diagnostic.message.contains("line "),
+            "the operator gets the remedy, not a serde position: {diagnostic:?}"
+        );
+
+        // The pinned path and the CLI path are the same entry, so both get it.
+        let flattened = parse_plan(&document).expect_err("parse_plan refuses it too");
+        assert_eq!(flattened, diagnostic.message);
+        let file = tempfile::NamedTempFile::new().expect("temp plan");
+        std::fs::write(file.path(), &document).expect("plan writes");
+        let from_file = read_plan_file(file.path()).expect_err("read_plan_file refuses it too");
+        assert_eq!(from_file.field, "schemaVersion");
+        assert!(
+            from_file
+                .message
+                .contains("unsupported plan schema version 2"),
+            "{from_file:?}"
+        );
+
+        // A genuine structural error at a supported version still reports as one, so the pre-scan
+        // has not swallowed serde's own diagnostics.
+        let mut malformed = plan_json();
+        malformed["shots"][0]["framng"] = json!("wide");
+        let decode =
+            parse_plan_document(&malformed.to_string()).expect_err("unknown field still refused");
+        assert_eq!(decode.field, "plan");
+        assert!(decode.message.contains("framng"), "{decode:?}");
     }
 
     #[test]
@@ -5320,6 +5458,86 @@ mod tests {
         value["shots"][0]["audio"] = json!("room tone,\n\ta door latch");
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         assert!(validate_plan_structure(&plan).is_empty());
+    }
+
+    /// sc-24026. `film_compile::audio_text` writes `Audio: ` in front of the author's words, so an
+    /// `audio` value that repeats the label would dispatch `Audio: Audio: room tone`. Refused
+    /// naming the shot rather than stripped: the value is authored prose, and silently rewriting it
+    /// would make the plan a false record of what was dispatched.
+    #[test]
+    fn an_audio_sentence_may_not_repeat_the_prefix_the_compiler_writes() {
+        for audio in [
+            "Audio: room tone",
+            "audio: room tone",
+            "AUDIO: room tone",
+            "  Audio: room tone",
+            "Audio:room tone",
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{audio:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{audio:?}");
+            assert_eq!(findings[0].field, "audio", "{audio:?}");
+            assert!(
+                findings[0]
+                    .message
+                    .contains("the compiler writes that prefix"),
+                "the refusal says whose prefix it is: {:?}",
+                findings[0]
+            );
+        }
+
+        // Only the OPENING label is refused. The word elsewhere, and a sentence that merely starts
+        // with "Audio" as a word, are ordinary prose.
+        for audio in [
+            "Room tone. Audio: mixed low.",
+            "Audio equipment hums in the corner.",
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_plan_structure(&plan).is_empty(),
+                "{audio:?}: {:?}",
+                messages(&validate_plan_structure(&plan))
+            );
+        }
+    }
+
+    /// No document this repository ships trips the prefix refusal — the check is a guard on future
+    /// authoring, not a break for the plans already checked in.
+    #[test]
+    fn no_shipped_plan_repeats_the_audio_prefix() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir("../../config/film-harness/courier-workshop")
+            .expect("the shipped plan directory is readable")
+        {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !name.starts_with("plan") || !name.ends_with(".jsonc") {
+                continue;
+            }
+            let plan = read_plan_file(&path).unwrap_or_else(|e| panic!("{name} reads: {e}"));
+            for shot in &plan.shots {
+                assert!(
+                    !shot
+                        .audio
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("audio:"),
+                    "{name} shot {} repeats the compiler's prefix: {:?}",
+                    shot.id,
+                    shot.audio
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "the shipped plans were actually walked");
     }
 
     #[test]
