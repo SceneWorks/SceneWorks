@@ -268,7 +268,11 @@ the draft available for manual editing. The full operator flow is in
 
 **The capability envelope** is what the planner is held to. Whether it may write reference shots is
 decided from exactly two facts, and install state is not one of them: the catalog must serve the
-family's reference partition, and the pack must approve at least one reference. With both, the
+family's reference partition, and the pack must approve at least one **image-backed** role of a
+bindable kind (`PlannerCapabilities::narrowed_to_pack`). A described-only role is an approval of
+words, and `reference_to_video` conditions on pixels — counting one would invert the default mode
+to a binding `validate_plan_against_pack` then refuses for the whole round budget, and would offer
+the reference partition's Turbo adapter for a partition the film never dispatches. With both, the
 default mode inverts to `reference_to_video` for every shot showing an approved subject; with either
 missing the plan stays on the base checkpoint. The same brief and pack therefore produce the same
 film on two machines (runbook § *Partition resolution*, "Planning a reference film").
@@ -280,6 +284,28 @@ filter here, unlike the reference partition's, because an adapter whose weights 
 host's disk is a 400 at enqueue. A brief setting `"preferQuality": true` keeps the full step path:
 nothing is offered, and any selection a draft writes anyway is stripped rather than argued with
 (`crates/sceneworks-core/src/film_planner.rs:80`, `:938`).
+
+**The output contract carries the sound, and disowns the labels.** Every shot shape the planner is
+shown — the template it fills and the one worked example it copies — carries `audio`, with the
+wording MiniMax-H3's own prompt guide asks for
+([minimax-h3.md](../apps/web/public/prompt-guides/minimax-h3.md), *Prompt the audio explicitly*):
+the diegetic sound the action makes, then the ambience, then `"No music."` unless music is wanted;
+an outright statement of silence is a complete answer; the value never opens with the compiler's
+own `Audio: ` label; and a spoken line goes in `dialogue`, never in `audio`, because a placed line
+is spoken by this harness and the compiler tells H3 not to lay a second voice over it. A shot whose
+`audio` is missing or blank is a finding naming the shot, and the repair round restates the
+requirement as the key and a value to adapt rather than as prose about it
+(`film_planner::AUDIO_REQUIREMENT_RESTATEMENT`).
+
+The contract also tells the planner what it must NOT write: no `<Picture N>`, `<Audio N>` or
+`<Video N>` label anywhere, no restatement of a role's pack description in `prompt`, and nothing
+about which picture shows whom — all three are the compiler's, written after the answer. A draft
+that writes one anyway is a finding naming the shot, quoting the label and asking for its deletion
+(`film_planner::anchoring_findings`), and the repair round restates that in copyable form too. This
+is a **planner** finding, deliberately outside `validate_all`: a person who types `<Picture 1>` into
+a hand-authored plan means it, and `validate`/`compile` leave them alone. The one exception is
+`audio`, which is inserted prose on every path and where a `<` is already refused by the document
+rules — so a label there is reported once, by them.
 
 **The role-array copying rule, and why it exists.** Told in prose that a beat "MUST show courier,
 red_parcel, workbench_table", the real local planner (Anubis-Mini-8B) twice wrote one character, one
