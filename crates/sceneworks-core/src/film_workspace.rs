@@ -204,7 +204,10 @@ impl FilmDraft {
             start_state: "Opening state".to_owned(),
             end_state: "Closing state".to_owned(),
             dialogue: None,
-            sound: None,
+            // Empty exactly as `prompt` above is: a manual one-shot draft is a blank form, and the
+            // author fills both before it validates. Pre-filling either with plausible prose would
+            // put words the author never chose into a dispatched prompt (sc-24026).
+            audio: String::new(),
             generated_audio: None,
             dialogue_clip: None,
             conditioning: ShotConditioning {
@@ -477,7 +480,11 @@ mod tests {
     #[test]
     fn manual_draft_defaults_to_prompt_refiner_and_needs_no_reference_roles() {
         let mut draft = FilmDraft::manual_one_shot("project_1", "film_1", "Film");
+        // A manual draft is a blank FORM: `prompt` and `audio` both start empty and the author
+        // fills them before it validates (sc-24026). Filling them here is what the editor does.
+        assert!(draft.production_plan.shots[0].audio.is_empty());
         draft.production_plan.shots[0].prompt = "A courier enters a workshop.".to_owned();
+        draft.production_plan.shots[0].audio = "Room tone and footsteps. No music.".to_owned();
         assert_eq!(draft.planning.provider, DEFAULT_FILM_PLANNING_PROVIDER);
         assert_eq!(
             draft.render_regime,

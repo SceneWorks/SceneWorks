@@ -8,13 +8,13 @@ import { FilmShots } from "./FilmShots.jsx";
 function makeDraft() {
   const shot = (id, beat) => ({
     id, beat, framing: "wide", prompt: `${beat} prompt`, targetDurationSeconds: 5.1667,
-    startState: "start", endState: "end", conditioning: { mode: "text_to_video", referenceRoles: [] },
+    startState: "start", endState: "end", audio: "Room tone. No music.", conditioning: { mode: "text_to_video", referenceRoles: [] },
     continuityRoles: [], dependsOn: [],
   });
   return {
     id: "film_1",
     productionPlan: {
-      schemaVersion: 2, id: "film_1", version: 2, title: "Film", synopsis: "",
+      schemaVersion: 3, id: "film_1", version: 2, title: "Film", synopsis: "",
       model: { id: "minimax_h3", tier: "q4", fps: 24, resolution: "576x320", loras: [] },
       limits: { maxRunSeconds: 3600, maxShotSeconds: 2700, maxAttemptsPerShot: 1, maxMemoryGb: 96 },
       sound: {}, shots: [shot("SH010", "Arrival"), shot("SH020", "Reveal")],

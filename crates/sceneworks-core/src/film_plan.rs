@@ -38,11 +38,21 @@ use crate::video_request::{
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
 use crate::MAX_PROMPT_CHARS;
 
-/// Schema version of [`ProductionPlan`] documents this module reads and writes. Version 2 (sc-22711)
-/// adds `shots[].dependsOn`; a version 1 plan reads unchanged and simply declares no edges.
-pub const PLAN_SCHEMA_VERSION: u32 = 2;
+/// Schema version of [`ProductionPlan`] documents this module reads and writes.
+///
+/// **2** (sc-22711) added `shots[].dependsOn`.
+/// **3** (sc-24026) replaces the optional `shots[].sound` prose with a REQUIRED [`Shot::audio`].
+/// The rename is the point rather than a tidy-up: `sound` was traceability-only prose that never
+/// left the documents, while `audio` is dispatched — MiniMax-H3 generates its soundtrack from the
+/// same prompt as the picture, so a shot that says nothing about sound gets whatever the model
+/// invents. Requiring it is what makes "this shot is silent" a statement the plan had to make.
+///
+/// Versions 1 and 2 are REFUSED, not migrated: the harness is unreleased, every checked-in document
+/// moved with this bump, and a v2 plan read under a default would dispatch an empty audio sentence
+/// on every shot — exactly the silence this version exists to remove.
+pub const PLAN_SCHEMA_VERSION: u32 = 3;
 /// Plan schema versions this build accepts.
-pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[1, 2];
+pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[PLAN_SCHEMA_VERSION];
 /// Schema version of [`ReferencePack`] documents this module reads and writes.
 pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
 /// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
@@ -424,8 +434,17 @@ pub struct Shot {
     pub end_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>,
+    /// What this shot SOUNDS like, as one sentence the compiler appends to the dispatched prompt
+    /// (sc-24026). Diegetic sound, ambience, music or "no music" — or an explicit statement of
+    /// silence ("No audio. Silence.").
+    ///
+    /// REQUIRED on every shot, and never pattern-matched: MiniMax-H3 generates its soundtrack from
+    /// the same prompt as the picture, so whatever the prompt does not describe the model invents.
+    /// A blank value is refused rather than defaulted, because "the author had nothing to say about
+    /// sound" and "this shot is silent" are different films and only the author knows which one this
+    /// is. It replaces the optional `sound` prose of schema version 2, which never left the
+    /// documents.
+    pub audio: String,
     /// Override the run-level generated-audio policy for this shot (sc-22712).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_audio: Option<GeneratedAudio>,
@@ -744,7 +763,10 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
         findings.push(PlanDiagnostic::plan(
             "schemaVersion",
             format!(
-                "unsupported plan schema version {} (this build reads {SUPPORTED_PLAN_SCHEMA_VERSIONS:?})",
+                "unsupported plan schema version {} (this build reads \
+                 {SUPPORTED_PLAN_SCHEMA_VERSIONS:?}); a version 1 or 2 plan predates the required \
+                 shots[].audio sentence — set \"schemaVersion\": {PLAN_SCHEMA_VERSION} and give \
+                 every shot an \"audio\" value saying what it sounds like (or that it is silent)",
                 plan.schema_version
             ),
         ));
@@ -1345,47 +1367,77 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
     if let Some(clip) = &shot.dialogue_clip {
         findings.extend(validate_dialogue_clip(id, clip));
     }
+    // The audio sentence (sc-24026). Required and never pattern-matched: "No audio. Silence." is a
+    // complete, valid answer, and the only thing refused is having said NOTHING. The same two
+    // checks a pack description gets apply, because it lands in the dispatched prompt the same way.
+    if shot.audio.trim().is_empty() {
+        findings.push(PlanDiagnostic::shot(
+            id,
+            "audio",
+            "audio is required: say what this shot sounds like (diegetic sound, ambience, music or \
+             \"no music\"), or state that it is silent — MiniMax-H3 scores the prompt it is given, \
+             so anything left unsaid is invented",
+        ));
+    }
+    findings.extend(
+        inserted_prose_findings("audio", "audio", &shot.audio)
+            .into_iter()
+            .map(|(field, message)| PlanDiagnostic::shot(id, field, message)),
+    );
     findings
 }
 
-/// The checks one pack entry's `description` must pass, image and sound alike (sc-24023).
+/// The checks ONE piece of authored text the compiler repeats into a dispatched prompt must pass —
+/// a pack entry's `description` (sc-24023) and a shot's `audio` sentence (sc-24026).
 ///
-/// A description is not inert prose: the compiler repeats it into the binding sentence it writes
-/// into the dispatched prompt, inside `insertedText` — the one field
+/// Such text is not inert prose: the compiler repeats it into the sentence it writes into the
+/// dispatched prompt, inside `insertedText` — the one field
 /// `film_compile::CompiledPlan::conformance_findings` treats as the compiler's own authored, derived
-/// text and therefore never reads back. So a description carrying `<Picture 3>` or `<Audio 1>`
-/// forges a binding to media the shot never supplies, and the compiled document still reports clean.
-/// Refused here, at the document boundary, rather than stripped, because a forged marker is an
-/// authoring mistake to name.
+/// text and therefore never reads back. So text carrying `<Picture 3>` or `<Audio 1>` forges a
+/// binding to media the shot never supplies, and the compiled document still reports clean. Refused
+/// here, at the document boundary, rather than stripped, because a forged marker is an authoring
+/// mistake to name.
 ///
-/// Ordinary line breaks and tabs are NOT refused — a multi-line description is a reasonable thing to
-/// write — they are collapsed to single spaces by `film_compile::normalized_description` before they
-/// reach a prompt. Every other control character is a byte no author typed on purpose.
-fn reference_description_findings(field: &str, description: &str) -> Vec<PlanDiagnostic> {
+/// Ordinary line breaks and tabs are NOT refused — multi-line prose is a reasonable thing to write —
+/// they are collapsed to single spaces by `film_compile::normalized_description` before they reach a
+/// prompt. Every other control character is a byte no author typed on purpose.
+///
+/// Returns `(field, message)` pairs rather than diagnostics, because the same two checks are raised
+/// as a PLAN-level finding on a pack entry and as a SHOT-level finding on a shot's audio, and the
+/// caller is the one that knows which.
+fn inserted_prose_findings(field: &str, noun: &str, text: &str) -> Vec<(String, String)> {
     let mut findings = Vec::new();
-    if description.contains(['<', '>']) {
-        findings.push(PlanDiagnostic::plan(
-            format!("{field}.description"),
+    if text.contains(['<', '>']) {
+        findings.push((
+            field.to_owned(),
             format!(
-                "description {description:?} must not contain '<' or '>': it is repeated into the \
-                 dispatched prompt, where a marker like <Picture 1> would bind the model to media \
-                 this shot never supplies"
+                "{noun} {text:?} must not contain '<' or '>': it is repeated into the dispatched \
+                 prompt, where a marker like <Picture 1> would bind the model to media this shot \
+                 never supplies"
             ),
         ));
     }
-    if description
+    if text
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
     {
-        findings.push(PlanDiagnostic::plan(
-            format!("{field}.description"),
+        findings.push((
+            field.to_owned(),
             format!(
-                "description {description:?} must not contain control characters: it is repeated \
-                 into the dispatched prompt verbatim apart from whitespace"
+                "{noun} {text:?} must not contain control characters: it is repeated into the \
+                 dispatched prompt verbatim apart from whitespace"
             ),
         ));
     }
     findings
+}
+
+/// [`inserted_prose_findings`] for one pack entry's `description`, as a plan-level diagnostic.
+fn reference_description_findings(field: &str, description: &str) -> Vec<PlanDiagnostic> {
+    inserted_prose_findings(&format!("{field}.description"), "description", description)
+        .into_iter()
+        .map(|(field, message)| PlanDiagnostic::plan(field, message))
+        .collect()
 }
 
 /// Structural findings on the reference pack alone.
@@ -3896,7 +3948,7 @@ mod tests {
 
     fn plan_json() -> Value {
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 1,
             "title": "Courier",
@@ -3905,13 +3957,13 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["red_parcel"]
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.1667, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.1667, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
                     "continuityRoles": ["red_parcel"]
                 }
@@ -4413,7 +4465,7 @@ mod tests {
         let mut value = plan_json();
         let third = json!({
             "id": "SH030", "beat": "leave", "framing": "wide", "prompt": "the courier leaves",
-            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty",
+            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty", "audio": "Room tone, no music.",
             "conditioning": { "mode": "text_to_video", "chainFromShotId": "SH010" },
             "continuityRoles": ["red_parcel"]
         });
@@ -5178,17 +5230,96 @@ mod tests {
 
     fn plan_with_edges(edges: Value) -> ProductionPlan {
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"][1]["dependsOn"] = edges;
         serde_json::from_value(value).expect("plan parses")
     }
 
     #[test]
-    fn a_v1_plan_still_reads_and_declares_no_edges() {
+    fn a_v1_or_v2_plan_is_refused_by_version_and_named_the_remedy() {
+        // sc-24026. Both older versions are refused BY VERSION rather than read under a default:
+        // neither carries `shots[].audio`, and a plan read with an empty one would dispatch six
+        // shots whose soundtrack the model invents while every document reported clean.
+        for stale in [1, 2] {
+            let mut value = plan_json();
+            value["schemaVersion"] = json!(stale);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = messages(&validate_plan_structure(&plan));
+            assert!(
+                findings.iter().any(|message| {
+                    message.contains("schemaVersion")
+                        && message.contains(&stale.to_string())
+                        && message.contains("audio")
+                }),
+                "version {stale} must be refused by version, naming the remedy: {findings:?}"
+            );
+        }
+        // The current version, otherwise identical, is accepted — so the refusal above is about the
+        // version and not about anything else in the document.
         let plan = plan();
-        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
         assert!(validate_plan_structure(&plan).is_empty());
         assert!(plan.shots.iter().all(|shot| shot.depends_on.is_empty()));
+    }
+
+    /// sc-24026. `audio` is required on every shot: a missing key does not parse, a blank one is a
+    /// finding that NAMES the shot, and a value that states silence is simply accepted — the
+    /// validator never reads the prose, because "this shot is silent" is a legitimate answer and
+    /// the only unanswerable one is saying nothing.
+    #[test]
+    fn a_shot_without_an_audio_sentence_is_refused_naming_the_shot() {
+        let mut value = plan_json();
+        value["shots"][1].as_object_mut().unwrap().remove("audio");
+        let error = serde_json::from_value::<ProductionPlan>(value)
+            .expect_err("a shot with no audio key does not parse")
+            .to_string();
+        assert!(error.contains("audio"), "{error}");
+
+        for blank in ["", "   ", "\n\t"] {
+            let mut value = plan_json();
+            value["shots"][1]["audio"] = json!(blank);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{blank:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH020"), "{blank:?}");
+            assert_eq!(findings[0].field, "audio", "{blank:?}");
+        }
+
+        // Silence, stated. Accepted verbatim and with no finding anywhere.
+        let mut value = plan_json();
+        value["shots"][1]["audio"] = json!("No audio. Silence.");
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+        assert_eq!(plan.shots[1].audio, "No audio. Silence.");
+    }
+
+    /// The audio sentence reaches the dispatched prompt verbatim, so it gets the SAME two document
+    /// -boundary checks a pack description does (sc-24026) — and gets them as a SHOT finding, so
+    /// the operator is told which shot forged the marker.
+    #[test]
+    fn an_audio_sentence_may_not_forge_a_marker_or_carry_control_characters() {
+        for (audio, expected) in [
+            ("The bed from <Audio 1>.", "'<' or '>'"),
+            ("room tone\u{7}", "control characters"),
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{audio:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{audio:?}");
+            assert_eq!(findings[0].field, "audio", "{audio:?}");
+            assert!(findings[0].message.contains(expected), "{:?}", findings[0]);
+        }
+        // Newlines and tabs are NOT refused — `film_compile::normalized_description` collapses them
+        // before the sentence reaches a prompt, exactly as it does for a pack description.
+        let mut value = plan_json();
+        value["shots"][0]["audio"] = json!("room tone,\n\ta door latch");
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
     }
 
     #[test]
@@ -5238,7 +5369,6 @@ mod tests {
     #[test]
     fn a_dependency_cycle_is_refused() {
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"][0]["dependsOn"] = json!([{ "shotId": "SH020", "kind": "conditioning" }]);
         value["shots"][1]["dependsOn"] = json!([{ "shotId": "SH010", "kind": "continuity" }]);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
@@ -5264,7 +5394,6 @@ mod tests {
             })
             .collect();
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"] = Value::Array(shots);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         assert!(

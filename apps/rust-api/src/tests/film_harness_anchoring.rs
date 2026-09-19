@@ -16,8 +16,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use sceneworks_core::film_compile::{DispatchContext, InsertedTextKind};
-use sceneworks_core::film_plan::ReferencePack;
+use sceneworks_core::film_compile::{
+    normalized_description, DispatchContext, InsertedTextKind, NO_SPEECH_SENTENCE,
+};
+use sceneworks_core::film_plan::{ProductionPlan, ReferencePack, Shot};
 
 use crate::film_harness;
 use crate::film_planner;
@@ -88,14 +90,8 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
         );
         bound_shots += 1;
 
-        // ONE insertion, of the reference-binding kind, recorded apart from the authored prompt.
-        assert_eq!(
-            request.inserted_text.len(),
-            1,
-            "{}: {:?}",
-            request.shot_id,
-            request.inserted_text
-        );
+        // The FIRST insertion is the reference-binding kind, recorded apart from the authored
+        // prompt. The audio insertions that trail it are asserted by A4 below.
         assert_eq!(
             request.inserted_text[0].kind,
             InsertedTextKind::ReferenceBinding,
@@ -117,7 +113,7 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
             .find(|shot| shot.id == request.shot_id)
             .expect("every request is a shot of the plan");
         assert!(
-            request.prompt.ends_with(&shot.prompt),
+            request.prompt.contains(&shot.prompt),
             "{}: the authored prompt must survive the insertion",
             request.shot_id
         );
@@ -235,7 +231,10 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
     for request in &baseline.compiled.requests {
         assert_eq!(request.model, "minimax_h3", "{}", request.shot_id);
         assert!(
-            request.inserted_text.is_empty(),
+            request
+                .inserted_text
+                .iter()
+                .all(|piece| piece.kind != InsertedTextKind::ReferenceBinding),
             "{}: a base-checkpoint shot sends no pictures, so it names none: {:?}",
             request.shot_id,
             request.inserted_text
@@ -245,6 +244,182 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
             "{}: {}",
             request.shot_id,
             request.prompt
+        );
+    }
+}
+
+/// The sentences one compiled prompt must END with, given the shot it was compiled from.
+///
+/// Written out here rather than imported from the compiler, so the assertion is an independent
+/// statement of the expected text: only `normalized_description` is shared, and only because it is
+/// the whitespace rule the plan document itself is validated against.
+fn expected_audio_tail(shot: &Shot) -> String {
+    let audio = format!("Audio: {}", normalized_description(&shot.audio));
+    match shot.dialogue_clip {
+        // A PLACED line — spoken by TTS or imported from disk, both put our own voice on the
+        // dialogue bus — so H3 is told not to add a second one, after the audio sentence.
+        Some(_) => format!("{audio} {NO_SPEECH_SENTENCE}"),
+        None => audio,
+    }
+}
+
+/// A4 (epic 24017), the compiled half. EVERY shot of EVERY shipped plan ends with its own `Audio:`
+/// sentence, on both partitions, and only a shot that PLACES a dialogue line also ends with the
+/// fixed no-speech sentence.
+///
+/// Driven against the shipped documents rather than a fixture for the same reason A1 is: the thing
+/// being proved is that no shot was missed, and a fixture can only prove it about itself. The
+/// courier plans carry both cases — three shots place a line, three do not — so the negative half
+/// of the criterion is exercised by the same loop as the positive one.
+#[tokio::test]
+async fn a4_every_shipped_shot_ends_with_its_audio_sentence_and_only_placed_lines_silence_h3() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let mut placed = 0usize;
+    let mut unplaced = 0usize;
+
+    for (document, expected_model) in [
+        ("plan.jsonc", "minimax_h3"),
+        ("plan.v2.jsonc", "minimax_h3_ref"),
+    ] {
+        let path = Path::new(FIXTURE_DIR).join(document);
+        let (plan, _) = film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(path.clone(), harness.fixture_pack(), None),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{document} validates: {error:?}"));
+
+        let options = planner_options(&harness, &format!("audio-{document}"));
+        let artifacts = film_planner::compile_existing(
+            &harness.transport,
+            &planner_llm(&harness),
+            &options,
+            &path,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{document} compiles: {error:?}"));
+        assert_eq!(artifacts.compiled.requests.len(), plan.shots.len());
+
+        for request in &artifacts.compiled.requests {
+            assert_eq!(request.model, expected_model, "{}", request.shot_id);
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| shot.id == request.shot_id)
+                .expect("every request is a shot of the plan");
+            let tail = expected_audio_tail(shot);
+            assert!(
+                request.prompt.ends_with(&tail),
+                "{document} {}: must end with {tail:?}: {}",
+                request.shot_id,
+                request.prompt
+            );
+            // Recorded as INSERTED text, separately from the authored prompt, and written after the
+            // refine rewrite — the authored text the plan wrote never contains either sentence.
+            let kinds: Vec<InsertedTextKind> = request
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .filter(|kind| *kind != InsertedTextKind::ReferenceBinding)
+                .collect();
+            let authored = request
+                .authored_prompt
+                .as_deref()
+                .unwrap_or(shot.prompt.as_str());
+            assert!(
+                !authored.contains("Audio:") && !authored.contains(NO_SPEECH_SENTENCE),
+                "{document} {}: the authored prompt stays the plan's own words: {authored}",
+                request.shot_id
+            );
+
+            if shot.dialogue_clip.is_some() {
+                placed += 1;
+                assert_eq!(
+                    kinds,
+                    vec![InsertedTextKind::Audio, InsertedTextKind::NoSpeech],
+                    "{document} {}",
+                    request.shot_id
+                );
+            } else {
+                unplaced += 1;
+                assert_eq!(
+                    kinds,
+                    vec![InsertedTextKind::Audio],
+                    "{document} {}",
+                    request.shot_id
+                );
+                assert!(
+                    !request.prompt.contains(NO_SPEECH_SENTENCE),
+                    "{document} {}: no line is placed on this shot, so none is silenced: {}",
+                    request.shot_id,
+                    request.prompt
+                );
+            }
+        }
+    }
+    // Shape, not a corpus count: the plans may gain or lose shots, but BOTH branches of the
+    // dialogue rule must have been exercised or the negative half proved nothing.
+    assert!(
+        placed > 0 && unplaced > 0,
+        "{placed} placed, {unplaced} not"
+    );
+}
+
+/// A4, the document half. A shot that says nothing about sound is refused by name, a shot that says
+/// it is silent is accepted, and both older plan schema versions are refused BY VERSION.
+///
+/// Against the SHIPPED plan rather than a fixture, so the refusals are proved on the document an
+/// operator actually edits.
+#[test]
+fn a4_a_shot_without_audio_and_an_older_plan_version_are_both_refused() {
+    let text = std::fs::read_to_string(Path::new(FIXTURE_DIR).join("plan.v2.jsonc"))
+        .expect("the shipped reference plan");
+    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(&text);
+    let original: serde_json::Value = serde_json::from_str(&stripped).expect("it parses");
+    let shot_id = original["shots"][2]["id"]
+        .as_str()
+        .expect("a shot id")
+        .to_owned();
+
+    // As shipped: clean.
+    let plan: ProductionPlan = serde_json::from_value(original.clone()).expect("it decodes");
+    assert!(
+        sceneworks_core::film_plan::validate_plan_structure(&plan).is_empty(),
+        "the shipped plan must validate: {:?}",
+        sceneworks_core::film_plan::validate_plan_structure(&plan)
+    );
+
+    // Blanked: refused, NAMING the shot.
+    let mut blanked = original.clone();
+    blanked["shots"][2]["audio"] = serde_json::json!("   ");
+    let plan: ProductionPlan = serde_json::from_value(blanked).expect("it decodes");
+    let findings = sceneworks_core::film_plan::validate_plan_structure(&plan);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].shot_id.as_deref(), Some(shot_id.as_str()));
+    assert_eq!(findings[0].field, "audio");
+
+    // Silence, stated: accepted. The validator never reads the prose.
+    let mut silent = original.clone();
+    silent["shots"][2]["audio"] = serde_json::json!("No audio. Silence.");
+    let plan: ProductionPlan = serde_json::from_value(silent).expect("it decodes");
+    assert!(
+        sceneworks_core::film_plan::validate_plan_structure(&plan).is_empty(),
+        "a shot that states its silence is a complete answer"
+    );
+
+    // Versions 1 and 2: refused BY VERSION, with the remedy named.
+    for stale in [1, 2] {
+        let mut older = original.clone();
+        older["schemaVersion"] = serde_json::json!(stale);
+        let plan: ProductionPlan = serde_json::from_value(older).expect("it decodes");
+        let findings = sceneworks_core::film_plan::validate_plan_structure(&plan);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "schemaVersion"
+                    && finding.message.contains(&stale.to_string())
+                    && finding.message.contains("audio")
+            }),
+            "version {stale}: {findings:?}"
         );
     }
 }

@@ -197,6 +197,8 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
             </fieldset>
             <fieldset className="ve-film-inspector-fields" disabled={disabled}>
               <legend>Dialogue placement</legend>
+              <label>Audio<textarea aria-label={`Shot ${shot.id} audio`} placeholder="What this shot sounds like, or that it is silent" rows="2" value={shot.audio ?? ""} onChange={(event) => mutateShot((next) => { next.audio = event.target.value; })} /></label>
+              <Finding field="audio" findings={findings} shotId={shot.id} />
               <label>Dialogue<textarea aria-label={`Shot ${shot.id} dialogue`} rows="2" value={shot.dialogue ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "dialogue", event.target.value))} /></label>
               <label>Generated picture audio<select aria-label={`Shot ${shot.id} generated audio`} value={shot.generatedAudio ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "generatedAudio", event.target.value))}><option value="">Use film default</option><option value="mute">Mute</option><option value="include">Include</option></select></label>
               <label>Audio role<input value={shot.dialogueClip?.role ?? ""} onChange={(event) => mutateShot((next) => { next.dialogueClip ??= { role: "", offsetSeconds: 0, gain: 1, sourceInSeconds: 0 }; next.dialogueClip.role = event.target.value; })} /></label>

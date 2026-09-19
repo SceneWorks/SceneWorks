@@ -47,7 +47,22 @@ use crate::MAX_PROMPT_CHARS;
 /// reading one under this build would default the field to empty and then blame the operator for a
 /// hand edit through [`request_differences`] — the same migration trap as the two bumps above. The
 /// remedy is the same one line: `film-harness compile`.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 4;
+/// **5** (sc-24026): EVERY request's prompt now TRAILS with the shot's `Audio:` sentence, and a
+/// request whose shot places a dialogue line trails with [`NO_SPEECH_SENTENCE`] after it. Both are
+/// recorded as further `insertedText` entries. A v4 document's prompt carries neither, so reading
+/// one under this build would compare clean-but-different against a fresh compile and blame the
+/// operator for a hand edit through [`request_differences`] — the same migration trap as the three
+/// bumps above. The remedy is the same one line: `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 5;
+
+/// The sentence appended when the harness itself puts a voice on this shot (sc-24026).
+///
+/// MiniMax-H3 scores a soundtrack from the prompt, speech included, and a shot whose dialogue bus
+/// already carries a line would otherwise come back with a second voice over ours — two people
+/// saying different things at once, which no downstream check can detect and no mix can undo.
+/// FIXED wording, chosen once: it is compiler-owned text, so it must read the same on every shot of
+/// every plan rather than varying with whoever authored the audio sentence.
+pub const NO_SPEECH_SENTENCE: &str = "No one speaks on camera; no voices.";
 
 /// Serialize a production plan exactly as the project store and harness persist it, then hash
 /// those bytes. Keeping this beside the compiler prevents the editor preflight and CLI harness
@@ -144,15 +159,44 @@ pub enum InsertedTextKind {
     /// One sentence per bound reference role, giving that reference a job in the prompt by naming
     /// the `<Picture N>` the engine will label its image with.
     ReferenceBinding,
+    /// `Audio: <the shot's own sentence>` — what this shot should sound like (sc-24026).
+    Audio,
+    /// [`NO_SPEECH_SENTENCE`], on a shot whose dialogue bus the harness already fills (sc-24026).
+    NoSpeech,
+}
+
+/// Where in the prompt a kind of inserted text sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertedTextPlacement {
+    /// Ahead of the authored or refined prompt.
+    Leading,
+    /// After it.
+    Trailing,
+}
+
+impl InsertedTextKind {
+    /// Where this kind sits, and the ONE place that is decided.
+    ///
+    /// Reference bindings LEAD because the engine presents the reference media before the text: the
+    /// binding a picture needs should be the first thing said about it. The audio sentences TRAIL
+    /// because they describe a different track from everything before them — a prompt that opens on
+    /// sound reads as a film about sound — and because the no-speech sentence only makes sense once
+    /// the soundtrack has been described.
+    pub fn placement(self) -> InsertedTextPlacement {
+        match self {
+            Self::ReferenceBinding => InsertedTextPlacement::Leading,
+            Self::Audio | Self::NoSpeech => InsertedTextPlacement::Trailing,
+        }
+    }
 }
 
 /// Text the compiler wrote into [`CompiledRequest::prompt`], kept beside the authored prompt so the
 /// document says exactly what was added rather than only that the prompt differs (sc-24023).
 ///
-/// Every insertion LEADS the prompt, in the order of this list, because the engine presents the
-/// reference media before the text: the binding a picture needs should be the first thing said
-/// about it. Inserted text is written AFTER the model's own refine rewrite, so the refiner can
-/// never paraphrase a `<Picture N>` into something the engine does not label.
+/// Each insertion sits where its kind's [`InsertedTextKind::placement`] puts it, in the order of
+/// this list. Inserted text is written AFTER the model's own refine rewrite, so the refiner can
+/// never paraphrase a `<Picture N>` into something the engine does not label, nor soften "No audio.
+/// Silence." into a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertedText {
@@ -237,26 +281,68 @@ fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedT
     })
 }
 
-/// Everything the compiler writes into a shot's prompt, in the order it leads with.
+/// The shot's audio sentence as the prompt states it (sc-24026): `Audio: ` and the author's own
+/// words, whitespace-normalized exactly as a pack description is and otherwise verbatim.
+///
+/// The content is NEVER inspected. "No audio. Silence." is a complete answer, and a compiler that
+/// tried to tell silence from sound would have to guess at prose — the plan already refused a shot
+/// that said nothing, which is the only question worth asking here.
+fn audio_text(shot: &Shot) -> Option<InsertedText> {
+    let audio = normalized_description(&shot.audio);
+    (!audio.is_empty()).then(|| InsertedText {
+        kind: InsertedTextKind::Audio,
+        text: format!("Audio: {audio}"),
+    })
+}
+
+/// [`NO_SPEECH_SENTENCE`], on a shot that PLACES a dialogue line (sc-24026).
+///
+/// Keyed on [`Shot::dialogue_clip`], which is the placement: `dialogue` beside it is intent prose
+/// the run never plays, while a clip names a pack `sound` entry of kind `dialogue` that
+/// `ensure_sound` either imports from disk or synthesizes and then imports. Pre-recorded or spoken,
+/// both put OUR voice on the dialogue bus, so both are the reason not to let H3 add a second one. A
+/// shot with no clip gets nothing: it has no voice to double.
+fn no_speech_text(shot: &Shot) -> Option<InsertedText> {
+    shot.dialogue_clip.as_ref().map(|_| InsertedText {
+        kind: InsertedTextKind::NoSpeech,
+        text: NO_SPEECH_SENTENCE.to_owned(),
+    })
+}
+
+/// Everything the compiler writes into a shot's prompt, in the order the prompt reads it.
 ///
 /// The one place an insertion kind is produced: a later kind of compiler-owned text is another
 /// entry pushed here, and needs no change to the placement, the record or the conformance check.
-fn inserted_text_for_shot(pictures: &[ReferencePicture<'_>]) -> Vec<InsertedText> {
-    reference_binding_text(pictures).into_iter().collect()
+fn inserted_text_for_shot(shot: &Shot, pictures: &[ReferencePicture<'_>]) -> Vec<InsertedText> {
+    reference_binding_text(pictures)
+        .into_iter()
+        .chain(audio_text(shot))
+        .chain(no_speech_text(shot))
+        .collect()
 }
 
-/// The prompt the engine receives: the inserted text, in order, leading the refined or authored
-/// prompt.
+/// The prompt the engine receives: the leading insertions, in order, then the refined or authored
+/// prompt, then the trailing ones.
 fn apply_inserted_text(prompt: &str, inserted: &[InsertedText]) -> String {
     if inserted.is_empty() {
         return prompt.to_owned();
     }
     let mut composed = String::new();
-    for piece in inserted {
+    for piece in inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Leading)
+    {
         composed.push_str(piece.text.trim());
         composed.push(' ');
     }
-    composed.push_str(prompt);
+    composed.push_str(prompt.trim_end());
+    for piece in inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Trailing)
+    {
+        composed.push(' ');
+        composed.push_str(piece.text.trim());
+    }
     composed
 }
 
@@ -323,8 +409,8 @@ pub struct CompiledRequest {
     /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
     #[serde(default)]
     pub partition_reason: String,
-    /// The prompt the engine will receive: [`Self::inserted_text`], in order, leading the authored
-    /// or refined text.
+    /// The prompt the engine will receive: [`Self::inserted_text`], in order, around the authored
+    /// or refined text — bindings leading it, the audio sentences trailing it.
     pub prompt: String,
     pub prompt_source: PromptSource,
     /// The plan's own prompt, kept when `prompt` was refined so the rewrite can be reviewed and
@@ -606,10 +692,10 @@ fn compile_shot(
     // paraphrased, and a paraphrased `<Picture 2>` is a binding to an image the engine never
     // labelled that way. Writing it afterwards makes the compiler, not the model, the author of
     // every word the engine reads that the plan did not write.
-    let inserted_text = inserted_text_for_shot(&shot_reference_pictures(
-        &shot.conditioning.reference_roles,
-        pack,
-    ));
+    let inserted_text = inserted_text_for_shot(
+        shot,
+        &shot_reference_pictures(&shot.conditioning.reference_roles, pack),
+    );
     let prompt = apply_inserted_text(&prompt, &inserted_text);
     let length = prompt.chars().count();
     if length > MAX_PROMPT_CHARS {
@@ -617,9 +703,10 @@ fn compile_shot(
             &shot.id,
             "prompt",
             format!(
-                "this shot's prompt is {length} characters once the compiler's binding sentences \
-                 lead it, outside the 1-{MAX_PROMPT_CHARS} the video route accepts; shorten the \
-                 shot's prompt or its references' descriptions (nothing is silently truncated)"
+                "this shot's prompt is {length} characters once the compiler's own sentences lead \
+                 and trail it, outside the 1-{MAX_PROMPT_CHARS} the video route accepts; shorten \
+                 the shot's prompt, its audio sentence or its references' descriptions (nothing is \
+                 silently truncated)"
             ),
         )]);
     }
@@ -1227,13 +1314,13 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "seed": 7, "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["courier"]
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": {
                         "mode": "image_to_video",
                         "firstFrameRole": "workshop_plate",
@@ -1329,7 +1416,7 @@ mod tests {
         assert_eq!(compiled.reference_pack_version, 3);
         assert_eq!(compiled.model.fps, 24);
         let first = compiled.request("SH010").unwrap();
-        assert_eq!(first.prompt, "a courier enters");
+        assert_eq!(first.prompt, "a courier enters Audio: Room tone, no music.");
         assert_eq!(first.prompt_source, PromptSource::Authored);
         assert_eq!(first.authored_prompt, None);
         assert_eq!((first.width, first.height), (576, 320));
@@ -1470,7 +1557,10 @@ mod tests {
             .unwrap();
         assert_eq!(body["projectId"], "proj_1");
         assert_eq!(body["mode"], "text_to_video");
-        assert_eq!(body["prompt"], "a courier enters");
+        assert_eq!(
+            body["prompt"],
+            "a courier enters Audio: Room tone, no music."
+        );
         assert_eq!(body["duration"], 5.1667);
         assert_eq!(body["fps"], 24);
         assert_eq!(body["width"], 576);
@@ -1552,7 +1642,7 @@ mod tests {
         assert_eq!(first.prompt_source, PromptSource::Refined);
         assert_eq!(
             first.prompt,
-            "integrated_multimodal_description: a courier enters a warm workshop"
+            "integrated_multimodal_description: a courier enters a warm workshop Audio: Room tone, no music."
         );
         assert_eq!(first.authored_prompt.as_deref(), Some("a courier enters"));
         // The untouched shot still compiles its authored prompt.
@@ -1825,7 +1915,7 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "conditioning": {
                         "mode": "reference_to_video",
                         // Both BINDABLE kinds (character, prop): a `plate` is refused in this
@@ -1836,7 +1926,7 @@ mod tests {
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["courier", "red_parcel"]
                 }
@@ -2323,8 +2413,9 @@ mod tests {
         let referenced = compiled.request("SH010").unwrap();
         let plain = compiled.request("SH020").unwrap();
 
-        // One insertion, of one kind, holding one sentence per bound role in picture order.
-        assert_eq!(referenced.inserted_text.len(), 1, "{referenced:?}");
+        // The FIRST insertion is the binding kind, holding one sentence per bound role in picture
+        // order. The audio sentence sc-24026 appends trails it and is asserted in its own tests.
+        assert_eq!(referenced.inserted_text.len(), 2, "{referenced:?}");
         assert_eq!(
             referenced.inserted_text[0].kind,
             InsertedTextKind::ReferenceBinding
@@ -2339,7 +2430,7 @@ mod tests {
         assert_eq!(
             referenced.prompt,
             "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
-             <Picture 2>. a courier enters"
+             <Picture 2>. a courier enters Audio: Room tone, no music."
         );
         assert!(
             referenced
@@ -2394,9 +2485,19 @@ mod tests {
             );
         }
 
-        // The base partition sends no pictures, so it claims none and its prompt is the plan's.
-        assert!(plain.inserted_text.is_empty(), "{plain:?}");
-        assert_eq!(plain.prompt, "places the parcel");
+        // The base partition sends no pictures, so it claims no BINDING — its only insertion is the
+        // audio sentence every shot carries (sc-24026), and the plan's own words are untouched.
+        assert!(
+            plain
+                .inserted_text
+                .iter()
+                .all(|piece| piece.kind != InsertedTextKind::ReferenceBinding),
+            "{plain:?}"
+        );
+        assert_eq!(
+            plain.prompt,
+            "places the parcel Audio: Room tone, no music."
+        );
         let body = plain.to_job_body(&context).expect("SH020 body");
         assert!(body.get("referenceAssetIds").is_none(), "{body}");
         assert!(
@@ -2416,10 +2517,16 @@ mod tests {
             document["requests"][0]["insertedText"][0]["kind"],
             json!("reference_binding")
         );
-        assert!(
-            document["requests"][1].get("insertedText").is_none(),
-            "a shot with no insertion writes no field: {}",
-            document["requests"][1]
+        // A shot that binds nothing records no binding — only the audio sentence every shot
+        // carries since sc-24026, so the two kinds stay distinguishable in the document.
+        assert_eq!(
+            document["requests"][1]["insertedText"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{}", document["requests"][1]))
+                .iter()
+                .map(|piece| piece["kind"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("audio")]
         );
     }
 
@@ -2453,11 +2560,12 @@ mod tests {
         .expect("the refined mixed plan compiles");
         let referenced = compiled.request("SH010").unwrap();
         assert_eq!(referenced.prompt_source, PromptSource::Refined);
-        // The rewrite is carried through UNTOUCHED, behind the bindings.
+        // The rewrite is carried through UNTOUCHED, behind the bindings and ahead of the audio.
         assert_eq!(
             referenced.prompt,
             "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
-             <Picture 2>. integrated_multimodal_description: a courier steps into a warm workshop"
+             <Picture 2>. integrated_multimodal_description: a courier steps into a warm workshop \
+             Audio: Room tone, no music."
         );
         // The authored prompt is the PLAN's, with no compiler text in it: the insertion happened
         // after the rewrite, not before it, so neither recorded text has been polluted.
@@ -2473,14 +2581,174 @@ mod tests {
                 .contains("<Picture"),
             "the authored prompt must stay the plan's own words"
         );
-        assert_eq!(referenced.inserted_text.len(), 1);
-        assert!(
-            !referenced.inserted_text[0]
-                .text
-                .contains("courier steps into"),
-            "the inserted text is the compiler's alone: {}",
-            referenced.inserted_text[0].text
+        assert_eq!(
+            referenced
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio]
         );
+        for piece in &referenced.inserted_text {
+            assert!(
+                !piece.text.contains("courier steps into"),
+                "the inserted text is the compiler's alone: {}",
+                piece.text
+            );
+        }
+    }
+
+    /// sc-24026. EVERY shot's prompt ends with its own `Audio:` sentence — base partition and
+    /// reference partition alike — written after the refine rewrite and recorded apart from it.
+    #[test]
+    fn every_shots_prompt_ends_with_its_audio_sentence_on_both_partitions() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["audio"] = json!("A door latch clicking.   Room tone.\nNo music.");
+        document["shots"][1]["audio"] = json!("No audio. Silence.");
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        // Refined, so the insertion is provably AFTER the rewrite on both shots rather than
+        // something the authored text could have carried.
+        let refined: BTreeMap<String, String> = plan
+            .shots
+            .iter()
+            .map(|shot| (shot.id.clone(), format!("rewritten {}", shot.id)))
+            .collect();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &refined,
+            },
+        )
+        .expect("the mixed plan compiles");
+
+        // Two DIFFERENT partitions, so this is not one lane asserted twice.
+        let models: Vec<&str> = compiled
+            .requests
+            .iter()
+            .map(|request| request.model.as_str())
+            .collect();
+        assert!(
+            models.contains(&"minimax_h3") && models.contains(&"minimax_h3_ref"),
+            "{models:?}"
+        );
+
+        for request in &compiled.requests {
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| shot.id == request.shot_id)
+                .unwrap();
+            let audio = request
+                .inserted_text
+                .iter()
+                .find(|piece| piece.kind == InsertedTextKind::Audio)
+                .unwrap_or_else(|| panic!("{} records its audio text", request.shot_id));
+            // Whitespace-normalized exactly as a pack description is, and otherwise the author's
+            // own words: the runs of spaces and the newline above are collapsed, nothing else.
+            assert_eq!(
+                audio.text,
+                format!("Audio: {}", normalized_description(&shot.audio)),
+                "{}",
+                request.shot_id
+            );
+            assert!(
+                request.prompt.ends_with(&audio.text),
+                "{}: {}",
+                request.shot_id,
+                request.prompt
+            );
+            // The rewrite is still in there, ahead of it — the insertion ran after the refiner.
+            assert!(
+                request.prompt.contains(&format!("rewritten {}", shot.id)),
+                "{}: {}",
+                request.shot_id,
+                request.prompt
+            );
+            assert!(
+                !request
+                    .authored_prompt
+                    .as_deref()
+                    .unwrap()
+                    .contains("Audio:"),
+                "{}: the authored prompt stays the plan's own words",
+                request.shot_id
+            );
+        }
+        assert_eq!(compiled.requests.len(), plan.shots.len());
+    }
+
+    /// sc-24026. The no-speech sentence is keyed on a PLACED dialogue line — `dialogueClip`, which
+    /// is what puts our own voice on the dialogue bus — and on nothing else. Intent prose in
+    /// `dialogue` is not a placement and gets no sentence.
+    #[test]
+    fn only_a_shot_that_places_a_dialogue_line_gets_the_no_speech_sentence() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        // Shot 0 SPEAKS a placed line; shot 1 only declares the intent prose beside it.
+        document["shots"][0]["dialogueClip"] =
+            json!({ "role": "courier_line", "offsetSeconds": 0.5 });
+        document["shots"][1]["dialogue"] = json!("Recipient: \"Huh.\"");
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles");
+
+        let placed = compiled.request(&plan.shots[0].id).unwrap();
+        assert!(
+            placed.prompt.ends_with(NO_SPEECH_SENTENCE),
+            "{}: {}",
+            placed.shot_id,
+            placed.prompt
+        );
+        // After the audio sentence, not instead of it, and recorded as its own kind.
+        assert_eq!(
+            placed
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .filter(|kind| *kind != InsertedTextKind::ReferenceBinding)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::Audio, InsertedTextKind::NoSpeech]
+        );
+        assert!(
+            placed
+                .prompt
+                .contains(&format!("Audio: {} ", plan.shots[0].audio.trim()))
+                || placed.prompt.contains(&format!(
+                    "Audio: {} {NO_SPEECH_SENTENCE}",
+                    normalized_description(&plan.shots[0].audio)
+                )),
+            "{}",
+            placed.prompt
+        );
+
+        let unplaced = compiled.request(&plan.shots[1].id).unwrap();
+        assert!(
+            !unplaced.prompt.contains(NO_SPEECH_SENTENCE),
+            "a shot with only dialogue INTENT places no voice, so it silences none: {}",
+            unplaced.prompt
+        );
+        assert!(unplaced
+            .inserted_text
+            .iter()
+            .all(|piece| piece.kind != InsertedTextKind::NoSpeech));
     }
 
     /// The sentence a role gets is built from its pack entry: the KIND chooses the noun, and the
@@ -2720,7 +2988,7 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
         assert!(
-            findings[0].message.contains("binding sentences")
+            findings[0].message.contains("the compiler's own sentences")
                 && findings[0].message.contains("the video route accepts"),
             "{findings:?}"
         );

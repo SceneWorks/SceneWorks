@@ -38,13 +38,13 @@ different lifetimes. All three tolerate JSONC comments and refuse unknown fields
 
 ### 1. The plan: what the film is
 
-`ProductionPlan` (`crates/sceneworks-core/src/film_plan.rs:175`), schema version 2
-(`:43`, with `:45` still accepting version 1). It declares the model once, then a list of shots with
-stable ids.
+`ProductionPlan` (`crates/sceneworks-core/src/film_plan.rs:175`), schema version 3 (`:52`; `:53` is
+the accepted set, and versions 1 and 2 are refused by version — they predate the required
+`shots[].audio` sentence). It declares the model once, then a list of shots with stable ids.
 
 ```jsonc
 // config/film-harness/courier-workshop/plan.v2.jsonc
-"schemaVersion": 2,
+"schemaVersion": 3,
 "id": "courier-workshop-v2",
 "model": { "id": "minimax_h3", "tier": "q4", "fps": 24, "resolution": "576x320" },
 "limits": { "maxRunSeconds": 64800, "maxShotSeconds": 10800,
@@ -59,6 +59,7 @@ stable ids.
     "targetDurationSeconds": 5.1667,
     "startState": "Empty workshop, door closed, workbench clear.",
     "endState":   "Door open, courier standing in the doorway holding the red parcel...",
+    "audio": "Room tone, distant birds, a door latch clicking and the door creaking open. No music.",
     "conditioning": {
       "mode": "reference_to_video",
       "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
@@ -69,6 +70,14 @@ stable ids.
   }
 ]
 ```
+
+`audio` is **required on every shot** (sc-24026) and is never pattern-matched: MiniMax-H3 generates
+its soundtrack from the same prompt it renders the picture from, so whatever the prompt leaves
+unsaid the model invents. A silent shot says so outright — `"No audio. Silence."` is a complete,
+accepted value; only saying *nothing* is refused, and the refusal names the shot. The compiler
+appends it to the dispatched prompt as the final sentence, `Audio: <the shot's text>`, after the
+prompt-refine rewrite and recorded in `insertedText` — see § *What the compiler writes into a
+prompt* below.
 
 Two things about that shot are load-bearing. It names **roles**, never files, so the same plan runs
 against any pack that declares them (runbook § *The reference-conditioned courier plan*). And
@@ -254,7 +263,9 @@ resolved against **that shot's** partition (`CompiledRequest::loras`); `effectiv
 (`CompiledRequest::effective_steps`); and `referenceImageShortEdge`, written only for a
 reference-partition request (`CompiledRequest::reference_image_short_edge`).
 
-A reference shot's prompt also carries text the **compiler** wrote. MiniMax-H3 labels each supplied
+### What the compiler writes into a prompt
+
+A shot's prompt also carries text the **compiler** wrote. MiniMax-H3 labels each supplied
 reference `<Picture 1>`, `<Picture 2>`, … ahead of the prompt, in supply order, and the model's own
 prompt guide is explicit that a reference needs a job in the text. So the compile leads such a
 prompt with one plain binding sentence per bound role — "The courier is the person shown in
@@ -265,6 +276,17 @@ that role's asset in `referenceAssetIds` both come from `shot_reference_pictures
 that owns the reference order, called by the compiler and by the dispatcher alike. The inserted text
 is recorded per kind in the request's `insertedText`, separately from `authoredPrompt`, and is a
 derived field — a hand-edited one is refused by `conformance_findings` like any other.
+
+Every shot's prompt also **trails** with its audio sentence, `Audio: <the shot's `audio` text>` —
+base partition and reference partition alike, since H3 scores a soundtrack from the same text it
+renders the picture from. The author's words are repeated with their whitespace normalized and
+nothing else changed; the compiler never reads the prose, so a shot that states silence gets exactly
+that sentence. When the shot also **places** a dialogue line — a `dialogueClip`, whether
+`ensure_sound` speaks it through TTS or imports a recording, since both put our own voice on the
+dialogue bus — one further fixed sentence follows it, `film_compile::NO_SPEECH_SENTENCE`, so H3 does
+not lay a second voice over ours. A shot with no placed clip gets nothing: it has no voice to
+double, and `dialogue` beside it is intent prose the run never plays. Both are written after the
+refine rewrite and recorded as their own `insertedText` kinds (`audio`, `no_speech`).
 
 Two properties earn it its own file. It is **what the engine sees**: each prompt is run through the
 model's own `prompt_refine` rewrite with `modelId` set to the plan's model, and the authored text is

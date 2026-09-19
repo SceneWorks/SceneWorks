@@ -31,7 +31,7 @@ function draft(overrides = {}) {
     structuredBrief: { synopsis: "", styleNotes: "", targetTotalSeconds: 30, beats: [], dialogue: [] },
     planning: { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false },
     productionPlan: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: "film_1",
       version: 1,
       title: "First film",
@@ -41,7 +41,7 @@ function draft(overrides = {}) {
       sound: {},
       shots: [{
         id: "SH010", beat: "Opening shot", framing: "wide", prompt: "",
-        targetDurationSeconds: 5.1667, startState: "Opening state", endState: "Closing state",
+        targetDurationSeconds: 5.1667, startState: "Opening state", endState: "Closing state", audio: "",
         conditioning: { mode: "text_to_video", referenceRoles: [] }, continuityRoles: [],
       }],
     },

@@ -724,8 +724,11 @@ pub struct DraftShot {
     pub end_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>,
+    /// What this shot sounds like — REQUIRED, exactly as [`crate::film_plan::Shot::audio`] is
+    /// (sc-24026). It is not dropped when blank the way the optional fields below are: a blank one
+    /// is carried into the plan so `validate_plan_structure` refuses it NAMING THE SHOT, which is a
+    /// better report than "missing field `audio`" at an anonymous decode position.
+    pub audio: String,
     pub conditioning: ShotConditioning,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -829,13 +832,10 @@ fn normalize_draft(value: &mut Value) {
                 }
             }
         }
-        for field in [
-            "dialogue",
-            "sound",
-            "negativePrompt",
-            "resolution",
-            "beatId",
-        ] {
+        // `audio` is deliberately absent: it is REQUIRED (sc-24026), so dropping a blank one would
+        // turn a shot that said nothing about sound into a decode failure instead of a finding that
+        // names it.
+        for field in ["dialogue", "negativePrompt", "resolution", "beatId"] {
             drop_if_blank(shot, field);
         }
         if let Some(conditioning) = shot
@@ -973,7 +973,7 @@ pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> Productio
                 start_state: shot.start_state.clone(),
                 end_state: shot.end_state.clone(),
                 dialogue: shot.dialogue.clone(),
-                sound: shot.sound.clone(),
+                audio: shot.audio.clone(),
                 generated_audio: None,
                 dialogue_clip: None,
                 conditioning: shot.conditioning.clone(),
@@ -1766,7 +1766,7 @@ Answer with ONE JSON object and nothing else — no prose, no markdown fence, no
       \"targetDurationSeconds\": <one of the allowed durations, copied exactly>,
       \"startState\": \"<the world at the first frame>\",
       \"endState\": \"<the world at the last frame>\",
-      \"sound\": \"<the diegetic sound of this shot>\",
+      \"audio\": \"<what this shot sounds like: diegetic sound, ambience, music or 'no music' — or say it is silent>\",
       \"dialogue\": \"<a spoken line, or omit the field>\",
       \"conditioning\": { \"mode\": \"<one of the allowed modes>\" },
       \"seed\": <an integer, optional>,
@@ -1779,6 +1779,10 @@ Rules:
 - Shot ids ascend in tens: SH010, SH020, SH030 ...
 - Every field name is spelled exactly as above. An extra or misspelled field is rejected outright.
 - Omit an optional field rather than writing null, \"\" or a placeholder.{{LORA_RULE}}
+- audio is REQUIRED on every shot and is never omitted or left blank. The model that renders this \
+film scores its soundtrack from the same text it renders the picture from, so anything the prompt \
+does not describe is invented. A shot that is meant to be silent says so outright — \
+\"No audio. Silence.\" — rather than saying nothing.
 - beat, framing, prompt, startState and endState are STRINGS — one piece of prose each. Never an \
 object, never a list, and never a role-by-role breakdown.
 - startState and endState describe WHAT THE CAMERA SEES in the first and the last frame of this \
@@ -1817,7 +1821,7 @@ Dust turns in the light from the roller door behind them. The camera does not mo
 palm; the customer waits opposite with both hands at their sides.\",
   \"endState\": \"The counter is empty and the customer holds the brass key at chest height; the \
 mechanic's hand is withdrawn.\",
-  \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
+  \"audio\": \"Key scraping on steel, a compressor cycling somewhere off screen, no music.\",
   \"conditioning\": {{EXAMPLE_CONDITIONING}},
   \"continuityRoles\": {{EXAMPLE_CONTINUITY}}
 }";
@@ -1930,7 +1934,7 @@ mod tests {
             "targetDurationSeconds": 14.375,
             "startState": "empty",
             "endState": "not empty",
-            "sound": "room tone",
+            "audio": "room tone, no music",
             "conditioning": { "mode": "text_to_video" },
             "continuityRoles": ["courier", "red_parcel"]
         })
@@ -2431,7 +2435,7 @@ mod tests {
         // An unknown field is refused outright, not dropped.
         let error = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}, "cameraLens": "35mm"}]}"#,
         )
         .expect_err("unknown field refused");
@@ -2456,7 +2460,7 @@ mod tests {
         // column 20" told it nothing and all three decodes came back identical.
         let error = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}},
                 {"id": "SH020", "beatId": "delivery", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s",
@@ -2481,7 +2485,7 @@ mod tests {
                 "targetDurationSeconds": 5.1667,
                 "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
                 "endState": ["the courier fills the doorway", "the parcel is against their chest"],
-                "dialogue": "", "sound": "  ",
+                "dialogue": "", "audio": "  ",
                 "conditioning": {
                     "mode": "text_to_video", "firstFrameRole": "", "lastFrameRole": "",
                     "referenceRoles": [], "chainFromShotId": ""
@@ -2504,14 +2508,14 @@ mod tests {
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667,
                 "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
-                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+                "endState": "e", "audio": "Room tone, no music.", "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("parses");
         let forwards = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667,
                 "startState": {"courier": "not yet in frame", "workshop_plate": "empty workshop"},
-                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+                "endState": "e", "audio": "Room tone, no music.", "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("parses");
         assert_eq!(reversed.shots[0].start_state, forwards.shots[0].start_state);
@@ -2522,7 +2526,10 @@ mod tests {
         // A blank placeholder is an omission, not a value: `chainFromShotId: ""` would otherwise be
         // a chain to a shot named "" and `firstFrameRole: ""` a role no pack can contain.
         assert_eq!(shot.dialogue, None);
-        assert_eq!(shot.sound, None);
+        // `audio` is the exception, and deliberately so (sc-24026): it is REQUIRED, so a blank one
+        // is CARRIED rather than dropped, and `validate_plan_structure` then names the shot that
+        // said nothing about sound instead of the decoder reporting a missing field.
+        assert_eq!(shot.audio, "  ");
         assert_eq!(shot.conditioning.chain_from_shot_id, None);
         assert_eq!(shot.conditioning.first_frame_role, None);
         assert_eq!(shot.conditioning.last_frame_role, None);
@@ -2530,7 +2537,7 @@ mod tests {
         // ordinary structural validator reports it as the missing field it is.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": {}, "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": {}, "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("an empty object flattens");
@@ -2541,7 +2548,7 @@ mod tests {
         // about its conditioning; a slot the mode cannot use conditions nothing.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {
                     "mode": "text_to_video", "firstFrameRole": "workshop_plate",
                     "lastFrameRole": "courier", "referenceRoles": []
@@ -2555,7 +2562,7 @@ mod tests {
         // A slot the mode DOES take is untouched, and so is the second slot's absence.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {
                     "mode": "image_to_video", "firstFrameRole": "workshop_plate",
                     "lastFrameRole": "courier"
@@ -2573,7 +2580,7 @@ mod tests {
         // normalisation and is reported by the validator instead of being deleted.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video", "referenceRoles": ["courier"] },
                 "continuityRoles": ["courier"]}]}"#,
         )
