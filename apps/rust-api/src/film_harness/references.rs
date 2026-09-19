@@ -308,7 +308,13 @@ fn resolve_inherited(spec: &ReferenceSpec, spec_dir: &Path) -> (Inherited, Vec<P
     };
     for (file, what) in references
         .iter()
-        .map(|entry| (entry.file.clone(), format!("reference {:?}", entry.role)))
+        // A DESCRIBED-ONLY role names no image to inherit (sc-24025), exactly as a synthesized
+        // line names no clip: there is nothing on disk for this check to find.
+        .filter_map(|entry| {
+            entry
+                .file()
+                .map(|file| (file.to_owned(), format!("reference {:?}", entry.role)))
+        })
         .chain(sound.iter().filter_map(|entry| {
             // A synthesized line (sc-23404) has no clip on disk to inherit — `ensure_sound` speaks
             // it and overwrites `file` with what synthesis wrote. An entry that pins a filename
@@ -632,7 +638,8 @@ fn assert_replaceable_pack(out_dir: &Path) -> Result<(), HarnessError> {
     let declared: std::collections::BTreeSet<&str> = pack
         .references
         .iter()
-        .map(|entry| entry.file.as_str())
+        // A described-only role declares no path, so it sweeps nothing in (sc-24025).
+        .filter_map(sceneworks_core::film_plan::ReferenceEntry::file)
         // A synthesized line may declare no `file` at all (sc-23404); one that pins a filename
         // still declares that path, so it is not swept as a stray.
         .chain(pack.sound.iter().filter_map(|entry| entry.file.as_deref()))
@@ -696,7 +703,8 @@ async fn generate_into(
         entries.push(ReferenceEntry {
             role: role.role.clone(),
             kind: role.kind.clone(),
-            file: role.file.clone(),
+            // A generated plate is always written to disk, so it always names its file.
+            file: Some(role.file.clone()),
             source_asset_id: None,
             description: role.description.clone(),
             // A GENERATED plate is one role's own image: `validate_reference_spec` refuses two spec
@@ -729,11 +737,10 @@ async fn generate_into(
     // supplied plate stays a supplied plate when a generated pack carries it forward.
     let mut inherited_roles = Vec::new();
     for entry in &inherited.references {
-        copy_into(
-            &inherited.source_dir.join(&entry.file),
-            pending,
-            &entry.file,
-        )?;
+        // A described-only role carries forward as words alone: no bytes to copy (sc-24025).
+        if let Some(file) = entry.file() {
+            copy_into(&inherited.source_dir.join(file), pending, file)?;
+        }
         inherited_roles.push(entry.role.clone());
         entries.push(entry.clone());
     }

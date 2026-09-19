@@ -1,0 +1,41 @@
+{
+  // The courier/workshop/red-parcel cast and set, described in WORDS ONLY (epic 24017, sc-24025).
+  //
+  // Every role here is DESCRIBED-ONLY: it declares a `description` and no `file`. Reference images
+  // are optional in this harness, and this pack is the case that makes the text identity lock
+  // necessary — there is no photograph of this courier anywhere, so the only thing that can keep
+  // her the same courier from shot to shot is the compiler saying the same words about her in
+  // every shot that lists her in `continuityRoles`. It does, verbatim, from the descriptions
+  // below.
+  //
+  // Paired with `plan.described.jsonc`, which tells the same six-shot story as `plan.jsonc` with
+  // no conditioning of any kind: every shot is `text_to_video`, so every shot resolves to the base
+  // `minimax_h3` checkpoint and nothing is ever imported, numbered `<Picture N>` or counted
+  // against `limits.maxReferenceAssets`.
+  //
+  // A described-only role may be named in a shot's `continuityRoles` and NOWHERE else: naming one
+  // in `conditioning.referenceRoles`, `firstFrameRole` or `lastFrameRole` is refused, because
+  // every one of those slots supplies a picture and these roles have none.
+  //
+  // WRITING THE DESCRIPTIONS. Each is repeated into the prompt as a sentence of its own, verbatim
+  // but for whitespace normalization and a closing `.` the compiler supplies when one is missing.
+  // It is never prefixed with the role name, so each description below names its own subject —
+  // the same rule the shipped `references.jsonc` descriptions already follow, and the same text a
+  // binding sentence would append if these roles had plates. See `ReferenceEntry::description`.
+  //
+  // Schema 2 (sc-24024, sc-24025): `references[].locator` exists and `references[].file` is
+  // optional. A described-only role may carry no locator — a locator picks one subject out of an
+  // image, and there is no image to pick it out of.
+  "schemaVersion": 2,
+  "id": "courier-workshop-described",
+  "version": 1,
+  "description": "The courier/workshop/red-parcel cast and set as words alone: no plates, no conditioning.",
+  "references": [
+    { "role": "courier", "kind": "character", "description": "The courier: a young woman in a blue quilted jacket over a grey shirt, dark trousers, hair tied back, carrying a small parcel in both hands." },
+    { "role": "recipient", "kind": "character", "description": "The recipient: an older woman in a grey canvas work apron over a rust-coloured jumper, sleeves rolled to the elbow, reading glasses pushed up into short grey hair." },
+    { "role": "red_parcel", "kind": "prop", "description": "The parcel: a small bright red cardboard box about the size of two hands, taped along one seam, with a plain white label on its lid." },
+    { "role": "workshop_location", "kind": "location", "description": "The workshop: a cluttered woodworking room with tools on a pegboard wall, offcuts stacked in a corner and a single closed door camera-left." },
+    { "role": "workbench_table", "kind": "prop", "description": "The workbench: a long, scarred wooden bench dusted with sawdust, running across the centre of frame." },
+    { "role": "house_style", "kind": "style", "description": "Warm late-afternoon light through a side window, soft film grain, natural unsaturated colour." }
+  ]
+}

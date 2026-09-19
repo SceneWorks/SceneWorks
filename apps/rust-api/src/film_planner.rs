@@ -915,18 +915,24 @@ pub async fn generate_with_refiner(
             let dir = pack_dir(&options.reference_pack_path);
             let mut images: Vec<PlannerReferenceImage> = Vec::new();
             let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
+            // Pixels come from FILES. A described-only role has none (sc-24025): it reaches the
+            // planner through the text envelope's role listing and nowhere else, and grouping it
+            // here would join every fileless role into one bogus image at the pack directory.
             for entry in pack.references.iter().filter(|entry| entry.approved) {
+                let Some(file) = entry.file() else {
+                    continue;
+                };
                 let role = PlannerReferenceRole {
                     role: entry.role.clone(),
                     locator: entry.locator().map(str::to_owned),
                 };
-                match by_file.get(entry.file.as_str()).copied() {
+                match by_file.get(file).copied() {
                     Some(index) => images[index].roles.push(role),
                     None => {
-                        by_file.insert(entry.file.as_str(), images.len());
+                        by_file.insert(file, images.len());
                         images.push(PlannerReferenceImage {
                             roles: vec![role],
-                            path: dir.join(&entry.file),
+                            path: dir.join(file),
                         });
                     }
                 }

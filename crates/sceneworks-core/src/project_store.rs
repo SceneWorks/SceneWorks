@@ -659,7 +659,14 @@ fn copy_film_reference_files(
     destination_root: &Path,
     include_sound: bool,
 ) -> ProjectStoreResult<()> {
-    if pack.references.is_empty()
+    // Nothing to copy when no entry names a file on disk. A DESCRIBED-ONLY reference role is words
+    // and nothing else (sc-24025), exactly as a synthesized dialogue line is, so a pack made only
+    // of them stages no images — and must not be sent through the staging directory lookup below,
+    // which refuses a draft whose immutable input directory was never created.
+    if pack
+        .references
+        .iter()
+        .all(|reference| reference.file().is_none())
         && (!include_sound || pack.sound.iter().all(|sound| sound.file.is_none()))
     {
         return Ok(());
@@ -699,17 +706,21 @@ fn copy_film_reference_files(
         ));
     }
     for reference in &pack.references {
-        if !is_safe_relative_path(&reference.file) {
+        // A described-only role stages no image, so there is nothing to find or copy (sc-24025).
+        let Some(file) = reference.file() else {
+            continue;
+        };
+        if !is_safe_relative_path(file) {
             return Err(ProjectStoreError::BadRequest(format!(
                 "Film reference {:?} has an unsafe file path",
                 reference.role
             )));
         }
-        let source = draft_assets.join(&reference.file);
+        let source = draft_assets.join(file);
         let canonical_source = fs::canonicalize(&source).map_err(|_| {
             ProjectStoreError::BadRequest(format!(
-                "Film reference {:?} is missing its staged image {}",
-                reference.role, reference.file
+                "Film reference {:?} is missing its staged image {file}",
+                reference.role
             ))
         })?;
         if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
@@ -718,7 +729,7 @@ fn copy_film_reference_files(
                 reference.role
             )));
         }
-        let destination = canonical_destination.join(&reference.file);
+        let destination = canonical_destination.join(file);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1147,7 +1158,10 @@ impl ProjectStore {
         draft.reference_pack.references.push(ReferenceEntry {
             role: input.role,
             kind: input.kind,
-            file: relative_file.clone(),
+            // This route creates a reference FROM an image asset the project already holds, so it
+            // always names a file. A described-only role is authored in the pack document itself
+            // (sc-24025); nothing about this path changes.
+            file: Some(relative_file.clone()),
             source_asset_id: Some(input.asset_id.clone()),
             description: input.description,
             locator: input.locator,
@@ -15249,6 +15263,23 @@ mod tests {
             REFERENCE_PACK_SCHEMA_VERSION
         );
         assert_eq!(updated.reference_pack.references.len(), 1);
+
+        // The entry this route authors names BOTH the library asset it came from and the file it
+        // was stored as. `validate_reference_pack` refuses a `sourceAssetId` with no `file`
+        // (sc-24025), so a route that wrote only the asset id would author a draft the workspace
+        // then rejects — and the pack is validated inside `add_film_reference`, so this test is
+        // the reason that refusal can never reach the UI's own add path.
+        let added = &updated.reference_pack.references[0];
+        assert_eq!(
+            added.source_asset_id.as_deref(),
+            Some(asset["id"].as_str().expect("asset id"))
+        );
+        assert_eq!(
+            added.file(),
+            Some(format!("references/{}.png", asset["id"].as_str().expect("asset id")).as_str()),
+            "an image-backed role must name the file it is stored as"
+        );
+        assert!(crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty());
     }
 
     #[test]

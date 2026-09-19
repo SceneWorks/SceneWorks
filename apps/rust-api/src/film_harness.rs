@@ -2926,7 +2926,17 @@ impl Session<'_> {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let references = self.pack.references.clone();
+        // Only roles with an IMAGE are imported (sc-24025). A described-only role has no bytes to
+        // upload, no asset to tag and nothing to put in `role_assets` — it reaches the model as
+        // words the compiler writes into the prompt, and the run record's `references` stays what
+        // it has always been: the list of images this run imported.
+        let references: Vec<film_plan::ReferenceEntry> = self
+            .pack
+            .references
+            .iter()
+            .filter(|reference| reference.file().is_some())
+            .cloned()
+            .collect();
         // One listing for the whole pass, not one per reference: anything imported later in this
         // loop is this controller's own and is already recorded.
         // `includeRejected` / `includeTrashed` default to FALSE on the route, and a human reviewing
@@ -2967,23 +2977,29 @@ impl Session<'_> {
         // would miss it.
         let mut roles_by_file: BTreeMap<&str, Vec<&film_plan::ReferenceEntry>> = BTreeMap::new();
         for reference in &references {
-            roles_by_file
-                .entry(reference.file.as_str())
-                .or_default()
-                .push(reference);
+            let Some(file) = reference.file() else {
+                continue;
+            };
+            roles_by_file.entry(file).or_default().push(reference);
         }
         for reference in &references {
             if imported.contains(&reference.role) {
                 continue;
             }
-            let path = pack_dir.join(&reference.file);
+            // Total, though `references` was already filtered to roles that name one: the file is
+            // read, hashed, uploaded and recorded below, and every one of those steps wants the
+            // path itself rather than an `Option` unwrapped four times (sc-24025).
+            let Some(file) = reference.file() else {
+                continue;
+            };
+            let path = pack_dir.join(file);
             let bytes = std::fs::read(&path)?;
             let sha256 = sha256_hex(&bytes);
             let sharing = roles_by_file
-                .get(reference.file.as_str())
+                .get(file)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            let asset_id = match file_assets.get(&reference.file) {
+            let asset_id = match file_assets.get(file) {
                 // Already uploaded in this pass (or by an earlier controller): the shared image is
                 // sent once, so this role adopts that asset rather than creating a second copy of
                 // the same picture.
@@ -3005,7 +3021,7 @@ impl Session<'_> {
                     }
                 },
             };
-            file_assets.insert(reference.file.clone(), asset_id.clone());
+            file_assets.insert(file.to_owned(), asset_id.clone());
             // On BOTH branches: the upload and the tag PATCH are two writes, so a controller that
             // died between them leaves an asset the adoption finds but nothing has tagged. The
             // PATCH replaces the tag set, so re-applying it to an already-tagged asset is a no-op —
@@ -3019,7 +3035,7 @@ impl Session<'_> {
             self.record.references.push(ReferenceAssetRecord {
                 role: reference.role.clone(),
                 kind: reference.kind.clone(),
-                file: reference.file.clone(),
+                file: file.to_owned(),
                 sha256,
                 asset_id,
                 approved: reference.approved,

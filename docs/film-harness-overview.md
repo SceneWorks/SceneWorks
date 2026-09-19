@@ -104,7 +104,11 @@ take. A version 1 pack is refused by version, naming the edit that fixes it.
   { "role": "red_parcel",        "kind": "prop",      "file": "references/red_parcel.png" },
   { "role": "workshop_location", "kind": "location",  "file": "references/workshop_location.png" },
   { "role": "house_style",       "kind": "style",     "file": "references/house_style.png" },
-  { "role": "workshop_plate",    "kind": "plate",     "file": "references/workshop_plate.png" }
+  { "role": "workshop_plate",    "kind": "plate",     "file": "references/workshop_plate.png" },
+  // DESCRIBED-ONLY (sc-24025): a subject the pack describes but has no picture of. `file` is
+  // optional; an entry with neither a file nor a description is refused.
+  { "role": "recipient",         "kind": "character",
+    "description": "The recipient: grey work apron, rolled sleeves." }
 ],
 "sound": [
   { "role": "courier_line", "kind": "dialogue", "voice": "am_michael",
@@ -112,6 +116,19 @@ take. A version 1 pack is refused by version, naming the edit that fixes it.
   { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav" }
 ]
 ```
+
+**A described-only role is never bindable** — it supplies no image, so naming it in
+`conditioning.referenceRoles` or a keyframe slot is refused. It belongs in a shot's
+`continuityRoles`, and that is where it earns its keep: for every shot, the compiler writes the
+pack's `description` of each continuity role the shot does **not** bind to an image into the prompt
+**word for word**, identically every time (the **text identity lock**). With no picture anywhere,
+that repetition is the only thing holding a subject together across cuts. One exception, and it is
+the shared-file case below: if a continuity role's `file` is the file of a picture the shot *is*
+binding, its image is already being supplied, so it gets that picture's **binding** sentence with
+its locator instead of a description of its own. See
+[film-harness.md](film-harness.md) for the full rule, and
+`config/film-harness/courier-workshop/plan.described.jsonc` for a six-shot film that uses no
+references at all.
 
 **Several roles may name the same `file`** (sc-24024) — one photograph holding two people is one
 image with two subjects in it. Then each sharing role must carry a `locator`, the phrase that picks
