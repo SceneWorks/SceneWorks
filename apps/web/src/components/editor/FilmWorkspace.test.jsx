@@ -31,7 +31,7 @@ function draft(overrides = {}) {
     structuredBrief: { synopsis: "", styleNotes: "", targetTotalSeconds: 30, beats: [], dialogue: [] },
     planning: { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false },
     productionPlan: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: "film_1",
       version: 1,
       title: "First film",
@@ -41,7 +41,7 @@ function draft(overrides = {}) {
       sound: {},
       shots: [{
         id: "SH010", beat: "Opening shot", framing: "wide", prompt: "",
-        targetDurationSeconds: 5.1667, startState: "Opening state", endState: "Closing state",
+        targetDurationSeconds: 5.1667, startState: "Opening state", endState: "Closing state", audio: "",
         conditioning: { mode: "text_to_video", referenceRoles: [] }, continuityRoles: [],
       }],
     },
@@ -857,6 +857,11 @@ describe("FilmWorkspace", () => {
     expect(savedBody.reviewPlan.shots.OPENING).toEqual(original);
     expect(savedBody.reviewPlan.shots.SH010).not.toEqual(original);
     const addedId = savedBody.productionPlan.shots[1].id;
+    // sc-24026: plan schema 3 requires `audio` on every shot, and the PUT decodes into a Rust
+    // `Shot` where it has no default. A newly added shot must therefore carry the key — blank, so
+    // the server answers with the finding that names the shot rather than an anonymous decode
+    // error the workspace cannot attribute to anything.
+    expect(savedBody.productionPlan.shots[1].audio).toBe("");
     expect(savedBody.reviewPlan.shots[addedId].questions).toHaveLength(1);
     expect(savedBody.reviewPlan.shots[addedId].questions[0].ask).toBe(container.querySelector(`textarea[aria-label="${addedId} review question 1"]`).value);
   });

@@ -11,6 +11,7 @@ fn located_options(harness: &Harness) -> (String, String, RunOptions) {
     let mut draft = FilmDraft::manual_one_shot(&project.id, draft_id, "Action failures");
     draft.production_plan.shots[0].beat = "Courier enters".to_owned();
     draft.production_plan.shots[0].prompt = "A courier enters a quiet workshop.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     harness
         .state
         .project_store

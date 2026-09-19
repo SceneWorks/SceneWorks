@@ -1833,7 +1833,7 @@ mod tests {
             "shots": [{
                 "id": "SH010", "beatId": "arrival",
                 "beat": "The courier arrives at the door.", "framing": "wide",
-                "prompt": "p", "targetDurationSeconds": 5.0, "startState": "a", "endState": "b",
+                "prompt": "p", "targetDurationSeconds": 5.0, "startState": "a", "endState": "b", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" }
             }]
         }))

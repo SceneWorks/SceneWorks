@@ -36,7 +36,7 @@ use crate::dataset_quality::{
 };
 use crate::film_compile::{production_plan_sha256, CompiledPlan};
 use crate::film_plan::{
-    validate_reference_pack, ReferenceEntry, ReferencePack, REFERENCE_KINDS,
+    validate_reference_pack, ReferenceEntry, ReferencePack, PLAN_SCHEMA_VERSION, REFERENCE_KINDS,
     REFERENCE_PACK_SCHEMA_VERSION,
 };
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
@@ -866,7 +866,7 @@ impl ProjectStore {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let draft = Self::carry_film_draft_forward(serde_json::from_value(read_json(&path)?)?);
+            let draft = Self::carry_film_draft_forward(read_json(&path)?)?;
             if draft.project_id != project_id {
                 return Err(ProjectStoreError::BadRequest(format!(
                     "film draft {} belongs to a different project",
@@ -923,26 +923,86 @@ impl ProjectStore {
         Ok(draft)
     }
 
-    /// Carry a persisted [`FilmDraft`] forward to the schema versions this build writes.
+    /// Carry a persisted film draft forward to the schema versions this build reads, then decode
+    /// it (sc-24024, sc-24026).
     ///
     /// THE one place a draft read from `films/drafts/<id>.json` is brought up to date, called from
     /// every read path so they cannot drift, and the place a later schema bump extends rather than
     /// adding a fourth copy of the same idea.
     ///
-    /// A draft is project-store STATE, not a document a person authors: it is deserialized
-    /// verbatim and the workspace offers no way to edit a `schemaVersion` key inside it. When the
-    /// reference pack went to version 2 (sc-24024), every draft already on disk still said
-    /// version 1, and `validate_reference_pack` — which `add_film_reference`, `add_film_sound` and
-    /// the pack PUT all run — refuses a pack by version. Without this stamp, every one of those
-    /// would start failing on every pre-existing draft with a refusal telling the user to make an
-    /// edit they cannot make.
+    /// It takes the raw [`Value`] rather than a decoded [`FilmDraft`] because part of the
+    /// carry-forward has to happen BEFORE serde sees it. Plan schema version 3 renamed the optional
+    /// `shots[].sound` to a required `shots[].audio`, and [`crate::film_plan::Shot`] is
+    /// `deny_unknown_fields`: a draft written by an earlier build has both faults at once and each
+    /// is a hard decode error, so no helper that accepts a `FilmDraft` can ever run on one. The
+    /// reference-pack stamp is applied after the decode, on the typed value, because a version 1
+    /// pack decodes perfectly well.
     ///
-    /// Stamping is honest here and only here: version 2 only ADDS the optional `locator`, so a
-    /// version 1 draft pack IS a structurally valid version 2 pack. Pack DOCUMENTS on disk stay
-    /// refused by version — those have an author who can edit them, and E6 governs them.
-    fn carry_film_draft_forward(mut draft: FilmDraft) -> FilmDraft {
+    /// A draft is project-store STATE, not a document a person authors: it is deserialized verbatim
+    /// and the workspace offers no way to edit a `schemaVersion` key inside it. Left alone, a
+    /// pre-existing draft breaks in two ways at once. The plan faults above make a single stale
+    /// draft 500 its own GET — and, because `list_film_drafts` propagates, take the whole Films
+    /// list for that project down with it, so the user cannot even reach the draft to repair it.
+    /// And when the reference pack went to version 2 (sc-24024), every draft on disk still said
+    /// version 1, while `validate_reference_pack` — which `add_film_reference`, `add_film_sound`
+    /// and the pack PUT all run — refuses a pack by version, so each of those would fail on every
+    /// pre-existing draft with a refusal telling the user to make an edit they cannot make.
+    ///
+    /// Carrying forward is honest here and only here, and for a different reason per field. Pack
+    /// version 2 only ADDS the optional `locator`, so a version 1 draft pack IS a structurally
+    /// valid version 2 pack. The shot's old `sound` prose moves into `audio` when it said something
+    /// and blanks when it did not, which is the truth in both cases: the version 2 field meant the
+    /// same thing, and a draft that never had one has an author who has not yet said what the shot
+    /// sounds like. Blank is not silently accepted — it surfaces as the shot-named `audio` finding,
+    /// in the Audio field the workspace now shows, which is exactly where it gets fixed.
+    ///
+    /// DOCUMENTS on disk stay refused by version, both kinds: a pack document under E6, and a plan
+    /// document in [`crate::film_plan::parse_plan_document`]. Those have an author who can edit
+    /// them.
+    fn carry_film_draft_forward(mut stored: Value) -> ProjectStoreResult<FilmDraft> {
+        Self::carry_film_draft_plan_forward(&mut stored);
+        let mut draft: FilmDraft = serde_json::from_value(stored)?;
         draft.reference_pack.schema_version = REFERENCE_PACK_SCHEMA_VERSION;
-        draft
+        Ok(draft)
+    }
+
+    /// The JSON-level half of [`Self::carry_film_draft_forward`]: the production-plan fixups that
+    /// must land before the typed decode, because each of them is a hard serde error (sc-24026).
+    fn carry_film_draft_plan_forward(stored: &mut Value) {
+        let Some(plan) = stored
+            .get_mut("productionPlan")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        if let Some(shots) = plan.get_mut("shots").and_then(Value::as_array_mut) {
+            for shot in shots {
+                let Some(shot) = shot.as_object_mut() else {
+                    continue;
+                };
+                // Removed either way: version 3 has no `sound` on a shot, and leaving the key would
+                // be an unknown field whichever way `audio` resolved.
+                let carried = shot.remove("sound");
+                if !shot.contains_key("audio") {
+                    let audio = carried
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_default()
+                        .to_owned();
+                    shot.insert("audio".to_owned(), Value::String(audio));
+                }
+            }
+        }
+        // Stamped last, and only from a version this carry-forward actually handles: an unknown
+        // FUTURE version must stay unstamped so it is still reported rather than claimed.
+        if plan
+            .get("schemaVersion")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version == 1 || version == 2)
+        {
+            plan.insert("schemaVersion".to_owned(), Value::from(PLAN_SCHEMA_VERSION));
+        }
     }
 
     pub fn get_film_draft(
@@ -964,7 +1024,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft = Self::carry_film_draft_forward(serde_json::from_value(read_json(&path)?)?);
+        let draft = Self::carry_film_draft_forward(read_json(&path)?)?;
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -993,7 +1053,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let current: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+        let current = Self::carry_film_draft_forward(read_json(&path)?)?;
         if draft.revision != current.revision {
             return Err(ProjectStoreError::BadRequest(format!(
                 "Film draft revision conflict: expected {}, got {}",
@@ -1070,8 +1130,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let mut draft =
-            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
+        let mut draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1147,8 +1206,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft =
-            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
+        let draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1222,8 +1280,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let mut draft =
-            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
+        let mut draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1336,8 +1393,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft =
-            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
+        let draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1468,7 +1524,7 @@ impl ProjectStore {
                 "Film run authoring snapshot path does not match its run directory".to_owned(),
             ));
         }
-        let snapshot: FilmDraft = serde_json::from_value(read_json(&files.authoring_snapshot)?)?;
+        let snapshot = Self::carry_film_draft_forward(read_json(&files.authoring_snapshot)?)?;
         if snapshot.id != locator.draft_id
             || snapshot.project_id != locator.project_id
             || snapshot.revision != locator.draft_revision
@@ -14885,6 +14941,117 @@ mod tests {
             );
             assert_eq!(read_json(&files.review_plan).unwrap(), newer.review_plan);
         });
+    }
+
+    /// sc-24026. A draft written before plan schema version 3 has `shots[].sound` and no
+    /// `shots[].audio`. `Shot` is `deny_unknown_fields` and `audio` has no default, so BOTH faults
+    /// are hard serde errors: without the read carry-forward every one of these calls is a 500, and
+    /// because `list_film_drafts` propagates, one stale draft takes the whole Films list with it —
+    /// the user cannot even reach the draft to repair it.
+    #[test]
+    fn a_draft_stored_before_the_audio_sentence_opens_lists_and_saves_with_its_sound_carried_over()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Stale draft")
+            .expect("project creates");
+        let created = store
+            .create_film_draft(&project.id, "film_stale", "Stale")
+            .expect("draft creates");
+        let draft_path = store
+            .find_project_path(&project.id)
+            .expect("project path")
+            .join("films/drafts")
+            .join("film_stale.json");
+
+        // Rewrite the stored file as the previous build wrote it: plan schema 2, the shot's
+        // sentence under `sound`, no `audio` key at all. Shot 0 said something about sound; a
+        // second shot never did, which is the other half of the migration.
+        let mut stored = read_json(&draft_path).expect("stored draft reads");
+        {
+            let plan = stored
+                .get_mut("productionPlan")
+                .and_then(Value::as_object_mut)
+                .expect("plan object");
+            plan.insert("schemaVersion".to_owned(), Value::from(2));
+            let shots = plan
+                .get_mut("shots")
+                .and_then(Value::as_array_mut)
+                .expect("shots array");
+            let mut silent = shots[0].clone();
+            let first = shots[0].as_object_mut().expect("shot object");
+            first.remove("audio");
+            first.insert(
+                "sound".to_owned(),
+                Value::from("Room tone and a door latch. No music."),
+            );
+            let second = silent.as_object_mut().expect("shot object");
+            second.insert("id".to_owned(), Value::from("SH020"));
+            second.remove("audio");
+            shots.push(silent);
+        }
+        write_json(&draft_path, &stored).expect("stale draft writes");
+
+        for opened in [
+            store
+                .get_film_draft(&project.id, "film_stale")
+                .expect("a stale draft still opens"),
+            store
+                .list_film_drafts(&project.id)
+                .expect("a stale draft does not take the project's film list down")
+                .into_iter()
+                .find(|draft| draft.id == "film_stale")
+                .expect("the stale draft is listed"),
+        ] {
+            assert_eq!(
+                opened.production_plan.schema_version,
+                crate::film_plan::PLAN_SCHEMA_VERSION
+            );
+            assert_eq!(
+                opened.production_plan.shots[0].audio, "Room tone and a door latch. No music.",
+                "the version 2 sentence is carried into the field that dispatches it"
+            );
+            // The shot that never said anything comes back blank rather than inventing prose...
+            assert_eq!(opened.production_plan.shots[1].audio, "");
+        }
+
+        // ...and blank is not silently accepted: it surfaces as the shot-named finding the
+        // workspace's Audio field is there to clear.
+        let opened = store
+            .get_film_draft(&project.id, "film_stale")
+            .expect("a stale draft still opens");
+        let findings = crate::film_plan::validate_plan_structure(&opened.production_plan);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.shot_id.as_deref() == Some("SH020")
+                    && finding.field == "audio"),
+            "{findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "schemaVersion"),
+            "the carried-forward plan is not also refused by version: {findings:?}"
+        );
+
+        // The PUT the user makes after fixing it reads the stored document back to check the
+        // revision, so it goes through the same carry-forward.
+        let mut edited = opened;
+        edited.production_plan.shots[1].audio = "Silence. No audio.".to_owned();
+        let saved = store
+            .save_film_draft(&project.id, "film_stale", edited)
+            .expect("the repaired draft saves");
+        assert_eq!(saved.revision, created.revision + 1);
+        assert_eq!(saved.production_plan.shots[1].audio, "Silence. No audio.");
+        assert!(
+            !read_json(&draft_path)
+                .expect("saved draft reads")
+                .to_string()
+                .contains("\"sound\":\"Room tone"),
+            "the version 2 key is gone from the persisted document, not merely from the decode"
+        );
     }
 
     #[test]

@@ -81,7 +81,9 @@ none makes no claim. A beat that requires a role the pack does not approve is re
 first decode, since no draft could satisfy it.
 
 A plan carries stable shot ids, narrative beat, framing, prompt, target duration, intended start/end
-state, dialogue/sound intent and the conditioning each shot wants, expressed as **reference roles**
+state, a **required** `audio` sentence (sc-24026 — what the shot sounds like, or that it is silent;
+the compiler appends it to the dispatched prompt as `Audio: …`), dialogue intent and the
+conditioning each shot wants, expressed as **reference roles**
 (`firstFrameRole`, `lastFrameRole`, `referenceRoles`). The reference pack maps roles to approved
 image files; it is a separate versioned document, so approved references stay addressable
 independently of any generated take. Every file here tolerates JSONC comments and refuses unknown

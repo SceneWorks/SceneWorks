@@ -158,6 +158,7 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     draft["title"] = json!("Workshop delivery");
     draft["productionPlan"]["shots"][0]["prompt"] =
         json!("A courier enters a workshop carrying a red parcel.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, saved) = request(
         app.clone(),
         "PUT",
@@ -417,6 +418,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
 
     referenced = imported_draft;
     referenced["productionPlan"]["shots"][0]["prompt"] = json!("Courier close-up");
+    referenced["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     referenced["productionPlan"]["shots"][0]["conditioning"] = json!({
         "mode": "reference_to_video",
         "referenceRoles": ["courier"]
@@ -424,6 +426,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
     let mut plain_shot = referenced["productionPlan"]["shots"][0].clone();
     plain_shot["id"] = json!("SH020");
     plain_shot["prompt"] = json!("An empty workshop establishing shot");
+    plain_shot["audio"] = json!("Room tone. No music.");
     plain_shot["conditioning"] = json!({"mode": "text_to_video", "referenceRoles": []});
     plain_shot["continuityRoles"] = json!([]);
     referenced["productionPlan"]["shots"]
@@ -574,6 +577,7 @@ async fn film_sound_route_stages_prerecorded_audio_and_pins_it_with_the_run() {
         .unwrap()
         .to_owned();
     staged["productionPlan"]["shots"][0]["prompt"] = json!("A courier speaks.");
+    staged["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     staged["productionPlan"]["shots"][0]["dialogue"] = json!("The parcel is here.");
     staged["productionPlan"]["shots"][0]["dialogueClip"] = json!({
         "role": "courier_line", "offsetSeconds": 0.25, "sourceInSeconds": 0,
@@ -639,6 +643,7 @@ async fn unapproved_reference_binding_is_a_named_finding() {
     )
     .await;
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Hero enters");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     draft["productionPlan"]["shots"][0]["conditioning"] =
         json!({"mode": "reference_to_video", "referenceRoles": ["hero"]});
     let (_, saved) = request(
@@ -703,6 +708,7 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
         "refinePrompts": false
     });
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Manual prompt stays intact.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, saved) = request(
         app.clone(),
         "PUT",
@@ -954,6 +960,7 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     let authored_review = draft["reviewPlan"]["shots"]["SH010"].clone();
     let mut candidate = draft["productionPlan"].clone();
     candidate["shots"][0]["prompt"] = json!("Generated candidate prompt.");
+    candidate["shots"][0]["audio"] = json!("Room tone. No music.");
     let mut added_shot = candidate["shots"][0].clone();
     added_shot["id"] = json!("SH020");
     candidate["shots"].as_array_mut().unwrap().push(added_shot);
@@ -1102,6 +1109,7 @@ async fn film_render_refuses_an_authorized_revision_changed_by_another_session()
     let draft_id = draft["id"].as_str().unwrap().to_owned();
     let authorized_revision = draft["revision"].clone();
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Another session changed the prompt");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, _) = request(
         app.clone(),
         "PUT",
@@ -1158,6 +1166,7 @@ async fn film_render_store_pin_rechecks_revision_after_route_validation() {
     let draft_id = draft["id"].as_str().unwrap().to_owned();
     draft["productionPlan"]["shots"][0]["prompt"] =
         json!("A courier walks across a quiet workshop.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (_, saved) = request(
         app.clone(),
         "PUT",
@@ -1184,6 +1193,7 @@ async fn film_render_store_pin_rechecks_revision_after_route_validation() {
         .unwrap();
     let mut concurrent = saved;
     concurrent["productionPlan"]["shots"][0]["prompt"] = json!("Changed after route validation");
+    concurrent["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, _) = request(
         app.clone(),
         "PUT",

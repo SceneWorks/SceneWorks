@@ -3934,7 +3934,10 @@ impl Session<'_> {
                     height,
                     fps: request.fps,
                     dialogue: shot.dialogue.clone(),
-                    sound: shot.sound.clone(),
+                    // The record keeps its own v2 field name while the plan's moved to `audio`
+                    // (sc-24026): renaming it would refuse every in-flight run's resume for a
+                    // spelling, and the value it records is the same sentence it always was.
+                    sound: Some(shot.audio.clone()),
                     // The policy the export will obey for this shot — its own override, or the
                     // run-level default it inherits (sc-22712). Resolved here, at the same moment
                     // the rest of the intended state is, so the record says what was intended
@@ -7086,7 +7089,7 @@ mod unit_tests {
             "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
             "shots": [{
                 "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
-                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "reference_to_video", "referenceRoles": roles }
             }]
         }))
@@ -7114,7 +7117,7 @@ mod unit_tests {
             "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
             "shots": [{
                 "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
-                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" }
             }]
         }))

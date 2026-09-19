@@ -175,6 +175,7 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
     draft.production_plan.shots[0].prompt =
         "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     harness
         .state
         .project_store
@@ -329,6 +330,7 @@ async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() 
     draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
     draft.production_plan.shots[0].prompt =
         "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     harness
         .state
         .project_store
@@ -420,6 +422,7 @@ async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     let harness = Harness::start(true, vec![]).await;
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-draft", "Manual film");
     draft.production_plan.shots[0].prompt = "a courier crosses a quiet workshop".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     draft.production_plan.shots[0].beat = "The courier crosses the workshop".to_owned();
     let document_dir = harness.temp_dir.path().join("reference-free-film");
     std::fs::create_dir_all(&document_dir).expect("document directory");
@@ -736,6 +739,7 @@ async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_com
     );
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-preflight", "Preflight");
     draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     let selected = vec!["SH010".to_owned()];
 
     let ready = film_harness::preflight_documents(
@@ -760,6 +764,7 @@ async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_com
     let compiled = ready.compiled.unwrap();
     draft.production_plan.shots[0].prompt =
         "The edited prompt must invalidate the compile.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     let stale = film_harness::preflight_documents(
         &transport,
         &draft.production_plan,
@@ -2365,6 +2370,7 @@ impl Harness {
                 "targetDurationSeconds": 5.1667,
                 "startState": "before",
                 "endState": "after",
+                "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" },
                 // Every shot binds at least one approved role (sc-22713): the pack below approves
                 // exactly one, and these shots are about the workshop.
@@ -2373,7 +2379,7 @@ impl Harness {
             })
         };
         let plan = json!({
-            "schemaVersion": 2,
+            "schemaVersion": sceneworks_core::film_plan::PLAN_SCHEMA_VERSION,
             "id": "budget-fixture",
             "version": 1,
             "title": "Budget fixture",
@@ -3140,11 +3146,45 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
         .iter()
         .find(|reference| reference.role == "courier")
         .expect("courier imported");
+    // sc-24026, on the DISPATCH the run actually made: the plan the run read, so the expected tail
+    // is derived from the same document the compile was driven from rather than restated here.
+    let dispatched_plan = sceneworks_core::film_plan::read_plan_file(&options.plan_path)
+        .expect("the run's plan re-reads");
+
     for shot in &record.shots {
         let attempt = shot.attempts.last().expect("an attempt");
         let job_id = attempt.job_id.clone().expect("job id");
         let (status, job) = request_job(&harness, &job_id).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+
+        // EVERY shot, on BOTH partitions: the body that came off the route ends with this shot's
+        // own `Audio:` sentence. Asserted on the job payload rather than on `compiled.json`
+        // because the document is only a promise — this is the text the engine was handed.
+        let planned = dispatched_plan
+            .shots
+            .iter()
+            .find(|planned| planned.id == shot.shot_id)
+            .expect("every dispatched shot is a shot of the plan");
+        let prompt = job["payload"]["prompt"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+        let audio = format!(
+            "Audio: {}",
+            sceneworks_core::film_compile::normalized_description(&planned.audio)
+        );
+        let tail = match planned.dialogue_clip {
+            Some(_) => format!(
+                "{audio} {}",
+                sceneworks_core::film_compile::NO_SPEECH_SENTENCE
+            ),
+            None => audio,
+        };
+        assert!(
+            prompt.ends_with(&tail),
+            "{}: the dispatched prompt must end with {tail:?}: {prompt:?}",
+            shot.shot_id
+        );
+
         match shot.shot_id.as_str() {
             "SH010" => {
                 assert_eq!(job["payload"]["model"], "minimax_h3_ref");
@@ -7393,7 +7433,7 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
         "targetDurationSeconds": 5.1667,
         "startState": "the workshop before this shot",
         "endState": "the workshop after this shot",
-        "sound": "room tone, distant birds",
+        "audio": "Room tone, distant birds. No music.",
         "conditioning": { "mode": "text_to_video" },
         "seed": 22713,
         "continuityRoles": beat_roles(beat_id)
@@ -8254,9 +8294,21 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     .await
     .expect("the edited plan recompiles");
     let first = &artifacts.compiled.requests[0];
-    assert_eq!(
-        first.prompt,
-        "A hand-written prompt the planner never wrote."
+    // Verbatim, with the compiler's own audio sentence trailing it (sc-24026) — the hand-written
+    // text itself is untouched, which is what `--no-refine` promises.
+    assert!(
+        first
+            .prompt
+            .starts_with("A hand-written prompt the planner never wrote."),
+        "{}",
+        first.prompt
+    );
+    assert!(
+        first
+            .prompt
+            .ends_with("Audio: Room tone, distant birds. No music."),
+        "{}",
+        first.prompt
     );
     assert_eq!(first.duration_seconds, 8.0);
     film_harness::validate(Some(&harness.transport), &run_options)
@@ -10036,6 +10088,7 @@ async fn r15_api_accepted_resume_replace_and_repair_preserve_cancel_during_admis
         let mut draft = FilmDraft::manual_one_shot(&project.id, "draft_r15", "R15");
         draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
         draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+        draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
         harness
             .state
             .project_store
