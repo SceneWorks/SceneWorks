@@ -240,17 +240,29 @@ not change; what changed is that a repair became something a copy-only model can
 
 `film-harness compile` writes `compiled.json`: one request per shot with mode, prompt, duration,
 fps, geometry, seed and reference bindings exactly as they will be dispatched.
-`COMPILED_PLAN_SCHEMA_VERSION` is 3 (`crates/sceneworks-core/src/film_compile.rs:42`); a document at
-any earlier schema version — v1 or v2 — is refused by version rather than read
-(`crates/sceneworks-core/src/film_compile.rs:626`), because a stale document read under this build
-would have its derived fields defaulted and then be blamed as hand-edited (`:37`–`:41`). The remedy
-either way is to recompile.
+`COMPILED_PLAN_SCHEMA_VERSION` is 4 (`crates/sceneworks-core/src/film_compile.rs`,
+`COMPILED_PLAN_SCHEMA_VERSION`); a document at any earlier schema version — v1, v2 or v3 — is
+refused by version rather than read (`CompiledPlan::staleness_findings`), because a stale document
+read under this build would have its derived fields defaulted and then be blamed as hand-edited.
+The remedy either way is to recompile.
 
 Per shot it carries the resolved partition and its `partitionReason`
 (`crates/sceneworks-core/src/film_compile.rs:381`, `:387`); `referenceAssetIds` in the plan's role
 order, written only when the list is non-empty (`:602`); the resolved geometry; the LoRA ids resolved
 against **that shot's** partition (`:351`); `effectiveSteps` (`:375`); and
 `referenceImageShortEdge`, written only for a reference-partition request (`:342`).
+
+A reference shot's prompt also carries text the **compiler** wrote. MiniMax-H3 labels each supplied
+reference `<Picture 1>`, `<Picture 2>`, … ahead of the prompt, in supply order, and the model's own
+prompt guide is explicit that a reference needs a job in the text. So the compile leads such a
+prompt with one plain binding sentence per bound role — "The courier is the person shown in
+`<Picture 1>`." — built from the pack entry's kind and its own description. Two rules make it
+trustworthy: the sentences are written **after** the `prompt_refine` rewrite, so no language model
+can paraphrase a label the engine applies positionally; and the `<Picture N>` and the position of
+that role's asset in `referenceAssetIds` both come from `shot_reference_pictures`, the one function
+that owns the reference order, called by the compiler and by the dispatcher alike. The inserted text
+is recorded per kind in the request's `insertedText`, separately from `authoredPrompt`, and is a
+derived field — a hand-edited one is refused by `conformance_findings` like any other.
 
 Two properties earn it its own file. It is **what the engine sees**: each prompt is run through the
 model's own `prompt_refine` rewrite with `modelId` set to the plan's model, and the authored text is

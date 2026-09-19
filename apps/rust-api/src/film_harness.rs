@@ -48,8 +48,8 @@ use std::time::Duration;
 
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::film_compile::{
-    compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
-    PlannerExecutionRecord, ResolvedConditioning,
+    self, compile_plan, CompileInputs, CompiledPlan, CompiledRequest, DispatchContext,
+    PlannerExecutionRecord, ReferencePicture, ResolvedConditioning,
 };
 use sceneworks_core::film_plan::{
     self, AttemptRecord, ConditioningAssets, ExportPending, ExportRecord, GeneratedAudio,
@@ -1725,7 +1725,7 @@ fn compiled_for_run(
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
             let mut findings = compiled.staleness_findings(plan, plan_sha256);
             if findings.is_empty() {
-                findings = compiled.conformance_findings(plan, entries, lane);
+                findings = compiled.conformance_findings(plan, pack, entries, lane);
             }
             if findings.is_empty() {
                 Ok(compiled)
@@ -2205,7 +2205,8 @@ pub async fn validate(
         if findings.is_empty() {
             if let (Some((compiled, path)), Some(entries)) = (compiled.as_ref(), catalog.entries())
             {
-                let mut conformance = compiled.conformance_findings(&plan, &entries, facts.lane());
+                let mut conformance =
+                    compiled.conformance_findings(&plan, &pack, &entries, facts.lane());
                 if !conformance.is_empty() {
                     findings.push(compiled_document_header(path));
                     findings.append(&mut conformance);
@@ -3816,11 +3817,18 @@ impl Session<'_> {
                     .last_frame_role
                     .as_ref()
                     .and_then(|role| self.role_assets.get(role).cloned()),
-                reference_asset_ids: request
-                    .reference_roles
-                    .iter()
-                    .filter_map(|role| self.role_assets.get(role).cloned())
-                    .collect(),
+                // The dispatched order comes from `shot_reference_pictures` — the SAME function the
+                // compiler numbered this request's `<Picture N>` with (sc-24023) — so the position
+                // an asset takes here is the number the prompt already promised for it. The record
+                // is what `work_attempt` dispatches from, so this is the list the engine sees.
+                reference_asset_ids: film_compile::shot_reference_pictures(
+                    &request.reference_roles,
+                    &self.pack,
+                )
+                .iter()
+                .filter_map(ReferencePicture::dispatch_role)
+                .filter_map(|role| self.role_assets.get(role).cloned())
+                .collect(),
             };
             ordered.push(ShotRunRecord {
                 shot_id: shot.id.clone(),
@@ -4050,6 +4058,7 @@ impl Session<'_> {
                     attempt: attempt_number,
                     tier: self.plan.model.tier.as_deref(),
                     idempotency_key: Some(&key),
+                    pack: &self.pack,
                     role_assets: &self.role_assets,
                 },
                 &ResolvedConditioning {

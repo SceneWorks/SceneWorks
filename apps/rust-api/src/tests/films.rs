@@ -963,7 +963,10 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
         .join(&draft_id);
     std::fs::create_dir_all(&planning_root).unwrap();
     let mut compiled = json!({
-        "schemaVersion": 3,
+        // The version this build reads, not a literal: a hand-written compiled fixture pinned to a
+        // number is refused BY VERSION after the next schema bump, and the symptom is this test
+        // failing on an unrelated assertion about the applied plan's revision.
+        "schemaVersion": sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
         "planId": draft_id,
         "planVersion": 1,
         "planSha256": "synthetic-candidate-fixture",
