@@ -37,6 +37,7 @@ use crate::dataset_quality::{
 use crate::film_compile::{production_plan_sha256, CompiledPlan};
 use crate::film_plan::{
     validate_reference_pack, ReferenceEntry, ReferencePack, PLAN_SCHEMA_VERSION, REFERENCE_KINDS,
+    REFERENCE_PACK_SCHEMA_VERSION,
 };
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
@@ -443,6 +444,12 @@ pub struct FilmReferenceInput {
     pub kind: String,
     #[serde(default)]
     pub description: String,
+    /// Which subject in the image this role names, when the same library image backs several roles
+    /// (sc-24024). Adding one asset twice under two roles gives both the same
+    /// `references/<assetId>.<ext>` file, which is exactly the shared-file case the pack now
+    /// supports — and which [`validate_reference_pack`] refuses without a locator on each.
+    #[serde(default)]
+    pub locator: Option<String>,
     #[serde(default)]
     pub approved: bool,
 }
@@ -917,38 +924,50 @@ impl ProjectStore {
     }
 
     /// Carry a persisted film draft forward to the schema versions this build reads, then decode
-    /// it (sc-24026).
+    /// it (sc-24024, sc-24026).
     ///
     /// THE one place a draft read from `films/drafts/<id>.json` is brought up to date, called from
     /// every read path so they cannot drift, and the place a later schema bump extends rather than
     /// adding a fourth copy of the same idea.
     ///
-    /// It takes the raw [`Value`] rather than a decoded [`FilmDraft`] because the carry-forward has
-    /// to happen BEFORE serde sees it. Plan schema version 3 renamed the optional `shots[].sound`
-    /// to a required `shots[].audio`, and [`crate::film_plan::Shot`] is `deny_unknown_fields`: a
-    /// draft written by an earlier build has both faults at once and each is a hard decode error,
-    /// so no helper that accepts a `FilmDraft` can ever run on one.
+    /// It takes the raw [`Value`] rather than a decoded [`FilmDraft`] because part of the
+    /// carry-forward has to happen BEFORE serde sees it. Plan schema version 3 renamed the optional
+    /// `shots[].sound` to a required `shots[].audio`, and [`crate::film_plan::Shot`] is
+    /// `deny_unknown_fields`: a draft written by an earlier build has both faults at once and each
+    /// is a hard decode error, so no helper that accepts a `FilmDraft` can ever run on one. The
+    /// reference-pack stamp is applied after the decode, on the typed value, because a version 1
+    /// pack decodes perfectly well.
     ///
     /// A draft is project-store STATE, not a document a person authors: it is deserialized verbatim
-    /// and the workspace offers no way to edit a `schemaVersion` key inside it. Left alone, a single
-    /// stale draft would 500 its own GET — and, because `list_film_drafts` propagates, take the
-    /// whole Films list for that project down with it, so the user could not even reach the draft
-    /// to repair it.
+    /// and the workspace offers no way to edit a `schemaVersion` key inside it. Left alone, a
+    /// pre-existing draft breaks in two ways at once. The plan faults above make a single stale
+    /// draft 500 its own GET — and, because `list_film_drafts` propagates, take the whole Films
+    /// list for that project down with it, so the user cannot even reach the draft to repair it.
+    /// And when the reference pack went to version 2 (sc-24024), every draft on disk still said
+    /// version 1, while `validate_reference_pack` — which `add_film_reference`, `add_film_sound`
+    /// and the pack PUT all run — refuses a pack by version, so each of those would fail on every
+    /// pre-existing draft with a refusal telling the user to make an edit they cannot make.
     ///
-    /// Carrying forward is honest here and only here. The shot's old `sound` prose is moved into
-    /// `audio` when it said something and blanked when it did not, which is the truth in both
-    /// cases: the version 2 field meant the same thing, and a draft that never had one has an
-    /// author who has not yet said what the shot sounds like. Blank is not silently accepted — it
-    /// surfaces as the shot-named `audio` finding, in the Audio field the workspace now shows,
-    /// which is exactly where it gets fixed. Plan DOCUMENTS stay refused by version
-    /// ([`crate::film_plan::parse_plan_document`]): those have an author who can edit them.
+    /// Carrying forward is honest here and only here, and for a different reason per field. Pack
+    /// version 2 only ADDS the optional `locator`, so a version 1 draft pack IS a structurally
+    /// valid version 2 pack. The shot's old `sound` prose moves into `audio` when it said something
+    /// and blanks when it did not, which is the truth in both cases: the version 2 field meant the
+    /// same thing, and a draft that never had one has an author who has not yet said what the shot
+    /// sounds like. Blank is not silently accepted — it surfaces as the shot-named `audio` finding,
+    /// in the Audio field the workspace now shows, which is exactly where it gets fixed.
+    ///
+    /// DOCUMENTS on disk stay refused by version, both kinds: a pack document under E6, and a plan
+    /// document in [`crate::film_plan::parse_plan_document`]. Those have an author who can edit
+    /// them.
     fn carry_film_draft_forward(mut stored: Value) -> ProjectStoreResult<FilmDraft> {
         Self::carry_film_draft_plan_forward(&mut stored);
-        Ok(serde_json::from_value(stored)?)
+        let mut draft: FilmDraft = serde_json::from_value(stored)?;
+        draft.reference_pack.schema_version = REFERENCE_PACK_SCHEMA_VERSION;
+        Ok(draft)
     }
 
-    /// The JSON-level half of [`Self::carry_film_draft_forward`]: the fixups that must land before
-    /// the typed decode.
+    /// The JSON-level half of [`Self::carry_film_draft_forward`]: the production-plan fixups that
+    /// must land before the typed decode, because each of them is a hard serde error (sc-24026).
     fn carry_film_draft_plan_forward(stored: &mut Value) {
         let Some(plan) = stored
             .get_mut("productionPlan")
@@ -1131,6 +1150,7 @@ impl ProjectStore {
             file: relative_file.clone(),
             source_asset_id: Some(input.asset_id.clone()),
             description: input.description,
+            locator: input.locator,
             approved: input.approved,
             generated: false,
             generation: None,
@@ -7481,11 +7501,12 @@ mod tests {
         is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
         read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
         write_json, AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput,
-        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY,
-        MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
-        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        CharacterLookInput, CharacterReferenceInput, FilmReferenceInput, ProjectStore,
+        ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -15151,6 +15172,83 @@ mod tests {
                 .expect("second snapshot reads"),
             Some(second)
         );
+    }
+
+    /// A draft persisted before the reference pack moved to version 2 keeps working (sc-24024).
+    ///
+    /// The pack version is a DOCUMENT contract; a draft is project-store state with no author and
+    /// no edit surface for a `schemaVersion` key, so every read carries it forward. Without that,
+    /// the first reference or sound added to any pre-existing draft — and every pack PUT from the
+    /// React editor — would fail with `BadRequest` naming a version the user cannot change.
+    #[test]
+    fn a_draft_persisted_at_reference_pack_version_1_still_accepts_a_reference() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Legacy pack")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_legacy_pack", "Legacy pack")
+            .expect("draft creates");
+
+        // Exactly what is on disk for every draft written before this commit.
+        let draft_path = store
+            .project_file(&project.id, "films/drafts/film_legacy_pack.json")
+            .expect("the draft document is readable")
+            .path;
+        let mut persisted = read_json(&draft_path).expect("draft reads");
+        persisted["referencePack"]["schemaVersion"] = json!(1);
+        write_json(&draft_path, &persisted).expect("version 1 draft writes");
+        assert_eq!(
+            read_json(&draft_path).unwrap()["referencePack"]["schemaVersion"],
+            json!(1),
+            "the fixture has to be a version 1 document on disk"
+        );
+
+        // The read path carries it forward rather than handing the validator a stale number.
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_legacy_pack")
+                .expect("legacy draft reads")
+                .reference_pack
+                .schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+
+        let source = temp.path().join("plate.png");
+        fs::write(&source, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "plate.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let updated = store
+            .add_film_reference(
+                &project.id,
+                "film_legacy_pack",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: asset["id"].as_str().expect("asset id").to_owned(),
+                    role: "workshop_plate".to_owned(),
+                    kind: "plate".to_owned(),
+                    description: "Wide plate.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect("a version 1 draft still accepts a reference");
+        assert_eq!(
+            updated.reference_pack.schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+        assert_eq!(updated.reference_pack.references.len(), 1);
     }
 
     #[test]

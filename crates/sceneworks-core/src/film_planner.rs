@@ -617,8 +617,10 @@ impl PlannerCapabilities {
                 .to_owned()
         } else {
             format!(
-                "Reference conditioning: at most {} reference roles on a reference_to_video shot, \
-                 and an approved reference pack is available — so USE IT. Every shot binds, in \
+                "Reference conditioning: at most {} reference IMAGES on a reference_to_video \
+                 shot — roles that share one image count once, so a shot may bind more roles than \
+                 that when some of them are subjects in the same photograph — and an approved \
+                 reference pack is available — so USE IT. Every shot binds, in \
                  referenceRoles, the approved roles that are on screen in it: start from the list \
                  its beat says it MUST show (copy that list whole — a beat may name two props and \
                  no location, so never swap one of its roles for a different kind) and add any \
@@ -1553,11 +1555,32 @@ pub fn build_planner_request(
             continue;
         }
         out.push_str(&format!(
-            "- {} ({}): {}\n",
+            "- {} ({}): {}",
             entry.role,
             entry.kind,
             entry.description.trim()
         ));
+        // A role sharing its image with another is named as sharing it (sc-24024). Binding both
+        // costs the shot ONE reference image rather than two, and the locator is how the planner
+        // knows the two roles are different subjects in one photograph rather than two pictures.
+        let sharing: Vec<&str> = pack
+            .references
+            .iter()
+            .filter(|other| other.approved && other.file == entry.file && other.role != entry.role)
+            .map(|other| other.role.as_str())
+            .collect();
+        if let Some(locator) = entry.locator() {
+            out.push_str(&format!(" It is {locator} in its image."));
+        }
+        if !sharing.is_empty() {
+            out.push_str(&format!(
+                " That image also shows {} — binding them together costs one reference image, \
+                 not {}.",
+                sharing.join(", "),
+                sharing.len() + 1
+            ));
+        }
+        out.push('\n');
     }
 
     out.push_str("\n# What this model can actually do\n\n");
@@ -1836,6 +1859,7 @@ mechanic's hand is withdrawn.\",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION;
     use serde_json::json;
 
     fn brief_json() -> Value {
@@ -1864,7 +1888,7 @@ mod tests {
 
     fn pack() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -1921,7 +1945,7 @@ mod tests {
     /// A pack that approves nothing — the user who supplied no references (E1).
     fn pack_without_references() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -2888,7 +2912,7 @@ mod tests {
         let caps = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
         assert_eq!(caps.max_reference_images, 3);
         let section = caps.as_prompt_section();
-        assert!(section.contains("at most 3 reference roles"), "{section}");
+        assert!(section.contains("at most 3 reference IMAGES"), "{section}");
         assert!(!section.contains("negativePrompt"), "{section}");
     }
 
@@ -2926,7 +2950,7 @@ mod tests {
         assert_eq!(widened.min_memory_gb, base.min_memory_gb);
 
         let section = widened.as_prompt_section();
-        assert!(section.contains("at most 9 reference roles"), "{section}");
+        assert!(section.contains("at most 9 reference IMAGES"), "{section}");
         assert!(
             section.contains("Every shot binds, in referenceRoles"),
             "{section}"
@@ -2965,7 +2989,7 @@ mod tests {
         let brief = brief();
         let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         let style_and_plate_only: ReferencePack = serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -3498,6 +3522,69 @@ mod tests {
             !plan_json_contract(&bare, &pack()).contains("NEVER listed in referenceRoles"),
             "{}",
             plan_json_contract(&bare, &pack())
+        );
+    }
+
+    /// The two sentences a shared image adds to the planner prompt, and the one it corrects
+    /// (sc-24024). The per-role line has to name the co-subjects and say that binding them costs
+    /// ONE image, and the envelope's cap has to agree with it — it bounds reference IMAGES, so a
+    /// cap of nine admits ten roles when two of them are one photograph. The first draft of this
+    /// prompt said "at most N reference roles" fifteen lines above the sentence that says roles
+    /// are cheaper than that, which is a contradiction the planner reads in one sitting.
+    #[test]
+    fn the_planner_prompt_says_a_shared_image_costs_one_and_the_cap_counts_images() {
+        let brief = brief();
+        let pack: ReferencePack = serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "pair-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/pair.png",
+                  "locator": "the woman on the left", "description": "Blue jacket." },
+                { "role": "recipient", "kind": "character", "file": "references/pair.png",
+                  "locator": "the man on the right", "description": "Grey apron." },
+                { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png",
+                  "description": "Red box." }
+            ]
+        }))
+        .expect("the pair pack parses");
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+
+        assert!(
+            request.contains(
+                "- courier (character): Blue jacket. It is the woman on the left in its image. \
+                 That image also shows recipient — binding them together costs one reference \
+                 image, not 2."
+            ),
+            "{request}"
+        );
+        assert!(
+            request.contains(
+                "- recipient (character): Grey apron. It is the man on the right in its image. \
+                 That image also shows courier — binding them together costs one reference \
+                 image, not 2."
+            ),
+            "{request}"
+        );
+        assert!(
+            request.contains("- red_parcel (prop): Red box.\n"),
+            "a role with a plate to itself is told nothing about sharing: {request}"
+        );
+
+        // The cap in the same prompt counts IMAGES, and says so where the planner reads it.
+        assert!(
+            request.contains(
+                "Reference conditioning: at most 9 reference IMAGES on a reference_to_video \
+                 shot — roles that share one image count once"
+            ),
+            "{request}"
+        );
+        assert!(
+            !request.contains("reference roles on a reference_to_video shot"),
+            "the superseded role-counting cap must not survive anywhere in the prompt: {request}"
         );
     }
 

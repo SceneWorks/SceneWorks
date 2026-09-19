@@ -14,16 +14,17 @@
 //! stories of this epic extend this file with their own acceptance tests.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sceneworks_core::film_compile::{
     normalized_description, DispatchContext, InsertedTextKind, NO_SPEECH_SENTENCE,
 };
 use sceneworks_core::film_plan::{ProductionPlan, ReferencePack, Shot};
+use serde_json::{json, Value};
 
 use crate::film_harness;
 use crate::film_planner;
-use crate::tests::film_harness::{planner_llm, planner_options, Harness, FIXTURE_DIR};
+use crate::tests::film_harness::{planner_llm, planner_options, request_job, Harness, FIXTURE_DIR};
 
 /// The role as a binding sentence names it, mirroring the compiler's own rule. Written out here
 /// rather than imported so the assertion below is an independent statement of the expected text.
@@ -421,5 +422,210 @@ fn a4_a_shot_without_audio_and_an_older_plan_version_are_both_refused() {
             }),
             "version {stale}: {findings:?}"
         );
+    }
+}
+
+/// `[courier, recipient]` — the phrase each of the two sharing roles picks itself out of the one
+/// plate with. Written here, not read off the pack under test, so the assertions below are an
+/// independent statement of what must reach the prompt.
+const LOCATORS: [&str; 2] = ["the woman on the left", "the man on the right"];
+
+/// The shipped pack with `recipient` re-pointed at the COURIER's plate — one photograph holding two
+/// people, which is what sc-24024 exists for. Written beside the copied plates so the relative
+/// `file` paths still resolve; `locators` decides whether the two sharing roles declare the
+/// locators the pack now requires of them.
+fn shared_file_pack(harness: &Harness, locators: bool) -> PathBuf {
+    let base = harness.fixture_pack_without_sound();
+    let text = std::fs::read_to_string(&base).expect("fixture pack");
+    let mut pack: Value = serde_json::from_str(&text).expect("fixture pack parses");
+    let entries = pack["references"]
+        .as_array_mut()
+        .expect("the pack declares references");
+    let courier_file = entries
+        .iter()
+        .find(|entry| entry["role"] == "courier")
+        .and_then(|entry| entry["file"].as_str())
+        .expect("the shipped pack approves a courier")
+        .to_owned();
+    for entry in entries.iter_mut() {
+        let role = entry["role"].as_str().unwrap_or_default().to_owned();
+        if role == "recipient" {
+            assert_ne!(
+                entry["file"].as_str(),
+                Some(courier_file.as_str()),
+                "the shipped pack must give the two characters their own plates, or this fixture \
+                 proves nothing"
+            );
+            entry["file"] = json!(courier_file);
+        }
+        if locators && matches!(role.as_str(), "courier" | "recipient") {
+            entry["locator"] = json!(LOCATORS[usize::from(role == "recipient")]);
+        }
+    }
+    let path = base.with_file_name(format!(
+        "references.shared{}.json",
+        if locators { "" } else { ".unlocated" }
+    ));
+    std::fs::write(&path, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+    path
+}
+
+/// The mixed fixture with SH010 binding the two sharing roles AND a role with a plate of its own.
+/// `workshop_location` stays LAST so the shared pair cannot pass by numbering everything 1.
+fn shared_file_plan(harness: &Harness) -> PathBuf {
+    harness.mixed_partition_plan(|plan| {
+        plan["shots"][0]["conditioning"]["referenceRoles"] =
+            json!(["courier", "recipient", "workshop_location"]);
+    })
+}
+
+/// A2 (epic 24017, sc-24024). Two roles on ONE file, each with a locator, dispatch ONE asset id
+/// under ONE `<Picture N>`, and both binding sentences carry their own locator.
+///
+/// Driven through a REAL run — `film_harness::run` against the in-process router — and asserted on
+/// the body `POST /api/v1/video/jobs` actually received, because what is at stake is an agreement
+/// between the prompt and the payload and nothing downstream can detect them disagreeing.
+#[tokio::test]
+async fn a2_two_roles_on_one_file_share_one_picture_and_one_dispatched_asset() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let pack_path = shared_file_pack(&harness, true);
+    let plan_path = shared_file_plan(&harness);
+
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(plan_path, pack_path, Some(&["SH010"])),
+    )
+    .await
+    .expect("the shared-file run completes");
+
+    // ONE asset for the shared plate: the two roles resolve to the same imported id, and the role
+    // with its own plate keeps its own.
+    let asset_of = |role: &str| -> String {
+        record
+            .references
+            .iter()
+            .find(|reference| reference.role == role)
+            .unwrap_or_else(|| panic!("{role} is imported"))
+            .asset_id
+            .clone()
+    };
+    let shared = asset_of("courier");
+    assert_eq!(
+        asset_of("recipient"),
+        shared,
+        "two roles on one file must resolve to ONE imported asset"
+    );
+    let location = asset_of("workshop_location");
+    assert_ne!(location, shared, "a role with its own file keeps its own");
+
+    let shot = record
+        .shots
+        .iter()
+        .find(|shot| shot.shot_id == "SH010")
+        .expect("SH010 ran");
+    let job_id = shot
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.job_id.clone())
+        .expect("SH010 dispatched a job");
+    let (status, job) = request_job(&harness, &job_id).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+
+    // THE dispatched list: three bound roles, TWO supplied images, in picture order.
+    assert_eq!(
+        job["payload"]["referenceAssetIds"],
+        json!([shared, location]),
+        "the shared plate is supplied once: {}",
+        job["payload"]
+    );
+    let prompt = job["payload"]["prompt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+
+    // Both sharing roles are bound to <Picture 1> — the 1-based position of their ONE asset in the
+    // payload above — and each says WHICH subject in it it is.
+    for (role, locator) in [("courier", LOCATORS[0]), ("recipient", LOCATORS[1])] {
+        let sentence = format!("The {role} is {locator} in <Picture 1>.");
+        assert!(
+            prompt.contains(&sentence),
+            "{sentence:?} must lead the dispatched prompt: {prompt:?}"
+        );
+    }
+    // And the role with its own file is <Picture 2>: the shared pair did not consume two numbers,
+    // and it keeps the wording a reference with an image to itself has always had.
+    assert!(
+        prompt.contains("The workshop location is the place shown in <Picture 2>."),
+        "a role with its own file keeps the unlocated wording at its own number: {prompt:?}"
+    );
+    assert!(
+        !prompt.contains("<Picture 3>"),
+        "three roles over two files name two pictures: {prompt:?}"
+    );
+
+    // The record says the same thing the route was sent.
+    assert_eq!(
+        shot.conditioning_assets.reference_asset_ids,
+        vec![shared, location]
+    );
+}
+
+/// A2's refusal half. The SAME pack with no locator on the roles that share a file is refused, and
+/// the finding names both roles and the file — an author looking at that document knows its entries
+/// by name, and "two of your references collide" would send them counting array elements.
+///
+/// And the schema gate (E6): a version 1 document is refused BY VERSION.
+#[tokio::test]
+async fn a2_a_shared_file_without_locators_and_a_version_1_pack_are_both_refused() {
+    let harness = Harness::start(false, Vec::new()).await;
+    let plan_path = shared_file_plan(&harness);
+
+    let unlocated = shared_file_pack(&harness, false);
+    let findings = refusal_findings(
+        film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(plan_path.clone(), unlocated.clone(), None),
+        )
+        .await,
+    );
+    let shared = findings
+        .iter()
+        .find(|message| message.contains("locator"))
+        .unwrap_or_else(|| panic!("a shared file without locators must be refused: {findings:?}"));
+    for named in ["\"courier\"", "\"recipient\"", "references/courier.png"] {
+        assert!(
+            shared.contains(named),
+            "the refusal must name {named}: {shared:?}"
+        );
+    }
+
+    // Version: the same document, otherwise valid, declared as version 1.
+    let text = std::fs::read_to_string(shared_file_pack(&harness, true)).expect("shared pack");
+    let mut pack: Value = serde_json::from_str(&text).expect("pack parses");
+    pack["schemaVersion"] = json!(1);
+    let old = unlocated.with_file_name("references.v1.json");
+    std::fs::write(&old, serde_json::to_string_pretty(&pack).unwrap()).unwrap();
+    let findings = refusal_findings(
+        film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(plan_path, old, None),
+        )
+        .await,
+    );
+    assert!(
+        findings.iter().any(|message| {
+            message.contains("referencePack.schemaVersion") && message.contains("version 1")
+        }),
+        "a version 1 pack must be refused by version: {findings:?}"
+    );
+}
+
+/// The refusal messages of a `validate` that must not have succeeded.
+fn refusal_findings<T>(result: Result<T, film_harness::HarnessError>) -> Vec<String> {
+    match result {
+        Ok(_) => panic!("validate accepted a pack it must refuse"),
+        Err(film_harness::HarnessError::Validation(findings)) => {
+            findings.iter().map(ToString::to_string).collect()
+        }
+        Err(other) => panic!("expected a validation refusal, got {other}"),
     }
 }
