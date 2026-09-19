@@ -5,6 +5,18 @@ import { assetCanRenderAsImage } from "../assetMedia.jsx";
 const REFERENCE_KINDS = ["character", "prop", "location", "style", "plate"];
 const BINDABLE_KINDS = new Set(["character", "prop", "location"]);
 
+// Pack-level findings the server already worded. The panel never restates a rule the core states
+// (sc-24028): it shows the core's own message under the field the operator has to change.
+function PackFinding({ field, findings = [] }) {
+  const matches = findings.filter((finding) => finding.shotId == null && finding.field === field);
+  if (!matches.length) return null;
+  return (
+    <ul className="ve-film-findings">
+      {matches.map((finding, index) => <li key={`${finding.field}-${index}`}>{finding.message}</li>)}
+    </ul>
+  );
+}
+
 function defaultRole(asset) {
   const name = asset?.displayName ?? asset?.title ?? asset?.name ?? "reference";
   return name
@@ -18,6 +30,7 @@ export function FilmReferences({
   assets = [],
   busy = false,
   draft,
+  findings = [],
   importAsset,
   onDraftChange,
   onReplaceDraft,
@@ -36,6 +49,10 @@ export function FilmReferences({
   const [selectedShotId, setSelectedShotId] = useState(draft.productionPlan.shots[0]?.id ?? "");
   const [bindingRole, setBindingRole] = useState("");
   const [working, setWorking] = useState(false);
+  // The server's refusal of the last add, shown under the add form rather than only in the notice
+  // strip: the locator and description rules are stated by the core, and this is the moment the
+  // operator can act on them (sc-24028).
+  const [addError, setAddError] = useState("");
 
   const imageAssets = useMemo(
     () => assets.filter((asset) => (
@@ -55,6 +72,21 @@ export function FilmReferences({
   const bindable = references.filter((reference) => (
     reference.approved && Boolean(reference.file) && BINDABLE_KINDS.has(reference.kind)
   ));
+  // The files more than one role names (sc-24024). Every role sharing one needs its own locator,
+  // so those rows say the field is required before the server has to.
+  const sharedFiles = useMemo(() => {
+    const counts = new Map();
+    for (const reference of references) {
+      if (!reference.file) continue;
+      counts.set(reference.file, (counts.get(reference.file) ?? 0) + 1);
+    }
+    return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([file]) => file));
+  }, [references]);
+  // Roles already backed by the image the add form has selected: adding this one makes that file
+  // shared, which is the moment both roles need a locator.
+  const reusedAssetRoles = assetId
+    ? references.filter((reference) => reference.sourceAssetId === assetId).map((reference) => reference.role)
+    : [];
 
   function mutate(mutator) {
     onDraftChange((next) => mutator(next));
@@ -78,6 +110,53 @@ export function FilmReferences({
     });
   }
 
+  function clearAddForm() {
+    setAssetId("");
+    setRole("");
+    setDescription("");
+    setLocator("");
+    setApproved(false);
+  }
+
+  // A role with NO image (sc-24025): the same route, with no `assetId` key at all. The core's
+  // `validate_reference_pack` decides whether the description it carries is enough, so the panel
+  // states no rule of its own about it.
+  async function addDescribedReference() {
+    const nextRole = role.trim();
+    if (!nextRole) {
+      setNotice("Name the role this description belongs to.");
+      return;
+    }
+    setWorking(true);
+    setNotice("");
+    setAddError("");
+    try {
+      const saved = await saveDraft({ updateLocal: false });
+      const next = await apiFetch(
+        `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            draftRevision: saved.revision,
+            role: nextRole,
+            kind,
+            description,
+            approved,
+          }),
+        },
+      );
+      mergeAddedReferences(saved, next);
+      clearAddForm();
+      setNotice(`Described role ${nextRole} added to the draft. It has no image; its description is what every shot repeats.`);
+    } catch (error) {
+      setAddError(error.message);
+      setNotice(error.message);
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function addAssetReference(nextAssetId) {
     const chosen = imageAssets.find((asset) => asset.id === nextAssetId);
     const nextRole = role.trim() || defaultRole(chosen);
@@ -87,6 +166,7 @@ export function FilmReferences({
     }
     setWorking(true);
     setNotice("");
+    setAddError("");
     try {
       const saved = await saveDraft({ updateLocal: false });
       const next = await apiFetch(
@@ -106,13 +186,10 @@ export function FilmReferences({
         },
       );
       mergeAddedReferences(saved, next);
-      setAssetId("");
-      setRole("");
-      setDescription("");
-      setLocator("");
-      setApproved(false);
+      clearAddForm();
       setNotice(`Reference ${nextRole} added to the draft.`);
     } catch (error) {
+      setAddError(error.message);
       setNotice(error.message);
     } finally {
       setWorking(false);
@@ -125,6 +202,7 @@ export function FilmReferences({
     if (!file || typeof importAsset !== "function") return;
     setWorking(true);
     setNotice("");
+    setAddError("");
     try {
       const imported = await importAsset(file, { select: false, throwOnError: true });
       setAssetId(imported.id);
@@ -148,13 +226,10 @@ export function FilmReferences({
         },
       );
       mergeAddedReferences(saved, next);
-      setAssetId("");
-      setRole("");
-      setDescription("");
-      setLocator("");
-      setApproved(false);
+      clearAddForm();
       setNotice("Uploaded image added to the reference pack.");
     } catch (error) {
+      setAddError(error.message);
       setNotice(error.message);
     } finally {
       setWorking(false);
@@ -278,21 +353,45 @@ export function FilmReferences({
         <label>Role name<input aria-label="Reference role name" disabled={disabled} onChange={(event) => setRole(event.target.value)} value={role} /></label>
         <label>Kind<select aria-label="Reference kind" disabled={disabled} onChange={(event) => setKind(event.target.value)} value={kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
         <label>Description<input aria-label="Reference description" disabled={disabled} onChange={(event) => setDescription(event.target.value)} value={description} /></label>
-        <label>Locator<input aria-label="Reference locator" disabled={disabled} onChange={(event) => setLocator(event.target.value)} placeholder="the woman on the left" value={locator} /></label>
+        <label>Locator<input aria-label="Reference locator" aria-required={reusedAssetRoles.length ? "true" : undefined} disabled={disabled} onChange={(event) => setLocator(event.target.value)} placeholder="the woman on the left" required={Boolean(reusedAssetRoles.length)} value={locator} /></label>
         <label className="ve-film-reference-check"><input checked={approved} disabled={disabled} onChange={(event) => setApproved(event.target.checked)} type="checkbox" />Approved</label>
         <button disabled={disabled || !assetId} onClick={() => addAssetReference(assetId)} type="button">Add asset</button>
+        <button disabled={disabled || !role.trim()} onClick={addDescribedReference} type="button">Add described role</button>
         <label className="ve-film-file-button">Upload image<input accept="image/png,image/jpeg,image/webp" disabled={disabled || typeof importAsset !== "function"} onChange={uploadReference} type="file" /></label>
+        {reusedAssetRoles.length ? (
+          <small className="ve-film-reference-note">This image already backs {reusedAssetRoles.join(", ")}. A locator is required on this role and on {reusedAssetRoles.length === 1 ? "that one" : "those"} — a phrase that completes “The {role.trim() || "role"} is …”, article included.</small>
+        ) : null}
+        {addError ? <ul className="ve-film-findings"><li>{addError}</li></ul> : null}
+        <small className="ve-film-reference-note">Add described role stores a role with no image: name it, choose its kind, and describe it. Its description is repeated word for word into every shot that lists it under continuity roles.</small>
       </div>
-      {references.map((reference, index) => (
-        <div className="ve-film-reference-row" key={`${reference.sourceAssetId ?? reference.file ?? reference.role}-${index}`}>
-          <input aria-label={`Reference ${index + 1} role`} disabled={disabled} onChange={(event) => renameReference(index, event.target.value)} value={reference.role} />
-          <select aria-label={`Reference ${reference.role} kind`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].kind = event.target.value; })} value={reference.kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-          <input aria-label={`Reference ${reference.role} description`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].description = event.target.value; })} value={reference.description ?? ""} />
-          <input aria-label={`Reference ${reference.role} locator`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].locator = event.target.value || undefined; })} placeholder="the woman on the left" value={reference.locator ?? ""} />
-          <label><input checked={reference.approved} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].approved = event.target.checked; })} type="checkbox" />Approved</label>
-          <button disabled={disabled} onClick={() => removeReference(index)} type="button">Remove</button>
-        </div>
-      ))}
+      {references.map((reference, index) => {
+        // A DESCRIBED-ONLY role (sc-24025) shows no image and may carry no locator: the core
+        // refuses one, because a locator picks a subject out of a picture this role has none of.
+        const describedOnly = !reference.file;
+        const shared = Boolean(reference.file) && sharedFiles.has(reference.file);
+        const sharingRoles = shared
+          ? references.filter((item, position) => item.file === reference.file && position !== index).map((item) => item.role)
+          : [];
+        return (
+          <div className="ve-film-reference-row" key={`${reference.sourceAssetId ?? reference.file ?? reference.role}-${index}`}>
+            <input aria-label={`Reference ${index + 1} role`} disabled={disabled} onChange={(event) => renameReference(index, event.target.value)} value={reference.role} />
+            <select aria-label={`Reference ${reference.role} kind`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].kind = event.target.value; })} value={reference.kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+            <input aria-label={`Reference ${reference.role} description`} aria-required={describedOnly ? "true" : undefined} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].description = event.target.value; })} required={describedOnly} value={reference.description ?? ""} />
+            {describedOnly
+              ? <span className="ve-film-reference-described">no image — described in text</span>
+              : <input aria-label={`Reference ${reference.role} locator`} aria-required={shared ? "true" : undefined} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].locator = event.target.value || undefined; })} placeholder="the woman on the left" required={shared} value={reference.locator ?? ""} />}
+            <label><input checked={reference.approved} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].approved = event.target.checked; })} type="checkbox" />Approved</label>
+            <button disabled={disabled} onClick={() => removeReference(index)} type="button">Remove</button>
+            {describedOnly ? null : <small className="ve-film-reference-note">{reference.file}</small>}
+            {shared ? <small className="ve-film-reference-note">Locator required — this image also backs {sharingRoles.join(", ")}.</small> : null}
+            <PackFinding field={`referencePack.references[${index}].description`} findings={findings} />
+            <PackFinding field={`referencePack.references[${index}].locator`} findings={findings} />
+            <PackFinding field={`referencePack.references[${index}].file`} findings={findings} />
+            {shared ? <PackFinding field="referencePack.references.locator" findings={findings} /> : null}
+          </div>
+        );
+      })}
+      <PackFinding field="referencePack.references.file" findings={findings} />
       {selectedShot ? (
         <div className="ve-film-bindings">
           <label>Shot<select aria-label="Reference binding shot" disabled={disabled} onChange={(event) => setSelectedShotId(event.target.value)} value={selectedShot.id}>{draft.productionPlan.shots.map((shot) => <option key={shot.id} value={shot.id}>{shot.id}</option>)}</select></label>

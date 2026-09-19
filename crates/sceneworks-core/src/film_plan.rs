@@ -2030,8 +2030,9 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 // reference partition out of the request, and anyone who binds the role is refused
                 // by name. Silently reclassifying it is the one outcome nobody could debug, so it
                 // is refused here instead. The Film workspace's own add-reference route
-                // (`ProjectStore::add_film_reference`) always writes both, so this can never
-                // refuse a draft the UI authored.
+                // (`ProjectStore::add_film_reference`) writes `file` and `sourceAssetId` together
+                // or writes neither — the described-only role it authors with no `assetId` drops
+                // both — so this can never refuse a draft the UI authored.
                 if entry.source_asset_id.is_some() || entry.generated || entry.generation.is_some()
                 {
                     findings.push(PlanDiagnostic::plan(

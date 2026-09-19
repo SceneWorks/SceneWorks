@@ -1237,3 +1237,185 @@ async fn planning_repair_ceiling_is_rejected_before_creating_an_operation() {
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(jobs, json!([]));
 }
+
+/// sc-24028. The exact request bodies the Film workspace's reference panel posts, fed through the
+/// real route. The panel's vitest suite asserts these same shapes on the client side; this is the
+/// half that proves the server can decode them — a described-only add carries NO `assetId` key at
+/// all, and a second role on one image carries the `locator` the core requires.
+#[tokio::test]
+async fn film_reference_route_authors_described_only_roles_and_shared_image_locators() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Workspace authoring"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Workspace authoring"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/references");
+
+    // Described-only: no `assetId` key at all, which is what the panel omits when there is no
+    // image. `FilmReferenceInput` is `deny_unknown_fields`, so the omission is the contract.
+    let (status, described) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 1,
+            "role": "courier",
+            "kind": "character",
+            "description": "The courier: blue jacket, carries the parcel.",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{described}");
+    let entry = described["referencePack"]["references"][0].clone();
+    assert_eq!(entry["role"], "courier");
+    assert!(
+        entry.get("file").is_none(),
+        "a described-only role must be stored with no file: {entry}"
+    );
+    assert!(
+        entry.get("sourceAssetId").is_none(),
+        "a fileless role must not claim a library asset either: {entry}"
+    );
+
+    // A GET of the pack returns it — the reload the workspace does.
+    let (status, pack) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/reference-pack"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pack["references"][0], entry);
+
+    // Blank description and no image: the CORE's refusal, not one this route states again.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 2,
+            "role": "silent",
+            "kind": "character",
+            "description": "  ",
+            "approved": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no `file` and no `description`"),
+        "{refused}"
+    );
+
+    // Two roles on ONE image, with the `locator` key the panel marks required at that moment.
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "pair.png",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+    let (status, first) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 2,
+            "assetId": asset_id,
+            "role": "driver",
+            "kind": "character",
+            "description": "The driver: grey coat.",
+            "locator": "the woman on the left",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+
+    let (status, unlocated) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 3,
+            "assetId": asset_id,
+            "role": "guard",
+            "kind": "character",
+            "description": "The guard: high collar.",
+            "locator": Value::Null,
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unlocated}");
+    assert!(
+        unlocated["detail"]
+            .as_str()
+            .unwrap()
+            .contains("share the file"),
+        "{unlocated}"
+    );
+
+    let (status, second) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 3,
+            "assetId": asset_id,
+            "role": "guard",
+            "kind": "character",
+            "description": "The guard: high collar.",
+            "locator": "the man on the right",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    let references = second["referencePack"]["references"].as_array().unwrap();
+    assert_eq!(references.len(), 3);
+    let shared = format!("references/{asset_id}.png");
+    assert_eq!(references[1]["file"], json!(shared));
+    assert_eq!(
+        references[2]["file"],
+        json!(shared),
+        "one asset added twice is ONE file under two roles"
+    );
+    assert_eq!(references[1]["locator"], "the woman on the left");
+    assert_eq!(references[2]["locator"], "the man on the right");
+
+    // Everything survives the reload.
+    let (status, reloaded) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(
+        reloaded["referencePack"]["references"],
+        second["referencePack"]["references"]
+    );
+}

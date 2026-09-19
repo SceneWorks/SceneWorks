@@ -3,6 +3,15 @@ import { FILM_SHOT_STATE_LABELS, filmShotState } from "./filmShotState.js";
 
 const CONDITIONING_MODES = ["text_to_video", "image_to_video", "first_last_frame", "reference_to_video"];
 const DEPENDENCY_KINDS = ["conditioning", "continuity"];
+// `CompiledRequest.insertedText[].kind` (`film_compile::InsertedTextKind`, snake_case on the wire).
+// These sentences are the COMPILER's, written around the authored prompt after any refine rewrite,
+// so the preflight shows them apart from the text the operator wrote (sc-24023/24026).
+const INSERTED_TEXT_LABELS = {
+  reference_binding: "Reference binding",
+  continuity_description: "Continuity description",
+  audio: "Audio",
+  no_speech: "No speech",
+};
 
 function asList(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -209,7 +218,7 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
             </fieldset>
             <fieldset className="ve-film-inspector-fields" disabled={disabled}>
               <legend>Dialogue placement</legend>
-              <label>Audio<textarea aria-label={`Shot ${shot.id} audio`} placeholder="What this shot sounds like, or that it is silent" rows="2" value={shot.audio ?? ""} onChange={(event) => mutateShot((next) => { next.audio = event.target.value; })} /></label>
+              <label className="ve-film-prompt">Audio<textarea aria-label={`Shot ${shot.id} audio`} placeholder="What this shot sounds like, or that it is silent" rows="2" value={shot.audio ?? ""} onChange={(event) => mutateShot((next) => { next.audio = event.target.value; })} /><small className="ve-film-field-help">Required. Say what this shot sounds like — diegetic sound, ambience, and music, or “No music.” unless you want some. Silence is a valid answer: write “No audio. Silence.” and that is what is dispatched. The app adds the “Audio:” label itself, so do not type it.</small></label>
               <Finding field="audio" findings={findings} shotId={shot.id} />
               <label>Dialogue<textarea aria-label={`Shot ${shot.id} dialogue`} rows="2" value={shot.dialogue ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "dialogue", event.target.value))} /></label>
               <label>Generated picture audio<select aria-label={`Shot ${shot.id} generated audio`} value={shot.generatedAudio ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "generatedAudio", event.target.value))}><option value="">Use film default</option><option value="mute">Mute</option><option value="include">Include</option></select></label>
@@ -222,7 +231,7 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
         ) : null}
       </div>
 
-      {compiled ? <section className="ve-film-preflight" aria-label="Render preflight"><h4>Effective requests</h4>{compiled.requests.filter((request) => selectedShotIds.includes(request.shotId)).map((request) => <article key={request.shotId}><strong>{request.shotId}</strong><dl><dt>Model</dt><dd>{request.model}{request.partitionReason ? ` · ${request.partitionReason}` : ""}</dd><dt>Output</dt><dd>{request.width}×{request.height} · {request.fps} fps · {request.durationSeconds}s</dd><dt>Conditioning</dt><dd>{request.mode} · {request.referenceRoles?.join(", ") || "no reference roles"} · reference edge {request.referenceImageShortEdge ?? "model default"}</dd><dt>Sampling</dt><dd>{request.effectiveSteps ?? "model default"} steps · {request.loras?.join(", ") || "base model"} · seed {request.seed ?? "random"}</dd><dt>Prompt</dt><dd>{request.promptSource}{request.promptSource === "refined" ? " (recorded planner identity below)" : ""}</dd></dl></article>)}{compiled.planner?.executions?.length ? <div><strong>Prompt refinement identity</strong><ul>{compiled.planner.executions.map((execution, index) => <li key={`${execution.jobId ?? "execution"}-${index}`}>{execution.provider} · {execution.model} · thinking {execution.thinkingMode} · target {execution.targetVideoModelId}</li>)}</ul></div> : <p>Authored prompts; no prompt-refinement model was invoked.</p>}</section> : null}
+      {compiled ? <section className="ve-film-preflight" aria-label="Render preflight"><h4>Effective requests</h4>{compiled.requests.filter((request) => selectedShotIds.includes(request.shotId)).map((request) => <article key={request.shotId}><strong>{request.shotId}</strong><dl><dt>Model</dt><dd>{request.model}{request.partitionReason ? ` · ${request.partitionReason}` : ""}</dd><dt>Output</dt><dd>{request.width}×{request.height} · {request.fps} fps · {request.durationSeconds}s</dd><dt>Conditioning</dt><dd>{request.mode} · {request.referenceRoles?.join(", ") || "no reference roles"} · reference edge {request.referenceImageShortEdge ?? "model default"}</dd><dt>Sampling</dt><dd>{request.effectiveSteps ?? "model default"} steps · {request.loras?.join(", ") || "base model"} · seed {request.seed ?? "random"}</dd><dt>Prompt</dt><dd>{request.promptSource}{request.promptSource === "refined" ? " (recorded planner identity below)" : ""}</dd>{request.insertedText?.length ? <><dt>Added by the compiler</dt><dd><ul aria-label={`Text the compiler added to ${request.shotId}`} className="ve-film-inserted-text">{request.insertedText.map((item, index) => <li key={`${item.kind}-${index}`}><em>{INSERTED_TEXT_LABELS[item.kind] ?? item.kind}</em><span>{item.text}</span></li>)}</ul><small className="ve-film-field-help">Written around your authored prompt, after any refinement. Edit the reference descriptions, locators or the shot’s Audio field to change them.</small></dd></> : null}</dl></article>)}{compiled.planner?.executions?.length ? <div><strong>Prompt refinement identity</strong><ul>{compiled.planner.executions.map((execution, index) => <li key={`${execution.jobId ?? "execution"}-${index}`}>{execution.provider} · {execution.model} · thinking {execution.thinkingMode} · target {execution.targetVideoModelId}</li>)}</ul></div> : <p>Authored prompts; no prompt-refinement model was invoked.</p>}</section> : null}
     </section>
   );
 }

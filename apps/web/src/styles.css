@@ -11130,6 +11130,15 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-bindings label { display: grid; gap: 4px; }
 .ve-film-reference-row > input { min-width: 140px; flex: 1; }
 .ve-film-reference-check { display: flex !important; align-items: center; }
+.ve-film-reference-note { flex-basis: 100%; color: var(--text-muted); font-size: 11px; }
+.ve-film-reference-described {
+  min-width: 140px;
+  flex: 1;
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
 .ve-film-file-button input { max-width: 220px; }
 .ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
 .ve-film-bindings li span { min-width: 140px; }
@@ -11272,6 +11281,10 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-field-help { color: var(--text-muted); font-size: 11px; }
+.ve-film-inserted-text { display: grid; gap: 3px; margin: 0; padding-left: 18px; }
+.ve-film-inserted-text li { color: var(--text-muted); }
+.ve-film-inserted-text em { margin-right: 6px; color: var(--text); font-style: normal; font-weight: 650; }
 .ve-film-review { display: grid; gap: 12px; }
 .ve-film-review > details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .ve-film-review > details > summary { cursor: pointer; font-weight: 650; }

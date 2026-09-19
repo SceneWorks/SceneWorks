@@ -138,6 +138,49 @@ describe("FilmShots", () => {
     expect(container.textContent).toContain("target minimax_h3");
   });
 
+  // sc-24028. `insertedText` is what the COMPILER wrote around the authored prompt (sc-24023).
+  // The preflight has to show it apart from the authored text, labelled by kind, or a reviewer
+  // cannot tell which sentences they are responsible for.
+  it("shows the compiler's inserted text per kind, apart from the authored prompt", async () => {
+    const compiled = {
+      requests: [{
+        shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24,
+        durationSeconds: 5.1667, mode: "reference_to_video", referenceRoles: ["hero"],
+        promptSource: "authored", authoredPrompt: "The courier crosses the workshop.",
+        insertedText: [
+          { kind: "reference_binding", text: "The courier is the person shown in <Picture 1>." },
+          { kind: "continuity_description", text: "Grey work apron." },
+          { kind: "audio", text: "Audio: Room tone. No music." },
+          { kind: "no_speech", text: "No speech." },
+        ],
+      }],
+    };
+    await render({ compiled });
+    const inserted = container.querySelector('[aria-label="Text the compiler added to SH010"]');
+    expect([...inserted.querySelectorAll("li")].map((item) => item.querySelector("em").textContent))
+      .toEqual(["Reference binding", "Continuity description", "Audio", "No speech"]);
+    expect([...inserted.querySelectorAll("li span")].map((item) => item.textContent)).toEqual([
+      "The courier is the person shown in <Picture 1>.",
+      "Grey work apron.",
+      "Audio: Room tone. No music.",
+      "No speech.",
+    ]);
+    // It is not mixed into the authored prompt's own row.
+    expect(inserted.closest("article").querySelector("dt").textContent).toBe("Model");
+  });
+
+  it("shows no inserted-text block when the compiler added nothing", async () => {
+    const compiled = {
+      requests: [{
+        shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24,
+        durationSeconds: 5.1667, mode: "text_to_video", referenceRoles: [], promptSource: "authored",
+      }],
+    };
+    await render({ compiled });
+    expect(container.querySelector('[aria-label="Text the compiler added to SH010"]')).toBeNull();
+    expect(container.textContent).not.toContain("Added by the compiler");
+  });
+
   // sc-24026. `audio` is required on every shot by plan schema 3, and this textarea is the only
   // place in the workspace it can be written or repaired.
   it("edits the required audio sentence into the shot the draft saves", async () => {
@@ -153,6 +196,28 @@ describe("FilmShots", () => {
     // that names the shot, not blocked here, so the user can retype it in place.
     await act(async () => change(container.querySelector('textarea[aria-label="Shot SH010 audio"]'), ""));
     expect(latest.draft.productionPlan.shots[0].audio).toBe("");
+  });
+
+  // sc-24028. The field is load-bearing prose, and the two things an operator cannot guess are
+  // that silence must be SAID and that the "Audio:" label is the compiler's to write.
+  it("explains under the audio field that silence is valid and the prefix is added for you", async () => {
+    await render();
+    const help = container.querySelector('textarea[aria-label="Shot SH010 audio"]')
+      .closest("label")
+      .querySelector("small");
+    expect(help.textContent).toContain("Silence is a valid answer");
+    expect(help.textContent).toContain("No audio. Silence.");
+    expect(help.textContent).toContain("adds the “Audio:” label itself");
+  });
+
+  // sc-24028. A planner-produced draft arrives with `audio` already written; the field has to show
+  // that text rather than an empty box the operator would refill.
+  it("shows the audio a planner already wrote into the shot", async () => {
+    const planned = makeDraft();
+    planned.productionPlan.shots[0].audio = "Rain on a tin roof, distant traffic. No music.";
+    await render({ draft: planned });
+    expect(container.querySelector('textarea[aria-label="Shot SH010 audio"]').value)
+      .toBe("Rain on a tin roof, distant traffic. No music.");
   });
 
   it("shows a shot-named audio finding under the audio field", async () => {
