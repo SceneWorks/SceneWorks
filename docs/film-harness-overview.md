@@ -290,9 +290,20 @@ shown — the template it fills and the one worked example it copies — carries
 wording MiniMax-H3's own prompt guide asks for
 ([minimax-h3.md](../apps/web/public/prompt-guides/minimax-h3.md), *Prompt the audio explicitly*):
 the diegetic sound the action makes, then the ambience, then `"No music."` unless music is wanted;
-an outright statement of silence is a complete answer; the value never opens with the compiler's
-own `Audio: ` label; and a spoken line goes in `dialogue`, never in `audio`, because a placed line
-is spoken by this harness and the compiler tells H3 not to lay a second voice over it. A shot whose
+an outright statement of silence is a complete answer; and the value never opens with the
+compiler's own `Audio: ` label.
+
+A **spoken** shot is the one case where the two paths differ, and the planner is told only about
+its own. `audio` is the only text H3 scores a voice from, so the contract has a planner-written
+shot carry the line itself — the speaker, the words in quotes and the delivery, the guide's *Voice*
+bullet — beside the diegetic sound and the ambience, shown as a literal value to copy, with a
+reminder to keep the line short enough to say inside the shot's duration. A generated plan can
+never contradict that, because it places no sound: `draft_to_plan` writes `dialogueClip: None` and
+nothing but a hand edit ever sets one. In a HAND-AUTHORED plan that does place a clip, the words
+belong in `dialogueClip` and out of `audio`: the harness speaks that line itself, and the compiler
+appends `NO_SPEECH_SENTENCE` so H3 does not lay a second voice over ours. `Shot::dialogue` is the
+plan's own record of the line either way — `film_compile` never reads it — and is what the run
+record's `IntendedState` carries. A shot whose
 `audio` is missing or blank is a finding naming the shot, and the repair round restates the
 requirement as the key and a value to adapt rather than as prose about it
 (`film_planner::AUDIO_REQUIREMENT_RESTATEMENT`).
