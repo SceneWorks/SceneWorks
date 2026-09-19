@@ -1,6 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { apiFetch } from "../../api.js";
 import { assetCanRenderAsImage } from "../assetMedia.jsx";
+import {
+  FindingList,
+  planRefusalMessages,
+  SOUND_FIELD_PREFIX,
+  unroutedPackFindings,
+} from "./filmFindings.jsx";
 
 const REFERENCE_KINDS = ["character", "prop", "location", "style", "plate"];
 const BINDABLE_KINDS = new Set(["character", "prop", "location"]);
@@ -8,12 +14,12 @@ const BINDABLE_KINDS = new Set(["character", "prop", "location"]);
 // Pack-level findings the server already worded. The panel never restates a rule the core states
 // (sc-24028): it shows the core's own message under the field the operator has to change.
 function PackFinding({ field, findings = [] }) {
-  const matches = findings.filter((finding) => finding.shotId == null && finding.field === field);
-  if (!matches.length) return null;
   return (
-    <ul className="ve-film-findings">
-      {matches.map((finding, index) => <li key={`${finding.field}-${index}`}>{finding.message}</li>)}
-    </ul>
+    <FindingList
+      messages={findings
+        .filter((finding) => finding.shotId == null && finding.field === field)
+        .map((finding) => finding.message)}
+    />
   );
 }
 
@@ -51,8 +57,9 @@ export function FilmReferences({
   const [working, setWorking] = useState(false);
   // The server's refusal of the last add, shown under the add form rather than only in the notice
   // strip: the locator and description rules are stated by the core, and this is the moment the
-  // operator can act on them (sc-24028).
-  const [addError, setAddError] = useState("");
+  // operator can act on them (sc-24028). Held as the operator-facing messages, never the raw
+  // detail, whose `[scope] field:` prefixes are internal.
+  const [addErrors, setAddErrors] = useState([]);
 
   const imageAssets = useMemo(
     () => assets.filter((asset) => (
@@ -87,8 +94,32 @@ export function FilmReferences({
   const reusedAssetRoles = assetId
     ? references.filter((reference) => reference.sourceAssetId === assetId).map((reference) => reference.role)
     : [];
+  // Exactly the field paths the rows below render a finding for. Anything else the server reports
+  // about the pack — a duplicate role, an unknown kind, a generated-plate finding — would otherwise
+  // be counted in the step header and shown nowhere, which reads as "N findings" with nothing to
+  // read. Built from the same expressions the rows use, so the two cannot drift.
+  const rowFindingFields = useMemo(() => {
+    const fields = new Set(["referencePack.references.file"]);
+    references.forEach((reference, index) => {
+      fields.add(`referencePack.references[${index}].description`);
+      fields.add(`referencePack.references[${index}].locator`);
+      fields.add(`referencePack.references[${index}].file`);
+      if (reference.file && sharedFiles.has(reference.file)) {
+        fields.add("referencePack.references.locator");
+      }
+    });
+    return fields;
+  }, [references, sharedFiles]);
+  const otherPackFindings = unroutedPackFindings(
+    findings,
+    rowFindingFields,
+    (field) => !field.startsWith(SOUND_FIELD_PREFIX),
+  );
 
   function mutate(mutator) {
+    // Editing anything in the pack answers the refusal that was on screen, so it stops being
+    // current. Leaving it up outlives the row it was about.
+    setAddErrors([]);
     onDraftChange((next) => mutator(next));
   }
 
@@ -123,13 +154,9 @@ export function FilmReferences({
   // states no rule of its own about it.
   async function addDescribedReference() {
     const nextRole = role.trim();
-    if (!nextRole) {
-      setNotice("Name the role this description belongs to.");
-      return;
-    }
     setWorking(true);
     setNotice("");
-    setAddError("");
+    setAddErrors([]);
     try {
       const saved = await saveDraft({ updateLocal: false });
       const next = await apiFetch(
@@ -150,7 +177,7 @@ export function FilmReferences({
       clearAddForm();
       setNotice(`Described role ${nextRole} added to the draft. It has no image; its description is what every shot repeats.`);
     } catch (error) {
-      setAddError(error.message);
+      setAddErrors(planRefusalMessages(error.message));
       setNotice(error.message);
     } finally {
       setWorking(false);
@@ -166,7 +193,7 @@ export function FilmReferences({
     }
     setWorking(true);
     setNotice("");
-    setAddError("");
+    setAddErrors([]);
     try {
       const saved = await saveDraft({ updateLocal: false });
       const next = await apiFetch(
@@ -189,7 +216,7 @@ export function FilmReferences({
       clearAddForm();
       setNotice(`Reference ${nextRole} added to the draft.`);
     } catch (error) {
-      setAddError(error.message);
+      setAddErrors(planRefusalMessages(error.message));
       setNotice(error.message);
     } finally {
       setWorking(false);
@@ -202,7 +229,7 @@ export function FilmReferences({
     if (!file || typeof importAsset !== "function") return;
     setWorking(true);
     setNotice("");
-    setAddError("");
+    setAddErrors([]);
     try {
       const imported = await importAsset(file, { select: false, throwOnError: true });
       setAssetId(imported.id);
@@ -229,7 +256,7 @@ export function FilmReferences({
       clearAddForm();
       setNotice("Uploaded image added to the reference pack.");
     } catch (error) {
-      setAddError(error.message);
+      setAddErrors(planRefusalMessages(error.message));
       setNotice(error.message);
     } finally {
       setWorking(false);
@@ -352,17 +379,17 @@ export function FilmReferences({
         </select></label>
         <label>Role name<input aria-label="Reference role name" disabled={disabled} onChange={(event) => setRole(event.target.value)} value={role} /></label>
         <label>Kind<select aria-label="Reference kind" disabled={disabled} onChange={(event) => setKind(event.target.value)} value={kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-        <label>Description<input aria-label="Reference description" disabled={disabled} onChange={(event) => setDescription(event.target.value)} value={description} /></label>
+        <label>Description<input aria-label="Reference description" aria-required={assetId ? undefined : "true"} disabled={disabled} onChange={(event) => setDescription(event.target.value)} required={!assetId} value={description} /></label>
         <label>Locator<input aria-label="Reference locator" aria-required={reusedAssetRoles.length ? "true" : undefined} disabled={disabled} onChange={(event) => setLocator(event.target.value)} placeholder="the woman on the left" required={Boolean(reusedAssetRoles.length)} value={locator} /></label>
         <label className="ve-film-reference-check"><input checked={approved} disabled={disabled} onChange={(event) => setApproved(event.target.checked)} type="checkbox" />Approved</label>
         <button disabled={disabled || !assetId} onClick={() => addAssetReference(assetId)} type="button">Add asset</button>
-        <button disabled={disabled || !role.trim()} onClick={addDescribedReference} type="button">Add described role</button>
+        <button disabled={disabled || !role.trim() || Boolean(assetId) || Boolean(locator.trim())} onClick={addDescribedReference} type="button">Add described role</button>
         <label className="ve-film-file-button">Upload image<input accept="image/png,image/jpeg,image/webp" disabled={disabled || typeof importAsset !== "function"} onChange={uploadReference} type="file" /></label>
         {reusedAssetRoles.length ? (
           <small className="ve-film-reference-note">This image already backs {reusedAssetRoles.join(", ")}. A locator is required on this role and on {reusedAssetRoles.length === 1 ? "that one" : "those"} — a phrase that completes “The {role.trim() || "role"} is …”, article included.</small>
         ) : null}
-        {addError ? <ul className="ve-film-findings"><li>{addError}</li></ul> : null}
-        <small className="ve-film-reference-note">Add described role stores a role with no image: name it, choose its kind, and describe it. Its description is repeated word for word into every shot that lists it under continuity roles.</small>
+        <FindingList label="Reference add refusal" messages={addErrors} />
+        <small className="ve-film-reference-note">Add described role is for a role with NO image: name it, choose its kind, and describe it — clear the project image and the locator to use it. Its description is repeated word for word into every shot that lists it under continuity roles.</small>
       </div>
       {references.map((reference, index) => {
         // A DESCRIBED-ONLY role (sc-24025) shows no image and may carry no locator: the core
@@ -392,6 +419,10 @@ export function FilmReferences({
         );
       })}
       <PackFinding field="referencePack.references.file" findings={findings} />
+      <FindingList
+        label="Other reference pack findings"
+        messages={otherPackFindings.map((finding) => finding.message)}
+      />
       {selectedShot ? (
         <div className="ve-film-bindings">
           <label>Shot<select aria-label="Reference binding shot" disabled={disabled} onChange={(event) => setSelectedShotId(event.target.value)} value={selectedShot.id}>{draft.productionPlan.shots.map((shot) => <option key={shot.id} value={shot.id}>{shot.id}</option>)}</select></label>

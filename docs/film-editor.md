@@ -69,6 +69,10 @@ separate choice, and the planning operation records both identities.
    answer: write "No audio. Silence." and that is exactly what the compiler dispatches; the text is
    never pattern-matched. Leaving it blank is not, and surfaces as a finding naming the shot until
    you fill it in. Do not begin the value with "Audio:" — the compiler writes that label itself.
+
+   **Speech.** When the shot places a dialogue clip, the harness speaks that line itself, so leave
+   the words out of Audio. Otherwise a spoken line — who speaks, the words, and the delivery —
+   belongs in Audio, because the model invents any speech the prompt does not describe.
 4. Choose a render regime. **Turbo (recommended)** resolves the installed adapter recipe for the
    current model, output canvas, and reference-conditioned partitions and shows its concrete adapter
    IDs and effective step count. **Full quality** explicitly clears accelerator and step overrides

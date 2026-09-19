@@ -344,6 +344,52 @@ describe("FilmReferences", () => {
     await act(async () => { add.click(); await Promise.resolve(); await Promise.resolve(); });
     const refusal = container.querySelector(".ve-film-reference-add .ve-film-findings");
     expect(refusal.textContent).toContain("has no `file` and no `description`");
+    // The operator is shown the message, never the diagnostic's internal scope and field path.
+    expect(refusal.textContent).not.toContain("[plan]");
+    expect(refusal.textContent).not.toContain("referencePack.references[");
+
+    // Editing the pack answers the refusal, so it stops being shown.
+    await act(async () => {
+      setControl(rows[0].querySelector('[aria-label="Reference recipient description"]'), "Grey work apron, holds the door.");
+    });
+    expect(container.querySelector(".ve-film-reference-add .ve-film-findings")).toBeNull();
+  });
+
+  // sc-24028. The two adjacent buttons take different bodies. "Add described role" reads neither
+  // the image nor the locator, so leaving it clickable with either filled in would silently
+  // discard the operator's choice and store a fileless role with a success notice.
+  it("disables Add described role while an image or a locator is filled in", async () => {
+    const asset = {
+      id: "asset_courier",
+      projectId: "project_1",
+      displayName: "Courier",
+      type: "image",
+      file: { mimeType: "image/png" },
+      status: {},
+    };
+    await renderReferences({ assets: [asset] });
+    const describedButton = () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Add described role");
+
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference role name"]'), "recipient"); });
+    expect(describedButton().disabled).toBe(false);
+
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference project image"]'), "asset_courier"); });
+    expect(describedButton().disabled).toBe(true);
+
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference project image"]'), ""); });
+    expect(describedButton().disabled).toBe(false);
+
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference locator"]'), "the woman on the left"); });
+    expect(describedButton().disabled).toBe(true);
+
+    // With no image chosen the description is the whole of the role, so the field says so.
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference locator"]'), ""); });
+    const addDescription = container.querySelector('.ve-film-reference-add [aria-label="Reference description"]');
+    expect(addDescription.required).toBe(true);
+    expect(addDescription.getAttribute("aria-required")).toBe("true");
+    await act(async () => { setControl(container.querySelector('[aria-label="Reference project image"]'), "asset_courier"); });
+    expect(container.querySelector('.ve-film-reference-add [aria-label="Reference description"]').required).toBe(false);
   });
 
   // sc-24028 / sc-24024. Adding one asset under a second role leaves TWO entries on ONE file, and
@@ -385,8 +431,10 @@ describe("FilmReferences", () => {
     await act(async () => { setControl(container.querySelector('[aria-label="Reference role name"]'), "guard"); });
     const add = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add asset");
     await act(async () => { add.click(); await Promise.resolve(); await Promise.resolve(); });
-    expect(container.querySelector(".ve-film-reference-add .ve-film-findings").textContent)
-      .toContain("share the file");
+    const sharedRefusal = container.querySelector(".ve-film-reference-add .ve-film-findings");
+    expect(sharedRefusal.textContent).toContain("share the file");
+    expect(sharedRefusal.textContent).not.toContain("[plan]");
+    expect(sharedRefusal.textContent).not.toContain("referencePack.references.locator:");
 
     // Once both roles are on that one file, BOTH rows mark their locator required and carry the
     // core's message under it.
@@ -443,6 +491,36 @@ describe("FilmReferences", () => {
     for (const row of rows) expect(row.textContent).toContain("declare the same locator");
     // A shot's finding is not this panel's to show.
     expect(container.textContent).not.toContain("a shot finding belongs to the shots panel");
+  });
+
+  // sc-24028. A pack finding on a field no row renders beside — a duplicate role comes straight
+  // out of the row's own rename input — must still be readable. `FilmWorkspace` counts every
+  // finding in the step header, and `FilmShots`' catch-all only matches findings with a `shotId`,
+  // so anything unrouted here is displayed nowhere at all.
+  it("shows pack findings whose field no row renders, and leaves sound findings to the sound step", async () => {
+    const draft = filmDraft([
+      { role: "courier", kind: "character", file: "references/a.png", description: "Blue jacket.", approved: true, generated: false },
+      { role: "courier", kind: "character", file: "references/b.png", description: "Grey coat.", approved: true, generated: false },
+    ]);
+    await renderReferences({
+      draft,
+      findings: [
+        { field: "referencePack.references[0].role", message: "duplicate reference role \"courier\"" },
+        { field: "referencePack.references[1].kind", message: "unknown reference kind \"costume\"" },
+        { field: "referencePack.references[1].sourceAssetId", message: "source asset id must be 1-64 characters" },
+        { field: "referencePack.sound[0].role", message: "duplicate sound role \"theme\"" },
+        { field: "referencePack.references[0].description", message: "description must not contain '<' or '>'" },
+      ],
+    });
+
+    const other = container.querySelector('[aria-label="Other reference pack findings"]');
+    expect(other.textContent).toContain("duplicate reference role \"courier\"");
+    expect(other.textContent).toContain("unknown reference kind \"costume\"");
+    expect(other.textContent).toContain("source asset id must be 1-64 characters");
+    // Already shown beside its row, so it is not repeated here.
+    expect(other.textContent).not.toContain("description must not contain");
+    // The sound half of the pack is authored on the Sound step, which renders it there.
+    expect(container.textContent).not.toContain("duplicate sound role");
   });
 
   it("keeps approved per-shot bindings ordered and removes the mode when the last binding leaves", async () => {

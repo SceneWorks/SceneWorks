@@ -165,8 +165,13 @@ describe("FilmShots", () => {
       "Audio: Room tone. No music.",
       "No speech.",
     ]);
-    // It is not mixed into the authored prompt's own row.
-    expect(inserted.closest("article").querySelector("dt").textContent).toBe("Model");
+    // It is its own labelled row, immediately after the prompt row — not mixed into it.
+    const insertedDd = inserted.closest("dd");
+    expect(insertedDd.previousElementSibling.tagName).toBe("DT");
+    expect(insertedDd.previousElementSibling.textContent).toBe("Added by the compiler");
+    const promptDt = [...inserted.closest("dl").querySelectorAll("dt")]
+      .find((term) => term.textContent === "Prompt");
+    expect(promptDt.nextElementSibling.textContent).toBe("authored");
   });
 
   it("shows no inserted-text block when the compiler added nothing", async () => {
@@ -202,12 +207,17 @@ describe("FilmShots", () => {
   // that silence must be SAID and that the "Audio:" label is the compiler's to write.
   it("explains under the audio field that silence is valid and the prefix is added for you", async () => {
     await render();
-    const help = container.querySelector('textarea[aria-label="Shot SH010 audio"]')
-      .closest("label")
-      .querySelector("small");
+    const help = container.querySelector('textarea[aria-label="Shot SH010 audio"]').closest("label");
     expect(help.textContent).toContain("Silence is a valid answer");
     expect(help.textContent).toContain("No audio. Silence.");
     expect(help.textContent).toContain("adds the “Audio:” label itself");
+    // Speech: both halves of the rule, because the two shots behave oppositely.
+    expect(help.textContent).toContain("places a dialogue clip, the harness speaks that line itself, so leave the words out of Audio");
+    expect(help.textContent).toContain("otherwise a spoken line — who speaks, the words, and the delivery — belongs in Audio");
+    // The longer guidance sits in the page's collapsed-by-default disclosure, not in one long line.
+    const more = help.querySelector("details");
+    expect(more.open).toBe(false);
+    expect(more.querySelector("summary").textContent).toBe("More about the Audio field");
   });
 
   // sc-24028. A planner-produced draft arrives with `audio` already written; the field has to show
