@@ -3144,6 +3144,55 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
                     json!([courier.asset_id, location.asset_id]),
                     "the reference assets ride the payload in role order"
                 );
+                // sc-24023, on the DISPATCH the run actually made: `ensure_shot_records` resolved
+                // the conditioning, `work_attempt` posted `to_job_body_with`, and this is the body
+                // that came back off the route. The prompt in it must bind each role to the
+                // `<Picture N>` whose N is that role's 1-based position in the SAME payload's
+                // `referenceAssetIds` — the engine labels the supplied images positionally, so a
+                // sentence naming the wrong number renders a confidently wrong shot and no
+                // validator, record or reviewer downstream can tell.
+                let prompt = job["payload"]["prompt"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+                let dispatched = job["payload"]["referenceAssetIds"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("dispatched assets: {}", job["payload"]));
+                let mut cursor = 0usize;
+                for (index, (role, asset_id)) in [
+                    ("courier", &courier.asset_id),
+                    ("workshop_location", &location.asset_id),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let number = index + 1;
+                    assert_eq!(
+                        dispatched[index],
+                        json!(asset_id),
+                        "{role} is dispatched at position {number} of {dispatched:?}"
+                    );
+                    // Anchored on the whole sentence opening and scanned forward, so a phrase
+                    // occurring inside a pack description cannot stand in for the binding itself
+                    // and the sentences must also come out in picture order.
+                    let phrase = format!("{} is the ", role.replace(['_', '-'], " "));
+                    let role_at = prompt[cursor..]
+                        .find(&phrase)
+                        .map(|at| at + cursor)
+                        .unwrap_or_else(|| panic!("{phrase:?} is never said in {prompt:?}"));
+                    cursor = prompt[role_at..]
+                        .find(&format!("<Picture {number}>"))
+                        .map(|at| at + role_at)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{phrase:?} must be bound to <Picture {number}>, the position \
+                                 {role}'s asset takes in {dispatched:?}: {prompt:?}"
+                            )
+                        });
+                }
+                assert!(
+                    !prompt.contains("<Picture 3>"),
+                    "the dispatched prompt names a picture this shot never sends: {prompt:?}"
+                );
                 assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
                 // sc-23402 short edge: this plan names none, so nothing is dispatched and the
                 // record keeps the EFFECTIVE value the engine rendered at — its own 2048.

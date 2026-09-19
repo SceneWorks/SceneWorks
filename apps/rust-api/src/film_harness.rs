@@ -1725,7 +1725,7 @@ fn compiled_for_run(
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
             let mut findings = compiled.staleness_findings(plan, plan_sha256);
             if findings.is_empty() {
-                findings = compiled.conformance_findings(plan, entries, lane);
+                findings = compiled.conformance_findings(plan, pack, entries, lane);
             }
             if findings.is_empty() {
                 Ok(compiled)
@@ -2205,7 +2205,8 @@ pub async fn validate(
         if findings.is_empty() {
             if let (Some((compiled, path)), Some(entries)) = (compiled.as_ref(), catalog.entries())
             {
-                let mut conformance = compiled.conformance_findings(&plan, &entries, facts.lane());
+                let mut conformance =
+                    compiled.conformance_findings(&plan, &pack, &entries, facts.lane());
                 if !conformance.is_empty() {
                     findings.push(compiled_document_header(path));
                     findings.append(&mut conformance);
@@ -3786,7 +3787,11 @@ impl Session<'_> {
 
     /// Make sure the record holds one entry per plan shot, in plan order, without disturbing the
     /// entries a previous controller wrote.
-    fn ensure_shot_records(&mut self) {
+    ///
+    /// Refuses the run when a shot's conditioning role was never imported as an asset (sc-24023):
+    /// see [`Session::resolve_new_shot_conditioning`].
+    fn ensure_shot_records(&mut self) -> Result<(), HarnessError> {
+        let mut resolved = self.resolve_new_shot_conditioning()?;
         let mut ordered: Vec<ShotRunRecord> = Vec::with_capacity(self.plan.shots.len());
         for shot in &self.plan.shots {
             if let Some(index) = self
@@ -3807,20 +3812,18 @@ impl Session<'_> {
                 .request(&shot.id)
                 .expect("every plan shot compiled a request");
             let (width, height) = (request.width, request.height);
+            // Resolved by `CompiledRequest::resolve_conditioning` above — the SAME function that
+            // walks `shot_reference_pictures`, which the compiler numbered this request's
+            // `<Picture N>` with (sc-24023) — so the position an asset takes here is the number the
+            // prompt already promised for it. The record is what `work_attempt` dispatches from, so
+            // this is the list the engine sees.
+            let conditioning = resolved
+                .remove(&shot.id)
+                .expect("every shot without a record resolved its conditioning above");
             let assets = ConditioningAssets {
-                first_frame_asset_id: request
-                    .first_frame_role
-                    .as_ref()
-                    .and_then(|role| self.role_assets.get(role).cloned()),
-                last_frame_asset_id: request
-                    .last_frame_role
-                    .as_ref()
-                    .and_then(|role| self.role_assets.get(role).cloned()),
-                reference_asset_ids: request
-                    .reference_roles
-                    .iter()
-                    .filter_map(|role| self.role_assets.get(role).cloned())
-                    .collect(),
+                first_frame_asset_id: conditioning.first_frame_asset_id,
+                last_frame_asset_id: conditioning.last_frame_asset_id,
+                reference_asset_ids: conditioning.reference_asset_ids,
             };
             ordered.push(ShotRunRecord {
                 shot_id: shot.id.clone(),
@@ -3850,6 +3853,52 @@ impl Session<'_> {
             });
         }
         self.record.shots = ordered;
+        Ok(())
+    }
+
+    /// The conditioning assets for every plan shot that does not have a record yet, resolved
+    /// through [`CompiledRequest::resolve_conditioning`] — the ONE resolver, shared
+    /// with the job-body builder, so the dispatched `referenceAssetIds` and the `<Picture N>` the
+    /// compiler wrote into the prompt come out of one walk of `shot_reference_pictures` (sc-24023).
+    ///
+    /// A role with no imported asset is a finding that refuses the run. Dropping it instead would
+    /// shift every LATER asset one position off the picture number the prompt already promised, and
+    /// nothing downstream — not the record, not the route, not a reviewer reading `compiled.json` —
+    /// can see that the model was bound to the wrong image. `validate_plan_against_pack` makes it
+    /// unreachable today; this is the site that enforces it rather than assuming it.
+    ///
+    /// Runs as a whole pass BEFORE `ensure_shot_records` reorders anything, so a refusal cannot
+    /// leave the record half-drained.
+    fn resolve_new_shot_conditioning(
+        &self,
+    ) -> Result<BTreeMap<String, ResolvedConditioning>, HarnessError> {
+        let mut resolved = BTreeMap::new();
+        let mut findings: Vec<PlanDiagnostic> = Vec::new();
+        for shot in &self.plan.shots {
+            if self
+                .record
+                .shots
+                .iter()
+                .any(|existing| existing.shot_id == shot.id)
+            {
+                continue;
+            }
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            match request.resolve_conditioning(&self.pack, &self.role_assets) {
+                Ok(assets) => {
+                    resolved.insert(shot.id.clone(), assets);
+                }
+                Err(mut shot_findings) => findings.append(&mut shot_findings),
+            }
+        }
+        if findings.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(HarnessError::Validation(findings))
+        }
     }
 
     fn is_selected(&self, shot_id: &str) -> bool {
@@ -3858,7 +3907,7 @@ impl Session<'_> {
 
     /// Reconcile and, where the limits still allow it, dispatch every selected shot.
     async fn work_shots(&mut self) -> Result<(), HarnessError> {
-        self.ensure_shot_records();
+        self.ensure_shot_records()?;
         self.persist()?;
         for index in 0..self.plan.shots.len() {
             let shot = self.plan.shots[index].clone();
@@ -4050,6 +4099,7 @@ impl Session<'_> {
                     attempt: attempt_number,
                     tier: self.plan.model.tier.as_deref(),
                     idempotency_key: Some(&key),
+                    pack: &self.pack,
                     role_assets: &self.role_assets,
                 },
                 &ResolvedConditioning {

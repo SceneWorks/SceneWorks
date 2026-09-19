@@ -142,7 +142,7 @@ MiniMax-H3 ships its reference conditioning as a **separate catalog entry**: `mi
 `text_to_video | image_to_video | first_last_frame` with `limits.maxReferenceAssets: 0`, while
 `minimax_h3_ref` serves `reference_to_video` only (runbook § *Partition resolution*). A plan declares
 the **family once** and the compiler resolves the partition per shot
-(`crates/sceneworks-core/src/film_compile.rs:295`):
+(`crates/sceneworks-core/src/film_compile.rs`, `compile_shot`):
 
 | the shot's `conditioning.referenceRoles` | it compiles to |
 | --- | --- |
@@ -166,7 +166,7 @@ at, admitted over 1024..=2048 and defaulting to the engine's 2048. It sizes the 
 render, and a value outside the range is refused naming the field and the range rather than clamped,
 because a silent clamp would change the token budget the author measured (runbook § *Partition
 resolution*). It reaches only shots that resolve to the reference partition
-(`crates/sceneworks-core/src/film_compile.rs:342`).
+(`crates/sceneworks-core/src/film_compile.rs`, `CompiledRequest::reference_image_short_edge`).
 
 ## Dialogue is spoken through the audio route
 
@@ -240,25 +240,41 @@ not change; what changed is that a repair became something a copy-only model can
 
 `film-harness compile` writes `compiled.json`: one request per shot with mode, prompt, duration,
 fps, geometry, seed and reference bindings exactly as they will be dispatched.
-`COMPILED_PLAN_SCHEMA_VERSION` is 3 (`crates/sceneworks-core/src/film_compile.rs:42`); a document at
-any earlier schema version — v1 or v2 — is refused by version rather than read
-(`crates/sceneworks-core/src/film_compile.rs:626`), because a stale document read under this build
-would have its derived fields defaulted and then be blamed as hand-edited (`:37`–`:41`). The remedy
-either way is to recompile.
+`COMPILED_PLAN_SCHEMA_VERSION` is 4 (`crates/sceneworks-core/src/film_compile.rs`,
+`COMPILED_PLAN_SCHEMA_VERSION`); a document at any earlier schema version — v1, v2 or v3 — is
+refused by version rather than read (`CompiledPlan::staleness_findings`), because a stale document
+read under this build would have its derived fields defaulted and then be blamed as hand-edited.
+The remedy either way is to recompile.
 
 Per shot it carries the resolved partition and its `partitionReason`
-(`crates/sceneworks-core/src/film_compile.rs:381`, `:387`); `referenceAssetIds` in the plan's role
-order, written only when the list is non-empty (`:602`); the resolved geometry; the LoRA ids resolved
-against **that shot's** partition (`:351`); `effectiveSteps` (`:375`); and
-`referenceImageShortEdge`, written only for a reference-partition request (`:342`).
+(`crates/sceneworks-core/src/film_compile.rs`, `CompiledRequest::model` and
+`CompiledRequest::partition_reason`); `referenceAssetIds` in the plan's role order, written only when
+the list is non-empty (`CompiledRequest::to_job_body_with`); the resolved geometry; the LoRA ids
+resolved against **that shot's** partition (`CompiledRequest::loras`); `effectiveSteps`
+(`CompiledRequest::effective_steps`); and `referenceImageShortEdge`, written only for a
+reference-partition request (`CompiledRequest::reference_image_short_edge`).
+
+A reference shot's prompt also carries text the **compiler** wrote. MiniMax-H3 labels each supplied
+reference `<Picture 1>`, `<Picture 2>`, … ahead of the prompt, in supply order, and the model's own
+prompt guide is explicit that a reference needs a job in the text. So the compile leads such a
+prompt with one plain binding sentence per bound role — "The courier is the person shown in
+`<Picture 1>`." — built from the pack entry's kind and its own description. Two rules make it
+trustworthy: the sentences are written **after** the `prompt_refine` rewrite, so no language model
+can paraphrase a label the engine applies positionally; and the `<Picture N>` and the position of
+that role's asset in `referenceAssetIds` both come from `shot_reference_pictures`, the one function
+that owns the reference order, called by the compiler and by the dispatcher alike. The inserted text
+is recorded per kind in the request's `insertedText`, separately from `authoredPrompt`, and is a
+derived field — a hand-edited one is refused by `conformance_findings` like any other.
 
 Two properties earn it its own file. It is **what the engine sees**: each prompt is run through the
 model's own `prompt_refine` rewrite with `modelId` set to the plan's model, and the authored text is
-kept beside it as `authoredPrompt` (`crates/sceneworks-core/src/film_compile.rs:134`). And it is
-**the only place a job body is built**: `CompiledRequest::to_job_body`
-(`crates/sceneworks-core/src/film_compile.rs:492`) produces the `POST /api/v1/video/jobs` payload for
-the generated and hand-authored paths alike, so what a reviewer reads in `compiled.json` and what the
-API receives cannot drift. It records the SHA-256 of the plan it came from, and `validate` / `run`
+kept beside it as `authoredPrompt` (`crates/sceneworks-core/src/film_compile.rs`,
+`CompiledRequest::authored_prompt`). And it is **the only place a job body is built**:
+`CompiledRequest::to_job_body_with` (`crates/sceneworks-core/src/film_compile.rs`) produces the
+`POST /api/v1/video/jobs` payload for the generated and hand-authored paths alike, over conditioning
+`CompiledRequest::resolve_conditioning` resolved — the one resolver, so the `<Picture N>` in the
+prompt and the position of that role's asset in `referenceAssetIds` are one decision — and so what a
+reviewer reads in `compiled.json` and what the API receives cannot drift. It records the SHA-256 of the plan it came from, and `validate` / `run`
 refuse a compiled document whose plan has changed (runbook § *Compiled requests*).
 
 ## The run loop

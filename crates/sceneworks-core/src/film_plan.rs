@@ -1348,6 +1348,46 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
     findings
 }
 
+/// The checks one pack entry's `description` must pass, image and sound alike (sc-24023).
+///
+/// A description is not inert prose: the compiler repeats it into the binding sentence it writes
+/// into the dispatched prompt, inside `insertedText` — the one field
+/// `film_compile::CompiledPlan::conformance_findings` treats as the compiler's own authored, derived
+/// text and therefore never reads back. So a description carrying `<Picture 3>` or `<Audio 1>`
+/// forges a binding to media the shot never supplies, and the compiled document still reports clean.
+/// Refused here, at the document boundary, rather than stripped, because a forged marker is an
+/// authoring mistake to name.
+///
+/// Ordinary line breaks and tabs are NOT refused — a multi-line description is a reasonable thing to
+/// write — they are collapsed to single spaces by `film_compile::normalized_description` before they
+/// reach a prompt. Every other control character is a byte no author typed on purpose.
+fn reference_description_findings(field: &str, description: &str) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    if description.contains(['<', '>']) {
+        findings.push(PlanDiagnostic::plan(
+            format!("{field}.description"),
+            format!(
+                "description {description:?} must not contain '<' or '>': it is repeated into the \
+                 dispatched prompt, where a marker like <Picture 1> would bind the model to media \
+                 this shot never supplies"
+            ),
+        ));
+    }
+    if description
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        findings.push(PlanDiagnostic::plan(
+            format!("{field}.description"),
+            format!(
+                "description {description:?} must not contain control characters: it is repeated \
+                 into the dispatched prompt verbatim apart from whitespace"
+            ),
+        ));
+    }
+    findings
+}
+
 /// Structural findings on the reference pack alone.
 /// The checks one reference FILE path must pass, wherever it is declared — a pack entry or a
 /// [`ReferenceSpec`] entry. Kept in one place because the basename rule is security-relevant: the
@@ -1517,6 +1557,7 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             ));
         }
         findings.extend(reference_image_file_findings(&field, &entry.file));
+        findings.extend(reference_description_findings(&field, &entry.description));
         findings.extend(generated_reference_findings(&field, entry));
     }
     // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
@@ -1559,6 +1600,9 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             ));
         }
         findings.extend(validate_sound_source(&field, entry));
+        // Same rule as an image entry's: a sound description is prose a compiler-owned binding
+        // sentence may repeat, so it may not forge a marker of its own (sc-24023).
+        findings.extend(reference_description_findings(&field, &entry.description));
         let Some(declared) = entry.file.as_deref() else {
             continue;
         };
@@ -4942,6 +4986,60 @@ mod tests {
                 "expected a finding containing {expected:?}: {findings:#?}"
             );
         }
+    }
+
+    /// sc-24023. A description is repeated into the compiler-owned binding sentence, inside
+    /// `insertedText` — the one field `film_compile::CompiledPlan::conformance_findings` reads as
+    /// the compiler's own derived text and never checks against anything. So a description that
+    /// spells a marker would forge a binding to media the shot never supplies and the compiled
+    /// document would still report clean. Refused here, on both entry namespaces, because a later
+    /// story binds a sound entry's description the same way (`<Audio N>`).
+    #[test]
+    fn a_description_that_forges_a_media_marker_is_refused() {
+        let mut pack_value = sound_pack_json();
+        pack_value["references"][1]["description"] = json!("Actually the parcel in <Picture 3>.");
+        pack_value["sound"][2]["description"] = json!("The bed in <Audio 1>");
+        let pack: ReferencePack = serde_json::from_value(pack_value).expect("pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        for expected in ["referencePack.references[1].description", "<Picture 3>"] {
+            assert!(
+                findings.iter().any(|finding| finding.contains(expected)),
+                "expected a finding containing {expected:?}: {findings:#?}"
+            );
+        }
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("referencePack.sound[2].description")),
+            "a sound description is bound the same way: {findings:#?}"
+        );
+        // The shipped shape — ordinary prose, and a description that WRAPS — is untouched: the
+        // compiler collapses its whitespace rather than the document refusing it.
+        let mut clean = sound_pack_json();
+        clean["references"][1]["description"] = json!("Small bright red parcel,\n  centre frame.");
+        let clean: ReferencePack = serde_json::from_value(clean).expect("pack parses");
+        assert!(
+            !messages(&validate_reference_pack(&clean))
+                .iter()
+                .any(|finding| finding.contains("description")),
+            "{:#?}",
+            messages(&validate_reference_pack(&clean))
+        );
+    }
+
+    /// The other half of the same rule: a byte no author typed on purpose never reaches the prompt.
+    #[test]
+    fn a_description_carrying_a_control_character_is_refused() {
+        let mut pack_value = pack_json();
+        pack_value["references"][1]["description"] = json!("Small red parcel\u{0007}");
+        let pack: ReferencePack = serde_json::from_value(pack_value).expect("pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings.iter().any(|finding| finding
+                .contains("referencePack.references[1].description")
+                && finding.contains("control characters")),
+            "{findings:#?}"
+        );
     }
 
     #[test]

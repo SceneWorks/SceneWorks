@@ -2333,6 +2333,52 @@ mod tests {
         assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
     }
 
+    /// sc-24023. The marker ban must leave the engine's OWN reference labels alone.
+    ///
+    /// `<Picture N>`, `<Audio N>` and `<Video N>` are what the H3 text encoder itself prefixes each
+    /// supplied reference with, and from sc-24023 the film compiler writes sentences that bind a
+    /// role to one of them. They look exactly like the seven dead markers — angle-bracketed
+    /// literals in the prompt — and a filter that ate them would silently unbind every reference
+    /// shot while leaving a prompt that still reads correctly to a human.
+    ///
+    /// The ban is a fixed seven-literal list, so this passes as written; the test exists because
+    /// the next person to widen that list to a pattern has to see it go red.
+    #[test]
+    fn the_marker_ban_leaves_the_engines_own_reference_labels_alone() {
+        let bound = "The courier is the person shown in <Picture 1>. The parcel is the object \
+                     shown in <Picture 2>. She speaks with the voice from <Audio 1>, moving like \
+                     <Video 1>.";
+        // Byte for byte: a prompt made only of reference labels contains no dead marker, so the
+        // filter must not touch it at all — not even the whitespace collapse.
+        assert_eq!(strip_untrained_markers(bound), bound);
+
+        // And with a dead marker mixed in, the dead one goes and the labels stay. This is the case
+        // that separates "the filter ignores these" from "the filter never ran".
+        let baited = format!("<d>[English] Delivery.</d> {bound}");
+        let stripped = strip_untrained_markers(&baited);
+        assert!(
+            first_ci(&stripped, "<d>").is_none() && first_ci(&stripped, "</d>").is_none(),
+            "the dead dialogue markers must still go: {stripped}"
+        );
+        for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+            assert!(
+                stripped.contains(label),
+                "{label} is the engine's own reference label and must survive: {stripped}"
+            );
+        }
+        assert!(stripped.contains("[English] Delivery."), "{stripped}");
+
+        // Through the real reply path for both H3 partitions, which is where a refined film prompt
+        // actually meets the ban.
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            let refined = finalize_refined_output(&baited, false, Some(model_id));
+            for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+                assert!(refined.contains(label), "{model_id}: {refined}");
+            }
+            assert!(first_ci(&refined, "<d>").is_none(), "{model_id}: {refined}");
+        }
+    }
+
     #[test]
     fn system_prompt_defaults_to_image_when_workflow_absent_or_unknown() {
         assert!(build_refine_system_prompt(None, None).contains("generative image model"));
