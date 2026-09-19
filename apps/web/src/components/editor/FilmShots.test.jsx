@@ -19,7 +19,14 @@ function makeDraft() {
       limits: { maxRunSeconds: 3600, maxShotSeconds: 2700, maxAttemptsPerShot: 1, maxMemoryGb: 96 },
       sound: {}, shots: [shot("SH010", "Arrival"), shot("SH020", "Reveal")],
     },
-    referencePack: { references: [{ role: "hero", approved: true }, { role: "plate", approved: true }] },
+    referencePack: { references: [
+      { role: "hero", approved: true, file: "references/hero.png" },
+      { role: "plate", approved: true, file: "references/plate.png" },
+      // DESCRIBED-ONLY (sc-24025): approved, but with no image. It belongs in continuityRoles and
+      // nowhere else — the server refuses it in every conditioning slot.
+      { role: "recipient", approved: true, description: "Grey work apron." },
+      { role: "rejected", approved: false, file: "references/rejected.png" },
+    ] },
   };
 }
 
@@ -95,6 +102,28 @@ describe("FilmShots", () => {
       dependsOn: [{ shotId: "SH010", kind: "continuity", note: "Keep the courier screen-left" }],
     });
     expect(latest.selection).toEqual(["SH020"]);
+  });
+
+  // sc-24025. `validate_plan_against_pack` refuses a DESCRIBED-ONLY role in every conditioning
+  // slot, so offering one in the two keyframe selects or in the reference-role suggestions would
+  // let the editor build a draft the server rejects. It belongs in continuityRoles, and that is
+  // the one input that suggests it.
+  it("offers a described-only role for continuity only and never for conditioning", async () => {
+    await render();
+    const selectFor = (prefix) => [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.startsWith(prefix)).querySelector("select");
+    // `option.value` falls back to the text for an option with no value attribute, so this is the
+    // role list with the selects' empty "None" entry dropped.
+    const optionValues = (element) => [...element.querySelectorAll("option")]
+      .map((option) => option.value).filter(Boolean);
+
+    for (const prefix of ["First frame role", "Last frame role"]) {
+      expect(optionValues(selectFor(prefix))).toEqual(["hero", "plate"]);
+    }
+    expect(optionValues(container.querySelector("#film-reference-role-options")))
+      .toEqual(["hero", "plate"]);
+    expect(optionValues(container.querySelector("#film-continuity-role-options")))
+      .toEqual(["hero", "plate", "recipient"]);
   });
 
   it("shows field findings, effective settings and recorded refinement identity", async () => {

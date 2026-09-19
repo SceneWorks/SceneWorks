@@ -61,9 +61,19 @@ pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[PLAN_SCHEMA_VERSION];
 /// carries it too would dispatch it twice. One constant, so the check and the text it guards can
 /// never disagree about the spelling.
 pub const AUDIO_PROMPT_PREFIX: &str = "Audio:";
-/// Schema version of [`ReferencePack`] documents this module reads and writes. Version 2 (sc-24024)
-/// adds `references[].locator` — the phrase that picks one subject out of an image several roles
-/// share ("the woman on the left").
+/// Schema version of [`ReferencePack`] documents this module reads and writes.
+///
+/// Version 2 adds two things, and both are ADDITIVE — a version 1 document needs no edit for
+/// either unless two of its roles share one file:
+///
+///   * (sc-24024) `references[].locator` — the phrase that picks one subject out of an image
+///     several roles share ("the woman on the left").
+///   * (sc-24025) `references[].file` itself becomes OPTIONAL. An entry with no file is a
+///     DESCRIBED-ONLY role: a subject the pack describes but has no picture of, carried into
+///     every shot that names it by the compiler's identity lock rather than by an image.
+///
+/// This is the same wording [`validate_reference_pack`] refuses a wrong version with, so the
+/// constant and the message an author actually reads cannot drift.
 ///
 /// Only the current version is read. The harness is unreleased, so a version 1 document is refused
 /// by version rather than migrated on read: the alternative is a build that silently accepts a pack
@@ -469,8 +479,19 @@ pub struct Shot {
     pub conditioning: ShotConditioning,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
-    /// Roles the shot depicts (traceability only; they are not sent to the model). Every entry
-    /// must exist in the pack.
+    /// Roles the shot depicts. Every entry must exist in the pack.
+    ///
+    /// These ARE sent to the model, as text (sc-24025). For every role listed here that this shot
+    /// does NOT bind to an image — a described-only role, or an image-backed one on a shot that
+    /// resolves to the base checkpoint or simply binds nothing — the compiler inserts the pack's
+    /// `description` of it, word for word, into the dispatched prompt. That is the identity lock:
+    /// reference images are optional in this harness, and a subject nothing conditions on drifts
+    /// as soon as two shots word it differently, so the compiler words it once and repeats itself.
+    /// A role this shot DOES bind already carries its description in its binding sentence and is
+    /// not described twice.
+    ///
+    /// Listing a role here is therefore a claim about the film, not a note in the margin: it says
+    /// this shot shows that subject, and the prompt will say so.
     #[serde(default)]
     pub continuity_roles: Vec<String>,
     /// Shots this one depends on (sc-22711). Declaring the edge is what lets the harness flag this
@@ -616,7 +637,25 @@ pub struct ReferenceEntry {
     /// "The same file" means this string, compared literally: bindings in this repo are keyed on
     /// the configured path, and resolving through the filesystem would make two packs that read
     /// identically behave differently depending on symlinks and case folding.
-    pub file: String,
+    ///
+    /// OPTIONAL (sc-24025). A role with no file is DESCRIBED-ONLY: it exists so the compiler can
+    /// say the same words about it in every shot that names it in `continuityRoles`, which is the
+    /// only thing holding a subject steady in a film whose shots have no image to condition on.
+    /// Reference images are optional in this harness, and a described-only role is how a pack
+    /// describes a courier it has no photograph of.
+    ///
+    /// A described-only role therefore takes no part in anything an image does: it is never
+    /// grouped with another role by file, never imported as a project asset, never counted against
+    /// the reference limit, never sent as planner pixels, and may carry no [`ReferenceEntry::locator`]
+    /// (a locator picks a subject out of an image, and there is no image to pick it out of). It is
+    /// never BINDABLE either — [`validate_plan_against_pack`] refuses one named in any
+    /// `conditioning.*` slot — because conditioning supplies a picture and this role has none.
+    ///
+    /// An entry with NEITHER a file nor a [`ReferenceEntry::description`] is refused by name: it
+    /// says nothing and shows nothing, so no shot could depict it and nothing could be written
+    /// about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     /// The phrase that picks THIS role's subject out of [`ReferenceEntry::file`] — "the woman on
     /// the left", "the parcel on the bench" (sc-24024).
     ///
@@ -644,6 +683,26 @@ pub struct ReferenceEntry {
     /// state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_asset_id: Option<String>,
+    /// What this role IS, in the author's own words — and, because the compiler repeats it into
+    /// prompts, the words that hold it steady from shot to shot.
+    ///
+    /// **Write it as a COMPLETE SENTENCE about the subject, naming the subject itself.** The
+    /// compiler repeats it verbatim (whitespace normalized by `film_compile::normalized_description`)
+    /// as a sentence of its own and supplies nothing but a closing `.` when the text lacks terminal
+    /// punctuation. It never prefixes the role name, so the description has to carry its own
+    /// subject or the prompt reads as a fragment: "The courier: blue jacket, carries the parcel."
+    /// and "Small bright red cardboard parcel." both work; "blue jacket" alone does not.
+    ///
+    /// ONE rule for both places it is repeated, so the two never drift (sc-24025):
+    ///   * appended to a reference's binding sentence — "The courier is the person shown in
+    ///     `<Picture 1>`. The courier: blue jacket, carries the parcel." (sc-24023);
+    ///   * inserted ALONE as the text identity lock, on every shot that lists this role in
+    ///     `continuityRoles` without binding its image, which is what keeps a described subject
+    ///     worded identically across a film whose shots carry no reference (sc-24025).
+    ///
+    /// Both go through `film_compile::description_sentence`. REQUIRED on a described-only role
+    /// (one with no [`ReferenceEntry::file`]): it is everything that role is. Optional on an
+    /// image-backed one, which still shows the picture when it says nothing.
     #[serde(default)]
     pub description: String,
     /// Only approved references may be used as conditioning.
@@ -665,6 +724,26 @@ pub struct ReferenceEntry {
 }
 
 impl ReferenceEntry {
+    /// This entry's image path, or `None` when the role is DESCRIBED-ONLY (sc-24025).
+    ///
+    /// THE one reading of the field, so everything that treats a role as having a picture — the
+    /// grouping that decides which roles share a `<Picture N>`, the import, the planner's pixel
+    /// upload, the file-existence check — agrees on what "has an image" means. A declared but
+    /// blank path is `None` here AND a finding from [`reference_image_file_findings`], so a pack
+    /// that writes `"file": "  "` is refused rather than silently read as described-only.
+    pub fn file(&self) -> Option<&str> {
+        self.file
+            .as_deref()
+            .map(str::trim)
+            .filter(|file| !file.is_empty())
+    }
+
+    /// Whether this role exists only as words: no image, and therefore nothing to condition on,
+    /// import, number or count against a reference limit (sc-24025).
+    pub fn is_described_only(&self) -> bool {
+        self.file().is_none()
+    }
+
     /// This entry's locator, trimmed, or `None` when it declares none or declares only whitespace.
     /// The one reading of the field, so the validator that REQUIRES one on a shared file and the
     /// compiler that writes one into a sentence agree on what "has a locator" means.
@@ -1733,9 +1812,15 @@ fn generated_reference_findings(field: &str, entry: &ReferenceEntry) -> Vec<Plan
 ///   * **They must agree on `generated` / `generation`.** That provenance describes the FILE — the
 ///     job that rendered it, its sha256 — so two roles on one file cannot honestly claim two.
 fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
+    // Only roles with an IMAGE can share one (sc-24025). A described-only role has no file, so it
+    // is not grouped with anything — and emphatically not with the other described-only roles,
+    // which is what a naive grouping on the raw `Option` would do by treating `None` as a path they
+    // all name.
     let mut groups: BTreeMap<&str, Vec<&ReferenceEntry>> = BTreeMap::new();
     for entry in &pack.references {
-        groups.entry(entry.file.as_str()).or_default().push(entry);
+        if let Some(file) = entry.file() {
+            groups.entry(file).or_default().push(entry);
+        }
     }
     let mut findings = Vec::new();
     // Two spellings that differ only by ASCII case are ONE file on a case-insensitive volume —
@@ -1744,9 +1829,12 @@ fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     // the pack has to pick a spelling rather than have one picked for it.
     let mut by_fold: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for entry in &pack.references {
-        let spellings = by_fold.entry(entry.file.to_ascii_lowercase()).or_default();
-        if !spellings.contains(&entry.file.as_str()) {
-            spellings.push(entry.file.as_str());
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let spellings = by_fold.entry(file.to_ascii_lowercase()).or_default();
+        if !spellings.contains(&file) {
+            spellings.push(file);
         }
     }
     for spellings in by_fold.values() {
@@ -1849,8 +1937,8 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 "unsupported reference pack schema version {} (this build reads \
                  {REFERENCE_PACK_SCHEMA_VERSION}); set \"schemaVersion\": \
                  {REFERENCE_PACK_SCHEMA_VERSION} — version 2 only ADDS the optional \
-                 references[].locator, so a version 1 document needs no other edit unless two of \
-                 its roles share one file",
+                 references[].locator and makes references[].file itself optional, so a version 1 \
+                 document needs no other edit unless two of its roles share one file",
                 pack.schema_version
             ),
         ));
@@ -1907,7 +1995,56 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        findings.extend(reference_image_file_findings(&field, &entry.file));
+        // An image-backed role's path is held to every rule it always was. A DESCRIBED-ONLY role
+        // (sc-24025) has no path to check and must instead carry the words that are all it is —
+        // and may carry no locator, which points at a subject inside an image it does not have.
+        match entry.file.as_deref() {
+            Some(file) => findings.extend(reference_image_file_findings(&field, file)),
+            None => {
+                if entry.description.trim().is_empty() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.description"),
+                        format!(
+                            "reference {:?} has no `file` and no `description`: a role with no \
+                             image is DESCRIBED-ONLY, so its description is the whole of it — \
+                             give it one, or give the role an image",
+                            entry.role
+                        ),
+                    ));
+                }
+                if entry.locator().is_some() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.locator"),
+                        format!(
+                            "reference {:?} has no `file` but declares a `locator`; a locator \
+                             picks one subject out of an IMAGE (\"the woman on the left\"), and \
+                             this role has none — put the words in `description` instead",
+                            entry.role
+                        ),
+                    ));
+                }
+                // An entry that names an IMAGE anywhere is not described-only, whatever the
+                // missing `file` says. `sourceAssetId` and a `generation` block both describe a
+                // picture that exists, and `file` is the only thing that says where the run reads
+                // it: without one, `ensure_references` imports nothing, `films.rs` leaves the
+                // reference partition out of the request, and anyone who binds the role is refused
+                // by name. Silently reclassifying it is the one outcome nobody could debug, so it
+                // is refused here instead. The Film workspace's own add-reference route
+                // (`ProjectStore::add_film_reference`) always writes both, so this can never
+                // refuse a draft the UI authored.
+                if entry.source_asset_id.is_some() || entry.generated || entry.generation.is_some()
+                {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.file"),
+                        format!(
+                            "reference {:?} declares sourceAssetId/generation but no `file`; a \
+                             role backed by an image must name the file it is stored as",
+                            entry.role
+                        ),
+                    ));
+                }
+            }
+        }
         findings.extend(reference_description_findings(&field, &entry.description));
         findings.extend(reference_locator_findings(&field, entry.locator.as_deref()));
         findings.extend(generated_reference_findings(&field, entry));
@@ -2147,6 +2284,25 @@ pub fn validate_plan_against_pack(
                         format!("reference role {role:?} is not approved for conditioning"),
                     ));
                 }
+                // A DESCRIBED-ONLY role is never bindable, in ANY conditioning slot (sc-24025).
+                // Every one of them supplies a picture — `referenceRoles` a Ref2VA subject image,
+                // the keyframe slots a literal frame — and this role has no image at all. Refused
+                // here rather than left to fail at import, because the import is a whole run's
+                // worth of setup later and the refusal it would raise names a missing file rather
+                // than the authoring mistake. `continuityRoles` is exactly where such a role
+                // BELONGS: the compiler writes its description into the prompt from there.
+                Some(entry) if entry.is_described_only() && field.starts_with("conditioning.") => {
+                    findings.push(PlanDiagnostic::shot(
+                        &shot.id,
+                        field,
+                        format!(
+                            "reference role {role:?} is DESCRIBED-ONLY — it declares no `file`, so \
+                             there is no image to condition on. Name it in this shot's \
+                             continuityRoles instead, where its description is written into the \
+                             prompt word for word; or give the pack entry an image"
+                        ),
+                    ));
+                }
                 Some(_) => {}
             }
         }
@@ -2216,7 +2372,11 @@ fn validate_sound_against_pack(plan: &ProductionPlan, pack: &ReferencePack) -> V
 pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     for (index, entry) in pack.references.iter().enumerate() {
-        let path = pack_dir.join(&entry.file);
+        // A described-only role names no file, so there is none to find on disk (sc-24025).
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let path = pack_dir.join(file);
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
             Ok(_) => findings.push(PlanDiagnostic::plan(
@@ -5353,6 +5513,71 @@ mod tests {
                 .any(|m| m.contains("locator") && m.contains("'<' or '>'")),
             "{findings:?}"
         );
+    }
+
+    /// DESCRIBED-ONLY is decided by the ABSENCE of an image, and `file` is not the only place an
+    /// entry claims one (sc-24025). An entry carrying `sourceAssetId`, `generated: true` or a
+    /// `generation` block has a picture behind it, and `file` is the only thing that says where
+    /// the run reads it — so with no `file` it is refused rather than silently reclassified into a
+    /// role whose image is dropped from `ensure_references`, left out of the route's partition
+    /// request, and refused by name to anyone who binds it.
+    #[test]
+    fn a_fileless_entry_that_claims_an_image_is_refused_rather_than_called_described_only() {
+        let generation = json!({
+            "model": "flux_krea", "mode": "text_to_image", "prompt": "a courier",
+            "width": 1024, "height": 1024, "jobId": "job-1", "assetId": "asset-1",
+            "sha256": "abc", "createdAt": "2026-09-19T00:00:00Z"
+        });
+        let fileless = |edit: &dyn Fn(&mut Value)| -> Vec<String> {
+            let mut value = json!({
+                "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": [{
+                    "role": "courier", "kind": "character",
+                    "description": "The courier: blue jacket."
+                }]
+            });
+            edit(&mut value);
+            let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: words and nothing else is exactly what a described-only role is.
+        assert!(fileless(&|_| {}).is_empty(), "{:?}", fileless(&|_| {}));
+
+        for (name, edit) in [
+            (
+                "sourceAssetId",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["sourceAssetId"] = json!("asset-1");
+                }) as Box<dyn Fn(&mut Value)>,
+            ),
+            (
+                "generated",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["generated"] = json!(true);
+                }),
+            ),
+            (
+                "generation",
+                Box::new({
+                    let generation = generation.clone();
+                    move |value: &mut Value| {
+                        value["references"][0]["generation"] = generation.clone();
+                    }
+                }),
+            ),
+        ] {
+            let findings = fileless(&*edit);
+            assert!(
+                findings.iter().any(|message| {
+                    message.contains("\"courier\"")
+                        && message.contains("sourceAssetId/generation but no `file`")
+                }),
+                "{name} with no `file` must be refused by name: {findings:?}"
+            );
+        }
     }
 
     /// Sharing is decided by comparing `file` LITERALLY, so a path the filesystem would resolve to

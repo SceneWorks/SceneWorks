@@ -268,11 +268,19 @@ async fn main_async(args: Vec<String>) -> ExitCode {
                 let images: std::collections::BTreeSet<&str> = pack
                     .references
                     .iter()
-                    .map(|entry| entry.file.as_str())
+                    .filter_map(sceneworks_core::film_plan::ReferenceEntry::file)
                     .collect();
+                // And how many roles are DESCRIBED-ONLY (sc-24025): they cost no image and can be
+                // bound by no shot, so a pack whose roles mostly have no plates is something the
+                // operator should see here rather than discover when a binding is refused.
+                let described_only = pack
+                    .references
+                    .iter()
+                    .filter(|entry| entry.is_described_only())
+                    .count();
                 println!(
                     "plan {:?} v{} ({} shots) and reference pack {:?} v{} ({} references over {} \
-                     images) validate against {} on {}",
+                     images, {} described-only) validate against {} on {}",
                     plan.id,
                     plan.version,
                     plan.shots.len(),
@@ -280,6 +288,7 @@ async fn main_async(args: Vec<String>) -> ExitCode {
                     pack.version,
                     pack.references.len(),
                     images.len(),
+                    described_only,
                     plan.model.id,
                     parsed.api_url
                 );

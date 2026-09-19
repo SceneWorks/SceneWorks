@@ -68,7 +68,13 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
   const compiledInput = useRef(null);
   const shots = draft.productionPlan.shots;
   const shot = shots[Math.min(selectedIndex, shots.length - 1)];
+  // Every approved role, image-backed or DESCRIBED-ONLY (sc-24025). These belong in
+  // `continuityRoles` — the only slot a role with no image is allowed in.
   const approvedRoles = draft.referencePack.references.filter((entry) => entry.approved).map((entry) => entry.role);
+  // The approved roles a CONDITIONING slot may name: a described-only role supplies no image, and
+  // `validate_plan_against_pack` refuses one in the keyframe slots and in `referenceRoles` alike,
+  // so offering it here would build a draft the server rejects.
+  const conditionableRoles = draft.referencePack.references.filter((entry) => entry.approved && Boolean(entry.file)).map((entry) => entry.role);
   const modes = capabilities?.modes?.length ? capabilities.modes : CONDITIONING_MODES;
   const resolutions = capabilities?.resolutions ?? [];
   const turboLoras = capabilities?.turboLoras ?? [];
@@ -190,12 +196,13 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
             <fieldset className="ve-film-inspector-fields" disabled={disabled}>
               <legend>Conditioning and continuity</legend>
               <label>Mode<select aria-label="Conditioning mode" value={shot.conditioning.mode} onChange={(event) => mutateShot((next) => { next.conditioning.mode = event.target.value; })}>{modes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></label>
-              <label>First frame role<select value={shot.conditioning.firstFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "firstFrameRole", event.target.value))}><option value="">None</option>{approvedRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
-              <label>Last frame role<select value={shot.conditioning.lastFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "lastFrameRole", event.target.value))}><option value="">None</option>{approvedRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
+              <label>First frame role<select value={shot.conditioning.firstFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "firstFrameRole", event.target.value))}><option value="">None</option>{conditionableRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
+              <label>Last frame role<select value={shot.conditioning.lastFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "lastFrameRole", event.target.value))}><option value="">None</option>{conditionableRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
               <label>Ordered reference roles<input aria-label="Reference roles" list="film-reference-role-options" value={(shot.conditioning.referenceRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.conditioning.referenceRoles = asList(event.target.value); })} /></label>
-              <datalist id="film-reference-role-options">{approvedRoles.map((role) => <option key={role} value={role} />)}</datalist>
+              <datalist id="film-reference-role-options">{conditionableRoles.map((role) => <option key={role} value={role} />)}</datalist>
               <label>Continuity chain from<select value={shot.conditioning.chainFromShotId ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "chainFromShotId", event.target.value))}><option value="">None</option>{shots.filter((item) => item.id !== shot.id).map((item) => <option key={item.id}>{item.id}</option>)}</select></label>
-              <label>Continuity roles<input value={(shot.continuityRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.continuityRoles = asList(event.target.value); })} /></label>
+              <label>Continuity roles<input aria-label="Continuity roles" list="film-continuity-role-options" value={(shot.continuityRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.continuityRoles = asList(event.target.value); })} /></label>
+              <datalist id="film-continuity-role-options">{approvedRoles.map((role) => <option key={role} value={role} />)}</datalist>
               <Finding field="conditioning" findings={findings} shotId={shot.id} /><Finding field="continuityRoles" findings={findings} shotId={shot.id} />
               <div className="ve-film-dependencies"><strong>Dependencies</strong>{(shot.dependsOn ?? []).map((dependency, index) => <div className="ve-film-dependency" key={`${dependency.shotId}-${index}`}><select aria-label={`Dependency ${index + 1} shot`} value={dependency.shotId} onChange={(event) => mutateShot((next) => { next.dependsOn[index].shotId = event.target.value; })}><option value="">Choose shot</option>{shots.filter((item) => item.id !== shot.id).map((item) => <option key={item.id}>{item.id}</option>)}</select><select aria-label={`Dependency ${index + 1} kind`} value={dependency.kind} onChange={(event) => mutateShot((next) => { next.dependsOn[index].kind = event.target.value; })}>{DEPENDENCY_KINDS.map((kind) => <option key={kind}>{kind}</option>)}</select><input aria-label={`Dependency ${index + 1} note`} placeholder="Intent note" value={dependency.note ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.dependsOn[index], "note", event.target.value))} /><button onClick={() => mutateShot((next) => { next.dependsOn.splice(index, 1); })} type="button">Remove</button></div>)}<button onClick={() => mutateShot((next) => { next.dependsOn ??= []; next.dependsOn.push({ shotId: "", kind: "continuity" }); })} type="button">Add dependency</button></div>
               <Finding field="dependsOn" findings={findings} shotId={shot.id} />

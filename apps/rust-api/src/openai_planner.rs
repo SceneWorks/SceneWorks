@@ -778,7 +778,30 @@ mod tests {
             assert_eq!(execution.request_timeout_seconds, Some(30));
         }
         for request in &artifacts.compiled.requests {
-            assert!(request.prompt.starts_with("Native shot rewrite:"));
+            // CONTAINED, not leading: since sc-24025 the compiler's identity text leads any shot
+            // that names a continuity role it does not bind to an image, and these shots bind
+            // nothing. What this test is about is that the NATIVE refiner produced the text, so it
+            // asserts the rewrite survived and that only recorded inserted text precedes it.
+            let rewrite_at = request
+                .prompt
+                .find("Native shot rewrite:")
+                .unwrap_or_else(|| panic!("{}: {}", request.shot_id, request.prompt));
+            let leading: String = request
+                .inserted_text
+                .iter()
+                .filter(|piece| {
+                    piece.kind.placement()
+                        == sceneworks_core::film_compile::InsertedTextPlacement::Leading
+                })
+                .map(|piece| piece.text.clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                request.prompt[..rewrite_at].trim(),
+                leading.trim(),
+                "{}: only the compiler's own leading text precedes the rewrite",
+                request.shot_id
+            );
         }
         let recovered = crate::film_planner::compile_existing_with_executions(
             &harness.transport,

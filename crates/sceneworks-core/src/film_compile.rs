@@ -53,7 +53,14 @@ use crate::MAX_PROMPT_CHARS;
 /// one under this build would compare clean-but-different against a fresh compile and blame the
 /// operator for a hand edit through [`request_differences`] — the same migration trap as the three
 /// bumps above. The remedy is the same one line: `film-harness compile`.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 5;
+/// **6** (sc-24025): every request may now carry the TEXT IDENTITY LOCK — the pack's description of
+/// each `continuityRoles` entry the shot does not bind to an image, inserted word for word and
+/// recorded as a further `insertedText` entry. It is not a reference feature: a plan whose shots
+/// bind nothing at all gains it, which is exactly the case it exists for. A v5 document's prompt
+/// carries none of it, so reading one under this build would compare clean-but-different against a
+/// fresh compile and blame the operator for a hand edit through [`request_differences`] — the same
+/// migration trap as the four bumps above. The remedy is the same one line: `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 6;
 
 /// The sentence appended when the harness itself puts a voice on this shot (sc-24026).
 ///
@@ -154,6 +161,15 @@ impl ReferencePicture<'_> {
 /// A role the pack does not declare (`entry: None`) can never share, since there is no file to
 /// share: it gets a picture of its own. Only an unvalidated plan has one —
 /// [`crate::film_plan::validate_plan_against_pack`] refuses an undeclared role.
+///
+/// A DESCRIBED-ONLY role — declared, but with no `file` (sc-24025) — produces NO picture at all,
+/// which is a different answer from the undeclared role's "a picture of its own". There is no
+/// image to supply, so numbering one would promise the engine a `<Picture N>` it is never sent and
+/// shift every later number by one; and because the reference LIMIT, the route's pre-dispatch
+/// payload gate and the dispatched `referenceAssetIds` are all built by walking this list, a role
+/// that costs no image must not appear in it. Only an unvalidated plan can bind one —
+/// `validate_plan_against_pack` refuses a described-only role in every `conditioning.*` slot — and
+/// dropping it here is what makes that refusal the only way it is ever seen.
 pub fn shot_reference_pictures<'a>(
     reference_roles: &[String],
     pack: &'a ReferencePack,
@@ -162,16 +178,21 @@ pub fn shot_reference_pictures<'a>(
     let mut by_file: BTreeMap<&'a str, usize> = BTreeMap::new();
     for role in reference_roles {
         let entry = pack.references.iter().find(|entry| &entry.role == role);
+        if entry.is_some_and(crate::film_plan::ReferenceEntry::is_described_only) {
+            continue;
+        }
         let bound = BoundReferenceRole {
             role: role.clone(),
             entry,
         };
-        let shared = entry.and_then(|entry| by_file.get(entry.file.as_str()).copied());
+        let shared = entry
+            .and_then(crate::film_plan::ReferenceEntry::file)
+            .and_then(|file| by_file.get(file).copied());
         match shared {
             Some(index) => pictures[index].roles.push(bound),
             None => {
-                if let Some(entry) = entry {
-                    by_file.insert(entry.file.as_str(), pictures.len());
+                if let Some(file) = entry.and_then(crate::film_plan::ReferenceEntry::file) {
+                    by_file.insert(file, pictures.len());
                 }
                 pictures.push(ReferencePicture {
                     number: u32::try_from(pictures.len() + 1).unwrap_or(u32::MAX),
@@ -191,6 +212,14 @@ pub enum InsertedTextKind {
     /// One sentence per bound reference role, giving that reference a job in the prompt by naming
     /// the `<Picture N>` the engine will label its image with.
     ReferenceBinding,
+    /// THE TEXT IDENTITY LOCK (sc-24025): the pack's own description of every `continuityRoles`
+    /// entry this shot does NOT bind to an image, repeated word for word.
+    ///
+    /// Reference images are OPTIONAL in this harness, and a subject no picture conditions on is
+    /// held together by nothing but the words used for it. Left to an author or a planner, the
+    /// courier is re-worded in every shot and MiniMax-H3 duly renders a different courier; the
+    /// compiler instead says the same thing every time, from the one place the pack states it.
+    ContinuityDescription,
     /// `Audio: <the shot's own sentence>` — what this shot should sound like (sc-24026).
     Audio,
     /// [`NO_SPEECH_SENTENCE`], on a shot whose dialogue bus the harness already fills (sc-24026).
@@ -214,9 +243,13 @@ impl InsertedTextKind {
     /// because they describe a different track from everything before them — a prompt that opens on
     /// sound reads as a film about sound — and because the no-speech sentence only makes sense once
     /// the soundtrack has been described.
+    /// The identity lock LEADS too, immediately after the bindings, for the same reason they do:
+    /// both say what the shot is OF, and the two together are one block describing every subject
+    /// in the film — the bound ones by picture, the rest by description — read before the prompt
+    /// that puts those subjects in motion.
     pub fn placement(self) -> InsertedTextPlacement {
         match self {
-            Self::ReferenceBinding => InsertedTextPlacement::Leading,
+            Self::ReferenceBinding | Self::ContinuityDescription => InsertedTextPlacement::Leading,
             Self::Audio | Self::NoSpeech => InsertedTextPlacement::Trailing,
         }
     }
@@ -273,6 +306,165 @@ pub fn normalized_description(description: &str) -> String {
     description.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A pack description as ONE sentence of a prompt, or `None` when the pack says nothing.
+///
+/// THE one rule for repeating a description, shared by the two places that repeat one (sc-24025):
+/// the binding sentence a bound reference gets ([`reference_binding_text`], sc-24023) and the
+/// identity lock an unbound continuity role gets ([`continuity_description_text`]). One helper
+/// because the two must read identically — the same courier described the same way whether this
+/// shot happens to bind her plate — and two copies of "normalize, then add a period" would drift.
+///
+/// It adds NOTHING but a closing `.` to text that does not already end a sentence. In particular
+/// it never prefixes the role name: the pack's descriptions are written as complete sentences
+/// naming their own subject ("The courier: blue jacket, carries the parcel."), so prefixing would
+/// produce "The courier: The courier: …". That contract is stated on
+/// [`crate::film_plan::ReferenceEntry::description`], which is where an author reads it.
+///
+/// WHITESPACE is normalized first ([`normalized_description`]): the sentence is one line of a
+/// prompt, and a description carrying a newline or a tab run would otherwise land raw in the
+/// dispatched text (sc-24023).
+fn description_sentence(description: &str) -> Option<String> {
+    let mut text = normalized_description(description);
+    if text.is_empty() {
+        return None;
+    }
+    if !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    Some(text)
+}
+
+/// THE SHARED-FILE RULE for continuity roles (sc-24025), and the ONE place it is applied: a
+/// continuity role the shot does not list in `referenceRoles`, but whose `file` is the file of a
+/// picture this shot IS binding, is added to that picture as a bound role — and therefore gets a
+/// BINDING sentence with its locator instead of an identity sentence.
+///
+/// The case is a photograph of two people where the shot binds one of them. The other subject's
+/// image is already supplied inside that `<Picture N>`, so an identity sentence would describe
+/// somebody visibly present in a supplied picture without tying them to it — the second-subject
+/// ambiguity the locator exists to remove, reintroduced. Tying it to the picture says the one
+/// thing the prompt is missing: which of the two people in `<Picture 1>` the recipient is.
+///
+/// It never gets BOTH, because the binding sentence already repeats the pack's description and a
+/// description stated twice is emphasis a prompt model acts on. Adding the role here is what makes
+/// [`continuity_description_text`] skip it: that function asks the pictures it is given.
+///
+/// TEXT ONLY. The role is appended to an EXISTING picture, so nothing here changes
+/// [`shot_reference_pictures`]' order or numbering, and nothing changes the dispatched
+/// `referenceAssetIds`: those are built from each picture's [`ReferencePicture::dispatch_role`],
+/// which is the FIRST role on it and therefore always one the shot listed. The image was already
+/// being sent; this only names its second subject.
+///
+/// APPROVED roles only, the rule every other insertion follows, and appended AFTER the listed
+/// roles so a picture's binding sentences read in the order the shot asked for them.
+fn pictures_with_shared_continuity<'a>(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'a>],
+    pack: &'a ReferencePack,
+) -> Vec<ReferencePicture<'a>> {
+    let mut augmented = pictures.to_vec();
+    for role in &shot.continuity_roles {
+        if augmented
+            .iter()
+            .flat_map(|picture| picture.roles.iter())
+            .any(|bound| &bound.role == role)
+        {
+            continue;
+        }
+        let Some(entry) = pack
+            .references
+            .iter()
+            .find(|entry| &entry.role == role && entry.approved)
+        else {
+            continue;
+        };
+        // A DESCRIBED-ONLY role has no file and can share none: it falls through to the lock.
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let Some(picture) = augmented.iter_mut().find(|picture| {
+            picture
+                .roles
+                .first()
+                .and_then(|bound| bound.entry)
+                .and_then(crate::film_plan::ReferenceEntry::file)
+                == Some(file)
+        }) else {
+            continue;
+        };
+        picture.roles.push(BoundReferenceRole {
+            role: role.clone(),
+            entry: Some(entry),
+        });
+    }
+    augmented
+}
+
+/// THE TEXT IDENTITY LOCK for one shot (sc-24025): the pack's description of every
+/// `continuityRoles` entry this shot does not bind to an image, in the shot's own role order.
+///
+/// "Does not bind to an image" is asked of the shot's RESOLVED pictures and its keyframe slots,
+/// not of the role's kind or of the plan's declared model, because that is the question that
+/// matters: a role whose picture is actually being supplied already has its description in its
+/// binding sentence, and saying it twice is the one thing this must not do. Everything else
+/// qualifies — a described-only role on any shot, and an image-backed role on a shot that resolved
+/// to the base checkpoint or simply did not bind it. Role KIND is irrelevant: a style and a plate
+/// drift exactly as a character does when nobody repeats the words.
+///
+/// UNAPPROVED roles contribute nothing, which is the rule the binding sentences already follow —
+/// `validate_plan_against_pack` refuses an unapproved role in a conditioning slot, so no binding
+/// sentence has ever described one. `approved` defaults to TRUE, so an unapproved entry is an
+/// explicit "do not use this", and text shapes the render exactly as conditioning does.
+///
+/// An empty description contributes nothing and is not an error here: an image-backed role that
+/// says nothing still shows its picture. A DESCRIBED-only role cannot reach this state — the pack
+/// validator refuses one with no description, because it would be a role that is nothing at all.
+///
+/// A role SHARING a bound picture's file gets no identity sentence either, and it is
+/// [`pictures_with_shared_continuity`] that says so rather than a rule here: it has already added
+/// the role to that picture, so the `pictures` this reads report it bound. Its image is being
+/// supplied, so it is named by picture with its locator — see that function for why.
+fn continuity_description_text(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'_>],
+    pack: &ReferencePack,
+) -> Option<InsertedText> {
+    let image_bound = |role: &str| {
+        pictures
+            .iter()
+            .flat_map(|picture| picture.roles.iter())
+            .any(|bound| bound.role == role)
+            || [
+                shot.conditioning.first_frame_role.as_deref(),
+                shot.conditioning.last_frame_role.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|frame| frame == role)
+    };
+    // ONE sentence per SUBJECT, at its first mention. `continuityRoles` is a free list and nothing
+    // refuses a role written into it twice, but a subject described twice is the compiler
+    // contradicting its own purpose: the lock exists to say one fixed thing about each subject, and
+    // repetition is emphasis a prompt model acts on.
+    let mut described: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let sentences: Vec<String> = shot
+        .continuity_roles
+        .iter()
+        .filter(|role| !image_bound(role))
+        .filter_map(|role| {
+            pack.references
+                .iter()
+                .find(|entry| entry.role == *role && entry.approved)
+        })
+        .filter(|entry| described.insert(entry.role.as_str()))
+        .filter_map(|entry| description_sentence(&entry.description))
+        .collect();
+    (!sentences.is_empty()).then(|| InsertedText {
+        kind: InsertedTextKind::ContinuityDescription,
+        text: sentences.join(" "),
+    })
+}
+
 /// The binding sentences for one shot: one per bound role, in picture order, each naming the
 /// `<Picture N>` that role's image will be labelled with and repeating the pack's own description
 /// of it verbatim (sc-24023).
@@ -280,6 +472,13 @@ pub fn normalized_description(description: &str) -> String {
 /// Plain declarative sentences and nothing else — no emphasis, no imperatives, no restating of the
 /// shot. The prompt guide's rule is that a reference needs a job ("the woman from `<Picture 1>`");
 /// this is that job, stated once per reference.
+///
+/// "Bound role" is every role on the picture, which since sc-24025 includes a `continuityRoles`
+/// entry whose file this shot is already supplying for some other role
+/// ([`pictures_with_shared_continuity`]) — a second subject inside a picture that is being sent is
+/// named here, by picture and locator, rather than described on its own by the identity lock.
+/// It gets a binding sentence and no identity sentence; the picture's own number and its
+/// dispatched asset are untouched.
 fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedText> {
     let mut sentences: Vec<String> = Vec::new();
     for picture in pictures {
@@ -310,19 +509,13 @@ fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedT
                 ),
             };
             // The pack's description is the author's own words about that image, so it is repeated
-            // rather than paraphrased into the sentence above — but its WHITESPACE is normalized
-            // first: the sentence is one line of a prompt, and a description carrying a newline or a
-            // tab run would put a raw control run into the dispatched text (sc-24023).
-            let description = bound
+            // rather than paraphrased into the sentence above.
+            if let Some(description) = bound
                 .entry
-                .map(|entry| normalized_description(&entry.description))
-                .unwrap_or_default();
-            if !description.is_empty() {
+                .and_then(|entry| description_sentence(&entry.description))
+            {
                 sentence.push(' ');
                 sentence.push_str(&description);
-                if !description.ends_with(['.', '!', '?']) {
-                    sentence.push('.');
-                }
             }
             sentences.push(sentence);
         }
@@ -365,9 +558,15 @@ fn no_speech_text(shot: &Shot) -> Option<InsertedText> {
 ///
 /// The one place an insertion kind is produced: a later kind of compiler-owned text is another
 /// entry pushed here, and needs no change to the placement, the record or the conformance check.
-fn inserted_text_for_shot(shot: &Shot, pictures: &[ReferencePicture<'_>]) -> Vec<InsertedText> {
-    reference_binding_text(pictures)
+fn inserted_text_for_shot<'a>(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'a>],
+    pack: &'a ReferencePack,
+) -> Vec<InsertedText> {
+    let pictures = pictures_with_shared_continuity(shot, pictures, pack);
+    reference_binding_text(&pictures)
         .into_iter()
+        .chain(continuity_description_text(shot, &pictures, pack))
         .chain(audio_text(shot))
         .chain(no_speech_text(shot))
         .collect()
@@ -784,18 +983,35 @@ fn compile_shot(
     let inserted_text = inserted_text_for_shot(
         shot,
         &shot_reference_pictures(&shot.conditioning.reference_roles, pack),
+        pack,
     );
     let prompt = apply_inserted_text(&prompt, &inserted_text);
     let length = prompt.chars().count();
     if length > MAX_PROMPT_CHARS {
+        // What the COMPILER contributed, per kind, so the refusal points at the text the author
+        // has to go and shorten rather than at the total. The identity text is named because it is
+        // the one an author is least likely to suspect: it appears on shots that bind nothing at
+        // all, and it is written from a pack description that shot never mentions (sc-24025).
+        let inserted_chars = |kind: InsertedTextKind| -> usize {
+            inserted_text
+                .iter()
+                .filter(|piece| piece.kind == kind)
+                .map(|piece| piece.text.chars().count())
+                .sum()
+        };
         return Err(vec![PlanDiagnostic::shot(
             &shot.id,
             "prompt",
             format!(
                 "this shot's prompt is {length} characters once the compiler's own sentences lead \
                  and trail it, outside the 1-{MAX_PROMPT_CHARS} the video route accepts; shorten \
-                 the shot's prompt, its audio sentence or its references' descriptions (nothing is \
-                 silently truncated)"
+                 the shot's prompt, its audio sentence, or the pack descriptions the compiler \
+                 repeats. Of those characters the compiler wrote {} as reference binding \
+                 sentences and {} as identity text — the pack's description of each continuityRoles \
+                 entry this shot does not bind to an image, written in word for word (nothing is \
+                 silently truncated)",
+                inserted_chars(InsertedTextKind::ReferenceBinding),
+                inserted_chars(InsertedTextKind::ContinuityDescription),
             ),
         )]);
     }
@@ -3234,12 +3450,47 @@ mod tests {
             },
         )
         .expect_err("refuses");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        // BOTH shots, for two different reasons, and the message says which is which (sc-24025):
+        // SH010 BINDS the courier, so the over-long description arrives in its binding sentence;
+        // SH020 binds nothing at all and merely lists the courier in `continuityRoles`, so the
+        // same description arrives as identity text. The second is the case an author cannot
+        // otherwise account for — a reference-free shot refused over a reference's description —
+        // so the refusal names the identity text and attributes the characters to it.
+        let by_shot: BTreeMap<&str, &PlanDiagnostic> = findings
+            .iter()
+            .map(|finding| (finding.shot_id.as_deref().unwrap_or_default(), finding))
+            .collect();
+        assert_eq!(by_shot.len(), findings.len(), "one per shot: {findings:?}");
+        for shot_id in ["SH010", "SH020"] {
+            let finding = by_shot
+                .get(shot_id)
+                .unwrap_or_else(|| panic!("{shot_id} is refused: {findings:?}"));
+            assert_eq!(finding.field, "prompt");
+            assert!(
+                finding.message.contains("the compiler's own sentences")
+                    && finding.message.contains("the video route accepts")
+                    && finding.message.contains("identity text"),
+                "{finding:?}"
+            );
+        }
+        // The attribution is per shot and truthful, asserted as SHAPE rather than as a character
+        // count this test would have to recompute: the bound shot's long text is binding sentence
+        // and none of it is identity text; the unbound shot's is the exact reverse.
         assert!(
-            findings[0].message.contains("the compiler's own sentences")
-                && findings[0].message.contains("the video route accepts"),
-            "{findings:?}"
+            by_shot["SH010"].message.contains("0 as identity text")
+                && !by_shot["SH010"]
+                    .message
+                    .contains("wrote 0 as reference binding"),
+            "SH010 binds the courier, so its characters are binding sentence: {:?}",
+            by_shot["SH010"].message
+        );
+        assert!(
+            by_shot["SH020"]
+                .message
+                .contains("wrote 0 as reference binding")
+                && !by_shot["SH020"].message.contains("0 as identity text"),
+            "SH020 binds nothing, so all of its inserted characters are identity text: {:?}",
+            by_shot["SH020"].message
         );
     }
 
@@ -3359,7 +3610,8 @@ mod tests {
         // audio sentence. The bindings are what this test is about, so they are selected by kind
         // rather than by position.
         let shot = fixture_shot();
-        let inserted = inserted_text_for_shot(&shot, &shot_reference_pictures(&roles, &pack));
+        let inserted =
+            inserted_text_for_shot(&shot, &shot_reference_pictures(&roles, &pack), &pack);
         assert_eq!(
             inserted.iter().map(|piece| piece.kind).collect::<Vec<_>>(),
             vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio],
@@ -3387,6 +3639,7 @@ mod tests {
         let alone = inserted_text_for_shot(
             &shot,
             &shot_reference_pictures(&["courier".to_owned()], &shared_plate_pack()),
+            &shared_plate_pack(),
         );
         assert_eq!(
             alone[0].kind,
@@ -3400,5 +3653,307 @@ mod tests {
             "the locator survives a shot that binds neither of its co-subjects: {:?}",
             alone[0].text
         );
+    }
+
+    /// THE SHARED-FILE RULE (sc-24025). A continuity role the shot does not list, but whose file
+    /// is the file of a picture it IS binding, is named BY PICTURE — its image is already inside
+    /// that `<Picture N>`, and describing it on its own would put a second subject in the prompt
+    /// with nothing tying it to the picture it is visibly in.
+    ///
+    /// Everything about the dispatch stays as it was: one file is one picture, numbered once, and
+    /// one asset is sent.
+    #[test]
+    fn a_continuity_role_sharing_a_bound_picture_is_bound_to_it_and_never_described_twice() {
+        let mut pack = shared_plate_pack();
+        // The shipped fixture leaves the recipient silent; give it words, so "described twice"
+        // is a state this test could actually observe.
+        pack.references[1].description = "Grey work apron.".to_owned();
+
+        // Through the real compiler, so the prompt asserted below is the prompt a run dispatches.
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["conditioning"] =
+            json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+        document["shots"][0]["continuityRoles"] = json!(["recipient"]);
+        let plan = parse_plan(&document.to_string()).expect("the edited plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the plan compiles against the shared plate pack");
+        let request = compiled.request("SH010").expect("SH010 compiled");
+
+        assert_eq!(
+            request
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio],
+            "the sharer is BOUND, so there is no identity text at all: {request:?}"
+        );
+        assert_eq!(
+            request.inserted_text[0].text,
+            "The courier is the woman on the left in <Picture 1>. Blue jacket. The recipient is \
+             the man on the right in <Picture 1>. Grey work apron.",
+            "two binding sentences on ONE picture number, the listed role's first"
+        );
+        assert!(
+            !request.inserted_text[0].text.contains("<Picture 2>"),
+            "the shared file is one picture: {:?}",
+            request.inserted_text[0].text
+        );
+        assert_eq!(
+            request.prompt.matches("Grey work apron.").count(),
+            1,
+            "a description is never stated twice: {:?}",
+            request.prompt
+        );
+
+        // The dispatch is untouched: one picture, numbered 1, one asset, sent under the role the
+        // shot actually listed.
+        let pictures = shot_reference_pictures(&request.reference_roles, &pack);
+        assert_eq!(pictures.len(), 1, "{pictures:?}");
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(pictures[0].dispatch_role(), Some("courier"));
+        let role_assets = BTreeMap::from([
+            ("courier".to_owned(), "asset_courier".to_owned()),
+            ("recipient".to_owned(), "asset_recipient".to_owned()),
+        ]);
+        let resolved = request
+            .resolve_conditioning(&pack, &role_assets)
+            .expect("the bound role was imported");
+        assert_eq!(
+            resolved.reference_asset_ids,
+            vec!["asset_courier".to_owned()],
+            "the image was already being sent; the rule adds no asset"
+        );
+    }
+
+    /// The other half of the rule: with NEITHER sharer bound there is no picture to tie the role
+    /// to, so it falls back to the identity lock — a description and no `<Picture N>` at all.
+    #[test]
+    fn a_sharer_on_a_shot_that_binds_neither_is_described_with_no_picture_label() {
+        let mut pack = shared_plate_pack();
+        pack.references[1].description = "Grey work apron.".to_owned();
+
+        let mut shot = fixture_shot();
+        shot.conditioning.mode = "text_to_video".to_owned();
+        shot.conditioning.reference_roles = Vec::new();
+        shot.conditioning.first_frame_role = None;
+        shot.conditioning.last_frame_role = None;
+        shot.continuity_roles = vec!["recipient".to_owned()];
+
+        let inserted = inserted_text_for_shot(&shot, &[], &pack);
+        assert_eq!(
+            inserted.iter().map(|piece| piece.kind).collect::<Vec<_>>(),
+            vec![
+                InsertedTextKind::ContinuityDescription,
+                InsertedTextKind::Audio
+            ],
+            "nothing is bound, so the lock is the only thing holding this subject: {inserted:?}"
+        );
+        assert_eq!(inserted[0].text, "Grey work apron.");
+        assert!(
+            !inserted[0].text.contains("<Picture"),
+            "no image is supplied, so no picture may be named: {:?}",
+            inserted[0].text
+        );
+    }
+
+    /// A pack mixing an image-backed role, a DESCRIBED-ONLY one, an unapproved described-only one
+    /// and a described-only role with a keyframe plate — everything the identity lock has to tell
+    /// apart (sc-24025).
+    fn described_pack() -> ReferencePack {
+        parse_reference_pack(
+            &json!({
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character",
+                        "file": "references/courier.png",
+                        "description": "The courier: blue jacket."
+                    },
+                    // No file: words alone.
+                    {
+                        "role": "red_parcel", "kind": "prop",
+                        "description": "  The parcel: small,\n  bright red.  "
+                    },
+                    // A kind that may never be BOUND, to prove the lock does not care about kind.
+                    { "role": "house_style", "kind": "style", "description": "Warm light." },
+                    // Approved-false: the author's explicit "do not use this".
+                    {
+                        "role": "draft_look", "kind": "style", "approved": false,
+                        "description": "Not approved."
+                    },
+                    // Declared, but says nothing: an image-backed role may.
+                    { "role": "workshop_plate", "kind": "plate", "file": "references/plate.png" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// The identity text of one shot, or `None` when the compiler wrote none.
+    fn identity_text(shot: &Shot, pack: &ReferencePack) -> Option<String> {
+        inserted_text_for_shot(
+            shot,
+            &shot_reference_pictures(&shot.conditioning.reference_roles, pack),
+            pack,
+        )
+        .into_iter()
+        .find(|piece| piece.kind == InsertedTextKind::ContinuityDescription)
+        .map(|piece| piece.text)
+    }
+
+    /// THE LOCK (sc-24025). A continuity role the shot does NOT bind is described in the prompt,
+    /// word for word from the pack; one it DOES bind is not, because its binding sentence already
+    /// carries the same description and saying it twice is the one thing this must not do.
+    ///
+    /// Driven through the mixed fixture, whose two shots are exactly the two cases: SH010 binds
+    /// the courier it lists in `continuityRoles`, SH020 binds nothing at all.
+    #[test]
+    fn an_unbound_continuity_role_is_described_and_a_bound_one_is_not_described_twice() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let courier = "The courier: blue jacket.";
+
+        // SH010 BINDS the courier and lists it in continuityRoles: the binding sentence describes
+        // it, and the lock adds nothing.
+        let bound = &plan.shots[0];
+        assert_eq!(bound.continuity_roles, ["courier"]);
+        assert!(
+            bound
+                .conditioning
+                .reference_roles
+                .contains(&"courier".to_owned()),
+            "this shot must BIND the role it lists, or the test proves nothing"
+        );
+        assert_eq!(
+            identity_text(bound, &pack),
+            None,
+            "a bound role already has its description in its binding sentence"
+        );
+        let pictures = shot_reference_pictures(&bound.conditioning.reference_roles, &pack);
+        let bindings = reference_binding_text(&pictures).expect("the shot binds a role");
+        assert_eq!(
+            bindings.text.matches(courier).count(),
+            1,
+            "exactly once, in the binding sentence: {:?}",
+            bindings.text
+        );
+
+        // SH020 binds NOTHING and lists two roles: both are described, in the shot's own order.
+        let unbound = &plan.shots[1];
+        assert_eq!(unbound.continuity_roles, ["courier", "red_parcel"]);
+        assert!(unbound.conditioning.reference_roles.is_empty());
+        let text = identity_text(unbound, &pack).expect("an unbound continuity role is described");
+        assert_eq!(
+            text, "The courier: blue jacket. The parcel: small, bright red.",
+            "the pack's own words, whitespace normalized, in continuityRoles order"
+        );
+    }
+
+    /// What the lock leaves out, and why — each of these is a role that would otherwise be
+    /// described (sc-24025).
+    #[test]
+    fn a_keyframe_an_unapproved_and_a_silent_role_contribute_no_identity_text() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let mut shot = plan.shots[1].clone();
+
+        // A role placed as a KEYFRAME is image-bound just as a reference is: its frame is supplied.
+        shot.continuity_roles = vec!["workshop_plate".to_owned(), "house_style".to_owned()];
+        shot.conditioning.mode = "image_to_video".to_owned();
+        shot.conditioning.first_frame_role = Some("workshop_plate".to_owned());
+        assert_eq!(
+            identity_text(&shot, &pack).as_deref(),
+            Some("Warm light."),
+            "the keyframe role is supplied as a picture; the style role is not and is a `style`, \
+             which the lock describes like any other kind"
+        );
+
+        // UNAPPROVED: `approved` defaults to true, so false is the author's explicit "do not use
+        // this" — and prompt text shapes a render exactly as conditioning does.
+        shot.conditioning.first_frame_role = None;
+        shot.conditioning.mode = "text_to_video".to_owned();
+        shot.continuity_roles = vec!["draft_look".to_owned()];
+        assert_eq!(identity_text(&shot, &pack), None);
+
+        // SILENT: an image-backed role that describes itself with nothing contributes nothing, and
+        // is not an error — it still shows its picture wherever it is bound.
+        shot.continuity_roles = vec!["workshop_plate".to_owned()];
+        assert_eq!(identity_text(&shot, &pack), None);
+    }
+
+    /// The lock is BYTE-IDENTICAL across shots: identical input, identical text, which is the
+    /// entire point of moving the wording from the author to the compiler (sc-24025).
+    #[test]
+    fn the_same_role_yields_byte_identical_text_in_every_shot_that_names_it() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let mut first = plan.shots[1].clone();
+        first.continuity_roles = vec!["red_parcel".to_owned()];
+        let mut second = plan.shots[1].clone();
+        second.id = "SH030".to_owned();
+        // A different prompt, a different beat, a different audio sentence: everything about the
+        // shot differs except the role it locks.
+        second.prompt = "a wholly different shot of the same parcel".to_owned();
+        second.beat = "reveal".to_owned();
+        second.audio = "Distant traffic.".to_owned();
+        second.continuity_roles = vec!["red_parcel".to_owned()];
+
+        let text = identity_text(&first, &pack).expect("the role is described");
+        assert_eq!(
+            identity_text(&second, &pack).as_deref(),
+            Some(text.as_str())
+        );
+        assert_eq!(text, "The parcel: small, bright red.");
+
+        // And a role written into `continuityRoles` TWICE is still described once. Nothing refuses
+        // the duplicate, and the lock exists to say one fixed thing about each subject — saying it
+        // twice is emphasis a prompt model acts on.
+        let mut doubled = first.clone();
+        doubled.continuity_roles = vec!["red_parcel".to_owned(), "red_parcel".to_owned()];
+        assert_eq!(
+            identity_text(&doubled, &pack).as_deref(),
+            Some(text.as_str())
+        );
+    }
+
+    /// A described-only role supplies no image, so it is numbered as none: it must never create a
+    /// `<Picture N>`, because the engine is only ever sent the pictures that exist and a phantom
+    /// one shifts every later number (sc-24025).
+    ///
+    /// Only an unvalidated plan can reach this — `validate_plan_against_pack` refuses a
+    /// described-only role in every conditioning slot — which is why the compiler is asked
+    /// directly here rather than through a plan.
+    #[test]
+    fn a_described_only_role_is_never_numbered_as_a_picture() {
+        let pack = described_pack();
+        let roles = [
+            "red_parcel".to_owned(),
+            "courier".to_owned(),
+            "house_style".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&roles, &pack);
+        assert_eq!(
+            pictures.len(),
+            1,
+            "only the image-backed role is a picture: {pictures:?}"
+        );
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(pictures[0].dispatch_role(), Some("courier"));
     }
 }
