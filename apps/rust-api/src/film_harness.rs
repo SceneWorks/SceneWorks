@@ -3840,10 +3840,12 @@ impl Session<'_> {
     /// it) but tagged distinctly, so a query for the conditioning-eligible references cannot pick
     /// it up. Applied by [`Session::ensure_references`] to a freshly imported asset AND to an
     /// adopted one, because the tags are a second write the crash window can swallow.
-    /// `sharing` is every pack role that names this asset's file. A shared image wears a `role:`
-    /// tag for EACH of them (sc-24024): the PATCH replaces the whole tag set, so tagging a shared
-    /// asset one role at a time would leave it wearing only the last, and a query for the asset the
-    /// courier was conditioned on would come back empty.
+    /// `sharing` is every pack role that names this asset's file, and it always CONTAINS
+    /// `reference` — `ensure_references` builds it by looking `reference` up in a map keyed on
+    /// every reference's own file. A shared image wears a `role:` tag for EACH of them
+    /// (sc-24024): the PATCH replaces the whole tag set, so tagging a shared asset one role at a
+    /// time would leave it wearing only the last, and a query for the asset the courier was
+    /// conditioned on would come back empty.
     async fn tag_reference(
         &self,
         project_id: &str,
@@ -3857,11 +3859,12 @@ impl Session<'_> {
         } else {
             UNAPPROVED_REFERENCE_TAG
         };
+        debug_assert!(
+            sharing.iter().any(|entry| entry.role == reference.role),
+            "the group a reference is tagged under always contains that reference"
+        );
         let mut tags = vec![json!(kind_tag)];
-        for entry in sharing.iter().copied().chain(
-            // A caller that passed no group still tags the role it was given.
-            sharing.is_empty().then_some(reference),
-        ) {
+        for entry in sharing {
             tags.push(json!(harness_asset_tag("role", &entry.role)));
         }
         tags.push(json!(harness_asset_tag("pack", &self.pack.id)));

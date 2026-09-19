@@ -2888,5 +2888,21 @@ mod tests {
             "a role with its own file keeps the unlocated wording: {text:?}"
         );
         assert!(!text.contains("<Picture 3>"), "{text:?}");
+
+        // A shot may bind only ONE of the two roles on the shared plate. The image still shows two
+        // people, so the locator is still what says which one the courier is — it is read off the
+        // bound ENTRY, never off the group of roles this shot happens to bind (sc-24024).
+        let alone = inserted_text_for_shot(&shot_reference_pictures(
+            &["courier".to_owned()],
+            &shared_plate_pack(),
+        ));
+        assert_eq!(alone.len(), 1, "{alone:?}");
+        assert!(
+            alone[0]
+                .text
+                .contains("The courier is the woman on the left in <Picture 1>."),
+            "the locator survives a shot that binds neither of its co-subjects: {:?}",
+            alone[0].text
+        );
     }
 }

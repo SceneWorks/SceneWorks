@@ -94,13 +94,17 @@ the role and the kind.
 
 **Several pack entries may name the same `file`** (sc-24024, pack schema version 2) — one photograph
 holding two people is one image with two subjects in it. Each sharing role then needs a `locator`,
-the phrase that picks its subject out of that image ("the woman on the left"); a shared file with a
-locator missing is refused naming the roles and the file. The file is imported as **one** asset that
+the phrase that picks its subject out of that image — a noun phrase **including its article**, one
+that completes "The courier is …" as the compiler writes it verbatim ("the woman on the left", not
+"woman on the left"); a shared file with a locator missing is refused naming the roles and the file.
+The file is imported as **one** asset that
 every sharing role resolves to, supplied to the engine **once** under one `<Picture N>`, and each
 role's binding sentence carries its own locator. Because of that, `limits.maxReferenceAssets` counts
 **distinct files**, not bound roles. "The same file" is the `file` string compared literally — no
-filesystem canonicalization — and sharing roles must agree on `approved` and on their generation
-provenance, since one image carries one of each.
+filesystem canonicalization — so a `file` is refused unless it is already spelled canonically (no
+leading `./`, no `.` component, no doubled or trailing `/`, no `\`), and two entries whose paths
+differ only by ASCII case are refused as one file on a case-insensitive volume. Sharing roles must
+agree on `approved` and on their generation provenance, since one image carries one of each.
 
 A pack entry with `"approved": false` is still imported (so a human can review it), but it is tagged
 `film-harness-reference-unapproved` instead of `film-harness-reference`, recorded with

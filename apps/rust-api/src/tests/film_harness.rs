@@ -7768,7 +7768,7 @@ async fn the_planner_binds_approved_roles_on_every_shot_when_the_pack_has_refere
         .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
         .expect("a planning job was created");
     assert!(
-        request.contains("at most 9 reference roles"),
+        request.contains("at most 9 reference IMAGES"),
         "the cap is the REFERENCE partition's maxReferenceAssets, not the base entry's 0: {request}"
     );
     assert!(

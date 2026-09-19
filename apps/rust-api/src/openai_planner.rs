@@ -1059,6 +1059,76 @@ mod tests {
         .is_err());
     }
 
+    /// One photograph of two people is sent ONCE, labelled for both subjects with the locator that
+    /// picks each out (sc-24024). The label is the only thing telling the external planner that
+    /// the two roles are two subjects in one image rather than two pictures, so it is asserted
+    /// verbatim — including the plural, which is what says a single-role image is labelled
+    /// differently from a shared one.
+    #[tokio::test]
+    async fn a_shared_reference_image_is_sent_once_and_labelled_for_every_role_it_carries() {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(image.path(), b"pixels").unwrap();
+        let lone = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(lone.path(), b"pixels").unwrap();
+
+        let (base_url, seen) = fixture(
+            StatusCode::OK,
+            json!({"choices": [{"message": {"content": "{}"}}]}),
+            Duration::ZERO,
+        )
+        .await;
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            connection(base_url),
+            None,
+            options("disabled", true),
+            Arc::new(|| false),
+        )
+        .unwrap();
+        llm.complete(request(vec![
+            PlannerReferenceImage {
+                roles: vec![
+                    PlannerReferenceRole {
+                        role: "courier".to_owned(),
+                        locator: Some("the woman on the left".to_owned()),
+                    },
+                    PlannerReferenceRole {
+                        role: "recipient".to_owned(),
+                        locator: Some("the man on the right".to_owned()),
+                    },
+                ],
+                path: image.path().to_path_buf(),
+            },
+            PlannerReferenceImage {
+                roles: vec![PlannerReferenceRole {
+                    role: "red_parcel".to_owned(),
+                    locator: None,
+                }],
+                path: lone.path().to_path_buf(),
+            },
+        ]))
+        .await
+        .unwrap();
+
+        let body = seen.lock().unwrap()[0].1.to_string();
+        assert!(
+            body.contains(
+                "Approved reference roles: courier (the woman on the left), recipient (the man \
+                 on the right)"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("Approved reference role: red_parcel"),
+            "a lone role is labelled in the singular and carries no locator: {body}"
+        );
+        assert_eq!(
+            body.matches("data:image").count(),
+            2,
+            "two files, two images — the shared photograph is sent once: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn every_dispatched_failure_has_a_sanitized_durable_attempt_and_cancel_class() {
         for (status, body, delay, cancel, code) in [

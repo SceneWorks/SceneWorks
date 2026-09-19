@@ -115,8 +115,17 @@ its subject out of that image, and the pack is refused naming the roles and the 
   "locator": "the man on the right" }
 ```
 
+A `locator` is a **noun phrase including its article**: it completes the sentence "The courier is …",
+which the compiler writes verbatim and adds nothing to. Write `"the woman on the left"`, not
+`"woman on the left"` — the latter is accepted (a locator is free prose; nothing can check it) and
+reads "The courier is woman on the left in `<Picture 1>`."
+
 "The same file" is the `file` string compared **literally** — nothing canonicalizes through the
-filesystem, so two entries meaning one image must spell its path one way. A shared file is imported as
+filesystem, so two entries meaning one image must spell its path one way. To make that enforceable
+rather than a convention, a `file` is refused unless it is already in canonical form: no leading
+`./`, no `.` component, no doubled or trailing `/`, no `\`. Two entries whose paths differ only by
+ASCII case are refused too, because a case-insensitive volume holds one file where the pack declares
+two. A shared file is imported as
 **one** project asset that every sharing role resolves to, supplied to the engine **once** under one
 `<Picture N>`, and each role's binding sentence carries its own locator ("The courier is the woman on
 the left in `<Picture 1>`."). Because the file is supplied once, `limits.maxReferenceAssets` counts

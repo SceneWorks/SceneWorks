@@ -35,7 +35,10 @@ use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
 use crate::film_compile::{production_plan_sha256, CompiledPlan};
-use crate::film_plan::{validate_reference_pack, ReferenceEntry, ReferencePack, REFERENCE_KINDS};
+use crate::film_plan::{
+    validate_reference_pack, ReferenceEntry, ReferencePack, REFERENCE_KINDS,
+    REFERENCE_PACK_SCHEMA_VERSION,
+};
 use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
@@ -863,7 +866,7 @@ impl ProjectStore {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let draft: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+            let draft = Self::carry_film_draft_forward(serde_json::from_value(read_json(&path)?)?);
             if draft.project_id != project_id {
                 return Err(ProjectStoreError::BadRequest(format!(
                     "film draft {} belongs to a different project",
@@ -920,6 +923,28 @@ impl ProjectStore {
         Ok(draft)
     }
 
+    /// Carry a persisted [`FilmDraft`] forward to the schema versions this build writes.
+    ///
+    /// THE one place a draft read from `films/drafts/<id>.json` is brought up to date, called from
+    /// every read path so they cannot drift, and the place a later schema bump extends rather than
+    /// adding a fourth copy of the same idea.
+    ///
+    /// A draft is project-store STATE, not a document a person authors: it is deserialized
+    /// verbatim and the workspace offers no way to edit a `schemaVersion` key inside it. When the
+    /// reference pack went to version 2 (sc-24024), every draft already on disk still said
+    /// version 1, and `validate_reference_pack` — which `add_film_reference`, `add_film_sound` and
+    /// the pack PUT all run — refuses a pack by version. Without this stamp, every one of those
+    /// would start failing on every pre-existing draft with a refusal telling the user to make an
+    /// edit they cannot make.
+    ///
+    /// Stamping is honest here and only here: version 2 only ADDS the optional `locator`, so a
+    /// version 1 draft pack IS a structurally valid version 2 pack. Pack DOCUMENTS on disk stay
+    /// refused by version — those have an author who can edit them, and E6 governs them.
+    fn carry_film_draft_forward(mut draft: FilmDraft) -> FilmDraft {
+        draft.reference_pack.schema_version = REFERENCE_PACK_SCHEMA_VERSION;
+        draft
+    }
+
     pub fn get_film_draft(
         &self,
         project_id: &str,
@@ -939,7 +964,7 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft: FilmDraft = serde_json::from_value(read_json(&path)?)?;
+        let draft = Self::carry_film_draft_forward(serde_json::from_value(read_json(&path)?)?);
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1045,7 +1070,8 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let mut draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        let mut draft =
+            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1121,7 +1147,8 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        let draft =
+            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1195,7 +1222,8 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let mut draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        let mut draft =
+            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -1308,7 +1336,8 @@ impl ProjectStore {
                 "Film draft not found".to_owned(),
             ));
         }
-        let draft: FilmDraft = serde_json::from_value(read_json(&draft_path)?)?;
+        let draft =
+            Self::carry_film_draft_forward(serde_json::from_value(read_json(&draft_path)?)?);
         if draft.id != draft_id || draft.project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
                 "Film draft identity does not match its project path".to_owned(),
@@ -7416,11 +7445,12 @@ mod tests {
         is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
         read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
         write_json, AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput,
-        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY,
-        MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
-        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        CharacterLookInput, CharacterReferenceInput, FilmReferenceInput, ProjectStore,
+        ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -14975,6 +15005,83 @@ mod tests {
                 .expect("second snapshot reads"),
             Some(second)
         );
+    }
+
+    /// A draft persisted before the reference pack moved to version 2 keeps working (sc-24024).
+    ///
+    /// The pack version is a DOCUMENT contract; a draft is project-store state with no author and
+    /// no edit surface for a `schemaVersion` key, so every read carries it forward. Without that,
+    /// the first reference or sound added to any pre-existing draft — and every pack PUT from the
+    /// React editor — would fail with `BadRequest` naming a version the user cannot change.
+    #[test]
+    fn a_draft_persisted_at_reference_pack_version_1_still_accepts_a_reference() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Legacy pack")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_legacy_pack", "Legacy pack")
+            .expect("draft creates");
+
+        // Exactly what is on disk for every draft written before this commit.
+        let draft_path = store
+            .project_file(&project.id, "films/drafts/film_legacy_pack.json")
+            .expect("the draft document is readable")
+            .path;
+        let mut persisted = read_json(&draft_path).expect("draft reads");
+        persisted["referencePack"]["schemaVersion"] = json!(1);
+        write_json(&draft_path, &persisted).expect("version 1 draft writes");
+        assert_eq!(
+            read_json(&draft_path).unwrap()["referencePack"]["schemaVersion"],
+            json!(1),
+            "the fixture has to be a version 1 document on disk"
+        );
+
+        // The read path carries it forward rather than handing the validator a stale number.
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_legacy_pack")
+                .expect("legacy draft reads")
+                .reference_pack
+                .schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+
+        let source = temp.path().join("plate.png");
+        fs::write(&source, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "plate.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let updated = store
+            .add_film_reference(
+                &project.id,
+                "film_legacy_pack",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: asset["id"].as_str().expect("asset id").to_owned(),
+                    role: "workshop_plate".to_owned(),
+                    kind: "plate".to_owned(),
+                    description: "Wide plate.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect("a version 1 draft still accepts a reference");
+        assert_eq!(
+            updated.reference_pack.schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+        assert_eq!(updated.reference_pack.references.len(), 1);
     }
 
     #[test]

@@ -599,6 +599,13 @@ pub struct ReferenceEntry {
     /// where "the person shown in `<Picture 1>`" is already unambiguous — but honoured when given,
     /// since a lone reference may still be a crowded photograph.
     ///
+    /// **A noun phrase, with its article, that completes "The courier is …".** The compiler drops
+    /// the phrase in verbatim and adds nothing of its own, so the leading "the"/"a" is the
+    /// author's to supply: "the woman on the left" reads "The courier is the woman on the left in
+    /// `<Picture 1>`.", while "woman on the left" reads "The courier is woman on the left in
+    /// `<Picture 1>`." Nothing can check this — a locator is free prose — so it is stated here,
+    /// in the refusal that asks for one, and in the pack documentation.
+    ///
     /// Repeated into the dispatched prompt, so it is held to the same rules as
     /// [`ReferenceEntry::description`]: no `<` or `>`, no control characters, whitespace
     /// normalized by `film_compile::normalized_description`.
@@ -1471,6 +1478,44 @@ fn reference_image_file_findings(field: &str, file: &str) -> Vec<PlanDiagnostic>
             format!("file {file:?} must be a relative path inside the pack directory"),
         )];
     }
+    // ONE path may be spelled ONE way (sc-24024). Everything that decides whether two roles share
+    // an image compares this string LITERALLY — `film_compile::shot_reference_pictures`,
+    // `shared_reference_file_findings`, `Session::ensure_references` — so `references/pair.png`
+    // and `./references/pair.png` (likewise `references//pair.png`, `references/./pair.png`,
+    // `references/pair.png/`, a `\` separator) would import ONE photograph of two people twice,
+    // number it `<Picture 1>` and `<Picture 2>`, and require a `locator` on neither: exactly the
+    // silent ambiguity this feature exists to remove, and nothing downstream catches it — the
+    // import keys on role, so even an identical sha256 does not collapse them.
+    //
+    // Refused rather than canonicalized on read, for the reason the literal comparison exists in
+    // the first place: a pack document has to mean the same thing on every machine, and a
+    // normalizing read would quietly make two entries one without the author ever seeing it.
+    let forward_slashed = file.replace('\\', "/");
+    let canonical = std::path::Path::new(&forward_slashed)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if canonical.is_empty() {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    if canonical != file {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must be spelled in canonical form, as {canonical:?}: no leading \
+                 \"./\", no \".\" component, no doubled '/', no trailing '/', no '\\'. Roles \
+                 share one image when this string matches LITERALLY, so a second spelling of one \
+                 path is imported and numbered as a second image"
+            ),
+        )];
+    }
     if file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
         return vec![PlanDiagnostic::plan(
             format!("{field}.file"),
@@ -1570,6 +1615,36 @@ fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
         groups.entry(entry.file.as_str()).or_default().push(entry);
     }
     let mut findings = Vec::new();
+    // Two spellings that differ only by ASCII case are ONE file on a case-insensitive volume —
+    // which APFS and NTFS are by default — while every comparison in this feature is literal. The
+    // compiler would number two pictures of one photograph and require a locator on neither, so
+    // the pack has to pick a spelling rather than have one picked for it.
+    let mut by_fold: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for entry in &pack.references {
+        let spellings = by_fold.entry(entry.file.to_ascii_lowercase()).or_default();
+        if !spellings.contains(&entry.file.as_str()) {
+            spellings.push(entry.file.as_str());
+        }
+    }
+    for spellings in by_fold.values() {
+        if spellings.len() < 2 {
+            continue;
+        }
+        findings.push(PlanDiagnostic::plan(
+            "referencePack.references.file",
+            format!(
+                "files {} differ only by ASCII case, so a case-insensitive volume holds ONE file \
+                 while this pack is read as {}; spell one path one way, or the roles naming them \
+                 will be bound to two pictures of the same image",
+                spellings
+                    .iter()
+                    .map(|spelling| format!("{spelling:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                spellings.len()
+            ),
+        ));
+    }
     for (file, entries) in groups {
         if entries.len() < 2 {
             continue;
@@ -1589,8 +1664,11 @@ fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 "referencePack.references.locator",
                 format!(
                     "roles {roles} share the file {file:?}, so each of them needs a `locator` \
-                     saying which subject in that image it names (\"the woman on the left\"); \
-                     {} declare none",
+                     saying which subject in that image it names: a phrase that completes \"The \
+                     {} is …\", article included, e.g. \"the woman on the left\" — the compiler \
+                     writes the phrase in verbatim and supplies no article of its own; {} declare \
+                     none",
+                    entries[0].role,
                     missing.join(", ")
                 ),
             ));
@@ -5082,6 +5160,87 @@ mod tests {
             findings
                 .iter()
                 .any(|m| m.contains("locator") && m.contains("'<' or '>'")),
+            "{findings:?}"
+        );
+    }
+
+    /// Sharing is decided by comparing `file` LITERALLY, so a path the filesystem would resolve to
+    /// one image but this pack spells two ways is refused (sc-24024). Left unrefused, one
+    /// photograph of two people is imported twice, numbered `<Picture 1>` and `<Picture 2>`, and
+    /// — because the entries never group — neither role is asked for a locator: the exact
+    /// ambiguity the feature removes, reintroduced by a stray `./`.
+    #[test]
+    fn a_reference_file_must_already_be_in_canonical_lexical_form() {
+        let with_file = |file: &str| -> Vec<String> {
+            let mut value = pack_json();
+            value["references"][0]["file"] = json!(file);
+            let pack: ReferencePack =
+                serde_json::from_value(value).expect("the pack parses whatever the path says");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: the spelling every checked-in pack uses is accepted.
+        assert!(
+            with_file("references/workshop_plate.png").is_empty(),
+            "{:?}",
+            with_file("references/workshop_plate.png")
+        );
+
+        for spelling in [
+            "./references/workshop_plate.png",
+            "references//workshop_plate.png",
+            "references/./workshop_plate.png",
+            "references/workshop_plate.png/",
+            "references\\workshop_plate.png",
+        ] {
+            let findings = with_file(spelling);
+            assert!(
+                findings.iter().any(|m| m.contains("canonical form")
+                    && m.contains("\"references/workshop_plate.png\"")),
+                "{spelling:?} must be refused, naming the canonical spelling: {findings:?}"
+            );
+        }
+    }
+
+    /// Two spellings that differ only by case are ONE file on APFS and two in this pack, so the
+    /// pack is refused rather than read as two pictures of one photograph (sc-24024).
+    #[test]
+    fn two_reference_files_differing_only_by_case_are_refused() {
+        let mut value = pack_json();
+        value["references"][0]["file"] = json!("references/plate.png");
+        value["references"][1]["file"] = json!("references/Plate.png");
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("differ only by ASCII case")
+                    && m.contains("\"references/plate.png\"")
+                    && m.contains("\"references/Plate.png\"")),
+            "{findings:?}"
+        );
+    }
+
+    /// A locator is free prose, so nothing can check that it reads as a noun phrase — but the
+    /// refusal that ASKS for one has to say that the article is the author's to supply, because
+    /// "woman on the left" yields "The courier is woman on the left in <Picture 1>." in silence.
+    #[test]
+    fn the_missing_locator_refusal_says_the_article_is_the_authors_to_supply() {
+        let value = json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "pair-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/pair.png" },
+                { "role": "recipient", "kind": "character", "file": "references/pair.png" }
+            ]
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pair pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings.iter().any(|m| m.contains("locator")
+                && m.contains("The courier is …")
+                && m.contains("the woman on the left")),
             "{findings:?}"
         );
     }
