@@ -179,6 +179,22 @@ fn role_phrase(role: &str) -> String {
     role.replace(['_', '-'], " ")
 }
 
+/// A pack-authored description as compiler-owned text may repeat it: every `\r`, `\n`, `\t` and run
+/// of spaces collapsed to a single space, and the ends trimmed (sc-24023).
+///
+/// THE one place a description is normalized, because every kind of inserted text repeats one — the
+/// reference binding sentences here, and the audio bindings a later story adds — and a description
+/// that carried a newline or a control run would otherwise land raw in the dispatched prompt inside
+/// the one field [`CompiledPlan::conformance_findings`] treats as the compiler's own authored text
+/// and therefore never re-reads.
+///
+/// WHITESPACE only. `<`, `>` and genuine control characters are refused at the document boundary by
+/// [`crate::film_plan::reference_pack_findings`], because a description that forges `<Picture 3>` is
+/// an authoring mistake to name rather than something to silently rewrite.
+pub fn normalized_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The binding sentences for one shot: one per bound role, in picture order, each naming the
 /// `<Picture N>` that role's image will be labelled with and repeating the pack's own description
 /// of it verbatim (sc-24023).
@@ -198,14 +214,16 @@ fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedT
                 picture.number
             );
             // The pack's description is the author's own words about that image, so it is repeated
-            // verbatim rather than paraphrased into the sentence above.
+            // rather than paraphrased into the sentence above — but its WHITESPACE is normalized
+            // first: the sentence is one line of a prompt, and a description carrying a newline or a
+            // tab run would put a raw control run into the dispatched text (sc-24023).
             let description = bound
                 .entry
-                .map(|entry| entry.description.trim())
-                .unwrap_or("");
+                .map(|entry| normalized_description(&entry.description))
+                .unwrap_or_default();
             if !description.is_empty() {
                 sentence.push(' ');
-                sentence.push_str(description);
+                sentence.push_str(&description);
                 if !description.ends_with(['.', '!', '?']) {
                     sentence.push('.');
                 }
@@ -2331,8 +2349,12 @@ mod tests {
             referenced.prompt
         );
 
-        // THE criterion: N == the 1-based position in the dispatched list. Read out of the job
-        // body rather than recomputed here, because the body is what the engine receives.
+        // THE criterion: N == the 1-based position in the dispatched list. Read out of the job body
+        // this compiled request builds rather than recomputed here, so the assertion is against the
+        // shipped list builder. This is the COMPILED REQUEST's body, not the harness's own dispatch:
+        // the harness resolves through the same `resolve_conditioning` and posts `to_job_body_with`,
+        // and the end-to-end assertion in `apps/rust-api/src/tests/film_harness.rs` is what pins the
+        // agreement on the body a real run actually sent.
         let assets = role_assets();
         let context = short_edge_context(&assets);
         let body = referenced.to_job_body(&context).expect("SH010 body");
@@ -2506,6 +2528,59 @@ mod tests {
              The red parcel is the object shown in <Picture 2>. Small bright red cardboard parcel. \
              The workshop location is the place shown in <Picture 3>. Cluttered woodworking \
              workshop, door camera-left."
+        );
+    }
+
+    /// sc-24023. A description's WHITESPACE is normalized before it is appended: the binding
+    /// sentence is one line of a dispatched prompt, and a pack description that wrapped over several
+    /// lines would otherwise put a raw newline and tab run into the prompt — inside `insertedText`,
+    /// the one field `conformance_findings` reads as the compiler's own authored text and therefore
+    /// never checks. Only the joined whole was ever trimmed, never each description.
+    #[test]
+    fn a_multi_line_description_is_collapsed_to_one_line_before_it_reaches_the_prompt() {
+        let wrapped = parse_reference_pack(
+            &json!({
+                "schemaVersion": 1,
+                "id": "wrapped",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/a.png",
+                      "description": "  Blue jacket,\r\n\tcarries   the parcel.  " },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/b.png",
+                      "description": "Small\nred parcel" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["conditioning"]["referenceRoles"] = json!(["courier", "red_parcel"]);
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &wrapped,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("compiles");
+        let request = compiled.request("SH010").unwrap();
+        assert_eq!(
+            request.inserted_text[0].text,
+            "The courier is the person shown in <Picture 1>. Blue jacket, carries the parcel. \
+             The red parcel is the object shown in <Picture 2>. Small red parcel."
+        );
+        // And the prompt the engine receives carries no control run either.
+        assert!(
+            !request.prompt.contains(['\n', '\r', '\t']),
+            "{:?}",
+            request.prompt
         );
     }
 

@@ -25,8 +25,12 @@ use crate::tests::film_harness::{planner_llm, planner_options, Harness, FIXTURE_
 
 /// The role as a binding sentence names it, mirroring the compiler's own rule. Written out here
 /// rather than imported so the assertion below is an independent statement of the expected text.
+///
+/// BOTH separators, like `film_compile::role_phrase`: a pack role legally contains `-`
+/// (`film_plan`'s `is_safe_plan_id` admits `[A-Za-z0-9_-]`), and mirroring only `_` would make a
+/// hyphenated role panic here with "is never named" instead of failing on the thing under test.
 fn role_phrase(role: &str) -> String {
-    role.replace('_', " ")
+    role.replace(['_', '-'], " ")
 }
 
 /// Every reference role in `pack`, mapped to a distinct stand-in asset id — what `ensure_references`
@@ -118,7 +122,11 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
             request.shot_id
         );
 
-        // The dispatched list, read out of the job body the route actually receives.
+        // The dispatched list, read out of the job body this COMPILED REQUEST builds — not out of a
+        // run's own dispatch. Both are the same list: the harness resolves the record's
+        // `conditioning_assets` through the very `resolve_conditioning` called below and posts
+        // `to_job_body_with` from it. The agreement on the body a real run SENT is asserted
+        // end-to-end in `film_harness.rs`; what this loop adds is every shot of the shipped plan.
         let context = DispatchContext {
             project_id: "proj_anchoring",
             run_id: "run_anchoring",
@@ -161,7 +169,10 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
                 "{}: {role} is dispatched at position {number} of {dispatched:?}",
                 request.shot_id
             );
-            let phrase = role_phrase(role);
+            // Anchored on the full sentence opening, not the bare phrase: a pack description is
+            // repeated verbatim into the binding text, so a bare phrase could match inside someone
+            // else's description and the scan would walk past the sentence it meant to check.
+            let phrase = format!("{} is the ", role_phrase(role));
             let role_at = bindings[cursor..]
                 .find(&phrase)
                 .map(|at| at + cursor)
@@ -192,7 +203,9 @@ async fn a1_every_reference_shot_names_its_pictures_in_the_order_its_assets_are_
             request.shot_id
         );
     }
-    assert!(bound_shots >= 6, "the shipped reference plan has six shots");
+    // Every compiled request went through the loop above — a shape assertion, not a corpus count:
+    // the plan may gain or lose shots without this test caring, but none may skip the criterion.
+    assert_eq!(bound_shots, artifacts.compiled.requests.len());
 
     // Two of the six order `workbench_table` and `workshop_location` the other way round, so the
     // agreement above is exercised against genuinely different orderings of the same files rather

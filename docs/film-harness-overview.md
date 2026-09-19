@@ -142,7 +142,7 @@ MiniMax-H3 ships its reference conditioning as a **separate catalog entry**: `mi
 `text_to_video | image_to_video | first_last_frame` with `limits.maxReferenceAssets: 0`, while
 `minimax_h3_ref` serves `reference_to_video` only (runbook § *Partition resolution*). A plan declares
 the **family once** and the compiler resolves the partition per shot
-(`crates/sceneworks-core/src/film_compile.rs:295`):
+(`crates/sceneworks-core/src/film_compile.rs`, `compile_shot`):
 
 | the shot's `conditioning.referenceRoles` | it compiles to |
 | --- | --- |
@@ -166,7 +166,7 @@ at, admitted over 1024..=2048 and defaulting to the engine's 2048. It sizes the 
 render, and a value outside the range is refused naming the field and the range rather than clamped,
 because a silent clamp would change the token budget the author measured (runbook § *Partition
 resolution*). It reaches only shots that resolve to the reference partition
-(`crates/sceneworks-core/src/film_compile.rs:342`).
+(`crates/sceneworks-core/src/film_compile.rs`, `CompiledRequest::reference_image_short_edge`).
 
 ## Dialogue is spoken through the audio route
 
@@ -247,10 +247,12 @@ read under this build would have its derived fields defaulted and then be blamed
 The remedy either way is to recompile.
 
 Per shot it carries the resolved partition and its `partitionReason`
-(`crates/sceneworks-core/src/film_compile.rs:381`, `:387`); `referenceAssetIds` in the plan's role
-order, written only when the list is non-empty (`:602`); the resolved geometry; the LoRA ids resolved
-against **that shot's** partition (`:351`); `effectiveSteps` (`:375`); and
-`referenceImageShortEdge`, written only for a reference-partition request (`:342`).
+(`crates/sceneworks-core/src/film_compile.rs`, `CompiledRequest::model` and
+`CompiledRequest::partition_reason`); `referenceAssetIds` in the plan's role order, written only when
+the list is non-empty (`CompiledRequest::to_job_body_with`); the resolved geometry; the LoRA ids
+resolved against **that shot's** partition (`CompiledRequest::loras`); `effectiveSteps`
+(`CompiledRequest::effective_steps`); and `referenceImageShortEdge`, written only for a
+reference-partition request (`CompiledRequest::reference_image_short_edge`).
 
 A reference shot's prompt also carries text the **compiler** wrote. MiniMax-H3 labels each supplied
 reference `<Picture 1>`, `<Picture 2>`, … ahead of the prompt, in supply order, and the model's own
@@ -266,11 +268,13 @@ derived field — a hand-edited one is refused by `conformance_findings` like an
 
 Two properties earn it its own file. It is **what the engine sees**: each prompt is run through the
 model's own `prompt_refine` rewrite with `modelId` set to the plan's model, and the authored text is
-kept beside it as `authoredPrompt` (`crates/sceneworks-core/src/film_compile.rs:134`). And it is
-**the only place a job body is built**: `CompiledRequest::to_job_body`
-(`crates/sceneworks-core/src/film_compile.rs:492`) produces the `POST /api/v1/video/jobs` payload for
-the generated and hand-authored paths alike, so what a reviewer reads in `compiled.json` and what the
-API receives cannot drift. It records the SHA-256 of the plan it came from, and `validate` / `run`
+kept beside it as `authoredPrompt` (`crates/sceneworks-core/src/film_compile.rs`,
+`CompiledRequest::authored_prompt`). And it is **the only place a job body is built**:
+`CompiledRequest::to_job_body_with` (`crates/sceneworks-core/src/film_compile.rs`) produces the
+`POST /api/v1/video/jobs` payload for the generated and hand-authored paths alike, over conditioning
+`CompiledRequest::resolve_conditioning` resolved — the one resolver, so the `<Picture N>` in the
+prompt and the position of that role's asset in `referenceAssetIds` are one decision — and so what a
+reviewer reads in `compiled.json` and what the API receives cannot drift. It records the SHA-256 of the plan it came from, and `validate` / `run`
 refuse a compiled document whose plan has changed (runbook § *Compiled requests*).
 
 ## The run loop
