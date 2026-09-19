@@ -108,6 +108,51 @@ leading `./`, no `.` component, no doubled or trailing `/`, no `\`), and two ent
 differ only by ASCII case are refused as one file on a case-insensitive volume. Sharing roles must
 agree on `approved` and on their generation provenance, since one image carries one of each.
 
+**A pack entry's `file` is OPTIONAL** (sc-24025, pack schema version 2). An entry with a
+`description` and no `file` is a **described-only** role: a subject the pack names and describes but
+has no picture of. Reference images are optional in this harness, and a described-only role is how a
+pack describes a courier nobody photographed. An entry with **neither** a `file` nor a
+`description` is refused, naming the role — it shows nothing and says nothing.
+
+A described-only role takes no part in anything an image does. It is never imported as an asset,
+never grouped with another role, never numbered as a `<Picture N>`, never counted against
+`limits.maxReferenceAssets`, and never sent as planner reference pixels. It may carry no `locator`
+(a locator picks one subject out of an image, and there is none) — a locator on a fileless entry is
+refused naming the role. And it is **never bindable**: naming one in `conditioning.referenceRoles`,
+`firstFrameRole` or `lastFrameRole` is refused naming the shot and the role, because every one of
+those slots supplies a picture. It belongs in a shot's `continuityRoles`, which is where the
+compiler reads it.
+
+### The text identity lock (sc-24025)
+
+For every shot, the compiler inserts the pack's `description` of each `continuityRoles` entry that
+shot does **not** bind to an image, **word for word**, as `insertedText` of kind
+`continuity_description`. It leads the prompt, immediately after any reference binding sentences and
+before the authored text, and — like every insertion — it is written **after** the prompt-refine
+rewrite so no language model can paraphrase it.
+
+"Does not bind to an image" is asked of the shot's resolved pictures and its keyframe slots, so it
+covers a described-only role on any shot **and** an image-backed role on a shot that resolves to the
+base checkpoint or simply does not bind it. A role the shot **does** bind already carries its
+description in its binding sentence and is never described twice. Role kind is irrelevant — a
+`style` and a `plate` drift exactly as a character does. An unapproved role contributes nothing
+(`approved` defaults to true, so `false` is an explicit "do not use this", and prompt text shapes a
+render as surely as conditioning does), and so does an empty description on an image-backed role.
+
+This exists because reference images are optional: with no picture anywhere, the only thing keeping
+a subject the same subject across six cuts is that the same words are used for it every time.
+Identical input therefore gives **byte-identical** text in every shot, ordered by the shot's own
+`continuityRoles`. It is expected to hold wardrobe, props and setting — not a face.
+
+**Writing a `description`.** Write it as a complete sentence naming its own subject — "The courier:
+blue jacket, carries the parcel." or "Small bright red cardboard parcel." The compiler repeats it
+verbatim (whitespace normalized) and adds nothing but a closing `.` when one is missing; it never
+prefixes the role name, so "blue jacket" alone would land in the prompt as a fragment. One rule for
+both places a description is repeated — the binding sentence and the identity lock — so the two can
+never drift. `config/film-harness/courier-workshop/references.described.jsonc` and its
+`plan.described.jsonc` are the shipped six-shot fixture for this: a whole film with no references at
+all.
+
 A pack entry with `"approved": false` is still imported (so a human can review it), but it is tagged
 `film-harness-reference-unapproved` instead of `film-harness-reference`, recorded with
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have

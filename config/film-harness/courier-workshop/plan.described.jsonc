@@ -1,0 +1,125 @@
+{
+  // Courier / workshop / red parcel, told with NO REFERENCES AT ALL (epic 24017, sc-24025).
+  //
+  // The same six-beat story as `plan.jsonc`, against `references.described.jsonc` — a pack whose
+  // roles are words and nothing else. Every shot is `text_to_video`: no shot binds a
+  // `referenceRole`, and unlike `plan.jsonc` no shot takes a keyframe either, so nothing in this
+  // production is conditioned on an image and every shot resolves to the base `minimax_h3`
+  // checkpoint.
+  //
+  // That is the point of the document. With no picture anywhere, the ONLY thing holding the
+  // courier, the recipient, the parcel and the room together across six cuts is that the compiler
+  // writes the pack's description of each of them into every prompt that lists them in
+  // `continuityRoles`, word for word, identically. The prompts below deliberately do NOT re-describe
+  // them: they say what happens, and let the identity text say who it happens to. A prompt that
+  // spelled out "a young woman in a blue quilted jacket" itself would be the drift this fixture
+  // exists to demonstrate the absence of.
+  //
+  // `recipient` appears in the last three shots and in none of the first three, so the difference
+  // between a shot that locks a role and one that does not is visible within one film.
+  //
+  // No sound pack, so no beds and no placed dialogue: the shots state their own sound in `audio`,
+  // which is what MiniMax-H3 scores from. Schema 3 (sc-24026): `audio` is required on every shot.
+  "schemaVersion": 3,
+  "id": "courier-workshop-described",
+  "version": 1,
+  "title": "Courier at the Workshop (described)",
+  "synopsis": "A courier enters a cluttered workshop carrying a red parcel, sets it on the workbench and leaves; the recipient comes in, finds the parcel and opens it.",
+  "model": {
+    "id": "minimax_h3",
+    "tier": "q4",
+    "fps": 24,
+    "resolution": "576x320"
+  },
+  "limits": {
+    "maxRunSeconds": 7200,
+    "maxShotSeconds": 2700,
+    "maxAttemptsPerShot": 1,
+    "maxMemoryGb": 96
+  },
+  "shots": [
+    {
+      "id": "SH010",
+      "beat": "Establish the empty workshop; the door opens.",
+      "framing": "wide static, eye level, door camera-left, workbench centre",
+      "prompt": "The room is empty and still, dust hanging in the light. After a beat the door swings inward and the courier steps into the doorway, stopping there with the parcel held in front of her. Static wide shot.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, door closed, workbench clear.",
+      "endState": "Door open, courier standing in the doorway holding the parcel, workbench still clear.",
+      "audio": "Room tone, distant birds, a door latch clicking and the door creaking open. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24010,
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH020",
+      "beat": "The courier crosses to the workbench with the parcel.",
+      "framing": "medium, slow push-in following the courier to the bench",
+      "prompt": "The courier walks in from the left carrying the parcel in both hands and crosses to the workbench in the centre of the room, the camera easing in behind her. Sawdust turns in the air.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Courier in the doorway with the parcel.",
+      "endState": "Courier standing at the workbench, parcel still in hand.",
+      "audio": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24020,
+      "dependsOn": [{ "shotId": "SH010", "kind": "continuity", "note": "The courier and the parcel enter in SH010; SH020 starts from that doorway." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH030",
+      "beat": "The courier sets the parcel down and leaves.",
+      "framing": "close on the workbench surface, hands and parcel",
+      "prompt": "Close on the bench. The courier's hands lower the parcel onto the wood, let go, and withdraw out of frame; a moment later the door closes somewhere behind. Shallow depth of field.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Parcel in the courier's hands above the bench.",
+      "endState": "Parcel resting on the workbench, hands gone, room empty.",
+      "audio": "Soft thump of cardboard on wood, sleeves rustling, a door pulled shut, room tone. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24030,
+      "dependsOn": [{ "shotId": "SH020", "kind": "continuity", "note": "SH020 ends at the bench with the parcel still held." }],
+      "continuityRoles": ["workbench_table", "courier", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH040",
+      "beat": "The recipient comes in and stops.",
+      "framing": "wide static, matching SH010",
+      "prompt": "The empty room again. The door opens and the recipient comes in, two paces, and stops — she has seen something on the bench that was not there before. Static wide shot.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Empty workshop, parcel alone on the workbench, door closed.",
+      "endState": "Recipient standing just inside the door, looking towards the bench.",
+      "audio": "A door opening, two footsteps, then quiet. Room tone. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24040,
+      "dependsOn": [{ "shotId": "SH030", "kind": "continuity", "note": "SH030 leaves the parcel alone on the bench; SH040 is that room." }],
+      "continuityRoles": ["workshop_location", "workbench_table", "recipient", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH050",
+      "beat": "The recipient reaches the bench and picks the parcel up.",
+      "framing": "medium, following her to the bench",
+      "prompt": "The recipient crosses to the bench, stops over the parcel, turns it once to read the label, then picks it up in both hands. She does not open it yet.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Recipient by the door, parcel on the bench.",
+      "endState": "Recipient at the bench holding the parcel, label towards her.",
+      "audio": "Footsteps, cardboard scraping on wood, a quiet breath. Room tone. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24050,
+      "dependsOn": [{ "shotId": "SH040", "kind": "continuity", "note": "SH040 ends with her having seen it from the door." }],
+      "continuityRoles": ["workbench_table", "recipient", "red_parcel", "house_style"]
+    },
+    {
+      "id": "SH060",
+      "beat": "She opens it.",
+      "framing": "close, over her hands",
+      "prompt": "Close over her hands. She breaks the tape with a thumbnail, lifts the lid, and looks down into the open box; her face changes. Hold on her as she looks up and out of frame.",
+      "targetDurationSeconds": 5.1667,
+      "startState": "Recipient holding the closed parcel at the bench.",
+      "endState": "Open parcel in her hands, lid set aside, her attention up and out of frame.",
+      "audio": "Tape tearing, cardboard opening, a short indrawn breath. Room tone. No music.",
+      "conditioning": { "mode": "text_to_video" },
+      "seed": 24060,
+      "dependsOn": [{ "shotId": "SH050", "kind": "continuity", "note": "SH050 ends with the parcel in her hands, unopened." }],
+      "continuityRoles": ["workbench_table", "recipient", "red_parcel", "house_style"]
+    }
+  ]
+}

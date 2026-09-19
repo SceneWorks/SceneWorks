@@ -212,8 +212,13 @@ pub(crate) async fn resolve_film_render_options(
         film_plan::ModelLane::for_current_platform(),
     );
     let default_steps = capabilities.default_steps;
+    // A DESCRIBED-ONLY role never requests the reference partition (sc-24025): it supplies no
+    // image, cannot be bound, and asking for `minimax_h3_ref` on its account would have the
+    // workspace demand a second 18 GB DiT for a role that only ever reaches the model as text.
     let reference_requested = draft.reference_pack.references.iter().any(|reference| {
-        reference.approved && film_plan::BINDABLE_REFERENCE_KINDS.contains(&reference.kind.as_str())
+        reference.approved
+            && reference.file().is_some()
+            && film_plan::BINDABLE_REFERENCE_KINDS.contains(&reference.kind.as_str())
     });
     if reference_requested {
         if let Some(reference_id) = film_plan::reference_partition_for(&capabilities.model_id) {

@@ -321,7 +321,15 @@ async fn a4_every_shipped_shot_ends_with_its_audio_sentence_and_only_placed_line
                 .inserted_text
                 .iter()
                 .map(|piece| piece.kind)
-                .filter(|kind| *kind != InsertedTextKind::ReferenceBinding)
+                // The two LEADING kinds are other stories' subjects: the bindings are A1's and the
+                // identity text is A3's (sc-24025). What A4 is about is the audio tail.
+                .filter(|kind| {
+                    !matches!(
+                        kind,
+                        InsertedTextKind::ReferenceBinding
+                            | InsertedTextKind::ContinuityDescription
+                    )
+                })
                 .collect();
             let authored = request
                 .authored_prompt
@@ -628,4 +636,359 @@ fn refusal_findings<T>(result: Result<T, film_harness::HarnessError>) -> Vec<Str
         }
         Err(other) => panic!("expected a validation refusal, got {other}"),
     }
+}
+
+/// The described-only fixture pair: a pack whose roles are words alone, and the six-shot film that
+/// tells the courier story against it with no conditioning of any kind.
+///
+/// Both are CHECKED IN, and pointed at where they sit. The pack declares no `file` on any role, so
+/// there is nothing to copy beside it and nothing for a run to import — which is the whole of what
+/// is being proved, and a copied-into-a-tempdir version could hide a path resolution this must not
+/// need.
+fn described_fixture() -> (PathBuf, PathBuf) {
+    (
+        Path::new(FIXTURE_DIR).join("plan.described.jsonc"),
+        Path::new(FIXTURE_DIR).join("references.described.jsonc"),
+    )
+}
+
+/// The identity text a shot must carry for `role`, built from the PACK rather than from the
+/// compiler: the description as written, whitespace-normalized, with the closing `.` the compiler
+/// supplies when the author left one off.
+///
+/// An independent statement of the rule documented on `ReferenceEntry::description` — only
+/// `normalized_description` is shared, because that is the whitespace rule the pack document is
+/// itself validated against.
+fn expected_identity_sentence(pack: &ReferencePack, role: &str) -> String {
+    let entry = pack
+        .references
+        .iter()
+        .find(|entry| entry.role == role)
+        .unwrap_or_else(|| panic!("{role} is a role of the described pack"));
+    let mut text = normalized_description(&entry.description);
+    assert!(
+        !text.is_empty(),
+        "{role} is described-only, so its description is the whole of it"
+    );
+    if !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
+}
+
+/// A3 (epic 24017, sc-24025). THE TEXT IDENTITY LOCK, on a film with no references at all.
+///
+/// A pack role may be DESCRIBED-ONLY — words, no image — and a shot that lists such a role in
+/// `continuityRoles` gets the pack's description of it written into the dispatched prompt word for
+/// word. The criterion is BYTE-IDENTITY across shots: this exists because nothing conditions these
+/// shots on a picture, so the only thing keeping the courier one courier over six cuts is that the
+/// compiler says the same thing about her every time. A shot that does not list the role says
+/// nothing about it.
+///
+/// Asserted on BOTH halves: the compiled document, over the whole six-shot film, and the body
+/// `POST /api/v1/video/jobs` actually received in a real run — because a document that says the
+/// right thing while the route is sent something else is exactly the failure no reviewer
+/// downstream could see.
+#[tokio::test]
+async fn a3_a_described_only_role_is_locked_word_for_word_into_every_shot_that_names_it() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let (plan_path, pack_path) = described_fixture();
+
+    let (plan, pack) = film_harness::validate(
+        Some(&harness.transport),
+        &harness.options(plan_path.clone(), pack_path.clone(), None),
+    )
+    .await
+    .expect("the described-only pack and its plan validate against the live catalog");
+
+    // The fixture is what it claims to be, or nothing below is about described-only roles at all.
+    assert!(
+        pack.references
+            .iter()
+            .all(sceneworks_core::film_plan::ReferenceEntry::is_described_only),
+        "every role of the described pack must declare no file"
+    );
+    assert!(
+        plan.shots.iter().all(|shot| {
+            shot.conditioning.reference_roles.is_empty()
+                && shot.conditioning.first_frame_role.is_none()
+                && shot.conditioning.last_frame_role.is_none()
+        }),
+        "the described plan must condition on nothing at all"
+    );
+
+    // The role under test, and the shots that do and do not name it — read off the PLAN, so the
+    // fixture may be re-cut without this test asserting a count it invented.
+    const ROLE: &str = "recipient";
+    let naming: Vec<String> = plan
+        .shots
+        .iter()
+        .filter(|shot| shot.continuity_roles.iter().any(|role| role == ROLE))
+        .map(|shot| shot.id.clone())
+        .collect();
+    let silent: Vec<String> = plan
+        .shots
+        .iter()
+        .filter(|shot| !shot.continuity_roles.iter().any(|role| role == ROLE))
+        .map(|shot| shot.id.clone())
+        .collect();
+    assert!(
+        naming.len() >= 3 && !silent.is_empty(),
+        "the fixture must lock {ROLE} in at least three shots and omit it from at least one: \
+         naming {naming:?}, silent {silent:?}"
+    );
+    let sentence = expected_identity_sentence(&pack, ROLE);
+
+    let mut options = planner_options(&harness, "anchoring-described");
+    options.reference_pack_path = pack_path.clone();
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &plan_path,
+    )
+    .await
+    .expect("the described plan compiles");
+    assert_eq!(artifacts.compiled.requests.len(), plan.shots.len());
+
+    // THE criterion: every shot that names the role carries the pack's own words for it, and the
+    // text is the same text in each of them.
+    let mut locked: BTreeMap<String, String> = BTreeMap::new();
+    for request in &artifacts.compiled.requests {
+        // No shot of this plan binds anything, so none carries a binding sentence or a picture.
+        assert_eq!(request.model, "minimax_h3", "{}", request.shot_id);
+        assert!(
+            !request.prompt.contains("<Picture"),
+            "{}: nothing is conditioned, so no picture is named: {}",
+            request.shot_id,
+            request.prompt
+        );
+        let identity: Vec<&str> = request
+            .inserted_text
+            .iter()
+            .filter(|piece| piece.kind == InsertedTextKind::ContinuityDescription)
+            .map(|piece| piece.text.as_str())
+            .collect();
+
+        if naming.contains(&request.shot_id) {
+            assert_eq!(
+                identity.len(),
+                1,
+                "{}: one identity insertion: {:?}",
+                request.shot_id,
+                request.inserted_text
+            );
+            assert!(
+                identity[0].contains(&sentence),
+                "{}: must carry the pack's own words for {ROLE} — {sentence:?} — got {:?}",
+                request.shot_id,
+                identity[0]
+            );
+            // It reaches the PROMPT, and the authored text never contained it: the compiler wrote
+            // it, after the refine rewrite.
+            assert!(
+                request.prompt.contains(identity[0]),
+                "{}: the identity text must reach the prompt: {}",
+                request.shot_id,
+                request.prompt
+            );
+            // The PLAN's own words for this shot — the refiner's input when there was one, and the
+            // authored prompt otherwise. Never `request.prompt`, which is the composed text the
+            // insertion has already been written into and would make this assertion vacuous.
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| shot.id == request.shot_id)
+                .expect("every request is a shot of the plan");
+            let authored = request
+                .authored_prompt
+                .as_deref()
+                .unwrap_or(shot.prompt.as_str());
+            assert!(
+                !authored.contains(&sentence),
+                "{}: the identity text is the COMPILER's, not the plan's: {authored}",
+                request.shot_id
+            );
+            locked.insert(request.shot_id.clone(), identity[0].to_owned());
+        } else {
+            assert!(
+                !request.prompt.contains(&sentence),
+                "{}: does not name {ROLE}, so nothing describes {ROLE}: {}",
+                request.shot_id,
+                request.prompt
+            );
+        }
+    }
+
+    // BYTE-IDENTICAL, shot to shot. The role's sentence sits inside a larger identity block (these
+    // shots lock several roles), so the role's own sentence is compared across every shot that
+    // locks it, and each shot must state it exactly once.
+    assert_eq!(locked.len(), naming.len());
+    for (shot_id, text) in &locked {
+        assert_eq!(
+            text.matches(sentence.as_str()).count(),
+            1,
+            "{shot_id}: {ROLE} is described exactly once: {text:?}"
+        );
+    }
+
+    // THE REAL DISPATCH PATH. One shot that locks the role and one that does not, driven through
+    // `film_harness::run` against the in-process router, asserted on the body the video route
+    // actually received.
+    let with = naming.first().expect("a shot that names the role").clone();
+    let without = silent.first().expect("a shot that does not").clone();
+    let record = film_harness::run(
+        &harness.transport,
+        &harness.options(
+            plan_path,
+            pack_path,
+            Some(&[with.as_str(), without.as_str()]),
+        ),
+    )
+    .await
+    .expect("the described-only run completes");
+
+    // A described-only role is never imported as an asset: there are no bytes to import.
+    assert!(
+        record.references.is_empty(),
+        "a pack of described-only roles imports nothing: {:?}",
+        record.references
+    );
+
+    for (shot_id, expected) in [(&with, true), (&without, false)] {
+        let shot = record
+            .shots
+            .iter()
+            .find(|shot| &shot.shot_id == shot_id)
+            .unwrap_or_else(|| panic!("{shot_id} ran"));
+        let job_id = shot
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.job_id.clone())
+            .unwrap_or_else(|| panic!("{shot_id} dispatched a job"));
+        let (status, job) = request_job(&harness, &job_id).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        let prompt = job["payload"]["prompt"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+        assert_eq!(
+            prompt.contains(&sentence),
+            expected,
+            "{shot_id}: the route must{} have been sent {ROLE}'s identity text {sentence:?}: \
+             {prompt:?}",
+            if expected { "" } else { " NOT" }
+        );
+        if expected {
+            // And it is the SAME text the compiled document recorded: the route and the document
+            // agree on the exact words, which is the agreement nothing downstream could check.
+            let compiled = locked
+                .get(shot_id.as_str())
+                .unwrap_or_else(|| panic!("{shot_id} was locked at compile time"));
+            assert!(
+                prompt.contains(compiled.as_str()),
+                "{shot_id}: the dispatched prompt must carry the compiled identity text verbatim \
+                 — {compiled:?} — got {prompt:?}"
+            );
+        }
+        // Nothing is conditioned, so nothing is supplied — on the payload, not only the document.
+        assert!(
+            job["payload"]["referenceAssetIds"]
+                .as_array()
+                .is_none_or(|ids| ids.is_empty()),
+            "{shot_id}: a described-only film supplies no images: {}",
+            job["payload"]
+        );
+    }
+}
+
+/// A3's refusal half (sc-24025). A described-only role may not be BOUND; a role that is neither an
+/// image nor a description is not a role at all; and a locator on a role with no image points into
+/// a picture that does not exist.
+///
+/// All three are proved against the SHIPPED described documents, edited in memory, so they are
+/// statements about the document an author actually writes.
+#[tokio::test]
+async fn a3_a_described_only_role_cannot_be_bound_and_an_empty_role_is_refused() {
+    let harness = Harness::start(false, Vec::new()).await;
+    let (plan_path, pack_path) = described_fixture();
+    let pack: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(&pack_path).expect("the described pack"),
+    ))
+    .expect("the pack parses");
+    let plan: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &std::fs::read_to_string(&plan_path).expect("the described plan"),
+    ))
+    .expect("the plan parses");
+    let dir = harness.temp_dir.path();
+
+    // BOUND: SH010 names the described-only courier in `conditioning.referenceRoles`. Refused,
+    // naming the shot and the role.
+    let mut bound = plan.clone();
+    let shot_id = bound["shots"][0]["id"]
+        .as_str()
+        .expect("a shot id")
+        .to_owned();
+    bound["shots"][0]["conditioning"] =
+        json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+    let bound_path = dir.join("plan.described.bound.json");
+    std::fs::write(&bound_path, serde_json::to_string_pretty(&bound).unwrap()).unwrap();
+    let findings = refusal_findings(
+        film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(bound_path, pack_path.clone(), None),
+        )
+        .await,
+    );
+    let refusal = findings
+        .iter()
+        .find(|message| message.contains("DESCRIBED-ONLY"))
+        .unwrap_or_else(|| panic!("binding a described-only role must be refused: {findings:?}"));
+    for named in [shot_id.as_str(), "\"courier\"", "continuityRoles"] {
+        assert!(
+            refusal.contains(named),
+            "the refusal must name {named}: {refusal:?}"
+        );
+    }
+
+    // NEITHER: a role with no file and no description. Refused, naming the role.
+    let mut empty = pack.clone();
+    empty["references"][0]["description"] = json!("   ");
+    let empty_path = dir.join("references.described.empty.json");
+    std::fs::write(&empty_path, serde_json::to_string_pretty(&empty).unwrap()).unwrap();
+    let findings = refusal_findings(
+        film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(plan_path.clone(), empty_path, None),
+        )
+        .await,
+    );
+    assert!(
+        findings.iter().any(|message| {
+            message.contains("\"courier\"") && message.contains("no `file` and no `description`")
+        }),
+        "a role that is neither an image nor words must be refused by name: {findings:?}"
+    );
+
+    // A LOCATOR on a role with no image: it picks a subject out of a picture there is none of.
+    let mut located = pack.clone();
+    located["references"][0]["locator"] = json!("the woman on the left");
+    let located_path = dir.join("references.described.located.json");
+    std::fs::write(
+        &located_path,
+        serde_json::to_string_pretty(&located).unwrap(),
+    )
+    .unwrap();
+    let findings = refusal_findings(
+        film_harness::validate(
+            Some(&harness.transport),
+            &harness.options(plan_path, located_path, None),
+        )
+        .await,
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|message| message.contains("\"courier\"") && message.contains("locator")),
+        "a locator on a role with no image must be refused by name: {findings:?}"
+    );
 }

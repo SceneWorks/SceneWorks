@@ -49,8 +49,11 @@ export function FilmReferences({
   const references = draft.referencePack.references;
   const selectedShot = draft.productionPlan.shots.find((shot) => shot.id === selectedShotId)
     ?? draft.productionPlan.shots[0];
+  // A DESCRIBED-ONLY role — one with no `file` (sc-24025) — supplies no image, so it can never be
+  // bound: the server refuses it in every conditioning slot. Offering it here would let the editor
+  // build a draft that cannot validate.
   const bindable = references.filter((reference) => (
-    reference.approved && BINDABLE_KINDS.has(reference.kind)
+    reference.approved && Boolean(reference.file) && BINDABLE_KINDS.has(reference.kind)
   ));
 
   function mutate(mutator) {
@@ -281,7 +284,7 @@ export function FilmReferences({
         <label className="ve-film-file-button">Upload image<input accept="image/png,image/jpeg,image/webp" disabled={disabled || typeof importAsset !== "function"} onChange={uploadReference} type="file" /></label>
       </div>
       {references.map((reference, index) => (
-        <div className="ve-film-reference-row" key={`${reference.sourceAssetId ?? reference.file}-${index}`}>
+        <div className="ve-film-reference-row" key={`${reference.sourceAssetId ?? reference.file ?? reference.role}-${index}`}>
           <input aria-label={`Reference ${index + 1} role`} disabled={disabled} onChange={(event) => renameReference(index, event.target.value)} value={reference.role} />
           <select aria-label={`Reference ${reference.role} kind`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].kind = event.target.value; })} value={reference.kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
           <input aria-label={`Reference ${reference.role} description`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].description = event.target.value; })} value={reference.description ?? ""} />

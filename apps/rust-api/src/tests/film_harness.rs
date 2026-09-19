@@ -7615,12 +7615,32 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         assert_eq!(request["durationSeconds"], 5.1667);
         assert_eq!(request["mode"], "text_to_video");
         assert_eq!(request["promptSource"], "refined");
+        // The refinement produced the dispatched prompt — CONTAINED rather than leading it, because
+        // since sc-24025 the compiler's identity text leads every shot that names a continuity
+        // role it does not bind, and these shots bind nothing at all. What must still hold is that
+        // the refiner's own words survive and that everything ahead of them is recorded inserted
+        // text rather than something nobody wrote.
+        let prompt = request["prompt"].as_str().unwrap();
+        let refined_at = prompt
+            .find("integrated_multimodal_description:")
+            .unwrap_or_else(|| {
+                panic!("the H3 refinement produced the dispatched prompt: {request}")
+            });
+        let leading: String = request["insertedText"]
+            .as_array()
+            .expect("insertedText is recorded")
+            .iter()
+            .filter(|piece| piece["kind"] == "continuity_description")
+            .map(|piece| piece["text"].as_str().unwrap_or_default().to_owned())
+            .collect();
         assert!(
-            request["prompt"]
-                .as_str()
-                .unwrap()
-                .starts_with("integrated_multimodal_description:"),
-            "the H3 refinement produced the dispatched prompt: {request}"
+            !leading.is_empty(),
+            "these shots lock continuity roles: {request}"
+        );
+        assert_eq!(
+            prompt[..refined_at].trim(),
+            leading.trim(),
+            "only the compiler's own identity text precedes the refined prompt: {request}"
         );
         assert!(request.get("negativePrompt").is_none(), "{request}");
         assert!(
@@ -8296,10 +8316,13 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     let first = &artifacts.compiled.requests[0];
     // Verbatim, with the compiler's own audio sentence trailing it (sc-24026) — the hand-written
     // text itself is untouched, which is what `--no-refine` promises.
+    // Verbatim and intact. NOT `starts_with`: since sc-24025 the compiler's identity text leads a
+    // shot that names continuity roles it does not bind, and `--no-refine` promises the authored
+    // text is untouched, not that nothing the compiler owns is written around it.
     assert!(
         first
             .prompt
-            .starts_with("A hand-written prompt the planner never wrote."),
+            .contains("A hand-written prompt the planner never wrote."),
         "{}",
         first.prompt
     );
@@ -8436,11 +8459,14 @@ async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_p
             "refined"
         );
         assert_eq!(payload["advanced"]["mlxQuantize"], 4);
+        // Contained, not leading: the compiler's identity text leads these shots (sc-24025). The
+        // payload is asserted equal to `request.prompt` above, so the exact composition is already
+        // pinned; what this adds is that the REFINER's words are the ones that reached the route.
         assert!(
             payload["prompt"]
                 .as_str()
                 .unwrap()
-                .starts_with("integrated_multimodal_description:"),
+                .contains("integrated_multimodal_description:"),
             "{payload}"
         );
     }

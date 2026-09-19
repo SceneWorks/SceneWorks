@@ -1176,11 +1176,15 @@ pub fn role_coverage_findings(
         .filter(|entry| entry.approved)
         .map(|entry| entry.role.as_str())
         .collect();
-    // A role the pack approves AND whose kind may be BOUND as a reference_to_video subject.
+    // A role the pack approves, that HAS an image, and whose kind may be BOUND as a
+    // reference_to_video subject. A described-only role is never bindable however right its kind
+    // reads — `validate_plan_against_pack` refuses one in every conditioning slot (sc-24025) — so
+    // counting it here would have this rule demand a binding the validator then rejects.
     let bindable = |role: &str| {
         pack.references.iter().any(|entry| {
             entry.approved
                 && entry.role == role
+                && entry.file().is_some()
                 && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str())
         })
     };
@@ -1566,9 +1570,27 @@ pub fn build_planner_request(
         let sharing: Vec<&str> = pack
             .references
             .iter()
-            .filter(|other| other.approved && other.file == entry.file && other.role != entry.role)
+            // Only an IMAGE can be shared, so this asks the question of files that EXIST: two
+            // described-only roles both answering `None` are not two roles on one photograph, and
+            // comparing the raw options would tell the planner they were (sc-24025).
+            .filter(|other| {
+                other.approved
+                    && entry.file().is_some()
+                    && other.file() == entry.file()
+                    && other.role != entry.role
+            })
             .map(|other| other.role.as_str())
             .collect();
+        // A DESCRIBED-ONLY role is usable, and usable in exactly one place (sc-24025). It is a
+        // subject the pack describes but has no picture of, so it belongs in continuityRoles —
+        // where the compiler writes these very words into the prompt — and naming it in
+        // referenceRoles is refused. Said on the role's own line, because that is where the
+        // planner is reading when it decides what to do with it.
+        if entry.is_described_only() {
+            out.push_str(
+                " (no image: name this role in continuityRoles only — never in referenceRoles.)",
+            );
+        }
         if let Some(locator) = entry.locator() {
             out.push_str(&format!(" It is {locator} in its image."));
         }
