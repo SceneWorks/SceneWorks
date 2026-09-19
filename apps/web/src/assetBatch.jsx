@@ -10,11 +10,17 @@ import { terminalStatuses } from "./constants.js";
 import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
 import { assetIsHdrSource, assetNativeSize, assetUrl } from "./components/assetMedia.jsx";
-import { BatchOperationsPanel } from "./components/BatchOperationsPanel.jsx";
 import { Modal } from "./components/Modal.jsx";
+import { lazyInteraction } from "./components/LazyScreen.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
+
+const BatchOperationsPanel = lazyInteraction(
+  () => import("./components/BatchOperationsPanel.jsx"),
+  "BatchOperationsPanel",
+  "Batch operations",
+);
 
 // Sentinel "Move" target (sc-8341): selecting it promotes the assets into the Main Asset
 // Library (a true move) instead of linking them to a character. Namespaced so it can't

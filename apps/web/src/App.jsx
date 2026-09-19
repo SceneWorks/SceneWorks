@@ -18,7 +18,7 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
-import { lazyScreen } from "./components/LazyScreen.jsx";
+import { lazyInteraction, lazyScreen } from "./components/LazyScreen.jsx";
 import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -39,7 +39,6 @@ import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
-import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
 import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
 import {
   persistWorkflowEmbedPreference,
@@ -236,6 +235,11 @@ const SimpleShell = lazyScreen(
   () => import("./simple/SimpleShell.jsx"),
   "SimpleShell",
   "Simple UI",
+);
+const WorkflowDropPanel = lazyInteraction(
+  () => import("./components/WorkflowDropPanel.jsx"),
+  "WorkflowDropPanel",
+  "Workflow details",
 );
 
 // Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
@@ -3294,7 +3298,7 @@ export function App() {
   useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
   // Rendered from a single place even though the app has two shells: `Modal` portals to
   // <body>, so this element does not have to sit inside whichever shell is on screen.
-  const workflowDropPanel = (
+  const workflowDropPanel = workflowDrop.offer ? (
     <WorkflowDropPanel
       assets={workflowInputAssets}
       canImport={Boolean(activeProject)}
@@ -3305,7 +3309,7 @@ export function App() {
       onImport={workflowDrop.importImage}
       onUse={workflowDrop.useWorkflow}
     />
-  );
+  ) : null;
 
   // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
   // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler

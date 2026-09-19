@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AssetSelectionBar, useAssetBatch } from "./assetBatch.jsx";
+import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "./assetBatch.jsx";
 import { AppStaticContext, AppLiveContext, AppContext } from "./context/AppContext.js";
 
 // sc-9751 (F-052 follow-up): the App renders the split AppStaticContext + AppLiveContext
@@ -51,6 +51,9 @@ function render(ui) {
     root.render(ui);
   });
   return {
+    async rerender(nextUi) {
+      await act(async () => root.render(nextUi));
+    },
     cleanup() {
       act(() => root.unmount());
       container.remove();
@@ -105,6 +108,42 @@ describe("useAssetBatch under the split context providers (sc-9751)", () => {
     );
     expect(latest.selectedAssetList.map((a) => a.id)).toEqual(["a1"]);
     expect(latest.availableCharacters.map((c) => c.id)).toEqual(["c1"]);
+  });
+});
+
+describe("AssetBatchModal lazy loading", () => {
+  let harness;
+
+  afterEach(() => {
+    harness?.cleanup();
+    harness = null;
+  });
+
+  it("loads the batch operation controls when the interaction opens", async () => {
+    const batch = {
+      availableUpscaleEngines: [{ key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] }],
+      batch: null,
+      batchItems: [],
+      batchOpen: true,
+      batchProgress: null,
+      closeBatch: vi.fn(),
+      detailModels: [],
+      editModels: [],
+      eligibleSelected: [assets[0]],
+      runBatch: vi.fn(),
+    };
+    harness = render(<AssetBatchModal batch={batch} />);
+
+    await vi.waitFor(() => {
+      expect(document.body.querySelector(".batch-ops-head")?.textContent).toContain("1 image");
+    });
+
+    await harness.rerender(<AssetBatchModal batch={{ ...batch, batchOpen: false }} />);
+    expect(document.body.querySelector(".batch-ops-head")).toBeNull();
+    await harness.rerender(<AssetBatchModal batch={batch} />);
+    await vi.waitFor(() => {
+      expect(document.body.querySelector(".batch-ops-head")?.textContent).toContain("1 image");
+    });
   });
 });
 

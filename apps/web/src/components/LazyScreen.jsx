@@ -9,7 +9,7 @@ export async function waitForLazyScreenImports() {
   }
 }
 
-class ScreenLoadErrorBoundary extends React.Component {
+class LazyLoadErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
     this.state = { error: null };
@@ -22,6 +22,17 @@ class ScreenLoadErrorBoundary extends React.Component {
   render() {
     if (!this.state.error) {
       return this.props.children;
+    }
+
+    if (this.props.interaction) {
+      return (
+        <div className="lazy-interaction-boundary" role="alert">
+          <span>{this.props.label} could not be loaded.</span>
+          <button onClick={this.props.onRetry} type="button">
+            Try again
+          </button>
+        </div>
+      );
     }
 
     return (
@@ -49,6 +60,31 @@ function ScreenLoading({ label }) {
   );
 }
 
+function InteractionLoading({ label }) {
+  return (
+    <span aria-busy="true" aria-live="polite" className="lazy-interaction-boundary" role="status">
+      Loading {label}…
+    </span>
+  );
+}
+
+function createLazyNamedComponent(importComponent, exportName) {
+  return React.lazy(async () => {
+    const request = importComponent();
+    pendingScreenImports.add(request);
+    try {
+      const module = await request;
+      const component = module[exportName];
+      if (!component) {
+        throw new Error(`Lazy module does not export ${exportName}`);
+      }
+      return { default: component };
+    } finally {
+      pendingScreenImports.delete(request);
+    }
+  });
+}
+
 /**
  * Build a retryable React.lazy boundary around a named screen export.
  *
@@ -58,21 +94,7 @@ function ScreenLoading({ label }) {
  * their existing local state across navigation.
  */
 export function lazyScreen(importScreen, exportName, label) {
-  const createLazyComponent = () =>
-    React.lazy(async () => {
-      const request = importScreen();
-      pendingScreenImports.add(request);
-      try {
-        const module = await request;
-        const component = module[exportName];
-        if (!component) {
-          throw new Error(`Screen module does not export ${exportName}`);
-        }
-        return { default: component };
-      } finally {
-        pendingScreenImports.delete(request);
-      }
-    });
+  const createLazyComponent = () => createLazyNamedComponent(importScreen, exportName);
 
   function LazyScreen(props) {
     const [{ attempt, Screen }, setLoadState] = useState(() => ({
@@ -86,7 +108,7 @@ export function lazyScreen(importScreen, exportName, label) {
       }));
 
     return (
-      <ScreenLoadErrorBoundary
+      <LazyLoadErrorBoundary
         key={attempt}
         label={label}
         onRetry={retry}
@@ -94,10 +116,43 @@ export function lazyScreen(importScreen, exportName, label) {
         <React.Suspense fallback={<ScreenLoading label={label} />}>
           <Screen {...props} />
         </React.Suspense>
-      </ScreenLoadErrorBoundary>
+      </LazyLoadErrorBoundary>
     );
   }
 
   LazyScreen.displayName = `Lazy${exportName}`;
   return LazyScreen;
+}
+
+/** Build a compact retryable lazy boundary for controls that appear only after an interaction. */
+export function lazyInteraction(importComponent, exportName, label) {
+  const createLazyComponent = () => createLazyNamedComponent(importComponent, exportName);
+
+  function LazyInteraction(props) {
+    const [{ attempt, Component }, setLoadState] = useState(() => ({
+      attempt: 0,
+      Component: createLazyComponent(),
+    }));
+    const retry = () =>
+      setLoadState((current) => ({
+        attempt: current.attempt + 1,
+        Component: createLazyComponent(),
+      }));
+
+    return (
+      <LazyLoadErrorBoundary
+        interaction
+        key={attempt}
+        label={label}
+        onRetry={retry}
+      >
+        <React.Suspense fallback={<InteractionLoading label={label} />}>
+          <Component {...props} />
+        </React.Suspense>
+      </LazyLoadErrorBoundary>
+    );
+  }
+
+  LazyInteraction.displayName = `Lazy${exportName}`;
+  return LazyInteraction;
 }
