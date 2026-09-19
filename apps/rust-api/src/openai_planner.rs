@@ -343,9 +343,24 @@ fn multimodal_content(
             "webp" => "image/webp",
             _ => "image/png",
         };
+        // Every role this ONE image carries (sc-24024): a photograph holding two people is one
+        // image labelled for both subjects, each with the locator that picks it out, rather than
+        // the same bytes sent twice under two role names.
+        let roles = image
+            .roles
+            .iter()
+            .map(|role| match role.locator.as_deref() {
+                Some(locator) => format!("{} ({locator})", role.role),
+                None => role.role.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         content.push(json!({
             "type": "text",
-            "text": format!("Approved reference role: {}", image.role),
+            "text": format!(
+                "Approved reference role{}: {roles}",
+                if image.roles.len() == 1 { "" } else { "s" }
+            ),
         }));
         content.push(json!({
             "type": "image_url",
@@ -433,6 +448,7 @@ fn status_detail(status: reqwest::StatusCode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_planner::PlannerReferenceRole;
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -998,7 +1014,10 @@ mod tests {
         std::fs::write(image.path(), b"pixels").unwrap();
         let image_request = || {
             request(vec![PlannerReferenceImage {
-                role: "hero".to_owned(),
+                roles: vec![PlannerReferenceRole {
+                    role: "hero".to_owned(),
+                    locator: None,
+                }],
                 path: image.path().to_path_buf(),
             }])
         };
@@ -1122,7 +1141,10 @@ mod tests {
             }
             let error = llm
                 .complete(request(vec![PlannerReferenceImage {
-                    role: "hero".to_owned(),
+                    roles: vec![PlannerReferenceRole {
+                        role: "hero".to_owned(),
+                        locator: None,
+                    }],
                     path: image,
                 }]))
                 .await

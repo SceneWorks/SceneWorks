@@ -507,6 +507,16 @@ async fn long_legal_asset_identity_is_tagged_through_real_routes_without_losing_
     pack["references"][0]["role"] = json!(first_role);
     let mut second = pack["references"][0].clone();
     second["role"] = json!(second_role);
+    // Its OWN plate, copied beside the first. This test is about the LENGTH of the ids the harness
+    // stamps onto real assets, so it needs two assets; two roles on one file would be one asset
+    // under one `<Picture N>` (sc-24024), which `film_harness_anchoring.rs` covers on purpose.
+    let plate_dir = pack_path.parent().unwrap().join("references");
+    std::fs::copy(
+        plate_dir.join("workshop_plate.png"),
+        plate_dir.join("workshop_plate_b.png"),
+    )
+    .expect("the second plate copies");
+    second["file"] = json!("references/workshop_plate_b.png");
     pack["references"].as_array_mut().unwrap().push(second);
     let sound = ffmpeg_reachable();
     if sound {
@@ -2375,7 +2385,7 @@ impl Harness {
             ],
         });
         let pack = json!({
-            "schemaVersion": 1,
+            "schemaVersion": sceneworks_core::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
             "id": "budget-refs",
             "version": 1,
             "references": [
@@ -3552,16 +3562,27 @@ async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
     // them is a BINDABLE kind, so the count is the only thing wrong with the plan — a `plate` here
     // would be refused on its kind instead and the count would never be reached.
     let roles: Vec<String> = (0..10).map(|index| format!("extra_prop_{index}")).collect();
+    // Each on its OWN plate: `maxReferenceAssets` bounds the IMAGES a request supplies, so ten
+    // roles over one file would be one image and inside the cap (sc-24024). The files are copies
+    // of the shipped plate under ten names, so `validate_reference_pack_files` can stat them.
     let pack = harness.edited_pack(|pack| {
         let references = pack["references"].as_array_mut().expect("references");
         for role in 0..10 {
             references.push(json!({
                 "role": format!("extra_prop_{role}"),
                 "kind": "prop",
-                "file": "references/workshop_plate.png"
+                "file": format!("references/extra_prop_{role}.png")
             }));
         }
     });
+    let plate_dir = pack.parent().unwrap().join("references");
+    for role in 0..10 {
+        std::fs::copy(
+            plate_dir.join("workshop_plate.png"),
+            plate_dir.join(format!("extra_prop_{role}.png")),
+        )
+        .expect("the extra plates copy");
+    }
     let plan = harness.mixed_partition_plan(|plan| {
         plan["shots"][0]["conditioning"]["referenceRoles"] = json!(roles);
     });
@@ -3736,8 +3757,12 @@ async fn a_shot_filtered_run_does_not_demand_an_unselected_partitions_weights() 
     );
 }
 
-/// `GET /api/v1/jobs/{id}`, for the assertions above.
-async fn request_job(harness: &Harness, job_id: &str) -> (axum::http::StatusCode, Value) {
+/// `GET /api/v1/jobs/{id}`, for the assertions above and for the epic's acceptance tests, which
+/// read the body the route actually received rather than the one a compiled request would build.
+pub(crate) async fn request_job(
+    harness: &Harness,
+    job_id: &str,
+) -> (axum::http::StatusCode, Value) {
     request(
         harness.app.clone(),
         "GET",

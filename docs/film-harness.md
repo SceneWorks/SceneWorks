@@ -92,6 +92,16 @@ Ref2VA treats every bound image as a subject to depict; a `style` (a look) or a 
 frame, which belongs in `firstFrameRole` / `lastFrameRole`) bound there is refused naming the shot,
 the role and the kind.
 
+**Several pack entries may name the same `file`** (sc-24024, pack schema version 2) — one photograph
+holding two people is one image with two subjects in it. Each sharing role then needs a `locator`,
+the phrase that picks its subject out of that image ("the woman on the left"); a shared file with a
+locator missing is refused naming the roles and the file. The file is imported as **one** asset that
+every sharing role resolves to, supplied to the engine **once** under one `<Picture N>`, and each
+role's binding sentence carries its own locator. Because of that, `limits.maxReferenceAssets` counts
+**distinct files**, not bound roles. "The same file" is the `file` string compared literally — no
+filesystem canonicalization — and sharing roles must agree on `approved` and on their generation
+provenance, since one image carries one of each.
+
 A pack entry with `"approved": false` is still imported (so a human can review it), but it is tagged
 `film-harness-reference-unapproved` instead of `film-harness-reference`, recorded with
 `approved: false`, and never resolved into a shot's conditioning slots. A reference `file` must have
@@ -1374,7 +1384,8 @@ require the catalog to report the model installed.
    against, and it is what the run record's `model.hardware.platform` states;
 4. the model's catalog entry from `GET /api/v1/models`: capability per mode, target duration on the
    declared menu and inside the hard bounds, fps and resolution on the declared menus / under
-   `maxPixels`, reference counts against `limits.maxReferenceAssets`, negative prompts against
+   `maxPixels`, reference counts against `limits.maxReferenceAssets` — counting **distinct pack
+   files**, since roles sharing one image are supplied once (sc-24024) — negative prompts against
    `video.supportsNegativePrompt`, the plan's `limits.maxMemoryGb` against the lane's
    `minMemoryGb`, and the route's own gates — platform reachability
    (`ensure_video_model_available_on_platform`) and the reference-payload check

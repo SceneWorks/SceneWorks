@@ -4,7 +4,10 @@
   // placeholder plates written by `film-harness fixture-images` (576x320, one flat colour with a
   // bench line — see `FIXTURE_REFERENCES` in apps/rust-api/src/film_harness.rs). Replace a file
   // with a real approved plate and bump `version`; the roles and the plan do not change.
-  "schemaVersion": 1,
+  // 2 (sc-24024): pack entries may carry a `locator` — the phrase that picks one subject out of an
+  // image SEVERAL roles share ("the woman on the left"). Every role here has a plate to itself, so
+  // none declares one; the bump is the schema's, not this document's.
+  "schemaVersion": 2,
   "id": "courier-workshop-refs",
   // 2 (sc-23404): the three dialogue roles became synthesized lines instead of placeholder tones,
   // and SH060's line moved to its own `recipient_reveal_line` role so each of the three placements

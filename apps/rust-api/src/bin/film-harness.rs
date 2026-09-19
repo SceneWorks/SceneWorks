@@ -263,15 +263,23 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     if command == "validate" {
         return match film_harness::validate(Some(&transport), &parsed.options).await {
             Ok((plan, pack)) => {
+                // Roles AND images, because several roles may name one file (sc-24024) and it is
+                // the image count that `limits.maxReferenceAssets` bounds.
+                let images: std::collections::BTreeSet<&str> = pack
+                    .references
+                    .iter()
+                    .map(|entry| entry.file.as_str())
+                    .collect();
                 println!(
-                    "plan {:?} v{} ({} shots) and reference pack {:?} v{} ({} references) validate \
-                     against {} on {}",
+                    "plan {:?} v{} ({} shots) and reference pack {:?} v{} ({} references over {} \
+                     images) validate against {} on {}",
                     plan.id,
                     plan.version,
                     plan.shots.len(),
                     pack.id,
                     pack.version,
                     pack.references.len(),
+                    images.len(),
                     plan.model.id,
                     parsed.api_url
                 );

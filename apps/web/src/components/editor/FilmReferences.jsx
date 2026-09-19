@@ -29,6 +29,9 @@ export function FilmReferences({
   const [role, setRole] = useState("");
   const [kind, setKind] = useState("character");
   const [description, setDescription] = useState("");
+  // Which subject in the image this role names (sc-24024). Required by the API once two roles
+  // share one image, so the add form has to be able to say it.
+  const [locator, setLocator] = useState("");
   const [approved, setApproved] = useState(false);
   const [selectedShotId, setSelectedShotId] = useState(draft.productionPlan.shots[0]?.id ?? "");
   const [bindingRole, setBindingRole] = useState("");
@@ -94,6 +97,7 @@ export function FilmReferences({
             role: nextRole,
             kind,
             description,
+            locator: locator.trim() || null,
             approved,
           }),
         },
@@ -102,6 +106,7 @@ export function FilmReferences({
       setAssetId("");
       setRole("");
       setDescription("");
+      setLocator("");
       setApproved(false);
       setNotice(`Reference ${nextRole} added to the draft.`);
     } catch (error) {
@@ -134,6 +139,7 @@ export function FilmReferences({
             role: role.trim() || defaultRole(imported),
             kind,
             description,
+            locator: locator.trim() || null,
             approved,
           }),
         },
@@ -142,6 +148,7 @@ export function FilmReferences({
       setAssetId("");
       setRole("");
       setDescription("");
+      setLocator("");
       setApproved(false);
       setNotice("Uploaded image added to the reference pack.");
     } catch (error) {
@@ -268,6 +275,7 @@ export function FilmReferences({
         <label>Role name<input aria-label="Reference role name" disabled={disabled} onChange={(event) => setRole(event.target.value)} value={role} /></label>
         <label>Kind<select aria-label="Reference kind" disabled={disabled} onChange={(event) => setKind(event.target.value)} value={kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
         <label>Description<input aria-label="Reference description" disabled={disabled} onChange={(event) => setDescription(event.target.value)} value={description} /></label>
+        <label>Locator<input aria-label="Reference locator" disabled={disabled} onChange={(event) => setLocator(event.target.value)} placeholder="the woman on the left" value={locator} /></label>
         <label className="ve-film-reference-check"><input checked={approved} disabled={disabled} onChange={(event) => setApproved(event.target.checked)} type="checkbox" />Approved</label>
         <button disabled={disabled || !assetId} onClick={() => addAssetReference(assetId)} type="button">Add asset</button>
         <label className="ve-film-file-button">Upload image<input accept="image/png,image/jpeg,image/webp" disabled={disabled || typeof importAsset !== "function"} onChange={uploadReference} type="file" /></label>
@@ -277,6 +285,7 @@ export function FilmReferences({
           <input aria-label={`Reference ${index + 1} role`} disabled={disabled} onChange={(event) => renameReference(index, event.target.value)} value={reference.role} />
           <select aria-label={`Reference ${reference.role} kind`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].kind = event.target.value; })} value={reference.kind}>{REFERENCE_KINDS.map((item) => <option key={item} value={item}>{item}</option>)}</select>
           <input aria-label={`Reference ${reference.role} description`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].description = event.target.value; })} value={reference.description ?? ""} />
+          <input aria-label={`Reference ${reference.role} locator`} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].locator = event.target.value || undefined; })} placeholder="the woman on the left" value={reference.locator ?? ""} />
           <label><input checked={reference.approved} disabled={disabled} onChange={(event) => mutate((next) => { next.referencePack.references[index].approved = event.target.checked; })} type="checkbox" />Approved</label>
           <button disabled={disabled} onClick={() => removeReference(index)} type="button">Remove</button>
         </div>

@@ -441,6 +441,12 @@ pub struct FilmReferenceInput {
     pub kind: String,
     #[serde(default)]
     pub description: String,
+    /// Which subject in the image this role names, when the same library image backs several roles
+    /// (sc-24024). Adding one asset twice under two roles gives both the same
+    /// `references/<assetId>.<ext>` file, which is exactly the shared-file case the pack now
+    /// supports — and which [`validate_reference_pack`] refuses without a locator on each.
+    #[serde(default)]
+    pub locator: Option<String>,
     #[serde(default)]
     pub approved: bool,
 }
@@ -1059,6 +1065,7 @@ impl ProjectStore {
             file: relative_file.clone(),
             source_asset_id: Some(input.asset_id.clone()),
             description: input.description,
+            locator: input.locator,
             approved: input.approved,
             generated: false,
             generation: None,

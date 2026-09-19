@@ -1546,11 +1546,32 @@ pub fn build_planner_request(
             continue;
         }
         out.push_str(&format!(
-            "- {} ({}): {}\n",
+            "- {} ({}): {}",
             entry.role,
             entry.kind,
             entry.description.trim()
         ));
+        // A role sharing its image with another is named as sharing it (sc-24024). Binding both
+        // costs the shot ONE reference image rather than two, and the locator is how the planner
+        // knows the two roles are different subjects in one photograph rather than two pictures.
+        let sharing: Vec<&str> = pack
+            .references
+            .iter()
+            .filter(|other| other.approved && other.file == entry.file && other.role != entry.role)
+            .map(|other| other.role.as_str())
+            .collect();
+        if let Some(locator) = entry.locator() {
+            out.push_str(&format!(" It is {locator} in its image."));
+        }
+        if !sharing.is_empty() {
+            out.push_str(&format!(
+                " That image also shows {} — binding them together costs one reference image, \
+                 not {}.",
+                sharing.join(", "),
+                sharing.len() + 1
+            ));
+        }
+        out.push('\n');
     }
 
     out.push_str("\n# What this model can actually do\n\n");
@@ -1825,6 +1846,7 @@ mechanic's hand is withdrawn.\",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION;
     use serde_json::json;
 
     fn brief_json() -> Value {
@@ -1853,7 +1875,7 @@ mod tests {
 
     fn pack() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -1910,7 +1932,7 @@ mod tests {
     /// A pack that approves nothing — the user who supplied no references (E1).
     fn pack_without_references() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -2910,7 +2932,7 @@ mod tests {
         let brief = brief();
         let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         let style_and_plate_only: ReferencePack = serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [

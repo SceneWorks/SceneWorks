@@ -95,7 +95,8 @@ pub struct ReferencePicture<'a> {
     /// The `N` in `<Picture N>`, and the 1-based position of this picture's asset in the
     /// dispatched `referenceAssetIds`.
     pub number: u32,
-    /// The roles bound to this picture, in the shot's own order. Exactly one today.
+    /// The roles bound to this picture, in the shot's own order. More than one when the shot binds
+    /// several roles that name the same pack file — one photograph of two people (sc-24024).
     pub roles: Vec<BoundReferenceRole<'a>>,
 }
 
@@ -117,23 +118,47 @@ impl ReferencePicture<'_> {
 /// encoder labels the supplied assets `<Picture 1>`, `<Picture 2>`, … in supply order, so the
 /// numbering is positional and there is no id to check it against.
 ///
-/// Today every bound role has its own file, so a picture carries exactly one role and the order is
-/// the shot's own role order.
+/// AND the de-duplication (sc-24024): roles whose pack entries name the SAME `file` share one
+/// picture, numbered at the position of the first of them, because the engine labels each image it
+/// is SUPPLIED and a file supplied once is one picture however many roles point at it. A shot
+/// binding ten roles across nine files therefore sends nine images and names `<Picture 1>` …
+/// `<Picture 9>`.
+///
+/// "The same file" is the pack's `file` string compared LITERALLY. Nothing here touches the
+/// filesystem: the pack's own validator has already refused an absolute path, a `..` component and
+/// an unsafe basename, and canonicalizing would make one document mean different things on two
+/// machines. Two entries meaning one image must spell its path one way.
+///
+/// A role the pack does not declare (`entry: None`) can never share, since there is no file to
+/// share: it gets a picture of its own. Only an unvalidated plan has one —
+/// [`crate::film_plan::validate_plan_against_pack`] refuses an undeclared role.
 pub fn shot_reference_pictures<'a>(
     reference_roles: &[String],
     pack: &'a ReferencePack,
 ) -> Vec<ReferencePicture<'a>> {
-    reference_roles
-        .iter()
-        .enumerate()
-        .map(|(index, role)| ReferencePicture {
-            number: u32::try_from(index + 1).unwrap_or(u32::MAX),
-            roles: vec![BoundReferenceRole {
-                role: role.clone(),
-                entry: pack.references.iter().find(|entry| &entry.role == role),
-            }],
-        })
-        .collect()
+    let mut pictures: Vec<ReferencePicture<'a>> = Vec::with_capacity(reference_roles.len());
+    let mut by_file: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for role in reference_roles {
+        let entry = pack.references.iter().find(|entry| &entry.role == role);
+        let bound = BoundReferenceRole {
+            role: role.clone(),
+            entry,
+        };
+        let shared = entry.and_then(|entry| by_file.get(entry.file.as_str()).copied());
+        match shared {
+            Some(index) => pictures[index].roles.push(bound),
+            None => {
+                if let Some(entry) = entry {
+                    by_file.insert(entry.file.as_str(), pictures.len());
+                }
+                pictures.push(ReferencePicture {
+                    number: u32::try_from(pictures.len() + 1).unwrap_or(u32::MAX),
+                    roles: vec![bound],
+                });
+            }
+        }
+    }
+    pictures
 }
 
 /// A kind of text the COMPILER writes into a prompt, recorded so a reviewer can see exactly what
@@ -206,13 +231,31 @@ fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedT
     let mut sentences: Vec<String> = Vec::new();
     for picture in pictures {
         for bound in &picture.roles {
+            // With a LOCATOR the sentence says WHICH subject in that picture this role is
+            // (sc-24024) — "The courier is the woman on the left in <Picture 1>." — which is the
+            // only thing that makes one photograph of two people bindable as two roles, since both
+            // are bound to the same `<Picture N>`. Without one it keeps the wording a reference
+            // with an image to itself has always had. The locator's whitespace is normalized like
+            // every other pack-authored phrase the compiler repeats.
+            let locator = bound
+                .entry
+                .and_then(crate::film_plan::ReferenceEntry::locator)
+                .map(normalized_description)
+                .filter(|locator| !locator.is_empty());
             let kind = bound.entry.map_or("", |entry| entry.kind.as_str());
-            let mut sentence = format!(
-                "The {} is the {} shown in <Picture {}>.",
-                role_phrase(&bound.role),
-                bound_reference_noun(kind),
-                picture.number
-            );
+            let mut sentence = match locator {
+                Some(locator) => format!(
+                    "The {} is {locator} in <Picture {}>.",
+                    role_phrase(&bound.role),
+                    picture.number
+                ),
+                None => format!(
+                    "The {} is the {} shown in <Picture {}>.",
+                    role_phrase(&bound.role),
+                    bound_reference_noun(kind),
+                    picture.number
+                ),
+            };
             // The pack's description is the author's own words about that image, so it is repeated
             // rather than paraphrased into the sentence above — but its WHITESPACE is normalized
             // first: the sentence is one line of a prompt, and a description carrying a newline or a
@@ -1249,7 +1292,7 @@ mod tests {
     fn pack() -> ReferencePack {
         parse_reference_pack(
             &json!({
-                "schemaVersion": 1,
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
                 "id": "courier-refs",
                 "version": 3,
                 "references": [
@@ -2740,5 +2783,110 @@ mod tests {
         persisted.push(b'\n');
         let expected = format!("{:x}", Sha256::digest(&persisted));
         assert_eq!(production_plan_sha256(&plan).unwrap(), expected);
+    }
+
+    /// The fixture pack with the courier and the recipient on ONE plate, each with a locator — a
+    /// photograph of two people (sc-24024). `third` is a role with a plate of its own, so the
+    /// numbering below is exercised against a picture that follows a shared one.
+    fn shared_plate_pack() -> ReferencePack {
+        parse_reference_pack(
+            &json!({
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "pair-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character", "file": "references/pair.png",
+                        "locator": "the woman on the left",
+                        "description": "Blue jacket."
+                    },
+                    {
+                        "role": "recipient", "kind": "character", "file": "references/pair.png",
+                        "locator": "  the man\non the  right  "
+                    },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// Roles naming the same pack file are ONE picture, numbered at the first of them, and the
+    /// next role's own file is the NEXT number — not the next role's index (sc-24024).
+    #[test]
+    fn roles_that_share_a_file_share_one_picture_and_do_not_consume_its_number() {
+        let pack = shared_plate_pack();
+        let roles = [
+            "courier".to_owned(),
+            "recipient".to_owned(),
+            "red_parcel".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&roles, &pack);
+
+        assert_eq!(pictures.len(), 2, "two files, two pictures: {pictures:?}");
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(
+            pictures[0]
+                .roles
+                .iter()
+                .map(|bound| bound.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["courier", "recipient"],
+            "both roles on the shared plate ride one picture, in the shot's order"
+        );
+        assert_eq!(
+            pictures[1].number, 2,
+            "the third role is the SECOND picture"
+        );
+        assert_eq!(pictures[1].dispatch_role(), Some("red_parcel"));
+        assert_eq!(
+            pictures[0].dispatch_role(),
+            Some("courier"),
+            "one file is dispatched once, under the first role that named it"
+        );
+
+        // A role bound TWICE to the same file through the same entry cannot appear twice either:
+        // the reversed order proves the number follows the first occurrence, not the pack's order.
+        let reversed = [
+            "red_parcel".to_owned(),
+            "recipient".to_owned(),
+            "courier".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&reversed, &pack);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].dispatch_role(), Some("red_parcel"));
+        assert_eq!(pictures[1].number, 2);
+        assert_eq!(pictures[1].dispatch_role(), Some("recipient"));
+    }
+
+    /// Each sharing role's binding sentence carries ITS OWN locator against the shared
+    /// `<Picture N>`, whitespace-normalized like every other pack phrase the compiler repeats; a
+    /// role with a plate to itself keeps the wording it had before locators existed (sc-24024).
+    #[test]
+    fn a_locator_replaces_the_bare_noun_in_that_roles_binding_sentence() {
+        let pack = shared_plate_pack();
+        let roles = [
+            "courier".to_owned(),
+            "recipient".to_owned(),
+            "red_parcel".to_owned(),
+        ];
+        let inserted = inserted_text_for_shot(&shot_reference_pictures(&roles, &pack));
+        assert_eq!(inserted.len(), 1, "{inserted:?}");
+        let text = inserted[0].text.as_str();
+
+        assert!(
+            text.contains("The courier is the woman on the left in <Picture 1>. Blue jacket."),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("The recipient is the man on the right in <Picture 1>."),
+            "a locator's whitespace is normalized before it reaches the prompt: {text:?}"
+        );
+        assert!(
+            text.contains("The red parcel is the object shown in <Picture 2>."),
+            "a role with its own file keeps the unlocated wording: {text:?}"
+        );
+        assert!(!text.contains("<Picture 3>"), "{text:?}");
     }
 }

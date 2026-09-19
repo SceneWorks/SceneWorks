@@ -108,8 +108,19 @@ pub struct LlmRequest {
 
 #[derive(Debug, Clone)]
 pub struct PlannerReferenceImage {
-    pub role: String,
+    /// Every approved pack role this ONE image carries, in pack order, each with its `locator`
+    /// when it declares one (sc-24024). A photograph of two people is sent once and labelled for
+    /// both, rather than twice under two role names: the planner would otherwise see the same
+    /// picture twice, and the duplicate would count against the adapter's own per-request image
+    /// and byte caps.
+    pub roles: Vec<PlannerReferenceRole>,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannerReferenceRole {
+    pub role: String,
+    pub locator: Option<String>,
 }
 
 /// One completed LLM request: the text, and what it cost (sc-22715). `job_id` and
@@ -804,6 +815,7 @@ async fn prepare(
         resolve_envelope(transport, &brief, &pack, options.require_installed, &facts).await?;
     let findings = brief_model_findings(
         &brief,
+        &pack,
         catalog
             .base_entry()
             .expect("resolve_envelope refuses without an entry"),
@@ -838,6 +850,7 @@ async fn prepare(
 /// of that validator, so this is the same rules on the same code, not a second copy of them.
 fn brief_model_findings(
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     entry: &JsonObject<String, Value>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
@@ -855,8 +868,11 @@ fn brief_model_findings(
     };
     // The probe has NO shots, so no shot can resolve to a partition: a single-entry view is the
     // whole truth for the plan-level rules this runs.
+    // The pack is INERT here for the same reason the empty `shots` list is: the only rule that
+    // reads it is the per-shot reference count, and this probe has no shots (sc-24024).
     film_plan::validate_plan_against_model(
         &probe,
+        pack,
         &film_plan::ModelEntries::single(&brief.model.id, entry),
         lane,
     )
@@ -893,14 +909,30 @@ pub async fn generate_with_refiner(
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
     let reference_images = if options.send_reference_pixels {
-        pack.references
-            .iter()
-            .filter(|entry| entry.approved)
-            .map(|entry| PlannerReferenceImage {
-                role: entry.role.clone(),
-                path: pack_dir(&options.reference_pack_path).join(&entry.file),
-            })
-            .collect()
+        {
+            // Grouped by the pack's `file` string, exactly as the compiler and the import group it
+            // (sc-24024), so one image is sent once however many roles name it.
+            let dir = pack_dir(&options.reference_pack_path);
+            let mut images: Vec<PlannerReferenceImage> = Vec::new();
+            let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
+            for entry in pack.references.iter().filter(|entry| entry.approved) {
+                let role = PlannerReferenceRole {
+                    role: entry.role.clone(),
+                    locator: entry.locator().map(str::to_owned),
+                };
+                match by_file.get(entry.file.as_str()).copied() {
+                    Some(index) => images[index].roles.push(role),
+                    None => {
+                        by_file.insert(entry.file.as_str(), images.len());
+                        images.push(PlannerReferenceImage {
+                            roles: vec![role],
+                            path: dir.join(&entry.file),
+                        });
+                    }
+                }
+            }
+            images
+        }
     } else {
         Vec::new()
     };
@@ -1809,7 +1841,7 @@ mod tests {
         // No beat here declares `requiredRoles`, so the pack only has to exist.
         let pack: sceneworks_core::film_plan::ReferencePack =
             serde_json::from_value(serde_json::json!({
-                "schemaVersion": 1,
+                "schemaVersion": sceneworks_core::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
                 "id": "courier-refs",
                 "version": 1,
                 "references": [
