@@ -2031,7 +2031,7 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
     let api = ApiClient::new(&settings);
-    let job = reference_audio_job_snapshot();
+    let job = reference_audio_job_snapshot("job-sc17160");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc17160").expect("project creates");
     let project_path = PathBuf::from(&project.path);
@@ -2163,8 +2163,15 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
                     "the reference must reach the engine at its audio VAE's rate, not the \
                      asset's {SOURCE_RATE} Hz"
                 );
-                assert_eq!(audio.channels, 1, "the source layout is left alone");
-                audio.samples.len()
+                // sc-24070: normalized onto the engine's fixed two-channel layout, exactly like
+                // the rate above. The source assets here are mono.
+                assert_eq!(
+                    audio.channels, 2,
+                    "the reference reaches the engine as stereo"
+                );
+                // PER-CHANNEL, so the rate assertion below stays a statement about the RATE after
+                // sc-24070 made the track two channels wide rather than one.
+                audio.samples.len() / usize::from(audio.channels)
             }
             other => panic!("expected ReferenceAudio, got {other:?}"),
         })
@@ -2188,13 +2195,223 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     );
 }
 
+/// sc-24070: the normalization command pins the engine's CHANNEL layout as well as its rate.
+///
+/// The ffmpeg-free half of the defect, so it runs on every lane including hosted macOS CI, which
+/// ships no ffmpeg. The engine's `ref2va` layout reserves soundtrack rows for exactly
+/// `AUDIO_OUTPUT_CHANNELS` (2) while its encoder produces rows per channel SUPPLIED, and its own
+/// `check_audio` gates only the rate — so a mono reference was refused after the full model load
+/// ("556 reference soundtrack rows against a layout reserving 1112", real-weight render
+/// 2026-09-20). `-ac` is what makes mono reachable, and it must be the one `-ac` in the command:
+/// a second one would silently win and this asserts the single occurrence.
+#[test]
+fn reference_audio_normalization_pins_the_engines_channel_layout() {
+    use super::reference_audio::{
+        reference_audio_ffmpeg_args, REFERENCE_AUDIO_CHANNELS, REFERENCE_AUDIO_SAMPLE_RATE,
+    };
+
+    // The value ffmpeg would read for `flag` — and an assertion that there is only ONE, since a
+    // later duplicate silently wins and would make either assertion below meaningless.
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
+        let at = args.iter().position(|arg| arg == flag)?;
+        assert_eq!(
+            args.iter().filter(|arg| *arg == flag).count(),
+            1,
+            "{flag} must appear exactly once — a later duplicate would silently win: {args:?}"
+        );
+        args.get(at + 1)
+    }
+
+    let args = reference_audio_ffmpeg_args(Path::new("/in/voice.wav"), Path::new("/out/ref.wav"));
+    let channels = REFERENCE_AUDIO_CHANNELS.to_string();
+    let rate = REFERENCE_AUDIO_SAMPLE_RATE.to_string();
+    assert_eq!(
+        value_after(&args, "-ac"),
+        Some(&channels),
+        "a mono voice clip must reach the engine as dual mono, and a wider one downmixed, because \
+         the packed layout reserves rows for exactly {REFERENCE_AUDIO_CHANNELS} channels: {args:?}"
+    );
+    assert_eq!(
+        value_after(&args, "-ar"),
+        Some(&rate),
+        "the rate normalization (sc-18650) stays: {args:?}"
+    );
+    // The channel flag is a normalization of the INPUT, so it has to sit in the output-option run
+    // before the destination rather than after it, where ffmpeg would read it as an input option
+    // for a file it is writing.
+    let ac = args
+        .iter()
+        .position(|arg| arg == "-ac")
+        .expect("-ac present");
+    let dest = args
+        .iter()
+        .position(|arg| arg.ends_with("ref.wav"))
+        .expect("destination present");
+    assert!(ac < dest, "-ac must precede the output file: {args:?}");
+    assert!(
+        args.iter().any(|arg| arg == "pcm_s16le"),
+        "`read_wav_pcm16` decodes PCM s16 only: {args:?}"
+    );
+}
+
+/// sc-24070, the measured half: a MONO asset resolves to a two-channel dual-mono track and a
+/// STEREO one passes through with its width intact.
+///
+/// Every SceneWorks TTS producer (Kokoro included) emits mono, so this is the shape "a voice to
+/// match" actually arrives in. Skips when no ffmpeg is reachable, exactly as the sibling resolver
+/// test does — hosted macOS CI has none, and `ffmpeg_reachable` still fails loudly on a lane that
+/// declared one via `SCENEWORKS_REQUIRE_FFMPEG` (sc-19549).
+#[tokio::test]
+async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_mono() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_mono: \
+             ffmpeg not found"
+        );
+        return;
+    }
+
+    let data_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let job = reference_audio_job_snapshot("job-sc24070");
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc24070").expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+
+    // The engine's own rate, so this test is about CHANNELS only and a resample cannot move the
+    // per-channel counts it asserts.
+    const RATE: u32 = 32_000;
+    // 0.2 s — long enough for a real filter window.
+    const FRAMES: usize = 6_400;
+    // A DC level rather than silence: a dropped-and-zero-filled second channel is then visible,
+    // where duplicated silence would not be. Distinct per channel on the stereo asset, so a
+    // downmix-to-mono-then-upmix would be caught too.
+    let pid = std::process::id();
+    for (asset_id, name, channels, samples) in [
+        (
+            "asset_mono_voice",
+            format!("mono-{pid}.wav"),
+            1u16,
+            vec![0.25f32; FRAMES],
+        ),
+        (
+            "asset_stereo_voice",
+            format!("stereo-{pid}.wav"),
+            2u16,
+            (0..FRAMES)
+                .flat_map(|_| [0.25f32, -0.5f32])
+                .collect::<Vec<f32>>(),
+        ),
+    ] {
+        let media_rel = format!("assets/audio/{name}");
+        let media_path = project_path.join(&media_rel);
+        std::fs::create_dir_all(media_path.parent().expect("audio dir"))
+            .expect("audio dir creates");
+        write_wav_pcm16(
+            &AudioTrack {
+                samples,
+                sample_rate: RATE,
+                channels,
+            },
+            &media_path,
+        )
+        .expect("wav writes");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-sc24070",
+                "genset-sc24070",
+                &json!({
+                    "type": "audio",
+                    "assetId": asset_id,
+                    "mediaPath": media_rel,
+                    "mimeType": "audio/wav",
+                    "displayName": name,
+                    "createdAt": "2026-09-20T00:00:00Z",
+                }),
+            )
+            .expect("audio asset persists");
+    }
+
+    let request = request_with_audio(&project.id, &["asset_mono_voice", "asset_stereo_voice"]);
+    let conditioning =
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, &project_path)
+            .await
+            .expect("a mono reference must resolve — it is the only shape SceneWorks TTS emits");
+    assert_eq!(conditioning.len(), 2);
+
+    // The ENGINE's track (`gen_core::AudioTrack`), not the worker-local `AudioTrack` the fixtures
+    // above are written from — the resolver's whole job is the conversion between them.
+    let tracks: Vec<&gen_core::AudioTrack> = conditioning
+        .iter()
+        .map(|item| match item {
+            gen_core::Conditioning::ReferenceAudio { audio, .. } => audio,
+            other => panic!("expected ReferenceAudio, got {other:?}"),
+        })
+        .collect();
+
+    for (index, track) in tracks.iter().enumerate() {
+        assert_eq!(
+            track.channels, 2,
+            "reference {index} must reach the engine at the two channels its packed layout \
+             reserves rows for"
+        );
+        let per_channel = track.samples.len() / 2;
+        assert!(
+            per_channel.abs_diff(FRAMES) <= 128,
+            "reference {index}: {FRAMES} frames in must stay {FRAMES} frames out at an unchanged \
+             {RATE} Hz, got {per_channel}"
+        );
+    }
+
+    // The mono source arrives as DUAL mono — both channels carry the same waveform, not one
+    // waveform and one silent channel.
+    let mono = tracks[0];
+    let mismatched = mono
+        .samples
+        .chunks_exact(2)
+        .filter(|frame| (frame[0] - frame[1]).abs() > 1.0 / 32_768.0)
+        .count();
+    assert_eq!(
+        mismatched,
+        0,
+        "an upmixed mono reference must be DUAL mono: {mismatched} of {} frames differ between \
+         the two channels",
+        mono.samples.len() / 2
+    );
+
+    // ...and the stereo source is NOT flattened on the way through: its two distinct channels
+    // survive, so "always normalize to two" never became "always downmix then duplicate".
+    let stereo = tracks[1];
+    let distinct = stereo
+        .samples
+        .chunks_exact(2)
+        .filter(|frame| (frame[0] - frame[1]).abs() > 0.1)
+        .count();
+    assert!(
+        distinct * 10 > stereo.samples.len() / 2 * 9,
+        "a stereo reference must pass through with both channels intact: only {distinct} of {} \
+         frames still differ",
+        stereo.samples.len() / 2
+    );
+}
+
 /// A [`JobSnapshot`] for the reference-audio resolver tests. The resolver spawns ffmpeg through the
 /// shared runner, which uses the id only to name the scratch directory and to address the
 /// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
 /// elapses inside a sub-second transcode.
-fn reference_audio_job_snapshot() -> JobSnapshot {
+///
+/// **The id is a parameter because it is the scratch directory's name.** The resolver stages every
+/// reference under `<temp>/sw-reference-audio-<job id>-<index>` and REMOVES that directory on every
+/// exit, so two tests sharing one id delete each other's work mid-transcode and read each other's
+/// `reference.wav` — which is exactly what the two resolver tests did to each other when the
+/// sc-24070 one reused this snapshot verbatim. One id per test keeps them independent under
+/// `cargo test`'s default parallelism.
+fn reference_audio_job_snapshot(id: &str) -> JobSnapshot {
     serde_json::from_value(json!({
-        "id": "job-sc17160",
+        "id": id,
         "type": "video_generate",
         "status": "running",
         "projectId": null,

@@ -24,6 +24,27 @@ use super::prelude::*;
 /// number rather than two literals that happen to agree today.
 pub(super) const REFERENCE_AUDIO_SAMPLE_RATE: u32 = 32_000;
 
+/// The channel count every standalone audio reference reaches an engine at — MiniMax-H3's audio
+/// VAE output width (`mlx-gen-minimax-h3::audio_config::AUDIO_OUTPUT_CHANNELS`).
+///
+/// **This is a hard engine boundary, not a preference (sc-24070).** The packed `ref2va` layout
+/// reserves `num_audio_latents · AUDIO_OUTPUT_CHANNELS` soundtrack rows unconditionally
+/// (`pipeline::ref2va_layout` passes the constant, never the supplied track's own width), while
+/// `pipeline::audio_track_to_encoder_input` de-interleaves the track into one encoder batch item
+/// PER CHANNEL — so the rows PRODUCED scale with the reference's channel count and the rows
+/// RESERVED do not. A mono reference therefore produces exactly half the rows the layout reserves
+/// and `prepend_rows` refuses the sequence, and a 5.1 one would overrun it. The engine's own
+/// `Ref2VaReferences::check_audio` does NOT catch this — it gates `sample_rate` and rejects only a
+/// ZERO channel count — which is why the refusal lands after the full model load. Measured on real
+/// weights 2026-09-20: `minimax_h3: 556 reference soundtrack rows against a layout reserving 1112`.
+/// Both backends are identical here: the candle twin's `ref2va_layout` passes the same constant and
+/// its `check_audio` has the same blind spot.
+///
+/// Ungated for the same reason [`REFERENCE_AUDIO_SAMPLE_RATE`] is:
+/// [`super::minimax_h3::MINIMAX_H3_REFERENCE_AUDIO_CHANNELS`] is an alias of it so a video
+/// reference's own soundtrack and a standalone audio reference are normalized onto ONE number.
+pub(super) const REFERENCE_AUDIO_CHANNELS: u16 = 2;
+
 /// Resolve a video request's `referenceAudioAssetIds` (sc-17160) into the engine conditioning:
 /// one [`gen_core::Conditioning::ReferenceAudio`] per id, in submission order.
 ///
@@ -55,13 +76,24 @@ pub(super) const REFERENCE_AUDIO_SAMPLE_RATE: u32 = 32_000;
 /// off-rate, and it is what lets a reference be any container ffmpeg reads (mp3 / m4a / flac /
 /// non-PCM WAV) instead of only the canonical PCM-16 RIFF `read_wav_pcm16` decodes.
 ///
-/// The CHANNEL layout is deliberately left alone (no `-ac`). The engine accepts any positive channel
-/// count, so channels are not a contract the caller can violate — and both directions of "fixing"
-/// them substitute a different reference than the one supplied: upmixing a mono voice clip doubles
-/// its packed row cost for a duplicated channel, downmixing a stereo one discards its stereo image.
-/// This differs from the clip path's `-ac 2` on purpose: there the soundtrack is a byproduct of a
-/// VIDEO reference and stereo is the joint model's own emitted shape, while here the waveform IS the
-/// reference.
+/// # Why the channel layout is normalized too (sc-24070)
+///
+/// This used to pass no `-ac`, on the stated basis that the engine accepts any positive channel
+/// count. **It does not.** [`REFERENCE_AUDIO_CHANNELS`] documents the measured contract: the packed
+/// layout reserves rows for exactly two channels while the encoder produces rows per channel
+/// SUPPLIED, so a mono reference is refused — after the full model load, since the engine's own
+/// `check_audio` gates the rate but not the width. Every SceneWorks producer that could supply "a
+/// voice to match" emits MONO (Kokoro included), so leaving the layout alone left this capability
+/// with no reachable path from a generated clip, exactly as the rate did before sc-18650. A real
+/// render of the same clip as a dual-mono stereo copy succeeded and the voice transferred
+/// (2026-09-20 film-harness evidence).
+///
+/// So `-ac` runs unconditionally, on the same one-code-path grounds as `-ar`: mono is upmixed to
+/// dual mono, stereo passes through untouched, and anything wider is downmixed — which is what the
+/// engine's fixed two-channel layout requires, and what the clip path
+/// ([`super::minimax_h3::MINIMAX_H3_REFERENCE_AUDIO_CHANNELS`]) has always done for a video
+/// reference's own soundtrack. Upmixing does double a mono reference's packed row cost; that cost
+/// is the engine's shape, not a choice this resolver is free to make.
 ///
 /// Async since sc-18650, and it takes the `api`/`job` the shared
 /// [`crate::media_jobs::run_ffmpeg`] runner needs for its heartbeat + cooperative-cancel loop —
@@ -105,8 +137,21 @@ pub(crate) async fn resolve_reference_audio_conditioning(
         // Split so the scratch directory is dropped on EVERY exit, refusals included.
         let decoded = decode_reference_audio(api, settings, job, &path, &work_dir).await;
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        let audio = decoded?;
+        // The engine reserves rows for exactly [`REFERENCE_AUDIO_CHANNELS`] channels and only
+        // discovers a mismatch inside the denoise loop — after the full model load, which is how
+        // sc-24070 cost 180 s to report a decode-time fact. The normalization above is what makes
+        // this hold, so this is the assertion that it did: a decode that came back some other width
+        // is refused HERE, before the load, naming the asset the caller can act on.
+        if audio.channels != REFERENCE_AUDIO_CHANNELS {
+            return Err(WorkerError::InvalidPayload(format!(
+                "reference audio asset {asset_id} decoded to {} channels, but this engine's packed \
+                 layout reserves rows for exactly {REFERENCE_AUDIO_CHANNELS}",
+                audio.channels
+            )));
+        }
         conditioning.push(gen_core::Conditioning::ReferenceAudio {
-            audio: decoded?,
+            audio,
             // No per-reference strength knob today: the request carries one flat list, and
             // inventing a weight the caller cannot set would be a knob that silently does
             // nothing. `None` is what the voice-clone reference passes for the same reason.
@@ -133,26 +178,32 @@ async fn decode_reference_audio(
 ) -> WorkerResult<gen_core::AudioTrack> {
     let wav = work_dir.join("reference.wav");
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    run_ffmpeg(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-i".to_owned(),
-            source.display().to_string(),
-            "-map".to_owned(),
-            "0:a:0".to_owned(),
-            "-vn".to_owned(),
-            // The engine ships no resampler and refuses anything but its audio VAE's rate.
-            "-ar".to_owned(),
-            REFERENCE_AUDIO_SAMPLE_RATE.to_string(),
-            // `read_wav_pcm16` reads PCM s16 only.
-            "-c:a".to_owned(),
-            "pcm_s16le".to_owned(),
-            wav.display().to_string(),
-        ],
-        Some(ctx),
-    )
-    .await?;
+    run_ffmpeg(reference_audio_ffmpeg_args(source, &wav), Some(ctx)).await?;
     crate::audio_jobs::read_wav_pcm16(&wav)
+}
+
+/// The normalization command, built apart from running it so the two engine constants it carries
+/// are assertable without an ffmpeg on the host — the hosted macOS CI lane has none.
+pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<String> {
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        source.display().to_string(),
+        "-map".to_owned(),
+        "0:a:0".to_owned(),
+        "-vn".to_owned(),
+        // The engine ships no resampler and refuses anything but its audio VAE's rate.
+        "-ar".to_owned(),
+        REFERENCE_AUDIO_SAMPLE_RATE.to_string(),
+        // ...and its packed layout reserves rows for exactly this many channels (sc-24070), so a
+        // mono voice clip is upmixed to dual mono and a wider track is downmixed.
+        "-ac".to_owned(),
+        REFERENCE_AUDIO_CHANNELS.to_string(),
+        // `read_wav_pcm16` reads PCM s16 only.
+        "-c:a".to_owned(),
+        "pcm_s16le".to_owned(),
+        wav.display().to_string(),
+    ]
 }
