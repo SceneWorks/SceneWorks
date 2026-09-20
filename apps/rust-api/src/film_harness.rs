@@ -1723,7 +1723,7 @@ fn compiled_for_run(
             // still say what compiling it would say? The second is what keeps a hand-edited
             // `compiled.json` — the document every dispatched field but the prompt is read from —
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
-            let mut findings = compiled.staleness_findings(plan, plan_sha256);
+            let mut findings = compiled.staleness_findings(plan, plan_sha256, pack);
             if findings.is_empty() {
                 findings = compiled.conformance_findings(plan, pack, entries, lane);
             }
@@ -2169,7 +2169,7 @@ pub async fn validate(
     let compiled = read_compiled_for(options)?;
     if let Some((compiled, path)) = compiled.as_ref() {
         let plan_bytes = std::fs::read(&options.plan_path)?;
-        let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes));
+        let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes), &pack);
         if !stale.is_empty() {
             stale.insert(0, compiled_document_header(path));
             findings.append(&mut stale);

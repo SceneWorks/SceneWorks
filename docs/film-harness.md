@@ -892,10 +892,19 @@ so the caps the planner is held to are the ones a reference shot actually dispat
 (`minimax_h3_ref`'s nine images, not the base entry's zero). See *Planning a reference film* below
 for the two facts that decide it and for what the planner is told.
 
-`compiled.json` is **schema version 2** (sc-23402): its `model` field is the RESOLVED partition id
-rather than the plan's declared family model, with `partitionReason` beside it. A v1 document is
-refused by version — `unsupported compiled plan schema version 1` — and the remedy is `film-harness
-compile`, which rewrites it.
+`compiled.json` is at `COMPILED_PLAN_SCHEMA_VERSION`, **currently 7** (read the constant in
+`crates/sceneworks-core/src/film_compile.rs`, not this sentence). Version 2 is where its `model`
+field became the RESOLVED partition id rather than the plan's declared family model, with
+`partitionReason` beside it (sc-23402). Any document below the current version is refused by version
+— `unsupported compiled plan schema version 1` — and the remedy is `film-harness compile`, which
+rewrites it.
+
+The document is tied to its **reference pack** as well as to its plan, by `referencePackSha256`
+(sc-24029): the pack's descriptions and locators are what the compiler writes into each prompt, so
+editing one invalidates a compiled document. The refusal is *the reference pack changed since these
+requests were compiled; recompile, or use authored prompts* — from the CLI, `film-harness compile`;
+in the Film workspace, **Use authored prompts** or a re-plan. It hashes the parsed pack, so a
+comment- or whitespace-only edit of the pack document does not stale a compile.
 
 `config/film-harness/courier-workshop/plan.ref.jsonc` is the two-shot mixed fixture — SH010 binds
 `courier` + `workshop_location`, SH020 binds nothing — and

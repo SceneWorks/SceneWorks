@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::film_plan::{
-    parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits,
-    PlanLoraEntry, PlanModel, PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning,
-    ShotDependency, BINDABLE_REFERENCE_KINDS, PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
+    engine_label_at, parse_resolution, quoted_engine_label, validate_all, ModelEntries, ModelLane,
+    PlanDiagnostic, PlanLimits, PlanLoraEntry, PlanModel, PlanSound, ProductionPlan,
+    ReferenceEntry, ReferencePack, Shot, ShotConditioning, ShotDependency, PLAN_SCHEMA_VERSION,
+    SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
 use crate::minimax_h3_turbo::TurboRecipe;
@@ -406,7 +407,8 @@ impl PlannerCapabilities {
     /// being offered and then refused a decode later — the planner emits the modes it emitted
     /// before this story, and the plan resolves to the base checkpoint throughout.
     ///
-    /// "Can fill" is counted over [`BINDABLE_REFERENCE_KINDS`] only. An approved `style` or `plate`
+    /// "Can fill" is [`ReferenceEntry::is_bindable_image`], which counts
+    /// `crate::film_plan::BINDABLE_REFERENCE_KINDS` only. An approved `style` or `plate`
     /// is not something a `reference_to_video` shot may bind — a style is a look rather than a
     /// subject, and a plate is placed through the keyframe slots — so a pack approving only those
     /// two fills no reference shot and narrows exactly as an empty pack does.
@@ -419,11 +421,11 @@ impl PlannerCapabilities {
     /// The same count decides the reference partition's Turbo offer, so the described-only run also
     /// stops being shown an adapter for a partition it never dispatches.
     pub fn narrowed_to_pack(mut self, pack: &ReferencePack) -> Self {
-        if pack.references.iter().any(|entry| {
-            entry.approved
-                && !entry.is_described_only()
-                && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str())
-        }) {
+        if pack
+            .references
+            .iter()
+            .any(ReferenceEntry::is_bindable_image)
+        {
             return self;
         }
         self.modes.retain(|mode| mode != "reference_to_video");
@@ -1189,12 +1191,9 @@ pub fn role_coverage_findings(
     // reads — `validate_plan_against_pack` refuses one in every conditioning slot (sc-24025) — so
     // counting it here would have this rule demand a binding the validator then rejects.
     let bindable = |role: &str| {
-        pack.references.iter().any(|entry| {
-            entry.approved
-                && entry.role == role
-                && entry.file().is_some()
-                && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str())
-        })
+        pack.references
+            .iter()
+            .any(|entry| entry.role == role && entry.is_bindable_image())
     };
     let mut findings = Vec::new();
     for beat in &brief.required_beats {
@@ -1435,37 +1434,9 @@ pub fn lora_offer_findings(
     findings
 }
 
-/// The keywords of the angle-bracket labels the ENGINE owns, lower-cased for a case-insensitive
-/// scan. MiniMax-H3 applies `<Picture N>` positionally to the references a request supplies, and
-/// the same grammar names its other media slots; the compiler is the only thing in this pipeline
-/// that may write one (`film_compile::inserted_text_for_shot`).
-const ENGINE_MEDIA_LABELS: &[&str] = &["picture", "audio", "video"];
-
 /// Present verbatim in every finding [`anchoring_findings`] raises, so the repair round can tell a
 /// label finding from any other finding about the same field without re-scanning the draft.
 pub const ANCHOR_LABEL_FINDING_MARKER: &str = "The compiler writes every such label itself";
-
-/// The byte offset of the first engine label in `text`, or `None`.
-///
-/// Matched at each `<` by skipping ASCII whitespace and comparing the keyword that follows,
-/// case-insensitively — not as a substring, because the engine reads `< Picture 1 >` and
-/// `<\tpicture 1>` as the label too, and a `contains("<picture")` test lets exactly the spellings
-/// an author is most likely to produce by accident through unflagged.
-fn engine_label_at(text: &str) -> Option<usize> {
-    text.char_indices()
-        .filter(|(_, ch)| *ch == '<')
-        .find_map(|(start, _)| -> Option<usize> {
-            let after = text[start + 1..].trim_start_matches(|ch: char| ch.is_ascii_whitespace());
-            ENGINE_MEDIA_LABELS
-                .iter()
-                .any(|label| {
-                    after
-                        .get(..label.len())
-                        .is_some_and(|head| head.eq_ignore_ascii_case(label))
-                })
-                .then_some(start)
-        })
-}
 
 /// The draft's free text, with the label the engine owns found in it: `(field, text)`.
 ///
@@ -1502,18 +1473,6 @@ fn labelled_draft_text(shot: &DraftShot) -> Vec<(&'static str, &str)> {
     .collect()
 }
 
-/// The label as it was written, for quoting back: from the `<` of the first engine label to its
-/// closing `>`, or to the end of a short run when the author never closed it.
-fn quoted_label(text: &str) -> String {
-    let start = engine_label_at(text).unwrap_or(0);
-    let rest = &text[start..];
-    match rest.find('>') {
-        Some(end) => rest[..=end].to_owned(),
-        // Unclosed: quote a bounded run rather than the rest of the paragraph.
-        None => rest.chars().take(24).collect(),
-    }
-}
-
 /// Labels the ENGINE owns, written by the PLANNER — `<Picture 1>` and its siblings anywhere in a
 /// draft shot's prose (E2, sc-24027).
 ///
@@ -1545,7 +1504,7 @@ pub fn anchoring_findings(draft: &PlannerDraft) -> Vec<PlanDiagnostic> {
                      from {}'s {field} and say the same thing in plain words. {ANCHOR_LABEL_FINDING_MARKER}, \
                      after this answer, and numbers it from the shot's referenceRoles, so a label \
                      written here names a picture this shot never supplies",
-                    quoted_label(text),
+                    quoted_engine_label(text),
                     shot.id,
                 ),
             ));
@@ -3202,7 +3161,7 @@ mod tests {
     }
 
     /// sc-23405 review. "The pack can fill a reference shot" counts only the kinds a
-    /// `reference_to_video` shot may BIND ([`BINDABLE_REFERENCE_KINDS`]).
+    /// `reference_to_video` shot may BIND ([`crate::film_plan::BINDABLE_REFERENCE_KINDS`]).
     ///
     /// A pack may approve a style and a plate and still approve no SUBJECT: Ref2VA binds every image
     /// as a thing to depict, a style is a look rather than a thing, and a plate is placed through the

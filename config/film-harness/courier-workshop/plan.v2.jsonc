@@ -29,7 +29,10 @@
   //     one workbench, all from the same verbatim workshop description. This is the pack the
   //     sc-23405 evidence was produced against:
   //     `~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc`. It is NOT
-  //     checked in (PNGs), so it is named by `--references` at the command line.
+  //     checked in (PNGs), so it is named by `--references` at the command line. Being out of the
+  //     repo, it does not move when the pack schema does: it must declare
+  //     `"schemaVersion": 2` (`REFERENCE_PACK_SCHEMA_VERSION`), and an older copy is refused by
+  //     version rather than read.
   //   * a pack the user supplied themselves, with the same seven roles.
   //
   //   film-harness run \

@@ -692,6 +692,10 @@ fn expected_identity_sentence(pack: &ReferencePack, role: &str) -> String {
 #[tokio::test]
 async fn a3_a_described_only_role_is_locked_word_for_word_into_every_shot_that_names_it() {
     let harness = Harness::start(true, Vec::new()).await;
+    // The fixture declares the base-partition turbo adapter (sc-24029): turbo is the path a user
+    // takes, so the no-reference evaluation film is the turbo film, and the run below needs the
+    // adapter it names to be installed.
+    harness.install_turbo_loras();
     let (plan_path, pack_path) = described_fixture();
 
     let (plan, pack) = film_harness::validate(
@@ -750,6 +754,30 @@ async fn a3_a_described_only_role_is_locked_word_for_word_into_every_shot_that_n
     .await
     .expect("the described plan compiles");
     assert_eq!(artifacts.compiled.requests.len(), plan.shots.len());
+
+    // THE TURBO REGIME the fixture declares (sc-24029), asserted on the compiled document so the
+    // evaluation film cannot silently revert to the 50-step base regime. Every shot resolves to
+    // the base partition — nothing here binds a reference — so every shot takes the base
+    // partition's adapter and renders at the count that adapter was distilled for.
+    for request in &artifacts.compiled.requests {
+        assert_eq!(
+            request.loras,
+            vec!["minimax_h3_turbo_4step_v01".to_owned()],
+            "{} dispatches the base-partition turbo adapter",
+            request.shot_id
+        );
+        assert_eq!(
+            request.effective_steps,
+            Some(4),
+            "{} renders at the recipe's own count, not the model default",
+            request.shot_id
+        );
+        assert!(
+            request.steps.is_none(),
+            "{}: the plan sets no step override, so the recipe governs",
+            request.shot_id
+        );
+    }
 
     // THE criterion: every shot that names the role carries the pack's own words for it, and the
     // text is the same text in each of them.

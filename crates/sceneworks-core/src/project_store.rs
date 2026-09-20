@@ -34,7 +34,7 @@ use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
-use crate::film_compile::{production_plan_sha256, CompiledPlan};
+use crate::film_compile::{production_plan_sha256, CompiledPlan, COMPILED_PACK_STALENESS_FIELD};
 use crate::film_plan::{
     validate_reference_pack, ReferenceEntry, ReferencePack, PLAN_SCHEMA_VERSION, REFERENCE_KINDS,
     REFERENCE_PACK_SCHEMA_VERSION,
@@ -1081,11 +1081,25 @@ impl ProjectStore {
         // exactly matches the supplied plan, carry it across the store-owned revision bump by
         // updating only its identity hash. If the plan was edited independently, preserve the old
         // identity so preflight reports it stale and rendering cannot silently use old prompts.
+        //
+        // The question asked here is about the PLAN only (sc-24029). The bump this carries across
+        // rewrites the plan's identity — `version`, and therefore its hash — and nothing else, so
+        // a pack that no longer matches must survive the save as exactly that: one finding naming
+        // the pack. Counting the pack here instead would withhold the plan carry-across, and a
+        // pack edit would then surface as a STALE PLAN as well, putting the wrong cause first in
+        // the refusal the operator reads.
         let supplied_plan_sha = production_plan_sha256(&draft.production_plan)?;
         let compiled_was_current = draft.compiled_plan.as_ref().is_some_and(|compiled| {
             compiled
-                .staleness_findings(&draft.production_plan, &supplied_plan_sha)
-                .is_empty()
+                .staleness_findings(
+                    &draft.production_plan,
+                    &supplied_plan_sha,
+                    &draft.reference_pack,
+                )
+                .iter()
+                // Everything BUT the pack: a pack finding is not an answer about the plan, and
+                // it is deliberately carried through the save rather than resolved by it.
+                .all(|finding| finding.field == COMPILED_PACK_STALENESS_FIELD)
         });
         draft.reconcile_review_plan();
         draft.revision = current.revision.saturating_add(1);
@@ -1469,10 +1483,18 @@ impl ProjectStore {
         let compiled = compiled.or_else(|| draft.compiled_plan.clone());
         if let Some(compiled) = &compiled {
             let sha = production_plan_sha256(&draft.production_plan)?;
-            let findings = compiled.staleness_findings(&draft.production_plan, &sha);
+            let findings =
+                compiled.staleness_findings(&draft.production_plan, &sha, &draft.reference_pack);
             if !findings.is_empty() {
+                // `Display`, not `{:?}` — this string reaches an operator through the API, and a
+                // `Vec<PlanDiagnostic>` struct dump is the store's private notation (sc-24029).
                 return Err(ProjectStoreError::BadRequest(format!(
-                    "Film compiled plan does not match the pinned draft: {findings:?}"
+                    "Film compiled plan does not match the pinned draft: {}",
+                    findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 )));
             }
         }
