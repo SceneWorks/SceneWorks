@@ -76,6 +76,18 @@ pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 7;
 /// by a string literal it would have to keep in step (sc-24029).
 pub const COMPILED_PACK_STALENESS_FIELD: &str = "compiled.referencePackSha256";
 
+/// The Film workspace control that turns the refine rewrite off, quoted exactly as the checkbox
+/// labels it (`apps/web/src/components/editor/FilmPlanning.jsx`).
+///
+/// A refusal that can only be acted on from the CLI is no remedy to somebody working in the
+/// workspace (sc-24029): the refined-prompt refusals below surface through the planning operation,
+/// where `--no-refine` names a flag that person never types. The label is a CONSTANT, and a test
+/// asserts the JSX still contains this exact string, so the message and the control it points at
+/// cannot drift apart silently — renaming the checkbox fails that test rather than leaving the
+/// refusal quietly naming a control nobody can find.
+pub const REFINE_PROMPTS_CONTROL_LABEL: &str =
+    "Run model-specific prompt refinement when compiling shots";
+
 /// The sentence appended when the harness itself puts a voice on this shot (sc-24026).
 ///
 /// MiniMax-H3 scores a soundtrack from the prompt, speech included, and a shot whose dialogue bus
@@ -271,15 +283,34 @@ pub enum InsertedTextPlacement {
 }
 
 impl InsertedTextKind {
-    /// Every kind, in prompt order. Exhaustively matched in [`Self::label`] below, so a kind added
-    /// to the enum and left out of this list is a compile error rather than a kind the over-length
-    /// refusal and the conformance difference silently stop counting (sc-24029).
-    pub const ALL: &'static [Self] = &[
-        Self::ReferenceBinding,
-        Self::ContinuityDescription,
-        Self::Audio,
-        Self::NoSpeech,
-    ];
+    /// The first kind in prompt order; [`Self::all`] walks from here.
+    pub const FIRST: Self = Self::ReferenceBinding;
+
+    /// The kind after `self` in prompt order, or `None` at the end (sc-24029).
+    ///
+    /// THE one place the order is written down, and the reason it cannot go stale: this `match`
+    /// has no wildcard arm, so adding a variant to the enum stops the crate compiling HERE, at the
+    /// list itself. A hand-kept `&[Self; N]` could not do that — a new kind would simply be absent
+    /// from it, and would then drop silently out of the over-length attribution, whose test walks
+    /// the same list and so could never notice.
+    ///
+    /// Linking a new kind into the chain is still the author's job; what is mechanical is being
+    /// made to look at this function. The sum-to-total assertion on the over-length refusal is the
+    /// second half of the guard: a kind that reaches a prompt without being reachable from
+    /// [`Self::FIRST`] leaves the per-kind counts short of the characters actually inserted.
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::ReferenceBinding => Some(Self::ContinuityDescription),
+            Self::ContinuityDescription => Some(Self::Audio),
+            Self::Audio => Some(Self::NoSpeech),
+            Self::NoSpeech => None,
+        }
+    }
+
+    /// Every kind, in prompt order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::FIRST), |kind| kind.next())
+    }
 
     /// What this kind of inserted text is CALLED when a finding has to name it to an operator.
     ///
@@ -1085,8 +1116,10 @@ fn compile_shot(
                         "the refined prompt for {} contains {}, a label this film's renderer \
                          assigns itself: the compiler writes every such label after the rewrite, \
                          numbered from this shot's referenceRoles, so one written here names a \
-                         picture the request never supplies. Re-run the refinement or use \
-                         --no-refine (the refined prompt is not silently edited)",
+                         picture the request never supplies. Re-run the refinement, or compile \
+                         without prompt refinement — `--no-refine` from the CLI, or untick \
+                         {REFINE_PROMPTS_CONTROL_LABEL:?} in the Film workspace (the refined \
+                         prompt is not silently edited)",
                         shot.id,
                         crate::film_plan::quoted_engine_label(trimmed),
                     ),
@@ -1128,9 +1161,8 @@ fn compile_shot(
                 .map(|piece| piece.text.chars().count())
                 .sum()
         };
-        let contributions = InsertedTextKind::ALL
-            .iter()
-            .map(|kind| format!("{} as {}", inserted_chars(*kind), kind.label()))
+        let contributions = InsertedTextKind::all()
+            .map(|kind| format!("{} as {}", inserted_chars(kind), kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(vec![PlanDiagnostic::shot(
@@ -1524,10 +1556,14 @@ impl CompiledPlan {
     /// that has none would otherwise reach the route unjudged, because the document validators only
     /// ever read the plan.
     ///
-    /// Only `promptSource` and `authoredPrompt`, and the REFINED MIDDLE of `prompt`, may differ
-    /// from a fresh compile: those are the compile's output (the model's own rewrite), and
-    /// everything else is a transcription of the plan. The expected request is produced by the
-    /// compiler itself rather than by a second list of rules, so the two cannot drift.
+    /// Only `promptSource` and the REFINED MIDDLE of `prompt` may differ from a fresh compile:
+    /// that middle is the compile's output (the model's own rewrite), and everything else is a
+    /// transcription of the plan. The expected request is produced by the compiler itself rather
+    /// than by a second list of rules, so the two cannot drift.
+    ///
+    /// `authoredPrompt` is NOT in that exemption either (sc-24029), although it sits beside the
+    /// fields that are: it is a plain copy of `Shot::prompt`, so a fresh compile reproduces it and
+    /// a hand-edited one misreports what the refiner was given. [`prompt_differences`] checks it.
     ///
     /// `insertedText` is NOT in that exemption (sc-24023): the compiler's own sentences are derived
     /// from the plan and the pack, a fresh compile reproduces them exactly, and a hand-edited
@@ -1611,7 +1647,7 @@ impl CompiledPlan {
             match compile_shot(plan, shot, pack, &inputs, fps) {
                 Ok(expected) => {
                     findings.extend(request_differences(request, &expected));
-                    findings.extend(prompt_differences(request, &expected));
+                    findings.extend(prompt_differences(request, &expected, &shot.prompt));
                 }
                 Err(mut shot_findings) => findings.append(&mut shot_findings),
             }
@@ -1645,7 +1681,27 @@ impl CompiledPlan {
 /// compile time: it may not contain an engine label. A document read back from disk never went
 /// through that branch, so this is where a label hand-written into the middle of a refined prompt
 /// is caught.
-fn prompt_differences(actual: &CompiledRequest, expected: &CompiledRequest) -> Vec<PlanDiagnostic> {
+///
+/// # `authoredPrompt` (sc-24029)
+///
+/// Checked here too, because it is NOT the compile's output despite sitting beside the two fields
+/// that are. [`compile_shot`] writes `Some(shot.prompt)` on a refined request and `None` on an
+/// authored one — a plain copy of the plan either way — so a fresh compile reproduces it exactly
+/// and a hand-edited one is as much a lie as a hand-edited `mode`. It is what a reviewer diffs the
+/// rewrite against and what an operator reverts to by editing the plan, so a document claiming the
+/// model was handed words it never saw is precisely the thing this document exists to prevent.
+///
+/// `shot_prompt` is passed in rather than read off `expected`: [`CompiledPlan::conformance_findings`]
+/// compiles `expected` with an EMPTY refined map, so its `authored_prompt` is always `None` and
+/// comparing against it would exempt the field on exactly the requests that carry one. It is
+/// compared UNTRIMMED, byte for byte against `Shot::prompt`, because that is what `compile_shot`
+/// stores — trimming here would fail a legitimately compiled document whose plan prompt has
+/// surrounding whitespace.
+fn prompt_differences(
+    actual: &CompiledRequest,
+    expected: &CompiledRequest,
+    shot_prompt: &str,
+) -> Vec<PlanDiagnostic> {
     let tampered = |detail: &str| {
         vec![PlanDiagnostic::shot(
             &expected.shot_id,
@@ -1657,8 +1713,26 @@ fn prompt_differences(actual: &CompiledRequest, expected: &CompiledRequest) -> V
             ),
         )]
     };
+    let authored_differs = |expected_authored: Option<&str>| {
+        (actual.authored_prompt.as_deref() != expected_authored).then(|| {
+            vec![PlanDiagnostic::shot(
+                &expected.shot_id,
+                "compiled.authoredPrompt",
+                format!(
+                    "the authoredPrompt recorded for {} is not the prompt the plan holds, so this \
+                     document misreports what the refiner was given; re-run `film-harness compile`",
+                    expected.shot_id
+                ),
+            )]
+        })
+    };
     match actual.prompt_source {
         PromptSource::Authored => {
+            // Nothing was rewritten, so there is no authored text to keep BESIDE the prompt: the
+            // prompt is it. A value here claims a rewrite this request did not have.
+            if let Some(findings) = authored_differs(None) {
+                return findings;
+            }
             if actual.prompt == expected.prompt {
                 Vec::new()
             } else {
@@ -1668,25 +1742,30 @@ fn prompt_differences(actual: &CompiledRequest, expected: &CompiledRequest) -> V
                 )
             }
         }
-        PromptSource::Refined => match recovered_middle(&actual.prompt, &expected.inserted_text) {
-            None => tampered(
-                "the compiler's own leading and trailing sentences are not around the refined \
-                 text where it wrote them",
-            ),
-            Some(middle) => {
-                if let Some(label) = crate::film_plan::engine_label_at(&middle)
-                    .is_some()
-                    .then(|| crate::film_plan::quoted_engine_label(&middle))
-                {
-                    tampered(&format!(
-                        "the refined text inside it contains {label}, a label this film's renderer \
-                         assigns itself and the compiler writes"
-                    ))
-                } else {
-                    Vec::new()
+        PromptSource::Refined => {
+            if let Some(findings) = authored_differs(Some(shot_prompt)) {
+                return findings;
+            }
+            match recovered_middle(&actual.prompt, &expected.inserted_text) {
+                None => tampered(
+                    "the compiler's own leading and trailing sentences are not around the refined \
+                     text where it wrote them",
+                ),
+                Some(middle) => {
+                    if let Some(label) = crate::film_plan::engine_label_at(&middle)
+                        .is_some()
+                        .then(|| crate::film_plan::quoted_engine_label(&middle))
+                    {
+                        tampered(&format!(
+                            "the refined text inside it contains {label}, a label this film's \
+                             renderer assigns itself and the compiler writes"
+                        ))
+                    } else {
+                        Vec::new()
+                    }
                 }
             }
-        },
+        }
     }
 }
 
@@ -1728,7 +1807,11 @@ fn recovered_middle(prompt: &str, inserted: &[InsertedText]) -> Option<String> {
 }
 
 /// Every field of `actual` that a fresh compile would have written differently, except the three
-/// the compile itself produces (`prompt`, `promptSource`, `authoredPrompt`).
+/// whose comparison belongs to [`prompt_differences`]: `prompt`, `promptSource` and
+/// `authoredPrompt`. Only the first two are genuinely exempt from reproduction — the refined
+/// middle of the prompt is the model's own rewrite, and `promptSource` says which kind of request
+/// this is. `authoredPrompt` IS reproduced, but only against the plan's shot, which this function
+/// is not given (sc-24029).
 ///
 /// `expected` is destructured exhaustively on purpose: a field added to [`CompiledRequest`] fails
 /// to compile here until it is either compared or deliberately exempted, so the guarantee this
@@ -1748,6 +1831,7 @@ fn request_differences(
         effective_steps,
         turbo_scheduler_shift,
         partition_reason,
+        // The three `prompt_differences` owns; see this function's doc comment for why.
         prompt: _,
         prompt_source: _,
         authored_prompt: _,
@@ -3788,7 +3872,7 @@ mod tests {
         // Asserted as SHAPE: every kind's label appears with a count beside it, and the audio
         // sentence's count is positive because these shots have one.
         for finding in by_shot.values() {
-            for kind in InsertedTextKind::ALL {
+            for kind in InsertedTextKind::all() {
                 assert!(
                     finding.message.contains(kind.label()),
                     "{} is unaccounted for in {:?}",
@@ -3812,6 +3896,109 @@ mod tests {
                 finding.message
             );
         }
+
+        // THE ATTRIBUTION IS COMPLETE (sc-24029): the per-kind counts sum to every character the
+        // compiler actually inserted. This is the half of the guard that `InsertedTextKind::next`
+        // cannot give — that function makes adding a variant a compile error at the list, but a
+        // variant added and not LINKED into the chain would still be unreachable from `all()`, and
+        // a test that walked `all()` to build its own expectation could never see the gap. Summing
+        // against the inserted text itself can: a kind that reaches a prompt without being walked
+        // leaves the message short of the characters it is explaining.
+        for shot in &plan.shots {
+            let inserted = inserted_text_for_shot(
+                shot,
+                &shot_reference_pictures(&shot.conditioning.reference_roles, &long),
+                &long,
+            );
+            let total: usize = inserted
+                .iter()
+                .map(|piece| piece.text.chars().count())
+                .sum();
+            let attributed = attributed_counts(&by_shot[shot.id.as_str()].message);
+            assert_eq!(
+                attributed.iter().sum::<usize>(),
+                total,
+                "{}: the counts {attributed:?} must account for every inserted character: {:?}",
+                shot.id,
+                by_shot[shot.id.as_str()].message
+            );
+        }
+    }
+
+    /// The per-kind character counts an over-length refusal states, read back out of the message.
+    ///
+    /// Parsed rather than recomputed, because the point is what the OPERATOR is shown: a count the
+    /// message never printed is a count that explains nothing. Each contribution is written
+    /// `"<n> as <label>"`, and no other `" as "` occurs in the sentence.
+    fn attributed_counts(message: &str) -> Vec<usize> {
+        let mut counts = Vec::new();
+        let mut rest = message;
+        while let Some(index) = rest.find(" as ") {
+            let digits: String = rest[..index]
+                .chars()
+                .rev()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            if let Ok(value) = digits.parse::<usize>() {
+                counts.push(value);
+            }
+            rest = &rest[index + " as ".len()..];
+        }
+        counts
+    }
+
+    /// sc-24029. Walking the successor chain reaches every kind the enum declares, so a variant
+    /// added with a `next()` arm but never linked in is caught here rather than by its silent
+    /// absence from a refusal.
+    ///
+    /// Asserted as REACHABILITY, not as a count: the list is checked by naming each kind, so the
+    /// test says which one is missing rather than that a number changed.
+    #[test]
+    fn every_inserted_text_kind_is_reachable_from_the_first_one() {
+        let walked: Vec<InsertedTextKind> = InsertedTextKind::all().collect();
+        for kind in [
+            InsertedTextKind::ReferenceBinding,
+            InsertedTextKind::ContinuityDescription,
+            InsertedTextKind::Audio,
+            InsertedTextKind::NoSpeech,
+        ] {
+            assert!(
+                walked.contains(&kind),
+                "{kind:?} is unreachable from InsertedTextKind::FIRST: {walked:?}"
+            );
+        }
+        // The walk terminates and visits nothing twice, so `all()` can be iterated safely.
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in &walked {
+            assert!(
+                seen.insert(format!("{kind:?}")),
+                "{kind:?} is visited twice"
+            );
+        }
+        assert_eq!(walked.len(), seen.len());
+    }
+
+    /// sc-24029. The refined-prompt refusal names the WORKSPACE remedy as well as the CLI flag,
+    /// and the control it names still exists under that exact label.
+    ///
+    /// The refusal reaches workspace operators through the planning operation, where `--no-refine`
+    /// is a flag they never type. Pinning the JSX text is what stops the two drifting: renaming
+    /// the checkbox fails here instead of leaving the message pointing at nothing.
+    #[test]
+    fn the_refine_control_label_matches_the_film_workspace_checkbox() {
+        let jsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/web/src/components/editor/FilmPlanning.jsx");
+        let source = std::fs::read_to_string(&jsx)
+            .unwrap_or_else(|error| panic!("{} is readable: {error}", jsx.display()));
+        assert!(
+            source.contains(REFINE_PROMPTS_CONTROL_LABEL),
+            "the Film workspace no longer labels the refinement checkbox \
+             {REFINE_PROMPTS_CONTROL_LABEL:?}; update REFINE_PROMPTS_CONTROL_LABEL and the \
+             refusal that quotes it"
+        );
     }
 
     #[test]
@@ -4333,7 +4520,16 @@ mod tests {
             findings[0].message.contains("< picture 2>")
                 && findings[0].message.contains("SH010")
                 && findings[0].message.contains("--no-refine"),
-            "the refusal names the shot, the label and the remedy: {findings:?}"
+            "the refusal names the shot, the label and the CLI remedy: {findings:?}"
+        );
+        // BOTH remedies (sc-24029). This refusal reaches workspace operators through the planning
+        // operation, and `--no-refine` is a flag that person never types; the control they DO have
+        // is named, quoted as the checkbox labels it.
+        assert!(
+            findings[0].message.contains(REFINE_PROMPTS_CONTROL_LABEL)
+                && findings[0].message.contains("untick")
+                && findings[0].message.contains("Film workspace"),
+            "the refusal names the workspace remedy too: {findings:?}"
         );
     }
 
@@ -4532,6 +4728,108 @@ mod tests {
                     .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
                     .is_empty(),
                 "{label}: the restored document conforms"
+            );
+
+            // `authoredPrompt` IS reproduced (sc-24029), although it sits beside the two fields
+            // that genuinely are the compile's output. It is a plain copy of the plan's shot, and
+            // a hand-edited one makes the document misreport what the refiner was handed — which
+            // is exactly what a reviewer diffs the rewrite against. One mutation per mode: the
+            // refined request carries the plan's prompt and must keep it; the authored request
+            // carries NONE and must not acquire one.
+            let request = document
+                .requests
+                .iter_mut()
+                .find(|request| request.shot_id == "SH010")
+                .unwrap();
+            let pristine_authored = request.authored_prompt.clone();
+            let planned = plan.shots[0].prompt.clone();
+            match label {
+                "authored" => assert_eq!(
+                    pristine_authored, None,
+                    "an authored request keeps no second copy of the prompt"
+                ),
+                _ => assert_eq!(
+                    pristine_authored.as_deref(),
+                    Some(planned.as_str()),
+                    "a refined request records the plan's own prompt verbatim"
+                ),
+            }
+            request.authored_prompt = match label {
+                // A value where the compiler wrote none: this request claims a rewrite it never had.
+                "authored" => Some("a prompt the plan never held".to_owned()),
+                // The recorded "before" replaced, so the rewrite reads as a smaller edit than it was.
+                _ => Some(format!("{planned} and then some words nobody planned")),
+            };
+            let findings = document.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.field == "compiled.authoredPrompt"
+                        && finding.shot_id.as_deref() == Some("SH010")
+                        && finding.message.contains("is not the prompt the plan holds")
+                        && finding.message.contains("film-harness compile")),
+                "{label}/authoredPrompt edited must be refused: {findings:?}"
+            );
+
+            // And restoring it is enough to conform again — the check is about THIS field, and a
+            // legitimately compiled document never trips it in either mode.
+            let request = document
+                .requests
+                .iter_mut()
+                .find(|request| request.shot_id == "SH010")
+                .unwrap();
+            request.authored_prompt = pristine_authored;
+            assert!(
+                document
+                    .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+                    .is_empty(),
+                "{label}: the restored document conforms"
+            );
+        }
+    }
+
+    /// sc-24029. A plan prompt with surrounding whitespace still compiles to a document that
+    /// conforms: `compile_shot` stores `authoredPrompt` UNTRIMMED, so the check compares it
+    /// untrimmed too. Trimming on either side alone would refuse the compiler's own output.
+    #[test]
+    fn an_authored_prompt_with_surrounding_whitespace_round_trips_in_both_modes() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["prompt"] = json!("  a courier enters, unevenly spaced  ");
+        let plan = parse_plan(&document.to_string()).expect("the plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        for refined in [
+            BTreeMap::new(),
+            refined_for("SH010", "a courier crosses the cluttered room"),
+        ] {
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &entries,
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &refined,
+                },
+            )
+            .expect("the plan compiles");
+            let round_tripped: CompiledPlan =
+                serde_json::from_str(&serde_json::to_string(&compiled).unwrap()).unwrap();
+            let request = round_tripped.request("SH010").unwrap();
+            if request.prompt_source == PromptSource::Refined {
+                assert_eq!(
+                    request.authored_prompt.as_deref(),
+                    Some("  a courier enters, unevenly spaced  "),
+                    "the plan's prompt is recorded exactly as the plan holds it"
+                );
+            }
+            let findings =
+                round_tripped.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(
+                findings.is_empty(),
+                "the compiler's own output must conform: {findings:?}"
             );
         }
     }
