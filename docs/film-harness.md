@@ -89,6 +89,22 @@ image files; it is a separate versioned document, so approved references stay ad
 independently of any generated take. Every file here tolerates JSONC comments and refuses unknown
 fields.
 
+**Versions, and what an old document gets.** A plan is schema version 3
+(`film_plan::PLAN_SCHEMA_VERSION`); `SUPPORTED_PLAN_SCHEMA_VERSIONS` holds that one version, so a
+version 1 or 2 plan is refused **by version** rather than migrated — those predate the required
+`shots[].audio` sentence — and the refusal names the edit: set `"schemaVersion": 3` and give every
+shot an `audio` value. The refusal is raised before serde decodes the document, so the answer names
+the version rather than an unknown `sound` field at a byte offset, and it reaches a plan pinned
+inside a run and a plan imported into the Film workspace alike. A reference pack is schema version 2
+(`film_plan::REFERENCE_PACK_SCHEMA_VERSION`) and a version 1 pack is refused the same way; version 2
+only **adds** the optional `locator` and makes `file` optional, so a version 1 document needs no
+other edit unless two of its roles share one file. A film draft already **stored** in a project is
+the one exception: it is carried forward on read (`ProjectStore::carry_film_draft_forward`), which
+moves each shot's old `sound` prose into `audio` and stamps the versions, so an existing workspace
+draft opens rather than refusing. Compiled requests are schema version 7 — read
+`film_compile::COMPILED_PLAN_SCHEMA_VERSION` rather than this sentence — and an earlier one is
+refused by version, with `film-harness compile` as the remedy.
+
 `referenceRoles` may bind only the **subject** kinds — `character`, `prop`, `location` — because
 Ref2VA treats every bound image as a subject to depict; a `style` (a look) or a `plate` (a literal
 frame, which belongs in `firstFrameRole` / `lastFrameRole`) bound there is refused naming the shot,
@@ -118,7 +134,9 @@ A described-only role takes no part in anything an image does. It is never impor
 never grouped with another role, never numbered as a `<Picture N>`, never counted against
 `limits.maxReferenceAssets`, and never sent as planner reference pixels. It may carry no `locator`
 (a locator picks one subject out of an image, and there is none) — a locator on a fileless entry is
-refused naming the role. And it is **never bindable**: naming one in `conditioning.referenceRoles`,
+refused naming the role — and no `sourceAssetId` and no generation provenance either, for the same
+reason: both describe an image this role does not have, and a role backed by an image must name the
+file it is stored as. And it is **never bindable**: naming one in `conditioning.referenceRoles`,
 `firstFrameRole` or `lastFrameRole` is refused naming the shot and the role, because every one of
 those slots supplies a picture. It belongs in a shot's `continuityRoles`, which is where the
 compiler reads it.
@@ -137,7 +155,11 @@ base checkpoint or simply does not bind it. A role the shot **does** bind alread
 description in its binding sentence and is never described twice. Role kind is irrelevant — a
 `style` and a `plate` drift exactly as a character does. An unapproved role contributes nothing
 (`approved` defaults to true, so `false` is an explicit "do not use this", and prompt text shapes a
-render as surely as conditioning does), and so does an empty description on an image-backed role.
+render as surely as conditioning does), and so does an empty description on an image-backed role —
+neither is a finding here, they simply add no sentence. A role written into `continuityRoles` twice
+is described **once**, at its first mention: nothing refuses the duplicate, but a subject stated
+twice is emphasis a prompt model acts on, and the lock exists to say one fixed thing about each
+subject.
 
 **A continuity role that shares a bound picture's `file` is bound, not described.** When a role is
 not in the shot's `referenceRoles` but its `file` is the file of a picture the shot *is* binding —
@@ -383,6 +405,13 @@ changes.
   entry is exempt from the "the file must exist" check, because the run is what produces it.
 - **Only what the run PLACES is spoken**, the same rule the import follows: a `--shots` selection
   that leaves a shot out never pays for its line.
+- **A placed line keeps its words out of the shot's `audio`** (sc-24026). Our voice is already going
+  on the dialogue bus, so the compiler appends the fixed sentence "No spoken dialogue in the
+  generated audio; no voices on the soundtrack." to any shot carrying a `dialogueClip`, and H3 does
+  not score a second voice over ours. It constrains the **soundtrack**, not the picture: these are
+  exactly the shots where someone *is* speaking on camera. A shot with a spoken line and no clip is
+  the other case, and there the line — speaker, words, delivery — belongs in `audio`, because that
+  is the only text H3 scores a voice from. See *Prompt anchoring* for both.
 - **No live `audio_generate` worker ⇒ a resumable stop before the job exists** (`no_audio_worker`),
   naming the lines it was asked to speak — the same posture as the `video_generate` and `image_vqa`
   preflights, and scoped to the lines still *owed*, so a replacement whose clips are all already
@@ -609,6 +638,26 @@ draft that drops a beat is refused, never accepted as a shorter film.
   `targetDurationSeconds` finding likewise names the two legal values on either side of the value
   written. Validation is unchanged: what changed is that a repair is now something the planner can
   copy rather than something it has to re-derive.
+- **Every shot carries `audio`, and the planner writes it (sc-24026).** The answer template, its
+  rules and the one worked example all carry the key, shown as a literal value to copy: the diegetic
+  sound the action makes, the ambience of the space, then "No music." unless the shot wants music —
+  or an outright statement of silence. Two rules go with it: `audio` is never omitted or left blank,
+  and it never begins with `"Audio:"`, which the compiler writes itself. A missing key is
+  materialized as `""` before the decode so the shot is refused **by name** rather than taking the
+  whole draft down, and the repair round restates the requirement as the key and a value to adapt
+  rather than as prose about it. A **spoken** shot is the case the planner is told about: the line —
+  speaker, the words in quotes, the delivery — goes in `audio` beside the sound and the ambience,
+  short enough to say inside the shot's duration. It can never contradict that by placing a clip:
+  `draft_to_plan` writes `dialogue_clip: None` on every shot, and only a hand edit ever sets one.
+- **The engine labels are the compiler's, and a draft that writes one is a finding (sc-24029).** The
+  contract tells the planner to write no `<Picture N>`, `<Audio N>` or `<Video N>` label anywhere, to
+  restate no role's pack description in `prompt`, and to say nothing about which picture shows whom
+  — the compiler writes all three after the answer. A draft that writes a label anyway is a finding
+  naming the shot and the field, quoting the label and asking for its deletion
+  (`film_planner::anchoring_findings`), restated for the repair round in copyable form. It is
+  deliberately a **planner** finding and outside `validate_all`: a person who types `<Picture 1>`
+  into a hand-authored plan means it, and `validate` / `compile` leave them alone. The scan skips
+  `audio`, where a `<` is already refused by the document rules, so a label there is reported once.
 - **Bounded repair.** Each round hands the validator's findings back verbatim and asks for the whole
   plan again. `--max-repair-rounds` (default 2, ceiling 5) bounds the loop; on exhaustion the run
   fails with the outstanding findings and writes the refused answer to `planner-rejected.txt`. A
@@ -631,7 +680,14 @@ draft that drops a beat is refused, never accepted as a shorter film.
 - **Planning a reference film (sc-23405).** Whether the planner may write reference shots is decided
   from exactly two facts, and **install state is not one of them**: the catalog must SERVE the
   family's reference partition (an envelope built on an entry the API does not hold would offer a
-  mode refused on every shot), and the pack must approve at least one reference for a shot to bind.
+  mode refused on every shot), and the pack must approve at least one **image-backed** reference of
+  a bindable kind for a shot to bind — `ReferenceEntry::is_bindable_image`: `approved`, carrying a
+  `file`, and of kind `character`, `prop` or `location`. A described-only role does not count. It is
+  an approval of words, and `reference_to_video` conditions on pixels, so counting one would invert
+  the default mode to a binding `validate_plan_against_pack` then refuses for the whole round
+  budget. With no such entry, `PlannerCapabilities::narrowed_to_pack` drops `reference_to_video`
+  from the offered modes and sets the image budget to zero, so the contract never mentions
+  references at all.
   With both, the envelope carries the reference partition's own `maxReferenceAssets`, the default
   mode INVERTS — `reference_to_video` for every shot that shows an approved character, prop or
   location, `text_to_video` only for one that shows none — and the contract's one worked example
@@ -672,8 +728,12 @@ make it worth its own file:
   ordinary `prompt_refine` rewrite with `modelId` set to the plan's model, which is what selects the
   MiniMax-H3 asset — so the dispatched text is not the plan's text. The authored prompt is kept
   beside it as `authoredPrompt`. `--no-refine` compiles the plan's own prompts instead. A refined
-  prompt that comes back empty or over the route's 4000-character limit is a finding naming the
-  shot; it is never truncated and never silently swapped back.
+  prompt that comes back empty, over the route's 4000-character limit, or carrying an engine label
+  such as `<Picture 1>` is a refusal naming the shot; it is never truncated, never edited, and never
+  silently swapped back for the authored text. All three name the same remedies: re-run the
+  refinement, or compile without it — `--no-refine` from the CLI, or untick *Run model-specific
+  prompt refinement when compiling shots* in the Film workspace. See *Prompt anchoring* for why a
+  label in a rewrite cannot be allowed through.
   `--prompt-guide FILE` forwards the model's prompt guide on each rewrite as the `guide` field,
   which is what Video Studio's "Refine" button sends and what the worker appends to the H3 system
   turn under `# Model prompt guide`. With no flag the harness reads the guide the catalog entry
@@ -686,17 +746,146 @@ make it worth its own file:
   `POST /api/v1/video/jobs` payload for the generated and the hand-authored path alike, so what a
   reviewer reads in `compiled.json` and what the API receives cannot drift.
 
-`compiled.json` records the SHA-256 of the plan it was compiled from. `validate` and `run` refuse a
-compiled document whose plan has changed since — the fix is `film-harness compile`, not a dispatch
-of prompts the plan no longer holds. A plan with no compiled document beside it compiles its own
-prompts in memory, which is exactly what the hand-authored path has always done. The run record
-pins both documents by hash. A `resume` re-reads the compiled document by that hash too and refuses
-one that changed ("the compiled requests changed since run … started"), as it does the plan and the
-reference pack.
+`compiled.json` records the SHA-256 of the plan it was compiled from **and** of the reference pack
+(`referencePackSha256`, sc-24029). `validate` and `run` refuse a compiled document whose plan has
+changed since — the fix is `film-harness compile`, not a dispatch of prompts the plan no longer
+holds. **A pack edit invalidates a compiled document too**, and that is the newer half: since the
+pack now decides what the compiler writes into a prompt, editing a description or a locator changes
+the text every shot repeating it would dispatch, so a document keyed on the plan alone would stay
+"current" across that edit and then be blamed as hand-edited at preflight. The finding says *the
+reference pack changed since these requests were compiled; recompile, or use authored prompts*: from
+the CLI recompile with `film-harness compile`; in the Film workspace press **Use authored prompts**
+(which drops the compiled document) or re-plan. What is hashed is the **parsed** pack re-serialized
+canonically, not the document's bytes, so the CLI's JSONC file and the workspace's typed draft agree
+on one identity and a comment- or whitespace-only edit stales nothing.
+
+A plan with no compiled document beside it compiles its own prompts in memory, which is exactly what
+the hand-authored path has always done. The run record pins the documents by hash. A `resume`
+re-reads the compiled document by that hash too and refuses one that changed ("the compiled requests
+changed since run … started"), as it does the plan and the reference pack.
+
+**Conformance covers the prompts, not only the derived fields.** `conformance_findings` recompiles
+each shot from the plan and compares every derived field — model, partition reason, LoRAs, steps,
+geometry, `insertedText` and the rest — and additionally the recorded `authoredPrompt` and the
+dispatched `prompt`. An authored request must reproduce the plan's prompt exactly. A refined one
+must still have the compiler's own leading and trailing sentences around it exactly where the
+compiler put them, and the refined text recovered from between them must itself contain no engine
+label. Only those two prompt fields and `promptSource` are allowed to differ from a fresh compile of
+the plan; a difference anywhere else is reported as a hand edit.
+
+`compiled.json` declares its own schema version, currently 7 — read
+`film_compile::COMPILED_PLAN_SCHEMA_VERSION` rather than this sentence, since a bump is a one-word
+edit here — and a document at any earlier version is refused by version rather than read with its
+newer fields defaulted. The remedy is the same one line, `film-harness compile`.
 
 `compiled.json` also carries the planner's cost (`planner`, sc-22715) whenever an LLM produced or
 refined it — see *Planning from a brief*. A `--no-refine` compile of a hand-authored plan ran no
 LLM and records none.
+
+### Prompt anchoring: what the compiler writes into a prompt (sc-24017)
+
+The prompt a shot dispatches is not only the prompt somebody wrote. The **compiler** adds up to four
+kinds of sentence, always **after** the prompt-refine rewrite, so no language model can paraphrase
+them. Each piece is recorded in `compiled.json` beside `authoredPrompt` and `promptSource` as an
+entry in the request's `insertedText`, with its `kind` and its exact `text`.
+
+In prompt order:
+
+| # | kind | what it says | when |
+| --- | --- | --- | --- |
+| 1 | `reference_binding` | `The courier is the person shown in <Picture 1>.` (or `The courier is the woman on the left in <Picture 1>.` when the role has a locator), followed by the pack's description of that role verbatim | one per role bound to a picture |
+| 2 | `continuity_description` | the pack's description of a `continuityRoles` entry, word for word | per continuity role the shot does **not** bind to an image |
+| 3 | *(the authored or refined prompt)* | — | always |
+| 4 | `audio` | `Audio: <the shot's own audio sentence>` | every shot with a non-blank `audio` |
+| 5 | `no_speech` | `No spoken dialogue in the generated audio; no voices on the soundtrack.` | only when the shot places a `dialogueClip` |
+
+Kinds 1 and 2 **lead** the prompt, 4 and 5 **trail** it. Trailing pieces are joined by a sentence
+boundary rather than a bare space: neither the authored prompt, the refiner's rewrite nor the
+author's `audio` text is guaranteed to end in terminal punctuation, so the compiler supplies the
+missing `.` rather than dispatching `…a courier enters Audio: Room tone`.
+
+**Where to see it.** From the CLI, read `insertedText` on the request in `compiled.json`. In the Film
+workspace, open **Effective requests** under the shot list: the **Added by the compiler** list shows
+each piece with its kind (Reference binding, Continuity description, Audio, No speech) and its text,
+and the **Prompt** row above it says whether the prompt is `authored` or `refined`. The workspace
+deliberately does **not** show the fully composed prompt that is dispatched, nor the refiner's
+rewritten text — it shows what the compiler added and where the prompt came from. `compiled.json` is
+where the composed `prompt` itself is readable.
+
+**The `<Picture N>` number is positional.** MiniMax-H3 labels the images it is supplied
+`<Picture 1>`, `<Picture 2>`, … in supply order, so `N` is the 1-based position of that role's asset
+in the dispatched `referenceAssetIds`, and one function — `film_compile::shot_reference_pictures` —
+produces both. Never write a `<Picture N>` into a shot's prompt yourself expecting it to line up.
+
+#### Authoring a shared image with locators
+
+One photograph of two people is one image with two subjects in it. Give both roles the **same**
+`file` and a **different, non-empty** `locator` each:
+
+```jsonc
+{ "role": "courier",   "kind": "character", "file": "references/pair.png",
+  "locator": "the woman on the left",
+  "description": "The courier: blue jacket, carries the parcel." },
+{ "role": "recipient", "kind": "character", "file": "references/pair.png",
+  "locator": "the man on the right",
+  "description": "The recipient: grey work apron, rolled sleeves." }
+```
+
+A locator is a noun phrase **including its article** — it completes "The courier is …", which the
+compiler writes verbatim and adds nothing to. The file is imported once, supplied once, and shares
+one `<Picture N>`; both roles get a binding sentence naming that same picture with their own
+locators, and `limits.maxReferenceAssets` counts the picture once. Spell the path one way: the
+`file` strings are compared literally, a non-canonical spelling is refused, and two paths differing
+only by ASCII case are refused as one file. A continuity role whose shared photo is already on the
+shot gets that picture's binding sentence with its locator, not an identity sentence of its own.
+
+#### Authoring a described-only role
+
+Leave `file` out entirely and write the description as a complete sentence naming its own subject:
+
+```jsonc
+{ "role": "recipient", "kind": "character",
+  "description": "The recipient: grey work apron, rolled sleeves." }
+```
+
+Then name it in each shot's `continuityRoles`. It is never bindable — it supplies no image — so it
+may not appear in `referenceRoles`, `firstFrameRole` or `lastFrameRole`, and it may carry no
+`locator`, `sourceAssetId` or generation provenance. In the Film workspace this is the **Add
+described role** button, which requires a role name and requires that no project image is selected
+and the locator is empty.
+
+#### The audio sentence
+
+`audio` is required on every shot. Say what the shot sounds like — the diegetic sound the action
+makes, the ambience of the space, and "No music." unless music is wanted. Stating silence is a
+complete answer: `"No audio. Silence."` dispatches exactly that. Do **not** type the `Audio:` label;
+the compiler writes it.
+
+The one rule worth memorizing: **when a shot places a `dialogueClip`, keep the spoken words out of
+`audio`.** The harness speaks that line itself — `ensure_sound` synthesizes or imports it onto the
+dialogue bus — and the compiler appends the no-speech sentence so H3 does not score a second voice
+over ours. When a shot has a spoken line and **no** clip, the opposite holds: `audio` is the only
+text H3 scores a voice from, so the speaker, the words and the delivery belong there. Planner-written
+films are always that second case — `draft_to_plan` writes `dialogueClip: None` on every shot — so a
+generated plan carries its spoken lines in `audio`, and only a hand edit ever places a clip.
+
+#### Refusals, and what to do about each
+
+| refusal | remedy |
+| --- | --- |
+| `audio` is missing or blank, naming the shot | give the shot an `audio` value, or state that it is silent |
+| `audio` starts with `"Audio:"` | drop the label; the compiler writes it |
+| `<`, `>` or a control character in `audio`, a pack `description` or a `locator` | rewrite the prose in plain words — this text is repeated into the dispatched prompt, where a `<Picture 1>` would bind the model to media the shot never supplies |
+| the **refined** prompt contains an engine label, naming the shot and quoting the label | re-run the refinement; or compile without it — `--no-refine` from the CLI, or untick *Run model-specific prompt refinement when compiling shots* in the Film workspace |
+| the refined prompt is empty or over the route's 4000-character limit | the same three remedies; the authored prompt is never silently substituted |
+| the composed prompt is over 4000 characters once the compiler's sentences lead and trail it | shorten the shot's prompt, its `audio` sentence, or the pack descriptions the compiler repeats — the message reports how many characters each kind contributed, so it points at the text to cut |
+| roles sharing a `file` without a locator each, or with the same locator twice | give each sharing role its own distinct locator |
+| a described-only role named in a conditioning slot | move it to `continuityRoles`, or give the pack entry an image |
+| the reference pack changed since these requests were compiled | `film-harness compile`, or **Use authored prompts** in the workspace |
+
+A **hand-authored** prompt is deliberately never scanned for engine labels: a person who types
+`<Picture 1>` into a plan means it. A **planner draft** that writes one is a finding rather than a
+refusal, handed back to the repair round with the label quoted and its deletion asked for.
 
 ### Partition resolution (sc-23402)
 
@@ -720,6 +909,11 @@ on the plan's model. (A shot that declares `reference_to_video` and binds nothin
 contradiction, and is refused naming the shot and the requirement.) A family with no reference
 partition keeps the old behaviour exactly: the declared model's own `limits.maxReferenceAssets` is
 what refuses a shot that binds too many.
+
+`maxReferenceAssets` counts **pictures, not roles** (sc-24024): roles naming the same pack `file`
+are one image supplied once, so a shot binding ten roles across nine files fits MiniMax-H3's cap of
+nine. A described-only role costs no picture at all and is not in that list — naming one in a
+conditioning slot is refused before the count is ever reached.
 
 Three documents carry the outcome, and they cannot disagree because all three read one string:
 
@@ -992,7 +1186,7 @@ parcel on the two close-ups where it is not. In phase 1 those questions could on
 independently invented rooms happened to agree, which is exactly the miss the first real-weights
 smoke reported as a clean cut.
 
-### Dependencies (plan schema 2)
+### Dependencies
 
 A shot may declare `dependsOn: [{ shotId, kind, note }]`, with `kind` either:
 
@@ -1014,8 +1208,8 @@ before `review`, or review with a plan that drops the `acrossCut` questions (the
 
 Edges must name another shot in the same plan and may not form a cycle. They are declarations, not
 wiring: nothing here reaches the model. Their one job is to tell the harness who to **flag** when a
-selected take changes — see *Replacing a take* below. A schema 1 plan reads unchanged and declares
-no edges.
+selected take changes — see *Replacing a take* below. `dependsOn` is optional: a plan that declares
+none simply has no edges.
 
 ## Durable run state, resume and take replacement
 

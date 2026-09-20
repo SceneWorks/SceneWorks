@@ -102,7 +102,11 @@ not silently post a second planner request: startup reconciles the recorded oper
 
 - Preflight reads the saved plan, pack, host, catalog and worker list and returns findings naming the
   shot and field. It also exposes the effective model, partition, adapters, steps, reference
-  encoding and budget for each selected shot. It creates no render job.
+  encoding and budget for each selected shot, and — since epic 24017 — each request's
+  `promptSource` and its `insertedText`: the sentences the compiler writes around the authored
+  prompt, each with its `kind` (`reference_binding`, `continuity_description`, `audio`,
+  `no_speech`) and its exact text. The composed prompt itself is in the compiled document, not in
+  what the workspace renders. It creates no render job.
 - `compile_existing` (`apps/rust-api/src/film_planner.rs:783`) rebuilds `compiled.json` from an
   edited plan. One `prompt_refine` call per shot unless `--no-refine`, so tens of seconds to minutes.
 - `generate` (`apps/rust-api/src/film_planner.rs:667`) is the long one of the three: one full decode
@@ -338,7 +342,7 @@ invent a second job-body shape.
 | --- | --- |
 | reference pack | the cast and props: approved images with roles, plus the voices and beds |
 | plan | the shot list, with beats, framings, durations and intended start/end state |
-| compiled plan | what will actually be dispatched, per shot: a preflight sheet |
+| compiled plan | what will actually be dispatched, per shot: a preflight sheet. It is keyed to the plan **and** to the reference pack, so editing a description or a locator invalidates it |
 | run | the shoot; each attempt is a take, and nothing is ever deleted |
 | `selectedAttempt` | the circled take |
 | review | the script supervisor's notes, advisory only |
@@ -355,7 +359,14 @@ a flag read as a verdict.
 
 The Film workspace stores its original script, structured brief, optional reference pack, editable
 production plan and compiled plan in a project-scoped draft. Replacing the plan is an explicit
-operator action; the source text remains preserved. Planning, runs, review and export expose durable
+operator action; the source text remains preserved. A draft saved by an older build is carried
+forward when it is read (`ProjectStore::carry_film_draft_forward`), which moves each shot's former
+`sound` prose into the now-required `audio` field and stamps the document versions, so an existing
+draft opens rather than refusing. A plan **imported** into a draft gets no such treatment: it is
+checked for its schema version before the typed decode and a version 1 or 2 document is a 400 whose
+message names the version and the edit, rather than an unknown-field error at a byte offset. A
+stored compiled plan is separately invalidated when the pack it was compiled against changes; the
+workspace's remedy is **Use authored prompts**, which drops it. Planning, runs, review and export expose durable
 status in the Operations panel. Per-step progress comes from the job named by the operation or run,
 while the project record remains the recovery authority.
 

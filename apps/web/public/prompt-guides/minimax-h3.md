@@ -268,6 +268,37 @@ it a guess.
 Unlike a first/last frame, **references do not set the canvas shape** — they are encoded at their own
 resolution and the output falls back to 16:9 unless you choose a size.
 
+## In The Film Harness
+
+Everything above is written for the Video Studio, where you supply the references and write the
+prompt yourself. The **Film** workspace and the `film-harness` CLI work differently, and the
+difference matters if you are writing a shot's prompt there.
+
+**Do not write `<Picture 1>`, `<Audio 1>` or `<Video 1>` into a film shot's prompt.** In a film the
+compiler owns those labels. It writes one binding sentence per bound reference role — "The courier
+is the person shown in `<Picture 1>`." — after any refinement rewrite, numbered from the shot's own
+reference list, which is the same order the images are supplied in. A label written by hand or by a
+rewrite names a picture the request may never supply, and cannot be checked against anything. Say
+what the subject is in plain words instead; the sentence that ties it to its picture is added for
+you. The same goes for a role's description: the pack states it once, and the compiler repeats it
+word for word into every shot that names the role, so a shot's prompt should spend its words on what
+happens rather than restating who somebody is.
+
+**The audio sentence is added too.** Every film shot carries a required `audio` field saying what it
+sounds like, written the way *Prompt the audio explicitly* above asks: the diegetic sound, the
+ambience, and "No music." unless music is wanted. The compiler appends it to the dispatched prompt
+as a trailing `Audio: …` sentence, so the value itself must not begin with that label or it would be
+sent twice. Stating silence outright is a complete answer.
+
+**Speech in a film shot.** When a shot places a dialogue clip, the harness speaks that line itself
+onto the dialogue bus, so the words of the line stay out of `audio`; the compiler then appends a
+fixed sentence — "No spoken dialogue in the generated audio; no voices on the soundtrack." — that
+keeps H3 from scoring a second voice over the one already placed. It constrains the soundtrack only,
+not the picture: these are exactly the shots where somebody is speaking on camera. When a shot has a
+spoken line and no clip, the opposite holds and the *Voice* bullet above applies as written — the
+speaker, the line and the delivery belong in `audio`, because that is the only text a voice is
+scored from.
+
 ## Turbo — The Control That Changes The Cost Table
 
 The **Turbo** control in the Advanced panel swaps in a step-distilled adapter and switches the render

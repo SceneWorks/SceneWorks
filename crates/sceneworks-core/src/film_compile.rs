@@ -1090,8 +1090,10 @@ fn compile_shot(
                     "prompt",
                     format!(
                         "the refined prompt is {length} characters, outside the 1-{MAX_PROMPT_CHARS} \
-                         the video route accepts; re-run the refinement or compile with --no-refine \
-                         (the authored prompt is not silently substituted)"
+                         the video route accepts; re-run the refinement, or compile without prompt \
+                         refinement — `--no-refine` from the CLI, or untick \
+                         {REFINE_PROMPTS_CONTROL_LABEL:?} in the Film workspace (the authored \
+                         prompt is not silently substituted)"
                     ),
                 )]);
             }
@@ -2368,6 +2370,12 @@ mod tests {
             assert_eq!(findings.len(), 1, "{findings:?}");
             assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
             assert!(findings[0].message.contains("the video route accepts"));
+            // The remedy reaches somebody working in the WORKSPACE, who never types a CLI flag:
+            // this refusal names the checkbox by the same constant its sibling label refusal does.
+            assert!(
+                findings[0].message.contains(REFINE_PROMPTS_CONTROL_LABEL),
+                "{findings:?}"
+            );
         }
     }
 
