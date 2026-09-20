@@ -16,6 +16,24 @@
   // about the harness changes. This plan is what the harness does when they DO supply one.
   //
   // --------------------------------------------------------------------------------------------
+  // THE PROMPTS RESTATE THE PACK — READ THIS BEFORE COMPARING AGAINST A PHASE-3 RUN (sc-24017)
+  //
+  // These authored prompts were written in phase 2, when the prompt was the only place a subject
+  // could be described. They therefore restate what the pack already says: "the blue work jacket",
+  // "the small bright red parcel", "the long wooden workbench", "warm late-afternoon light" are the
+  // pack's own descriptions of `courier`, `red_parcel`, `workbench_table` and `house_style`,
+  // rewritten by hand into every shot that shows them.
+  //
+  // Since epic 24017 the COMPILER inserts those descriptions itself — verbatim, from the pack, in
+  // every shot — so a phase-3 compile of this file dispatches each of them TWICE: once in the
+  // compiler's own binding or identity sentence, and once in the authored prose here.
+  //
+  // The prompt text is deliberately LEFT ALONE. This plan is the 64/72 baseline, and the phase-3
+  // evaluation's question is what the compiler's insertions change; editing the prompts would
+  // change two things at once and isolate neither. Read the duplication as a property of the
+  // BASELINE rather than as a defect to fix here, and do not "tidy" these prompts.
+  //
+  // --------------------------------------------------------------------------------------------
   // WHICH PACK
   //
   // The roles below are the ones every courier pack declares, so this plan validates against

@@ -118,9 +118,10 @@ looking like one.
 
 ### Roles with no image
 
-A role does not need a picture. Fill in **Role name**, **Kind**, and **Description**, then choose
-**Add described role**: the role is stored with no image at all, and its description is the whole
-of it. This is how you hold a subject steady across a film you have no photograph of — the
+A role does not need a picture. Fill in **Role name**, **Kind**, and **Description**, clear the
+selected project image and leave the locator empty, then choose **Add described role**: the button
+stays disabled until the form describes a role with no image, and the role is then stored with no
+image at all, its description the whole of it. This is how you hold a subject steady across a film you have no photograph of — the
 compiler inserts the same words in every shot that lists the role under **Continuity roles**,
 rather than letting each shot reword it.
 
@@ -147,6 +148,12 @@ same locator, and a role with no image may not declare one at all.
 
 If either locator is missing or the two are identical, the add is refused and the reason appears
 under the field. Fill in the locator on the existing row first, then add the second role.
+
+A continuity role whose photograph a shot is **already** supplying for some other role is named by
+that picture rather than described on its own: it gets the binding sentence with its locator ("The
+recipient is the man on the right in `<Picture 1>`.") and no separate identity sentence, since the
+image is being sent either way and its description is already in that sentence. Nothing about the
+picture order or the images dispatched changes.
 
 SceneWorks copies selected image bytes into the film draft's project-owned reference pack. A run
 pins its own staged copy, so later project changes do not silently change an in-progress planning or
@@ -239,7 +246,11 @@ license acknowledgement, geometry and duration menus, adapters, and declared bud
 
 Read both parts of the result:
 
-- findings identify the shot and field that must change; and
+- findings identify the shot and field that must change, in plain words — the internal field path is
+  used to route a finding to the panel that owns it, never shown to you. A finding about the pack
+  appears under **References**, except a sound-and-dialogue finding, which appears under **Sound and
+  dialogue**; every pack finding has one of those two owners, so none is reported in a place you
+  cannot act on it. And
 - **Effective requests** show the resolved model partition, output geometry, conditioning roles,
   reference edge, adapters, effective steps, seed, prompt source, and any prompt-refinement
   provenance.
@@ -250,6 +261,22 @@ descriptions, the audio sentence, and the no-speech sentence. They are written a
 rewrite, so a refiner cannot paraphrase a `<Picture N>` the engine labels or soften a stated
 silence. You change them by editing their sources — a reference's description or locator, or the
 shot's Audio field — not by editing the prompt.
+
+**What this view does not show.** It does not show the fully composed prompt that is dispatched, and
+it does not show the refiner's rewritten text. The **Prompt** row says only where the prompt came
+from — `authored` or `refined` — and **Added by the compiler** says what was added around it. The
+composed prompt itself is in the compiled document: export it with **Export compiled plan**, or read
+`compiled.json` from a CLI run, where each request carries its `prompt`, its `authoredPrompt` and
+its `insertedText`.
+
+**Editing the references invalidates a compiled plan.** The reference pack decides the sentences
+above, so changing a description or a locator changes what every shot repeating it would dispatch. A
+compiled document is tied to the pack it was compiled against, and after a pack edit preflight
+reports that the reference pack changed since those requests were compiled. Clear it with **Use
+authored prompts**, which drops the stored compiled plan and returns the shots to the prompts you
+wrote, or re-plan to compile fresh requests against the edited pack. A comment- or whitespace-only
+difference does not do this: what the compiled document is keyed on is the pack's content, not its
+formatting.
 
 Fix every blocking finding and run preflight again. **Render selected shots** also runs preflight and
 does not dispatch when the saved selection is invalid.

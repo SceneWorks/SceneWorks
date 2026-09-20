@@ -5,8 +5,10 @@ shared library/CLI/route layering and the durable state documents. Operator beha
 [film-editor.md](film-editor.md); the harness architecture and CLI manual remain in
 [film-harness-overview.md](film-harness-overview.md) and [film-harness.md](film-harness.md).
 
-Some line references below describe the original harness commit and are retained as historical
-navigation. Use the current source and router as the authority for the product routes.
+Code is cited below by **file and symbol** — the function, struct or constant that owns the
+behaviour — never by line number, because a line number is stale the next time anyone edits above it
+and a reader then checks the claim against the wrong code. Use the current source and router as the
+authority for the product routes.
 
 ## The layering today
 
@@ -20,26 +22,25 @@ project-scoped film routes                 drafts, planning, runs, review, expli
 existing SceneWorks HTTP routes              projects, assets, timelines, jobs
 ```
 
-- The orchestration lives in the **library**: `pub mod film_harness; pub mod film_planner;`
-  (`apps/rust-api/src/lib.rs:283`–`:284`).
-- The CLI is a thin shell over it. Every verb it offers is a library call:
-  `film_harness::validate` (`apps/rust-api/src/film_harness.rs:1709`), `run` (`:4823`),
-  `run_with_control` (`:4837`), `resume` (`:5200`), `replace_take` (`:5260`), `edit_timeline`
-  (`:7129`), `request_cancel` (`:322`), `read_run_record` (`:378`);
-  `film_harness::review::{review, decide_take, request_repair, review_eval}`
-  (`apps/rust-api/src/film_harness/review.rs:769`, `:1604`, `:1757`, `:1924`);
-  `film_planner::{generate, compile_existing}` (`apps/rust-api/src/film_planner.rs:667`, `:783`);
-  `film_harness::references::make_references` (`apps/rust-api/src/film_harness/references.rs:149`).
-- Everything the harness does to SceneWorks goes through `ApiTransport`
-  (`apps/rust-api/src/film_harness.rs:176`), a two-method trait (`call` and `get_bytes`, `:190`),
-  whose shipped implementation is `HttpTransport` (`:5897`). There is no privileged in-process
+- The orchestration lives in the **library**: `apps/rust-api/src/lib.rs` declares
+  `pub mod film_harness;` and `pub mod film_planner;`.
+- The CLI is a thin shell over it. Every verb it offers is a library call. In
+  `apps/rust-api/src/film_harness.rs`: `validate`, `run`, `run_with_control`, `resume`,
+  `replace_take`, `edit_timeline`, `request_cancel`, `read_run_record`. In
+  `apps/rust-api/src/film_harness/review.rs`:
+  `film_harness::review::{review, decide_take, request_repair, review_eval}`. In
+  `apps/rust-api/src/film_planner.rs`: `film_planner::{generate, compile_existing}`. And
+  `film_harness::references::make_references` (`apps/rust-api/src/film_harness/references.rs`).
+- Everything the harness does to SceneWorks goes through the `ApiTransport` trait
+  (`apps/rust-api/src/film_harness.rs`), whose two methods are `call` and `get_bytes`, and whose
+  shipped implementation is `HttpTransport` in the same file. There is no privileged in-process
   backdoor; a UI-hosted run would use the same trait.
 - Project-scoped routes expose drafts, references, sound, preflight, planning, run lifecycle, and
   explicit export. The review routes call the same decision, swap, replacement, repair, and bounded
   analysis functions as the CLI. Their router registrations are in `apps/rust-api/src/lib.rs` and
   their adapters are in `films.rs`, `film_planning.rs`, `film_lifecycle.rs`, and `film_review.rs`.
 - **There is no in-memory state beyond the files.** The record on disk is the run
-  (`crates/sceneworks-core/src/film_plan.rs:3726`).
+  (`crates/sceneworks-core/src/film_plan.rs`, `RunRecord`).
 
 ### The routes it drives
 
@@ -102,12 +103,16 @@ not silently post a second planner request: startup reconciles the recorded oper
 
 - Preflight reads the saved plan, pack, host, catalog and worker list and returns findings naming the
   shot and field. It also exposes the effective model, partition, adapters, steps, reference
-  encoding and budget for each selected shot. It creates no render job.
-- `compile_existing` (`apps/rust-api/src/film_planner.rs:783`) rebuilds `compiled.json` from an
+  encoding and budget for each selected shot, and — since epic 24017 — each request's
+  `promptSource` and its `insertedText`: the sentences the compiler writes around the authored
+  prompt, each with its `kind` (`reference_binding`, `continuity_description`, `audio`,
+  `no_speech`) and its exact text. The composed prompt itself is in the compiled document, not in
+  what the workspace renders. It creates no render job.
+- `compile_existing` (`apps/rust-api/src/film_planner.rs`) rebuilds `compiled.json` from an
   edited plan. One `prompt_refine` call per shot unless `--no-refine`, so tens of seconds to minutes.
-- `generate` (`apps/rust-api/src/film_planner.rs:667`) is the long one of the three: one full decode
+- `generate` (`apps/rust-api/src/film_planner.rs`) is the long one of the three: one full decode
   plus one per repair round plus one rewrite per shot. Local planner jobs default to the
-  `DEFAULT_LLM_JOB_TIMEOUT` bound of 1200 s per job (`:57`); the Film workspace exposes that same
+  `DEFAULT_LLM_JOB_TIMEOUT` bound of 1200 s per job; the Film workspace exposes that same
   positive-seconds setting and persists its effective value with the durable operation. Minutes on
   the dev Mac.
 
@@ -128,7 +133,7 @@ supplied compiled document against the snapshot held under that same lock.
 
 ### 2. Long-running and resumable: `run`, `resume`
 
-Hours. The CLI `run` (`apps/rust-api/src/film_harness.rs:4823`) can create a project, import
+Hours. The CLI `run` (`apps/rust-api/src/film_harness.rs`) can create a project, import
 assets, speak dialogue, dispatch one video job per shot attempt, assemble a timeline, and optionally
 export. The Film workspace creates its run inside the active project, delivers each completed shot
 into the editable saved timeline, and leaves export as a separate operator action.
@@ -136,21 +141,21 @@ into the editable saved timeline, and leaves export as a separate operator actio
 The server-hosted run is a task the API owns, with the record file as the durable truth:
 
 - the record is rewritten atomically at **every** transition, by temp file, `sync_all` and rename
-  (`apps/rust-api/src/film_harness.rs:1684`–`:1703`), and mirrored into the project at
-  `film-harness/<run_id>/run.json` (`:1636`). A reader never sees a half-written record, and a UI
+  and mirrored into the project at `film-harness/<run_id>/run.json` — both in
+  `film_harness::persist_record`, over `write_atomically`. A reader never sees a half-written record, and a UI
   polling it is never more than one transition behind the API;
 - every attempt carries an idempotency key written **before** the job is created
-  (`apps/rust-api/src/film_harness.rs:1422`, `crates/sceneworks-core/src/film_plan.rs:3420`), so a
+  (`film_harness::idempotency_key`, recorded as `AttemptRecord::idempotency_key`), so a
   process that dies between the POST and the record write finds its own job on replay;
-- `resume` (`:5200`) reconciles a record against the API without re-dispatching anything.
+- `resume` reconciles a record against the API without re-dispatching anything.
 
 So the task does not need its own state store and must not have one. A UI that renders from
 `run.json` and a CLI that renders from `run.json` cannot disagree.
 
-`RunControl` (`apps/rust-api/src/film_harness.rs:282`) is the in-process cancel handle
-(`cancel` at `:301`, `is_canceled` at `:305`) that `run_with_control` (`:4837`) takes; the
-out-of-process equivalent is `request_cancel` (`:322`), which writes a cancel request into the run
-directory, and `clear_cancel_request` (`:338`). A hosted task would use the former for a UI cancel
+`RunControl` (`apps/rust-api/src/film_harness.rs`) is the in-process cancel handle — methods
+`cancel` and `is_canceled` — that `run_with_control` takes; the out-of-process equivalent is
+`request_cancel`, which writes a cancel request into the run directory, and
+`clear_cancel_request`. A hosted task would use the former for a UI cancel
 button and keep the latter working for a shell.
 
 An interrupted replacement or repair carries `activeTakeOperation` in `run.json`: its kind,
@@ -174,11 +179,11 @@ reviews stopped by a limit remain visible after reload; existing observations re
 
 | verb | library entry | API cost |
 | --- | --- | --- |
-| `review` | `film_harness::review::review` (`review.rs:769`) | frame extraction + one `image_vqa` per question; minutes, bounded by the review plan's own `limits` |
-| `accept-take` / `reject-take` | `decide_take` (`review.rs:1604`) | **none; it never reaches the API** |
-| `request-repair` | `request_repair` (`review.rs:1757`) | one bounded render |
-| `replace-take` | `replace_take` (`film_harness.rs:5260`) | one bounded render |
-| `trim` / `reorder` / `swap-take` | `edit_timeline` (`film_harness.rs:7129`), `TimelineEdit` (`:7088`), `EditOptions` (`:7114`) | a timeline PUT; a render only if `--export` |
+| `review` | `film_harness::review::review` (`review.rs`) | frame extraction + one `image_vqa` per question; minutes, bounded by the review plan's own `limits` |
+| `accept-take` / `reject-take` | `decide_take` (`review.rs`) | **none; it never reaches the API** |
+| `request-repair` | `request_repair` (`review.rs`) | one bounded render |
+| `replace-take` | `replace_take` (`film_harness.rs`) | one bounded render |
+| `trim` / `reorder` / `swap-take` | `edit_timeline` with `TimelineEdit` and `EditOptions` (`film_harness.rs`) | a timeline PUT; a render only if `--export` |
 | export | re-dispatched by `edit_timeline` / `replace_take` with `--export` | one `timeline_export` job |
 
 `accept-take` and `reject-take` needing no API call at all is worth designing around: in a hosted
@@ -186,57 +191,58 @@ model they are the cheapest possible writes, and a UI can make them feel instant
 
 ## The run record is the state document
 
-`RunRecord` (`crates/sceneworks-core/src/film_plan.rs:3726`), schema version 2 (`:58`). Written at
+`RunRecord` (`crates/sceneworks-core/src/film_plan.rs`), schema version
+`RUN_RECORD_SCHEMA_VERSION` = 2. Written at
 `<out>/run.json` and mirrored to `<project>/film-harness/<run_id>/run.json`. A UI reads this and
 nothing else.
 
-| field | line | what a UI does with it |
-| --- | --- | --- |
-| `schemaVersion`, `runId`, `createdAt`, `finishedAt` | `:3727`–`:3731` | identity and age |
-| `state` | `:3733` | `running` or `finished`, the field a resume reads first; drives "is anyone holding this?" |
-| `outcome` | `:3734` | `completed` / `rejected` / `stopped_run_budget` / `stopped_memory_limit` / `canceled` / `failed` (`:3057`) |
-| `stop` | `:3737` | `{ reason, detail, resumable }` (`:3095`). **`resumable` is what enables or disables a Resume button** |
-| `plan`, `referencePack`, `compiled` | `:3738`, `:3739`, `:3743` | id, version, path and sha256 of each pinned document |
-| `projectId`, `projectPath` | `:3745`, `:3747` | where the assets live |
-| `model` | `:3749` | requested tier, fps, lane, observed backend, weights rows per partition, and the render host's platform/memory/GPU (`ModelRecord`, `HardwareRecord`) |
-| `limits` | `:3750` | the declared budgets, for showing progress against them |
-| `selectedShotIds` | `:3751` | which shots this run is about |
-| `references`, `sound` | `:3753`, `:3758` | imported assets, with role, kind, sha256, asset id and approval |
-| `synthesizedSound` | `:3762` | lines this run spoke: model, voice, text, `textSha256`, job, asset, pack file |
-| `shots` | `:3764` | the body of the record, detailed below |
-| `timeline`, `export`, `exportPending`, `supersededExportJobIds` | `:3766`, `:3768`, `:3771`, `:3780` | the sequence and the MP4 |
-| `diagnostics` | `:3782` | findings and transport errors |
-| `decisions` | `:3785` | the edit log |
-| `elapsedSeconds`, `humanRequestedElapsedSeconds` | `:3794`, `:3799` | the two clocks; total cost is their sum |
+| field (`RunRecord`) | what a UI does with it |
+| --- | --- |
+| `schemaVersion`, `runId`, `createdAt`, `finishedAt` | identity and age |
+| `state` | `running` or `finished`, the field a resume reads first; drives "is anyone holding this?" |
+| `outcome` | `completed` / `rejected` / `stopped_run_budget` / `stopped_memory_limit` / `canceled` / `failed` (`RunOutcome`) |
+| `stop` | `{ reason, detail, resumable }` (`RunStop`). **`resumable` is what enables or disables a Resume button** |
+| `plan`, `referencePack`, `compiled` | id, version, path and sha256 of each pinned document |
+| `projectId`, `projectPath` | where the assets live |
+| `model` | requested tier, fps, lane, observed backend, weights rows per partition, and the render host's platform/memory/GPU (`ModelRecord`, `HardwareRecord`) |
+| `limits` | the declared budgets, for showing progress against them |
+| `selectedShotIds` | which shots this run is about |
+| `references`, `sound` | imported assets, with role, kind, sha256, asset id and approval |
+| `synthesizedSound` | lines this run spoke: model, voice, text, `textSha256`, job, asset, pack file |
+| `shots` | the body of the record, detailed below |
+| `timeline`, `export`, `exportPending`, `supersededExportJobIds` | the sequence and the MP4 |
+| `diagnostics` | findings and transport errors |
+| `decisions` | the edit log |
+| `elapsedSeconds`, `humanRequestedElapsedSeconds` | the two clocks; total cost is their sum |
 
-**Per shot** (`ShotRunRecord`, `crates/sceneworks-core/src/film_plan.rs:3504`): `shotId`, `outcome`
-(`rendered` / `failed` / `timed_out` / `canceled` / `not_dispatched` / `not_selected`, `:3186`),
+**Per shot** (`ShotRunRecord`, `crates/sceneworks-core/src/film_plan.rs`): `shotId`, `outcome`
+(`rendered` / `failed` / `timed_out` / `canceled` / `not_dispatched` / `not_selected`, `ShotOutcome`),
 `intended`, `conditioningAssets`, `attempts[]`, `selectedAttempt`, `needsReview[]`, `reviews[]`,
 `humanDecision`. Nothing is ever removed: a rejected take stays beside the one that replaced it.
 
-**Per attempt** (`AttemptRecord`, `:3414`): `attempt`, `idempotencyKey`, `resolvedModelId`,
+**Per attempt** (`AttemptRecord`): `attempt`, `idempotencyKey`, `resolvedModelId`,
 `partitionReason`, `referenceImageShortEdge`, `loras`, `effectiveSteps`, `turboSchedulerShift`,
 `jobId`, `status`, timestamps, `elapsedSeconds`, `peakMemoryGb` + `peakMemorySource`, `error`,
-`take`, `rejection`, `humanRequested`. `AttemptRecord::has_live_take` (`:3497`) is the "is this still
+`take`, `rejection`, `humanRequested`. `AttemptRecord::has_live_take` is the "is this still
 a candidate" predicate a take strip wants.
 
-**Decisions** (`ProductionDecision`, `:3173`): `at`, `action` (one of `resume`, `cancel`,
+**Decisions** (`ProductionDecision`): `at`, `action` (one of `resume`, `cancel`,
 `replace_take`, `review`, `accept_take`, `reject_take`, `request_repair`), optional `shotId`,
 `detail`. Timeline edits append here as well as to `timeline.edits`.
 
-**Timeline** (`TimelineRecord`, `:3629`): `timelineId`, `name`, `aspectRatio` (what the timeline was
+**Timeline** (`TimelineRecord`): `timelineId`, `name`, `aspectRatio` (what the timeline was
 created at) alongside `sourceAspectRatio` / `sourceWidth` / `sourceHeight` (what the takes actually
 are), `fps`, `durationSeconds`, `items[]` in cut order, `tracks[]` with each bus's `gain` and
-`muted`, `generatedAudioDefault`, and `edits[]` (`:3662`; `TimelineEditRecord` at `:3668`). **Items are read
+`muted`, `generatedAudioDefault`, and `edits[]` (`TimelineEditRecord`). **Items are read
 back off the saved timeline, never off the harness's intent**, so the record cannot claim items the
 project does not hold.
 
-**Export** (`ExportRecord`, `:3680`): `jobId`, `status`, `stale`, `assetId`, `renderPath`
-(project-relative), `error`, and `droppedAudioLayers[]` (`:3698`), each `{ assetId, trackId, role,
+**Export** (`ExportRecord`): `jobId`, `status`, `stale`, `assetId`, `renderPath`
+(project-relative), `error`, and `droppedAudioLayers[]` (`ExportRecord::dropped_audio_layers`), each `{ assetId, trackId, role,
 generated, reason }`, so a UI can say *why* a bus is missing from the file rather than leaving the
 user to guess.
 
-`RunRecord::is_resumable` (`:3820`) already encodes the rule a Resume button needs.
+`RunRecord::is_resumable` already encodes the rule a Resume button needs.
 
 ## What is already a project asset
 
@@ -245,8 +251,8 @@ what makes a front end cheap:
 
 | thing | how it got there |
 | --- | --- |
-| reference images | imported and tagged `film-harness-reference` (or `film-harness-reference-unapproved`), `apps/rust-api/src/film_harness.rs:3206`, `:3306` |
-| dialogue clips and beds | imported on the sound buses, `:3133`; a synthesized clip's asset carries `extra.filmHarness.synthesized: true` |
+| reference images | imported and tagged `film-harness-reference` (or `film-harness-reference-unapproved`) by `Session::ensure_references` (`apps/rust-api/src/film_harness.rs`), which uploads one asset per distinct pack `file` |
+| dialogue clips and beds | imported on the sound buses by `Session::ensure_sound`, which speaks a `text` line through `synthesize_dialogue` first; a synthesized clip's asset carries `extra.filmHarness.synthesized: true` |
 | takes | the video job's own output asset, recorded in `AttemptRecord::take` |
 | extracted review frames | persisted as project assets by the `frame_extract` job |
 | the export | the `timeline_export` job's render asset |
@@ -287,7 +293,7 @@ fixed. A route that "just does the simple case" of a run is how a UI-started run
 resumable from a shell. If a route needs behaviour the library does not have, the change goes in the
 library.
 
-One consequence worth stating: `read_run_record` (`:378`) is a plain file read, so
+One consequence worth stating: `read_run_record` is a plain file read, so
 `GET /film-harness/runs/:id` costs nothing and can be polled freely.
 
 ## Concurrency and safety
@@ -315,8 +321,9 @@ What the record *does* imply:
   with a **resumable** stop. Attempts already spent are not re-spent: a cancel is not a retry. A
   cancel the worker does not honour within the grace (30 s, capped at `maxShotSeconds`) stops the run
   rather than dispatching a second render beside one still on the GPU (runbook § *Validation before
-  dispatch*; the constant is `CANCEL_GRACE`, `apps/rust-api/src/film_harness.rs:76`, and the cap is
-  applied at `:659`–`:661`).
+  dispatch*; the constant is `CANCEL_GRACE` in `apps/rust-api/src/film_harness.rs`, and the
+  `min` against the shot budget is applied wherever a `PollBounds` is built — `work_attempt` for a
+  render, `edit_timeline_with_lease` and `finish_explicit_export` for an export).
 - **Resume after a server restart is crash-only.** Startup adopts only a `running` record whose
   unlocked controller lease still names the process that died. A cleanly released controller is not
   restarted automatically, even when the record remains resumable; the Operations panel leaves an
@@ -338,7 +345,7 @@ invent a second job-body shape.
 | --- | --- |
 | reference pack | the cast and props: approved images with roles, plus the voices and beds |
 | plan | the shot list, with beats, framings, durations and intended start/end state |
-| compiled plan | what will actually be dispatched, per shot: a preflight sheet |
+| compiled plan | what will actually be dispatched, per shot: a preflight sheet. It is keyed to the plan **and** to the reference pack, so editing a description or a locator invalidates it |
 | run | the shoot; each attempt is a take, and nothing is ever deleted |
 | `selectedAttempt` | the circled take |
 | review | the script supervisor's notes, advisory only |
@@ -355,7 +362,14 @@ a flag read as a verdict.
 
 The Film workspace stores its original script, structured brief, optional reference pack, editable
 production plan and compiled plan in a project-scoped draft. Replacing the plan is an explicit
-operator action; the source text remains preserved. Planning, runs, review and export expose durable
+operator action; the source text remains preserved. A draft saved by an older build is carried
+forward when it is read (`ProjectStore::carry_film_draft_forward`), which moves each shot's former
+`sound` prose into the now-required `audio` field and stamps the document versions, so an existing
+draft opens rather than refusing. A plan **imported** into a draft gets no such treatment: it is
+checked for its schema version before the typed decode and a version 1 or 2 document is a 400 whose
+message names the version and the edit, rather than an unknown-field error at a byte offset. A
+stored compiled plan is separately invalidated when the pack it was compiled against changes; the
+workspace's remedy is **Use authored prompts**, which drops it. Planning, runs, review and export expose durable
 status in the Operations panel. Per-step progress comes from the job named by the operation or run,
 while the project record remains the recovery authority.
 
