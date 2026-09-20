@@ -798,14 +798,19 @@ pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
     super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
 
 /// Channels a reference soundtrack is extracted at — stereo, the shape the joint model both emits
-/// and was conditioned on. The engine accepts any positive channel count, so this is a choice
-/// rather than a constraint, and downmixing to mono would discard the stereo image of the very clip
-/// the caller supplied as the reference.
+/// and was conditioned on.
+///
+/// **A constraint, not a choice (sc-24070).** The `ref2va` packed layout reserves soundtrack rows
+/// for exactly this many channels regardless of what the reference carries, so any other width is
+/// refused deep inside the denoise loop. An ALIAS of the ungated
+/// [`super::reference_audio::REFERENCE_AUDIO_CHANNELS`], which records the measurement, for the
+/// same anti-drift reason [`MINIMAX_H3_AUDIO_SAMPLE_RATE`] is one.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 = 2;
+pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 =
+    super::reference_audio::REFERENCE_AUDIO_CHANNELS as u32;
 
 /// Fewest 24 fps frames a reference clip may normalize to — **13**.
 ///
