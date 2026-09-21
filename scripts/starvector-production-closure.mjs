@@ -27,6 +27,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/engines.rs",
   "crates/sceneworks-worker/src/inference_runtime.rs",
   "crates/sceneworks-worker/src/lib.rs",
+  "crates/sceneworks-worker/src/mlx_decode_cache.rs",
   "crates/sceneworks-worker/src/model_jobs.rs",
   "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
   "crates/sceneworks-worker/src/refine_model_cache.rs",

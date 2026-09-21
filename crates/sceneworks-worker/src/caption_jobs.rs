@@ -229,8 +229,13 @@ pub(crate) async fn run_training_caption_job(
                 ..Default::default()
             };
             request.prompt = request.options.custom_prompt.clone();
+            // sc-24029: JoyCaption decodes up to 4096 tokens on the same mlx-llm KV cache, which
+            // grows per token. Scoped to ONE item so each caption's terminal clear runs before the
+            // next load, on this blocking thread — the one whose MLX allocator state it releases.
+            let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
             let mut on_progress = |progress: Progress| {
                 if let Progress::Step { current, total } = progress {
+                    cache_bound.note_token();
                     // Publish the latest `(index, current, total)` token count into the coalescing
                     // watch channel the loop below reads. `send` is non-blocking and latest-wins —
                     // token decode is NEVER back-pressured by API latency (the F-016 fix). A send

@@ -523,10 +523,16 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                             "text provider {expected_provider_id} exposes the wrong StarVector tier"
                         )));
                     }
+                    // sc-24029: StarVector decodes on the same resident `TextLlm` with the same
+                    // per-token-growing KV cache, on this (the refine cache) thread. `Progress` is
+                    // the decode's per-token event, so counting its arrivals bounds the cache the
+                    // same way; the terminal clear fires when this job closure returns.
+                    let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                     let mut events = Vec::new();
                     let output = provider
                         .generate_svg(&typed_request, &mut |event| {
                             if let StarVectorStreamEvent::Progress { generated_tokens } = &event {
+                                cache_bound.note_token();
                                 // Only counters leave this private source boundary. A watch channel
                                 // stores one value even if decode outruns the async publisher.
                                 record_vector_token_progress(
