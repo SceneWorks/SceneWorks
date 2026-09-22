@@ -78,7 +78,15 @@ const DEFAULT_FILM_PLAN_MAX_NEW_TOKENS: u32 = 4096;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: RefineTask) -> u32 {
+fn resolve_max_new_tokens(
+    payload: &serde_json::Map<String, Value>,
+    task: RefineTask,
+    // sc-24113: the Qwen rewrite's budget is PER REWRITER (the two cards publish different
+    // ceilings), and which rewriter applies is a property of the REQUEST, not of the task. `None`
+    // for every other task, and for a rewrite it falls back to the smaller of the two — never to
+    // the worker's caption ceiling, which is far below either card.
+    rewriter: Option<crate::qwen_prompt_rewrite::Rewriter>,
+) -> u32 {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
@@ -87,7 +95,9 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: Refine
         .unwrap_or(match task {
             RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
             RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
-            RefineTask::QwenImageRewrite => crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS,
+            RefineTask::QwenImageRewrite => rewriter
+                .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
+                .max_new_tokens(),
             RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
             RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
         })
@@ -245,6 +255,32 @@ impl RefineTask {
         }
     }
 }
+/// The image-carrier invariant the generate closure asserts, as a named predicate (sc-24113).
+///
+/// Extracted from the `debug_assert!` so it can be tested directly: the assert itself sits AFTER a
+/// provider load, so no test in this lane can reach it, and the bug it hid was a wrong predicate
+/// rather than a wrong call site.
+///
+/// **One-directional.** "Images are present ⇒ the task declares it takes them." The converse is
+/// deliberately NOT asserted: a Qwen rewrite with zero references is the legitimate text-to-image
+/// case, and it is what selects the T2I rewriter over the editing one.
+///
+/// This replaced `carries_image == is_vision_task`, which held only while the two VISION tasks were
+/// the sole image carriers. The Qwen rewrite carries images with `is_vision()` FALSE — it is driven
+/// by the user's text and merely accepts pictures — so the equality panicked every I2I rewrite in a
+/// debug build.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn image_carrier_invariant_holds(
+    carries_image: bool,
+    takes_reference_images: bool,
+) -> bool {
+    !carries_image || takes_reference_images
+}
+
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
@@ -1188,7 +1224,7 @@ pub(crate) async fn run_prompt_refine_job(
         gen_core::core_llm::ThinkingMode::Auto => "auto",
         gen_core::core_llm::ThinkingMode::Disabled => "disabled",
     };
-    let max_new_tokens = resolve_max_new_tokens(payload, task);
+    let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
     let temperature = task.temperature();
     let work_message = task.work_message();
     let done_message = task.done_message();
@@ -1316,7 +1352,11 @@ pub(crate) async fn run_prompt_refine_job(
     // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture
     // set minimal.
     let emits_json = task.emits_json();
-    let is_vision_task = task.is_vision();
+    // sc-24113: the blocking closure's image invariant is "this task DECLARES it takes reference
+    // images", not "this task is a vision task" — the Qwen rewrite carries images while
+    // `is_vision()` is false. Copied out as a bool for the same reason `emits_json` is: so the
+    // closure's capture set stays minimal and names no enum.
+    let takes_reference_images = task.takes_reference_images();
     // Resolution requirements (see the sc-8105 note below): JSON-emitting tasks still select a
     // provider that supports JSON constraints, preserving the existing provider/cache identity.
     // After load, [`json_decode_constraint`] decides whether to apply the mask to this decode: an
@@ -1442,7 +1482,19 @@ pub(crate) async fn run_prompt_refine_job(
                 // — `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
                 // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
                 // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
-                debug_assert!(carries_image == is_vision_task);
+                //
+                // sc-24113 widened this from `carries_image == is_vision_task`. That equality was true
+                // only while the VISION tasks were the sole image carriers; the Qwen rewrite carries
+                // images with `is_vision()` FALSE (it is driven by the user's text and merely accepts
+                // pictures), so the old form panicked every I2I rewrite in a debug build. The invariant
+                // that actually holds — and the one worth asserting — is the one-directional implication:
+                // if images are present, the task must be one that declares it takes them. The converse
+                // is deliberately NOT asserted, because a rewrite with zero references is the legitimate
+                // text-to-image case.
+                debug_assert!(image_carrier_invariant_holds(
+                    carries_image,
+                    takes_reference_images
+                ));
                 emit_event(
                     "prompt_refine_load_complete",
                     json!({ "jobId": job_id, "engine": engine_label }),
@@ -1638,11 +1690,25 @@ pub(crate) async fn run_prompt_refine_job(
     let mut result_refined = refined.clone();
     let mut rewrite_suggestion = None;
     if let Some(rewriter) = qwen_rewriter {
+        // A budget exhausted mid-reasoning is the ONE failure worth distinguishing, because its fix
+        // is a number rather than a retry. These checkpoints reason first and emit the JSON object
+        // last, so running out loses the object entirely and the generic parse error ("did not
+        // return a JSON object") reads as a broken model. Checked BEFORE the parse, since the
+        // parse is guaranteed to fail in exactly this case and would otherwise win the report.
+        if output.finish_reason == Some(gen_core::core_llm::FinishReason::Length) {
+            return Err(WorkerError::Engine(
+                crate::qwen_prompt_rewrite::truncated_reply_error(rewriter, max_new_tokens),
+            ));
+        }
         let suggestion = crate::qwen_prompt_rewrite::parse_rewrite(&refined).map_err(|error| {
             WorkerError::Engine(format!(
                 "The Qwen Image 2.1 prompt rewriter ({}) returned output this build cannot read: \
-                 {error}",
-                rewriter.repo()
+                 {error}. The reply began: {}",
+                rewriter.repo(),
+                // Discarding the reply leaves nobody anything to act on — not the user reading the
+                // job's error, not whoever reads the log afterwards. Bounded, because a reply can
+                // be thousands of characters and an error message is not a transcript.
+                crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
             ))
         })?;
         rewrite_suggestion = Some(crate::qwen_prompt_rewrite::suggestion_result_block(
@@ -1959,6 +2025,135 @@ mod tests {
         );
     }
 
+    /// sc-24113 BLOCKER REGRESSION. The generate closure's image invariant must hold for every
+    /// task × image-presence combination the job can actually produce.
+    ///
+    /// The bug: the assert read `carries_image == is_vision_task`, an equality that was true only
+    /// while `image_caption`/`image_describe` were the sole image carriers. `QwenImageRewrite`
+    /// carries images with `is_vision()` FALSE, so **every I2I rewrite panicked in a debug build** —
+    /// and nothing caught it, because the assert sits after a provider load that no test in this
+    /// lane can reach. Hence the predicate is extracted and tested here instead.
+    ///
+    /// Restoring the equality (`carries_image == takes_reference_images`) in
+    /// `image_carrier_invariant_holds` reds the `QwenImageRewrite`-without-references row below;
+    /// restoring the original (`== is_vision()`) reds the with-references row too.
+    #[test]
+    fn the_generate_closures_image_invariant_holds_for_every_task_and_image_combination() {
+        // The property the rewrite broke, stated on its own: it takes images, and it is NOT a
+        // vision task. Both halves matter — the first is why it carries a `Content::Image`, the
+        // second is why the prompt stays required and zero references is legal.
+        assert!(RefineTask::QwenImageRewrite.takes_reference_images());
+        assert!(!RefineTask::QwenImageRewrite.is_vision());
+
+        for task in [
+            RefineTask::Rewrite,
+            RefineTask::MagicPrompt,
+            RefineTask::ImageCaption,
+            RefineTask::ImageDescribe,
+            RefineTask::FilmPlan,
+            RefineTask::QwenImageRewrite,
+        ] {
+            let takes = task.takes_reference_images();
+            // WITH images: legal exactly for a task that declares it takes them.
+            assert_eq!(
+                image_carrier_invariant_holds(true, takes),
+                takes,
+                "{task:?} with images"
+            );
+            // WITHOUT images: always legal. This is the row the old equality got wrong for the
+            // rewrite — a text-to-image rewrite carries none, and that is not a violation.
+            assert!(
+                image_carrier_invariant_holds(false, takes),
+                "{task:?} without images must never trip the assert"
+            );
+        }
+
+        // Spelled out for the one task whose two rows the two historical forms of this assert
+        // disagreed about, so a failure names the case rather than a loop index.
+        assert!(image_carrier_invariant_holds(
+            true,
+            RefineTask::QwenImageRewrite.takes_reference_images()
+        ));
+        assert!(image_carrier_invariant_holds(
+            false,
+            RefineTask::QwenImageRewrite.takes_reference_images()
+        ));
+    }
+
+    /// sc-24113 BLOCKER REGRESSION, the data half: drive the I2I rewrite's turn assembly and reply
+    /// handling with a fixture image and a fixture LLM reply.
+    ///
+    /// Everything the job does between "references resolved" and "result posted" EXCEPT the
+    /// provider call, which needs weights this lane does not run. The `Content::Image` blocks are
+    /// built from a real decoded PNG through the same `load_caption_image_ref` the job uses, so
+    /// `carries_image` is true for the same reason it is true in production — which is the
+    /// condition that used to panic.
+    #[test]
+    fn the_i2i_rewrite_path_assembles_image_turns_and_parses_a_fixture_reply() {
+        use crate::qwen_prompt_rewrite::{parse_rewrite, suggestion_result_block, Rewriter};
+        use gen_core::core_llm::{Content, Message, Role};
+
+        // Two real on-disk references, distinguishable so an ordering bug is visible.
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (index, colour) in [[200u8, 30, 30], [30, 200, 30]].into_iter().enumerate() {
+            let path = dir.path().join(format!("ref{index}.png"));
+            image::RgbImage::from_pixel(8, 8, image::Rgb(colour))
+                .save(&path)
+                .unwrap();
+            paths.push(path);
+        }
+        let image_refs: Vec<_> = paths
+            .iter()
+            .map(|path| load_caption_image_ref(path).expect("fixture reference decodes"))
+            .collect();
+        assert_eq!(image_refs.len(), 2);
+
+        // Request-shaped rewriter selection: references present ⇒ the EDITING half.
+        let rewriter = Rewriter::for_reference_count(image_refs.len());
+        assert_eq!(rewriter, Rewriter::Editing);
+
+        // The user turn the job builds: every image BEFORE the instruction text, exactly as the
+        // caption tasks do.
+        let task = RefineTask::QwenImageRewrite;
+        let mut content: Vec<Content> = image_refs.into_iter().map(Content::Image).collect();
+        content.push(Content::text("swap the backdrop".to_owned()));
+        let user = Message {
+            role: Role::User,
+            content,
+            thinking: None,
+            tool_calls: Vec::new(),
+        };
+        let carries_image = user
+            .content
+            .iter()
+            .any(|block| matches!(block, Content::Image(_)));
+
+        // THE REGRESSION: this exact pair reached the old `carries_image == is_vision_task` assert
+        // and panicked. `true, false` — images present, not a vision task.
+        assert!(carries_image);
+        assert!(!task.is_vision());
+        assert!(image_carrier_invariant_holds(
+            carries_image,
+            task.takes_reference_images()
+        ));
+
+        // The fixture reply, through the same cleanup + parse the completion arm runs.
+        let reply = "<think>Keep the courier, replace the backdrop.</think>\n\
+                     {\"rewritten_prompt\": \"Replace the grey backdrop with a sunlit alley\", \
+                     \"wh_ratio\": \"\", \"ratio_follow\": \"<image2>\"}";
+        let suggestion =
+            parse_rewrite(&clean_json_output(reply)).expect("the fixture reply parses");
+        assert_eq!(
+            suggestion.rewritten_prompt,
+            "Replace the grey backdrop with a sunlit alley"
+        );
+        let block = suggestion_result_block(&suggestion, rewriter, 2);
+        // `<image2>` is the SECOND reference the turn carried, i.e. index 1.
+        assert_eq!(block.get("followsReferenceIndex"), Some(&Value::from(1)));
+        assert_eq!(block.get("rewriter"), Some(&Value::from("i2i")));
+    }
+
     /// The rewrite's sampling and token budget are the PUBLISHED recipe, not the house defaults.
     ///
     /// Asserted through `RefineTask` (not just the constants) because the wiring is what could
@@ -1972,14 +2167,30 @@ mod tests {
             crate::qwen_prompt_rewrite::REWRITE_TEMPERATURE
         );
         assert_ne!(task.temperature(), RefineTask::Rewrite.temperature());
+        // The budget is PER REWRITER — each card's own published ceiling, not the worker's caption
+        // default. Capping below the card is not a safe economy: these checkpoints reason first and
+        // emit the JSON object last, so a budget that runs out loses the object entirely.
+        use crate::qwen_prompt_rewrite::{Rewriter, I2I_MAX_NEW_TOKENS, T2I_MAX_NEW_TOKENS};
+        assert_eq!(T2I_MAX_NEW_TOKENS, 16256);
+        assert_eq!(I2I_MAX_NEW_TOKENS, 24000);
+        assert_ne!(T2I_MAX_NEW_TOKENS, I2I_MAX_NEW_TOKENS);
         assert_eq!(
-            resolve_max_new_tokens(&serde_json::Map::new(), task),
-            crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS
+            resolve_max_new_tokens(&serde_json::Map::new(), task, Some(Rewriter::TextToImage)),
+            T2I_MAX_NEW_TOKENS
+        );
+        assert_eq!(
+            resolve_max_new_tokens(&serde_json::Map::new(), task, Some(Rewriter::Editing)),
+            I2I_MAX_NEW_TOKENS
+        );
+        // Never the caption ceiling, which is an order of magnitude below either card.
+        assert!(
+            resolve_max_new_tokens(&serde_json::Map::new(), task, None)
+                > DEFAULT_CAPTION_MAX_NEW_TOKENS
         );
         // An explicit override still wins, the same escape hatch every other task has.
         let payload = serde_json::json!({ "maxNewTokens": 256 });
         assert_eq!(
-            resolve_max_new_tokens(payload.as_object().unwrap(), task),
+            resolve_max_new_tokens(payload.as_object().unwrap(), task, Some(Rewriter::Editing)),
             256
         );
         // The progress copy says "review", not "applied" — the rewrite is a suggestion.
@@ -2193,23 +2404,23 @@ mod tests {
         let obj = |value: serde_json::Value| value.as_object().unwrap().clone();
         for task in [RefineTask::MagicPrompt, RefineTask::ImageCaption] {
             assert_eq!(
-                resolve_max_new_tokens(&obj(serde_json::json!({})), task),
+                resolve_max_new_tokens(&obj(serde_json::json!({})), task, None),
                 4096
             );
         }
         // A whole shot plan (sc-22713) takes the same generous ceiling.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::FilmPlan),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::FilmPlan, None),
             4096
         );
         // The prose-describe task (epic 8203) gets the in-between default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe, None),
             1024
         );
         // The free-text rewrite stays at the small default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite, None),
             512
         );
         // An explicit positive override wins for any task.
@@ -2219,7 +2430,11 @@ mod tests {
             RefineTask::FilmPlan,
         ] {
             assert_eq!(
-                resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 6000 })), task),
+                resolve_max_new_tokens(
+                    &obj(serde_json::json!({ "maxNewTokens": 6000 })),
+                    task,
+                    None
+                ),
                 6000
             );
         }
@@ -2227,14 +2442,16 @@ mod tests {
         assert_eq!(
             resolve_max_new_tokens(
                 &obj(serde_json::json!({ "maxNewTokens": 0 })),
-                RefineTask::MagicPrompt
+                RefineTask::MagicPrompt,
+                None
             ),
             4096
         );
         assert_eq!(
             resolve_max_new_tokens(
                 &obj(serde_json::json!({ "maxNewTokens": "nope" })),
-                RefineTask::Rewrite
+                RefineTask::Rewrite,
+                None
             ),
             512
         );
@@ -3967,8 +4184,8 @@ mod tests {
     #[ignore = "real-weight: needs an optional Qwen-Image-2.1-PE checkpoint staged + a Metal device"]
     fn qwen_prompt_rewrite_real_weights() {
         use crate::qwen_prompt_rewrite::{
-            load_system_prompt, parse_rewrite, suggested_resolution, Rewriter,
-            REWRITE_MAX_NEW_TOKENS, REWRITE_TEMPERATURE, REWRITE_TOP_K, REWRITE_TOP_P,
+            load_system_prompt, parse_rewrite, suggested_resolution, Rewriter, REWRITE_TEMPERATURE,
+            REWRITE_TOP_K, REWRITE_TOP_P, T2I_MAX_NEW_TOKENS,
         };
         use gen_core::core_llm::{
             LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
@@ -4004,7 +4221,7 @@ mod tests {
                 top_k: REWRITE_TOP_K,
                 ..Sampling::default()
             },
-            max_new_tokens: REWRITE_MAX_NEW_TOKENS,
+            max_new_tokens: T2I_MAX_NEW_TOKENS,
             seed: None,
             ..Default::default()
         };

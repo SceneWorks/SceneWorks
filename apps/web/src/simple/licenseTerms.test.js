@@ -90,6 +90,41 @@ describe("modelLicenseRows", () => {
     expect(row.badge.label).toBe("Non-commercial");
   });
 
+  it("covers the optional prompt rewriters, with a wired document and the same badge (sc-24113)", () => {
+    // The two PE checkpoints were in NO component. Three things went wrong at once and none of
+    // them failed a build: `check-license-coverage` named them but exits 0 (report-only), the
+    // About screen had no row for them, and `licenseBadge` — which reads `nonCommercial` off this
+    // manifest — had nothing to read, so research-only weights would have badged "Commercial OK".
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1-pe");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual([
+      "qwen_image_2_1_pe_t2i",
+      "qwen_image_2_1_pe_i2i",
+    ]);
+    expect(component.nonCommercial).toBe(true);
+    // Same agreement as the base weights, so the same trap: the TITLE carries no marker and the
+    // flag is what makes the badge right.
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+
+    // The document must RESOLVE, not merely be named: `bundledLicenses` drops any document whose
+    // key has no bundled URL, so an unwired key would leave an About row with nothing to open.
+    expect(component.documents).toHaveLength(1);
+    expect(component.documents[0].key).toBe("qwen-image-2-1-research");
+    expect(typeof component.documents[0].url).toBe("string");
+
+    const row = modelLicenseRows(bundledLicenses).find(
+      (entry) => entry.id === "qwen-image-2-1-pe",
+    );
+    expect(row).toBeTruthy();
+    expect(row.license).toBe("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(row.badge.label).toBe("Non-commercial");
+
+    // A SEPARATE row from the weights — different repositories, different purpose — so the About
+    // screen does not imply the rewriters are part of the image model's download.
+    expect(row.id).not.toBe("qwen-image-2-1");
+  });
+
   it("falls back to the licence name for a component that declares no flag", () => {
     // Every pre-existing component keeps the badge it had: no `nonCommercial` key, name match only.
     const fluxDev = bundledLicenses.find((entry) => entry.id === "flux1-dev");

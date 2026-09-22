@@ -12686,21 +12686,26 @@ fn qwen_edit_engine_id_maps_variants() {
     assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
 }
 
-/// sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+/// sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the DEFAULT
+/// is upstream-parity truncation.
 ///
-/// `DynamicImage::to_rgb8()` converts RGBA→RGB by dropping the fourth byte, and 2.1's alpha is
-/// STRAIGHT — `A=0` does NOT zero RGB — so a fully transparent pixel keeps whatever colour it was
-/// authored with. Truncating therefore fed the VAE a reference the user never saw: a transparent
-/// background arrived as whatever the encoder left behind, commonly black. This is the case that
-/// used to be silently wrong, so the fixture is deliberately the adversarial one — a transparent
-/// pixel whose hidden RGB is pure black, which truncation and compositing disagree about
-/// maximally.
+/// Both answers are correct for different upstream pipelines, and the distinction is invisible
+/// unless a reference genuinely carries transparency — which is why getting it wrong is silent.
+/// `to_rgb8()` drops the fourth byte exactly as `PIL.Image.convert("RGB")` does, so every edit model
+/// shipped before 2.1 (SDXL inpaint, FLUX.2 edit, Kolors IP-adapter, `qwen_image_edit_2511`) is at
+/// parity only under `Truncate`. `OverWhite` matches the S4 contract's `to_rgb_over_white()`, which
+/// is what 2.1's vision tower is fed.
 ///
-/// Also pins the OPAQUE case byte-for-byte, because a composite that is not the identity on
-/// `A=255` would silently shift every existing reference in the app.
+/// The fixture is deliberately adversarial: a fully transparent pixel whose hidden RGB is pure
+/// BLACK. 2.1's alpha is straight — `A=0` does NOT zero RGB — so the two policies disagree
+/// maximally there (`[0,0,0]` vs `[255,255,255]`) and agree exactly on the opaque pixels.
+///
+/// Flipping `FlattenPolicy`'s `#[default]` to `OverWhite` reds the truncation half below; that is
+/// the mutation this test exists to catch, because the first cut of sc-24113 composited on EVERY
+/// lane and moved every pre-2.1 model off parity without a single test noticing.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_alpha_carrying_reference_is_composited_over_white_not_truncated() {
+fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_request() {
     let data_dir = tempfile::tempdir().unwrap();
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
@@ -12739,18 +12744,75 @@ fn an_alpha_carrying_reference_is_composited_over_white_not_truncated() {
         "the fixture genuinely carries alpha, or this test proves nothing"
     );
 
-    let image =
+    // DEFAULT — what every pre-2.1 model gets. Raw RGB bytes, alpha dropped, upstream parity.
+    let truncated =
         load_reference_image(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap();
-    assert_eq!((image.width, image.height), (2, 2));
-    assert_eq!(image.pixels.len(), 2 * 2 * 3);
+    assert_eq!((truncated.width, truncated.height), (2, 2));
+    assert_eq!(truncated.pixels.len(), 2 * 2 * 3);
+    // A=0 with hidden BLACK stays black — `convert("RGB")` semantics, and the byte-for-byte
+    // behaviour SDXL inpaint / FLUX.2 edit / Kolors / qwen_image_edit_2511 are compared against.
+    assert_eq!(&truncated.pixels[0..3], &[0, 0, 0]);
+    // A=128 red keeps its raw red; the alpha byte is simply not consulted.
+    assert_eq!(&truncated.pixels[3..6], &[255, 0, 0]);
+    assert_eq!(&truncated.pixels[6..9], &[0, 255, 0]);
+    assert_eq!(&truncated.pixels[9..12], &[0, 0, 0]);
 
-    // A=0 over white is WHITE. Truncation would have produced [0, 0, 0] — the exact silent defect.
-    assert_eq!(&image.pixels[0..3], &[255, 255, 255]);
+    // The default really is `Truncate` — asserted on the enum too, so a changed `#[default]` fails
+    // here by name rather than only through the bytes above.
+    assert_eq!(FlattenPolicy::default(), FlattenPolicy::Truncate);
+
+    // OPT-IN — the S4 `to_rgb_over_white()` semantics 2.1's vision tower wants.
+    let composited = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &asset_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    // A=0 over white is WHITE — maximally different from the truncated [0, 0, 0] above.
+    assert_eq!(&composited.pixels[0..3], &[255, 255, 255]);
     // A=128 red over white: 255*128/255 + 255*127/255 = 255 red; 0*128/255 + 255*127/255 = 127.
-    assert_eq!(&image.pixels[3..6], &[255, 127, 127]);
-    // A=255 is the identity, so every already-shipped opaque reference is byte-for-byte unchanged.
-    assert_eq!(&image.pixels[6..9], &[0, 255, 0]);
-    assert_eq!(&image.pixels[9..12], &[0, 0, 0]);
+    assert_eq!(&composited.pixels[3..6], &[255, 127, 127]);
+    // A=255 is the IDENTITY under both policies, which is why an opaque reference cannot be
+    // perturbed by this choice no matter which lane loads it.
+    assert_eq!(&composited.pixels[6..9], &truncated.pixels[6..9]);
+    assert_eq!(&composited.pixels[9..12], &truncated.pixels[9..12]);
+
+    // An OPAQUE source is byte-identical under both policies — the same `to_rgb8()` call — so no
+    // existing reference in the app can move whichever policy a future caller picks.
+    let opaque_file = data_dir.path().join("opaque.png");
+    image::RgbImage::from_pixel(2, 2, image::Rgb([17, 34, 51]))
+        .save(&opaque_file)
+        .unwrap();
+    let opaque_asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "opaque.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: opaque_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let opaque_id = opaque_asset["id"].as_str().unwrap().to_owned();
+    assert!(
+        !reference_carries_alpha(&settings.data_dir, &project.id, &opaque_id, &project_path)
+            .unwrap()
+    );
+    let opaque_default =
+        load_reference_image(&settings.data_dir, &project.id, &opaque_id, &project_path).unwrap();
+    let opaque_over_white = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &opaque_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    assert_eq!(opaque_default.pixels, opaque_over_white.pixels);
 }
 
 #[cfg(target_os = "macos")]

@@ -3321,6 +3321,14 @@
         //   preset ladder (what `modelDimensionConstraints` did before it had these keys) would have
         //   given 1536..2752 — the extremes of the seven buckets — which is not the engine's
         //   envelope and would have refused every legal small size.
+        //
+        // ⚠️ The grid is enforced AT ENQUEUE only because this entry declares the OTHER TWO keys
+        // as well. `requiresDimensionsMultipleOf` on its own stays advisory, as it has always been
+        // on the image lane: the six shipped `mage_flow*` entries declare `16` with no min/max, and
+        // their only reader is the Studio's free Width/Height control, which SNAPS. Enforcing a
+        // bare stride would have turned that silent snap into a 400 and rejected off-grid sizes
+        // those models have always accepted, including stored recipes and workflow replays. See
+        // `image_dimension_error` in crates/sceneworks-core/src/video_request.rs.
         "minDimension": 32,
         "maxDimension": 2752,
         "requiresDimensionsMultipleOf": 32,
@@ -27106,7 +27114,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3601851b0806f09a131914ba3ceccc43256075db4a990b2a3b35d1a9c7c8d2af",
+              "sha256": "e448cdf4ec8491ecd340d13b64c4cf55736baa55633791a392b9fe95bfe6b7f1",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27195,8 +27203,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 219831,
-                  "sha256": "ae79a9ee280b55e92c082cc5ad26855ed62e6ff4a55a9f9e2ab118d53e8ca986"
+                  "byteSize": 231504,
+                  "sha256": "fc2d2e3d4793f0bdcb20e768cd94ed928292e4d683ed0e0e75726ecb3ae9a1a8"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -27220,8 +27228,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 140012,
-                  "sha256": "9ed31c966613cea6c49cace82929b0f0f6947bb80e2cba9ffabdf8996410b32e"
+                  "byteSize": 140316,
+                  "sha256": "4efc9da0e06810119538eb0eff543d82e6ae5a3c8f342629783efd99a3b3b71b"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

@@ -39,6 +39,7 @@ import {
   TRANSPARENCY_PROMPT_HINT,
 } from "../qwenAlpha.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
+import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
@@ -846,6 +847,11 @@ export function ImageStudio() {
   // downloaded checkpoints, and WHICH ONE applies is decided by the request rather than by a
   // picker: references attached ⇒ the editing rewriter, none ⇒ the text-to-image one. The catalog
   // ids mirror `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`'s `Rewriter::catalog_id`.
+  // Name an asset the way the rest of this screen does, for the ordered-reference rail.
+  const assetLabelFor = useCallback(
+    (id) => editImageAssets.find((asset) => asset.id === id)?.name ?? id,
+    [editImageAssets],
+  );
   const qwenRewriteReferenceIds = useMemo(() => {
     // The SAME ordered list the Generate button will send, so the rewrite sees what the render
     // will. `referenceAssetIds` is the plural multi-reference picker; `referenceAssetId` /
@@ -3365,6 +3371,16 @@ export function ImageStudio() {
                     onChange={setReferenceAssetIds}
                     values={referenceAssetIds}
                   />
+                ) : null}
+                {/* sc-24113: the ORDER of these references is part of the request for a model whose
+                    template numbers them, so show it and let the user change it. Renders nothing
+                    below two references — there is no order to show with one. */}
+                {multiReference ? (
+                  <OrderedReferenceList
+                    assetIds={referenceAssetIds}
+                    labelFor={assetLabelFor}
+                    onChange={setReferenceAssetIds}
+                  />
                 ) : (
                   <>
                     <ImageEditSourcePickerField
@@ -3410,6 +3426,13 @@ export function ImageStudio() {
                         multiple
                         onChange={setReferenceAssetIds}
                         values={referenceAssetIds}
+                      />
+                    ) : null}
+                    {sourceWithMultiReference ? (
+                      <OrderedReferenceList
+                        assetIds={referenceAssetIds}
+                        labelFor={assetLabelFor}
+                        onChange={setReferenceAssetIds}
                       />
                     ) : null}
                   </>
