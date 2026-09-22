@@ -30,7 +30,7 @@ export function abortableDelay(ms, signal) {
 // centralises that mechanism while keeping every per-caller variation explicit:
 //   - createPath   : the enqueue endpoint (e.g. "/api/v1/prompts/refine").
 //   - body         : the JSON body object to POST (stringified here).
-//   - deadlineMs    : the caller's own poll deadline (refine=120s, the rest=180s).
+//   - deadlineMs    : the caller's own poll deadline (180s for every current caller).
 //   - resolveResult : (job) => value — invoked once the job is "completed"; each caller
 //                     extracts + validates its own result field here and throws its own
 //                     "empty result" error, so the completion semantics stay per-caller.

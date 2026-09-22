@@ -29,13 +29,15 @@ explicitly flagged as wanting a human ear: A6a SH060 (§6).
 | Measured GPU work inside it | 6 653 s (A5 756 s + A6a 5 022 s + A6b 875 s) + 202 s locator compile |
 | Hardware / OS | Apple M5 Max, 128 GB unified, macOS 26.6.2; one MLX worker, one GPU process at a time, SIGTERM-only teardown |
 | Renderer | MiniMax-H3 q4; reference partition `minimax_h3_ref` for A6a, base `minimax_h3` for A6b; turbo 4-step LoRAs; 576x320, 24 fps, 5.1667 s clips |
-| Packs | A5/A6a: `courier-refs/references.jsonc` (schemaVersion 2, 7 roles / 7 images, the sc-23403 Krea plates + the checked-in sound block — §8.1). A5/A6b: `references.described.jsonc` (6 roles, **0 images**, all described-only). Locator cell: `locator-refs/` (a fixture built for this pass). |
+| Packs | A5/A6a: `courier-refs/references.jsonc` (schemaVersion 2, 7 roles / 7 images, the sc-23403 Krea plates + the checked-in sound block — §8 item 1). A5/A6b: `references.described.jsonc` (6 roles, **0 images**, all described-only). Locator cell: `locator-refs/` (a fixture built for this pass). |
 | Guard | external 1 s RSS loop (`guard.sh`), 40 GB cap for planner phases, 80 GB for renders, `kill -TERM` only. **Never fired on any run.** |
 | Disk | 382 → 378 GB free throughout (declared floor 40 GB) |
 | CI | no `Runner.Worker` active at any point; the runner *listener* was idle-resident and is not a GPU process |
 
 **Verdict: every mechanism the epic adds is present, correctly placed and recorded, on all 18
-compiled requests across three packs.** A6a scored above the phase-2 turbo baseline; A6b confirmed
+compiled requests across three packs.** A6a scored one point above the phase-2 turbo baseline,
+read as **no regression, not +1** — the prompts changed between the two passes and each take is a
+single draw, so the difference is within what one sample can say. A6b confirmed
 the identity lock's expected behaviour and, unexpectedly, showed exactly *why* it fails where it
 fails. The defects found are in §8 and **none of them is in the anchoring code**.
 
@@ -336,6 +338,10 @@ the evidence here.**
    refiner rewrite); SH060's prompt has zero gendered words and shows only hands, so it is not a
    control either way. Confidence that the plan/plate inconsistency is real and can now visibly flip
    the rendered person: **high**. Fixed in the checked-in fixtures by this story — see §8.2.
+   **Consequence for reproduction:** every A5 and A6a document measured in this report was produced
+   *before* that fixture edit, so those measured plans, briefs and compiled documents are **not
+   byte-reproducible** from the checked-in fixtures at this PR's head; the evidence directory holds
+   the exact inputs they were produced from.
 4. **An uninvited person in A6b SH040.** `continuityRoles` name the recipient and the startState is
    "empty workshop, parcel alone on the workbench, door closed", but the take puts the **courier in
    the doorway** three shots after she left. Scored identity 0 by the rubric's own wording ("an extra
@@ -345,10 +351,18 @@ the evidence here.**
    matched insertion kinds in camelCase where the document uses snake_case. Both were corrected and
    **all three cells re-verified from scratch** with the corrected checker; the results in §3 are the
    corrected ones.
+6. **The male recipient's two dialogue lines were cast with a female voice (fixed here).** Both
+   `recipient_*` entries in `config/film-harness/courier-workshop/references.jsonc` named the Kokoro
+   voice `af_heart`, on the same role the approved plate shows as a man and whose own `description`
+   says "as **he** notices the parcel" — the audio half of the finding in item 3. Recast to `am_eric`
+   (the courier keeps `am_michael`, so the two speakers stay distinguishable). **The A6a runs scored
+   in this report were made with `af_heart`, and their sound scores stand**: §4.1 scores bed
+   continuity, the dialogue slot's RMS and the absence of energy outside the slot, all of which are
+   timbre-insensitive — no scored criterion asks who the voice sounds like.
 
 ### 8.1 The refiner's token budget
 
-RESULTS.md left §8.2 as "worth a look at the refine job's token budget". It was looked at, and **it
+RESULTS.md left §6 item 2 as "worth a look at the refine job's token budget". It was looked at, and **it
 is a defect, fixed in this story.**
 
 The per-shot film refine is dispatched with **no `task` field** — `apps/rust-api/src/film_planner.rs`
@@ -357,36 +371,60 @@ payload with no task classifies as `RefineTask::Rewrite`
 (`crates/sceneworks-worker/src/prompt_refine_jobs.rs`, `RefineTask::from_payload`), and `Rewrite`
 carried the smallest of the four budgets:
 
-| task | budget (tokens) | reachable chars at ~2.83 chars/token |
-| --- | --- | --- |
-| `MagicPrompt` / `ImageCaption` | 4096 | ~11 600 |
-| `FilmPlan` | 4096 | ~11 600 |
-| `ImageDescribe` | 1024 | ~2 900 |
-| **`Rewrite`** (the film shot refine) | **512** | **~1 450** |
+| task | budget (tokens) |
+| --- | --- |
+| `MagicPrompt` / `ImageCaption` | 4096 |
+| `FilmPlan` | 4096 |
+| `ImageDescribe` | 1024 |
+| **`Rewrite`** (the film shot refine) | **512** |
 
-The output contract for that rewrite is `sceneworks_core::MAX_PROMPT_CHARS` = **4000** chars, which
-needs **~1414 tokens** at the ratio this file itself states ("4096 ≈ ~11.6k chars"). **512 tokens
-could not reach the contract**, so the generation ended on `MaxTokens` rather than on EOS — exactly
-the mid-sentence cut observed on SH060. The budget's comment still described the caller it was sized
-for in 2018 ("the free-text rewrite is a one-liner (512 is ample)"); the per-shot film refine was
-never revisited when film shots began emitting multi-field MiniMax-H3 blocks. The override path does
-not rescue it either: `PromptRefineRequest` has no `maxNewTokens` field, so 512 was effectively
-hard-coded on this route.
+The output contract for that rewrite is `sceneworks_core::MAX_PROMPT_CHARS` = **4000** chars, and the
+budget is derived here from what the refiner was **measured** emitting, not from a nominal ratio.
+`a5-image/smoke.log` records all six shot rewrites of the A5 image-pack compile at the old 512-token
+cap:
 
-**Fix (minimum change):** `DEFAULT_REFINE_MAX_NEW_TOKENS` 512 → **1536** (≈4350 chars, the contract
-plus headroom). A rewrite that has said what it has to say still emits EOS far below the cap, so this
+| SH010 | SH020 | SH030 | SH040 | SH050 | SH060 |
+| --- | --- | --- | --- | --- | --- |
+| 2922 | 1759 | 1584 | 2166 | 1739 | 2663 |
+
+So 512 tokens of this refiner's **prose** reaches **~2900 chars at its longest** (≈5.7 chars/token —
+prose packs far more per token than the JSON captions the other budgets were sized for). That
+observed ceiling is **below the 4000-char contract**, which is the defect: a rewrite with more than
+~2900 chars to say stops on `MaxTokens` rather than on EOS — exactly the mid-sentence cut observed on
+SH060 (3026 chars, at the boundary because its prompt carried a preserved prefix). At the measured
+prose ratio the contract needs only **~700 tokens**.
+
+The budget's comment still described the caller it was sized for ("the free-text rewrite is a
+one-liner (512 is ample)"); the per-shot film refine was never revisited when film shots began
+emitting multi-field MiniMax-H3 blocks. The override path does not rescue it either:
+`PromptRefineRequest` has no `maxNewTokens` field, so 512 was effectively hard-coded on this route.
+
+**Fix (minimum change):** `DEFAULT_REFINE_MAX_NEW_TOKENS` 512 → **1536** — a little over twice the
+~700 tokens the measured prose ratio requires, so the contract is reachable with real headroom for a
+denser rewrite. A rewrite that has said what it has to say still emits EOS far below the cap, so this
 only rescues the truncating cases and costs nothing on the normal path. Guarded by a new unit test
-that asserts the **contract** — budget × the file's own chars-per-token figure ≥ `MAX_PROMPT_CHARS` —
-rather than the literal, so shrinking the budget or raising the cap fails in CI rather than in a
-render.
+that asserts the **contract** — budget × chars-per-token ≥ `MAX_PROMPT_CHARS` — rather than the
+literal, so shrinking the budget or raising the cap fails in CI rather than in a render. That test
+and the constant's comment use **2.83 chars/token**, which is deliberately *not* the prose ratio: it
+is the conservative floor the JSON-caption path implies (4096 ≈ ~11.6k chars), chosen so the
+assertion holds even for the densest output this task can emit. 1536 clears it (~4350 chars) as well
+as clearing the measured prose requirement by more than 2x.
 
-**One adjacent finding is left open and is Michael's call, not an agent's.** A `Rewrite` that
-finishes on `FinishReason::Length` is treated as an ordinary success: the "exhausted its
-{max_new_tokens}-token output budget" message is raised only for `FilmPlan` **and** only when the
-output is empty, and `finishReason` is recorded on the *failure* result, not the success one. So a
-truncated-but-non-empty rewrite completes silently — which is why this went unnoticed until a human
-read SH060's prompt. Raising the budget removes the trigger, not the blind spot. Surfacing it rather
-than fixing it here because it changes the job-result shape, which is beyond this story's scope.
+**The adjacent `FinishReason::Length` blind spot is fixed here too.** A `Rewrite` that finished on
+`Length` was treated as an ordinary success: the "exhausted its {max_new_tokens}-token output budget"
+message is raised only for `FilmPlan` **and** only when the output is empty, and `finishReason` was
+recorded on the *failure* result, not the success one — so a truncated-but-non-empty rewrite
+completed silently, which is why this went unnoticed until a human read SH060's prompt. Raising the
+budget removes the trigger, not the blind spot, so both were closed:
+
+- `refine_result` now carries the same additive `generation` object `refine_failure_result` already
+  built (`finishReason`, `usage`, `maxNewTokens`). Purely additive JSON — no existing key changes.
+- `film_planner.rs` treats a shot rewrite whose `generation.finishReason` is `"length"` as a **failed
+  rewrite**: the shot falls back to its authored prompt and the compile emits a planner finding
+  naming the shot, instead of compiling truncated prose into the request. The execution record keeps
+  the `length` finish reason.
+
+Both are covered without a GPU through the existing `run_fake_refine_job` scripting seam.
 
 ### 8.2 The recipient's gender in the checked-in fixtures (fixed here)
 
@@ -394,7 +432,7 @@ The `recipient` plate is **approved and is a man** (`references/recipient.png`; 
 generator prompt is gender-neutral — "a workshop owner … arms relaxed at their sides" — so the man is
 the image model's draw, and the plate is the approved artifact). Every checked-in document that binds
 that role against `references.jsonc` nevertheless called the recipient "she" or "a woman". Phase 2
-recorded this as a document-consistency finding and it stayed open; §8.3 shows it is no longer
+recorded this as a document-consistency finding and it stayed open; §8 item 3 shows it is no longer
 cosmetic, because the refiner now amplifies the plan's pronouns into the dispatched prompt.
 
 Corrected in this story so the checked-in plans, brief, review plan and pack agree with the approved

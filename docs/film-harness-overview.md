@@ -642,7 +642,7 @@ six shots and the same evaluator method, so the numbers are comparable column fo
   (`docs/film-harness-evaluation-phase-2.md:139`);
 - **cost metrics** per cell: wall clock, s/step, peak memory, and wall per accepted second.
 
-Headline numbers, both passes:
+Headline numbers, all three passes:
 
 | pass | configuration | picture /72 | render wall | s/step | peak | wall per accepted second |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -652,7 +652,7 @@ Headline numbers, both passes:
 | 2 | SH010 alone at 1344x768, 50 steps | 12/12 | 23 961 s | 457 | 28.8 GB | 4 638 s |
 | 2 | SH010 + SH050, reference edge 1024, 50 steps | 24/24 (vs 22/24 at 2048) | 3 376 s | 30–32 | 16.3 GB | 327 s |
 | 3 (2026-09-22) | prompt anchoring on, references + turbo 4-step, edge 2048 | **65** (+ 2/2 sound) | 4 876 s | — | 33.7 GB † | 157 s |
-| 3 | described-only, **no references**, base `minimax_h3`, turbo 4-step | **49** | 570 s | — | 33.7 GB † | 18 s |
+| 3 | described-only, **no references**, base `minimax_h3`, turbo 4-step | **49** | 570 s | — | 33.7 GB † | 55 s (570 s / 10.33 s accepted — SH010 + SH020; the other four shots were rejections) |
 
 † one guard-sampled peak for the whole A6a + A6b + locator stack, not a per-cell figure, and a
 transient at the refiner→H3 handover; steady-state rendering sat at 15–29 GB

@@ -248,6 +248,8 @@ impl PlannerLlm for OpenAiPlannerLlm {
                     text,
                     thinking: execution.thinking.clone(),
                     elapsed_seconds: execution.duration_seconds.unwrap_or_default(),
+                    // sc-24029: same refusal applies to a hosted planner's truncated reply.
+                    finish_reason: execution.finish_reason.clone(),
                     execution: Some(execution),
                     ..LlmReply::default()
                 }),

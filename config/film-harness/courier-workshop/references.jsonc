@@ -41,8 +41,8 @@
   // a real recording and bump `version`; nothing else changes.
   "sound": [
     { "role": "courier_line", "kind": "dialogue", "voice": "am_michael", "text": "Delivery. I'll leave it on the bench.", "description": "The courier's line in SH020." },
-    { "role": "recipient_line", "kind": "dialogue", "voice": "af_heart", "text": "Huh. That's not mine.", "description": "The recipient's line in SH050, quietly, as he notices the parcel." },
-    { "role": "recipient_reveal_line", "kind": "dialogue", "voice": "af_heart", "text": "Oh. Oh, that's lovely.", "description": "The recipient's line in SH060, as the lid lifts." },
+    { "role": "recipient_line", "kind": "dialogue", "voice": "am_eric", "text": "Huh. That's not mine.", "description": "The recipient's line in SH050, quietly, as he notices the parcel." },
+    { "role": "recipient_reveal_line", "kind": "dialogue", "voice": "am_eric", "text": "Oh. Oh, that's lovely.", "description": "The recipient's line in SH060, as the lid lifts." },
     { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav", "description": "Continuous workshop room tone (100 Hz, 32s)." },
     { "role": "main_theme", "kind": "music", "file": "sound/main_theme.wav", "description": "Continuous music bed (250 Hz, 32s)." }
   ]

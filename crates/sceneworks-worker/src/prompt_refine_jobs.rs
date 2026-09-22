@@ -52,11 +52,21 @@ const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
 // The free-text rewrite was budgeted as a one-liner (512 tokens) when its only caller refined a
 // single sentence. It is now also the per-shot film refine (`film_planner.rs` sends no `task`, so a
 // shot prompt classifies as `Rewrite`), whose output contract is `MAX_PROMPT_CHARS` = 4000 chars of
-// multi-field MiniMax-H3 prose. At this file's own stated ratio (4096 ≈ ~11.6k chars, i.e. ~2.83
-// chars/token) 4000 chars needs ~1414 tokens, so 512 could not reach the contract from either end:
-// generation stopped on `MaxTokens` mid-sentence rather than on EOS (sc-24029 measured a film shot
-// cut at 3026/4000 chars). 1536 covers the contract with headroom; a rewrite that has said what it
-// has to say still emits EOS far below the cap, so this only rescues the truncating cases.
+// multi-field MiniMax-H3 prose.
+//
+// Sized from MEASUREMENT, not from a nominal ratio: sc-24029's six shot rewrites at the old 512-token
+// cap emitted 1584-2922 chars (`a5-image/smoke.log` in that story's evidence dir), i.e. this
+// refiner's prose runs ~5.7 chars/token and 512 tokens tops out around 2900 chars — BELOW the
+// 4000-char contract, so a rewrite with more to say stopped on `MaxTokens` mid-sentence rather than
+// on EOS (a film shot shipped cut at 3026/4000 chars). At that measured ratio the contract needs only
+// ~700 tokens; 1536 is a little over twice that, so the contract is reachable with real headroom for
+// a denser rewrite. A rewrite that has said what it has to say still emits EOS far below the cap, so
+// this only rescues the truncating cases.
+//
+// `the_rewrite_budget_covers_the_refined_prompt_char_contract` guards it at 2.83 chars/token, which
+// is deliberately NOT the prose ratio above: it is the conservative floor the JSON-caption path
+// implies (4096 ≈ ~11.6k chars), so the assertion holds even for the densest output this task can
+// emit. 1536 clears that floor too (~4350 chars).
 #[cfg(any(
     test,
     target_os = "macos",
@@ -1558,6 +1568,9 @@ pub(crate) async fn run_prompt_refine_job(
                 &model,
                 backend,
                 thinking_mode_name,
+                output.finish_reason,
+                output.usage,
+                max_new_tokens,
             )),
             backend,
         ),
@@ -1666,11 +1679,39 @@ fn refine_progress(
     }
 }
 
+/// How the decode ended, beside the budget it ended against (sc-24029).
+///
+/// Carried on BOTH the success and the failure result. A `Rewrite` that stops on
+/// `FinishReason::Length` is non-empty and therefore a "success" as far as this job is concerned,
+/// but its text is truncated mid-sentence — and the caller that cannot tolerate that (the film
+/// planner's per-shot rewrite, whose output feeds a compiled request) has no other way to know.
+/// Purely additive: no existing key changes shape, so every current reader is unaffected.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn generation_block(
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
+) -> Value {
+    json!({
+        "finishReason": finish_reason_name(finish_reason),
+        "usage": {
+            "promptTokens": usage.prompt_tokens,
+            "generatedTokens": usage.generated_tokens,
+        },
+        "maxNewTokens": max_new_tokens,
+    })
+}
+
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn refine_result(
     original_prompt: &str,
     refined_prompt: &str,
@@ -1678,6 +1719,9 @@ fn refine_result(
     model: &str,
     backend: &str,
     thinking_mode: &str,
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
@@ -1685,6 +1729,10 @@ fn refine_result(
     if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
         result.insert("thinking".to_owned(), json!(thinking));
     }
+    result.insert(
+        "generation".to_owned(),
+        generation_block(finish_reason, usage, max_new_tokens),
+    );
     result.insert(
         "executionIdentity".to_owned(),
         json!({
@@ -1757,14 +1805,7 @@ fn refine_failure_result(
     }
     result.insert(
         "generation".to_owned(),
-        json!({
-            "finishReason": finish_reason_name(finish_reason),
-            "usage": {
-                "promptTokens": usage.prompt_tokens,
-                "generatedTokens": usage.generated_tokens,
-            },
-            "maxNewTokens": max_new_tokens,
-        }),
+        generation_block(finish_reason, usage, max_new_tokens),
     );
     result.insert(
         "executionIdentity".to_owned(),
@@ -1795,6 +1836,12 @@ mod tests {
             "Qwen/Qwen3.6-27B",
             "mlx",
             "enabled",
+            Some(gen_core::core_llm::FinishReason::Stop),
+            gen_core::core_llm::Usage {
+                prompt_tokens: 1_024,
+                generated_tokens: 32,
+            },
+            4_096,
         );
         assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
         assert_eq!(result["thinking"], "private reasoning");
@@ -1806,6 +1853,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("private reasoning"));
+    }
+
+    /// sc-24029. A `Rewrite` that stops on `Length` is non-empty, so it completes as a SUCCESS —
+    /// and the caller that must not compile truncated prose (the film planner's per-shot rewrite)
+    /// could not tell, because `finishReason` was recorded only on the failure result. The success
+    /// result now carries the same additive `generation` object.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn a_truncated_but_non_empty_rewrite_reports_its_length_finish_on_the_success_result() {
+        use gen_core::core_llm::{FinishReason, Usage};
+
+        let result = refine_result(
+            "a courier sets a parcel down",
+            "A courier sets the parcel on the bench. overall_soundscape:\n  The only",
+            None,
+            "TheDrummer/Anubis-Mini-8B-v1",
+            "mlx",
+            "disabled",
+            Some(FinishReason::Length),
+            Usage {
+                prompt_tokens: 900,
+                generated_tokens: 1_536,
+            },
+            1_536,
+        );
+        assert_eq!(result["generation"]["finishReason"], "length");
+        assert_eq!(result["generation"]["usage"]["promptTokens"], 900);
+        assert_eq!(result["generation"]["usage"]["generatedTokens"], 1_536);
+        assert_eq!(result["generation"]["maxNewTokens"], 1_536);
+        // Additive only: the keys every existing reader uses are untouched.
+        assert_eq!(result["originalPrompt"], "a courier sets a parcel down");
+        assert!(result["refinedPrompt"].as_str().unwrap().ends_with("only"));
+        assert_eq!(result["executionIdentity"]["backend"], "mlx");
     }
 
     #[test]
@@ -1991,11 +2074,15 @@ mod tests {
     /// prompt it must produce is bounded by `sceneworks_core::MAX_PROMPT_CHARS`. A budget that
     /// cannot reach the contract truncates the rewrite mid-sentence and still reports success,
     /// which is how a 3026/4000-char film shot prompt shipped. Asserted as the CONTRACT (budget ×
-    /// the file's own chars-per-token figure ≥ the char cap) rather than as a literal, so shrinking
-    /// the budget or raising the cap fails here rather than in a render.
+    /// chars-per-token ≥ the char cap) rather than as a literal, so shrinking the budget or raising
+    /// the cap fails here rather than in a render.
     #[test]
     fn the_rewrite_budget_covers_the_refined_prompt_char_contract() {
-        // The stated ratio in this file's own header: 4096 tokens ≈ ~11.6k chars.
+        // ~2.83 chars/token, from the JSON-caption path this file already states (4096 ≈ ~11.6k
+        // chars). This is a deliberately CONSERVATIVE FLOOR, not the rate this task's prose
+        // actually achieves: sc-24029 measured the refiner's shot rewrites at ~5.7 chars/token
+        // (1584-2922 chars from a 512-token budget). The floor is used here so the assertion holds
+        // even for the densest output the task can emit; the budget clears both figures.
         const CHARS_PER_TOKEN: f64 = 11_600.0 / 4096.0;
 
         let budget = f64::from(DEFAULT_REFINE_MAX_NEW_TOKENS);

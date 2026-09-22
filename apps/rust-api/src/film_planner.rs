@@ -134,6 +134,10 @@ pub struct LlmReply {
     pub execution: Option<PlannerExecutionRecord>,
     pub elapsed_seconds: f64,
     pub peak_memory_bytes: Option<u64>,
+    /// How the decode ENDED, as the backend reported it (sc-24029): `"stop"`, `"length"`, … A
+    /// `"length"` reply is truncated mid-sentence, and the shot-rewrite caller must refuse it
+    /// rather than compile it — see [`compile_and_write`]. `None` when the backend reported none.
+    pub finish_reason: Option<String>,
 }
 
 pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmReply, HarnessError>> + Send + 'a>>;
@@ -388,6 +392,15 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                         let identity = result
                             .and_then(|result| result.get("executionIdentity"))
                             .and_then(Value::as_object);
+                        // sc-24029: the worker records how the decode ended on the SUCCESS result
+                        // too, because a rewrite that stopped on `length` is non-empty and so
+                        // completes normally while being truncated mid-sentence.
+                        let finish_reason = result
+                            .and_then(|result| result.get("generation"))
+                            .and_then(|generation| generation.get("finishReason"))
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_owned);
                         let execution = identity.map(|identity| PlannerExecutionRecord {
                             job_id: Some(job_id.clone()),
                             provider: identity
@@ -415,7 +428,7 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             temperature: None,
                             reference_pixels_sent: None,
                             duration_seconds: Some(started.elapsed().as_secs_f64()),
-                            finish_reason: None,
+                            finish_reason: finish_reason.clone(),
                             failure_code: None,
                             thinking: thinking.clone(),
                             usage: None,
@@ -427,6 +440,7 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             execution,
                             elapsed_seconds: started.elapsed().as_secs_f64(),
                             peak_memory_bytes,
+                            finish_reason,
                         });
                     }
                     "interrupted" if adopted => {
@@ -631,6 +645,10 @@ pub struct PlannerArtifacts {
     pub compiled_path: PathBuf,
     /// Repair rounds actually taken (0 when the first draft validated).
     pub repair_rounds: u32,
+    /// Non-fatal findings raised while compiling (sc-24029). Today: a shot whose refiner rewrite
+    /// ran out of output budget and was discarded in favour of its authored prompt. The artifacts
+    /// ARE valid — these say what is less than the caller asked for, not that nothing was produced.
+    pub findings: Vec<PlanDiagnostic>,
 }
 
 /// Resolve the model entry and the capability envelope the planner will be held to, refusing the
@@ -1047,7 +1065,7 @@ pub async fn generate_with_refiner(
             return Err(cost.preserve_on_error(error));
         }
     }
-    let (compiled, compiled_path) = compile_and_write(
+    let (compiled, compiled_path, findings) = compile_and_write(
         refiner,
         options,
         &plan,
@@ -1065,6 +1083,7 @@ pub async fn generate_with_refiner(
         compiled,
         compiled_path,
         repair_rounds: round,
+        findings,
     })
 }
 
@@ -1167,7 +1186,7 @@ pub(crate) async fn compile_existing_with_executions(
         }
     }
     let plan_bytes = std::fs::read(plan_path)?;
-    let (compiled, compiled_path) = compile_and_write(
+    let (compiled, compiled_path, findings) = compile_and_write(
         llm,
         options,
         &plan,
@@ -1192,6 +1211,7 @@ pub(crate) async fn compile_existing_with_executions(
         compiled,
         compiled_path,
         repair_rounds,
+        findings,
     })
 }
 
@@ -1290,10 +1310,11 @@ async fn compile_and_write(
     plan_bytes: &[u8],
     mut cost: PlannerCost,
     repair_rounds: u32,
-) -> Result<(CompiledPlan, PathBuf), HarnessError> {
+) -> Result<(CompiledPlan, PathBuf, Vec<PlanDiagnostic>), HarnessError> {
     let result = async {
         std::fs::create_dir_all(&options.out_dir)?;
         let mut refined = BTreeMap::new();
+        let mut findings = Vec::new();
         if options.refine_prompts {
             // Read once, not once per shot: the guide is the same for every rewrite in this compile.
             // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
@@ -1316,6 +1337,30 @@ async fn compile_and_write(
                     })
                     .await?;
                 cost.record(&reply);
+                // sc-24029: a rewrite that ran out of output budget is truncated mid-sentence —
+                // non-empty, so the job completed, but not a finished thought. Compiling it would
+                // bake half a sentence into the dispatched request (a film shot shipped that way,
+                // cut at 3026 chars). Treat it as a FAILED rewrite instead: this shot keeps the
+                // prompt its author wrote, exactly as `--no-refine` would leave it, and the run
+                // says so. Not fatal — the rest of the film still refines, and the authored prompt
+                // is a legitimate request.
+                if reply.finish_reason.as_deref() == Some("length") {
+                    findings.push(PlanDiagnostic::shot(
+                        &shot.id,
+                        "prompt",
+                        format!(
+                            "the refiner exhausted its output budget on this shot ({}), so the \
+                             rewrite was truncated mid-sentence and was discarded; the shot keeps \
+                             its authored prompt",
+                            reply
+                                .job_id
+                                .as_deref()
+                                .map(|id| format!("job {id}"))
+                                .unwrap_or_else(|| "finishReason \"length\"".to_owned()),
+                        ),
+                    ));
+                    continue;
+                }
                 refined.insert(shot.id.clone(), reply.text);
             }
         }
@@ -1347,7 +1392,7 @@ async fn compile_and_write(
                 .map_err(|error| HarnessError::Io(error.to_string()))?
                 + "\n",
         )?;
-        Ok((compiled, compiled_path))
+        Ok((compiled, compiled_path, findings))
     }
     .await;
     result.map_err(|error| cost.preserve_on_error(error))

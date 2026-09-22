@@ -67,7 +67,7 @@ a no-reference described-only film at **49/72** characterizing the text identity
 wardrobe, props and setting but not a face, and whose **reach is exactly the roles the plan lists**
 (every shot omitting `workshop_location` from `continuityRoles` left the workshop); the shared-plate
 locator path compiled and verified but **never rendered**; phase 2's open planner defect confirmed
-**fixed** (the unmodified brief planned in one repair round); and three defects, none in the
+**fixed** (the unmodified brief planned in one repair round); and five findings, none in the
 anchoring code.
 
 ## Documents
