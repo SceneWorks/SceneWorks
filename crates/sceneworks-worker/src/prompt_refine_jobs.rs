@@ -14,8 +14,10 @@
 //! rewrite rules + image/video/audio medium switch + guide assembly (`build_refine_system_prompt`, into the
 //! request `system`) and the reasoning-block / code-fence / surrounding-quote cleanup
 //! (`clean_refine_output`, over the model reply). Sampling matches the Python path (temperature 0.7,
-//! top_p 0.9, max_new_tokens 512), as does the empty-output → error behavior and the `{originalPrompt,
-//! refinedPrompt}` result shape.
+//! top_p 0.9), as does the empty-output → error behavior and the `{originalPrompt, refinedPrompt}`
+//! result shape. The output budget no longer does: the Python path's 512 tokens could not cover the
+//! `MAX_PROMPT_CHARS` contract once this task began carrying the per-shot film refine (sc-24029) —
+//! see `DEFAULT_REFINE_MAX_NEW_TOKENS`.
 
 use super::*;
 
@@ -35,24 +37,32 @@ const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
-// Output-length cap. The free-text rewrite is a one-liner (512 is ample), but the two caption tasks
-// (magic-prompt + image_caption) emit a full Ideogram JSON caption — multi-element, with bboxes,
-// #RRGGBB palettes and (since sc-8199) optional per-element palettes — which truncates well past 2048
-// tokens on busy images (sc-8210: `EOF while parsing a list` mid-`elements`). 4096 ≈ ~11.6k chars of
-// headroom; a well-formed caption emits EOS far below the cap, so a higher ceiling only rescues the
-// truncating cases. Callers may still override via the `maxNewTokens` payload field.
+// Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
+// caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element
+// palettes — which truncates well past 2048 tokens on busy images (sc-8210: `EOF while parsing a
+// list` mid-`elements`). 4096 ≈ ~11.6k chars of headroom; a well-formed caption emits EOS far below
+// the cap, so a higher ceiling only rescues the truncating cases. Callers may still override via the
+// `maxNewTokens` payload field.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
+// The free-text rewrite was budgeted as a one-liner (512 tokens) when its only caller refined a
+// single sentence. It is now also the per-shot film refine (`film_planner.rs` sends no `task`, so a
+// shot prompt classifies as `Rewrite`), whose output contract is `MAX_PROMPT_CHARS` = 4000 chars of
+// multi-field MiniMax-H3 prose. At this file's own stated ratio (4096 ≈ ~11.6k chars, i.e. ~2.83
+// chars/token) 4000 chars needs ~1414 tokens, so 512 could not reach the contract from either end:
+// generation stopped on `MaxTokens` mid-sentence rather than on EOS (sc-24029 measured a film shot
+// cut at 3026/4000 chars). 1536 covers the contract with headroom; a rewrite that has said what it
+// has to say still emits EOS far below the cap, so this only rescues the truncating cases.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
+const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
 // longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
 #[cfg(any(
@@ -1976,6 +1986,31 @@ mod tests {
         assert_eq!(RefineTask::Rewrite.done_message(), "Prompt refined.");
     }
 
+    /// sc-24029. The per-shot film refine is dispatched with no `task` field
+    /// (`film_planner.rs`), so it classifies as `Rewrite` and takes that task's budget — while the
+    /// prompt it must produce is bounded by `sceneworks_core::MAX_PROMPT_CHARS`. A budget that
+    /// cannot reach the contract truncates the rewrite mid-sentence and still reports success,
+    /// which is how a 3026/4000-char film shot prompt shipped. Asserted as the CONTRACT (budget ×
+    /// the file's own chars-per-token figure ≥ the char cap) rather than as a literal, so shrinking
+    /// the budget or raising the cap fails here rather than in a render.
+    #[test]
+    fn the_rewrite_budget_covers_the_refined_prompt_char_contract() {
+        // The stated ratio in this file's own header: 4096 tokens ≈ ~11.6k chars.
+        const CHARS_PER_TOKEN: f64 = 11_600.0 / 4096.0;
+
+        let budget = f64::from(DEFAULT_REFINE_MAX_NEW_TOKENS);
+        let reachable_chars = budget * CHARS_PER_TOKEN;
+        let required = sceneworks_core::MAX_PROMPT_CHARS;
+
+        assert!(
+            reachable_chars >= required as f64,
+            "the Rewrite budget of {DEFAULT_REFINE_MAX_NEW_TOKENS} tokens reaches only \
+             {reachable_chars:.0} chars at {CHARS_PER_TOKEN:.2} chars/token, short of the \
+             {required}-char refined-prompt contract; a film shot rewrite would stop on MaxTokens \
+             mid-sentence instead of on EOS",
+        );
+    }
+
     #[test]
     fn resolve_max_new_tokens_defaults_and_override() {
         // Caption tasks (magic-prompt + image_caption) get the larger default so the JSON closes
@@ -1997,10 +2032,12 @@ mod tests {
             resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe),
             1024
         );
-        // The free-text rewrite stays at the small default.
+        // The free-text rewrite carries the per-shot film refine, whose output contract is
+        // `MAX_PROMPT_CHARS` (sc-24029: 512 tokens cut a shot prompt off mid-sentence at 3026
+        // chars, because generation ended on `MaxTokens` rather than on EOS).
         assert_eq!(
             resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite),
-            512
+            1536
         );
         // An explicit positive override wins for any task.
         for task in [
@@ -2026,7 +2063,7 @@ mod tests {
                 &obj(serde_json::json!({ "maxNewTokens": "nope" })),
                 RefineTask::Rewrite
             ),
-            512
+            1536
         );
     }
 
