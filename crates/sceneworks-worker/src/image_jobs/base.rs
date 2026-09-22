@@ -7608,6 +7608,71 @@ pub(crate) fn load_reference_image(
     asset_id: &str,
     project_path: &Path,
 ) -> WorkerResult<Image> {
+    // Every caller that existed before sc-24113 keeps upstream-parity truncation, byte-for-byte.
+    load_reference_image_with(
+        data_dir,
+        project_id,
+        asset_id,
+        project_path,
+        FlattenPolicy::Truncate,
+    )
+}
+
+/// How a reference that CARRIES an alpha channel is reduced to the 3-channel `gen_core::Image`
+/// every engine at this pin takes (sc-24113).
+///
+/// A PARITY knob, not a quality one, and both answers are correct — for different upstream
+/// pipelines:
+///
+/// * [`Truncate`](FlattenPolicy::Truncate) drops the fourth byte, which is what
+///   `DynamicImage::to_rgb8()` does and what upstream `PIL.Image.convert("RGB")` does. Every edit
+///   model SceneWorks shipped before 2.1 — SDXL inpaint, FLUX.2 edit, Kolors IP-adapter,
+///   `qwen_image_edit_2511` — is compared against a reference implementation that truncates, so
+///   this is the only answer that keeps them at parity, and it is the default for that reason.
+/// * [`OverWhite`](FlattenPolicy::OverWhite) composites straight (un-premultiplied) alpha over an
+///   opaque white backdrop, matching the S4 contract's `RgbaImage::to_rgb_over_white()`.
+///   Qwen-Image 2.1 feeds its VISION tower the composited copy, so its reference path wants this.
+///
+/// ⚠️ The two are IDENTICAL on an opaque image (`A=255`) and differ MAXIMALLY on a transparent one,
+/// because 2.1's alpha is straight: `A=0` does NOT zero RGB, so a transparent pixel keeps whatever
+/// colour it was authored with. A blanket change of this default would therefore move every
+/// existing model silently rather than loudly — which is exactly what the first cut of sc-24113 did.
+///
+/// Note for sc-24110 (S3-SW), which owns the 2.1 reference carrier: once
+/// `Conditioning::ReferenceRgba` lands, an alpha-carrying 2.1 reference travels UN-FLATTENED with
+/// all four channels reaching the VAE, and this policy governs only the composited copy the vision
+/// tower gets. The parameter is left in place for that call site.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum FlattenPolicy {
+    /// Drop the alpha byte — upstream `convert("RGB")` semantics. Every pre-2.1 lane.
+    #[default]
+    Truncate,
+    /// Composite straight alpha over opaque white — the S4 `to_rgb_over_white()` semantics.
+    ///
+    /// Constructed only by tests at this pin: `qwen_image_2_1` has no worker-side reference route
+    /// until the terminal bump, so there is no production caller to pass it yet (item 8d of the
+    /// `PENDING_PIN_ENGINE_IDS` checklist). The variant exists now so the parity DECISION is made
+    /// and tested once, rather than under time pressure when sc-24110's route lands.
+    #[allow(dead_code)]
+    OverWhite,
+}
+
+/// [`load_reference_image`] with an explicit [`FlattenPolicy`].
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn load_reference_image_with(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+    flatten: FlattenPolicy,
+) -> WorkerResult<Image> {
     let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
         .get_asset(project_id, asset_id)
         .map_err(|error| {
@@ -7629,39 +7694,34 @@ pub(crate) fn load_reference_image(
     let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
         WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
     })?;
-    // sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+    // sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the
+    // default is upstream-parity truncation. See [`FlattenPolicy`] for why both answers are
+    // correct and why the default must not move: `to_rgb8()` drops the fourth byte exactly as
+    // `PIL.Image.convert("RGB")` does, which is what every pre-2.1 edit model is compared against.
     //
-    // `DynamicImage::to_rgb8()` converts RGBA→RGB by DROPPING the fourth byte, which is exactly
-    // what the S4 RGBA contract says a flattening consumer must not do: 2.1's alpha is STRAIGHT
-    // (un-premultiplied) and `A=0` does NOT zero RGB, so a fully transparent pixel keeps whatever
-    // colour it was authored with. Truncating therefore turns a transparent background into
-    // whatever garbage the encoder happened to leave in the RGB planes — commonly black — and
-    // hands the VAE a reference the user never saw. Compositing matches the engine's own
-    // `RgbaImage::to_rgb_over_white()`, so the two agree on what a flattened reference looks like.
+    // `OverWhite` composites straight alpha over an opaque white backdrop, matching the S4
+    // contract's `RgbaImage::to_rgb_over_white()`. It matters only for an image that actually
+    // carries alpha, and only where the transparency is real: `A=255` makes the two identical, and
+    // `A=0` makes them maximally different because straight alpha leaves the hidden RGB intact.
     //
-    // ⚠️ Flattening AT ALL is the pin's limitation, not the desired behaviour. Under the S4
-    // contract an alpha-carrying reference travels as `Conditioning::ReferenceRgba` with all four
-    // channels reaching the VAE — a flattened reference is a DIFFERENT request, and it is the case
-    // transparent-layer editing depends on. `gen_core::RgbaImage` and that carrier do not exist at
-    // the revision this branch pins, so the worker composites and RECORDS the carrier it would have
-    // used (`qwen_alpha::reference_conditioning_kind`); the terminal pin bump replaces this
-    // function's tail with the four-channel path.
-    let carries_alpha = decoded.color().has_alpha();
-    let rgb = if carries_alpha {
-        let rgba = decoded.to_rgba8();
-        let (width, height) = (rgba.width(), rgba.height());
-        image::RgbImage::from_fn(width, height, |x, y| {
-            let [r, g, b, a] = rgba.get_pixel(x, y).0;
-            let over_white = |channel: u8| {
-                // Straight alpha over an opaque white backdrop, rounded half-up:
-                //   out = channel * a/255 + 255 * (1 - a/255)
-                let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
-                ((blended + 127) / 255) as u8
-            };
-            image::Rgb([over_white(r), over_white(g), over_white(b)])
-        })
-    } else {
-        decoded.to_rgb8()
+    // A non-alpha source takes `to_rgb8()` under either policy — the same call, the same bytes —
+    // so nothing here can perturb an ordinary opaque reference.
+    let rgb = match (flatten, decoded.color().has_alpha()) {
+        (FlattenPolicy::OverWhite, true) => {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = (rgba.width(), rgba.height());
+            image::RgbImage::from_fn(width, height, |x, y| {
+                let [r, g, b, a] = rgba.get_pixel(x, y).0;
+                let over_white = |channel: u8| {
+                    // Straight alpha over an opaque white backdrop, rounded half-up:
+                    //   out = channel * a/255 + 255 * (1 - a/255)
+                    let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
+                    ((blended + 127) / 255) as u8
+                };
+                image::Rgb([over_white(r), over_white(g), over_white(b)])
+            })
+        }
+        _ => decoded.to_rgb8(),
     };
     Ok(Image {
         width: rgb.width(),

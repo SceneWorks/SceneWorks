@@ -566,7 +566,27 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     //      lane's `compare-engine-capability-facts` is what forces this: a fresh dump that carries
     //      the new provider will not match the checked-in one.
     //
-    //   8. (sc-24112) `crates/sceneworks-worker/src/memory_route_registry.rs` — the two
+    //   8. (sc-24113) `crates/sceneworks-worker/src/qwen_alpha.rs` — the S4 RGBA contract lands with
+    //      the same bump, and FOUR seams there are staged behind it. Each is written against the
+    //      final meaning, so the bump is a body swap rather than a redesign:
+    //        a. `PINNED_ALPHA_CAPABLE_ENGINES` — delete it and make
+    //           `engine_advertises_alpha_output` read
+    //           `descriptor.capabilities.supports_alpha_output`, taking the resolved descriptor
+    //           instead of the id. Self-deleting like this list:
+    //           `the_pinned_alpha_capability_list_expires_with_the_pin_that_justifies_it` asserts
+    //           the id does NOT resolve, so it reds here at the bump.
+    //        b. `resolve_output_channels`'s stamp is RECIPE-ONLY today
+    //           (`image_jobs.rs`'s `write_image_asset` records what was asked for; nothing reaches
+    //           the provider). Assign `gen_core::OutputChannels::Rgba` on the request instead —
+    //           `output_channels_request_fragment` already computes the decision.
+    //        c. `reference_conditioning_kind` + `image_jobs/base.rs`'s `reference_carries_alpha`
+    //           have no call site because 2.1 has no worker-side edit route yet. sc-24110 (S3-SW)
+    //           owns that route and wires them: an alpha-carrying reference travels as
+    //           `Conditioning::ReferenceRgba`, UN-flattened.
+    //        d. `load_reference_image_with`'s `FlattenPolicy` — pass `OverWhite` from the 2.1 path
+    //           for the vision-tower copy. The default stays `Truncate`; every pre-2.1 lane is at
+    //           upstream `convert("RGB")` parity and must not move.
+    //   9. (sc-24112) `crates/sceneworks-worker/src/memory_route_registry.rs` — the two
     //      `qwen_image_2_1` rules are registered ALREADY (MLX + Candle, `BF16_Q4_Q8`, `TEXT_ONLY`,
     //      `PLAIN`), but nothing in that file's tests forces them, so re-read them against the
     //      pinned descriptor at the bump: confirm the provider still declares exactly those tiers
@@ -577,7 +597,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     //
     // SEPARATELY FROM THE PIN — the epic's TERMINAL story owns the tier upload, which is what
     // turns sc-24112's DECLARED q8/q4 tiers into installable ones. That is not a pin-bump item and
-    // must not be folded into one; `test_qwen_image_2_1_pending_tiers_are_refused_until_their_revision_is_pinned`
+    // must not be folded into one; `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
     // in `tests/test_builtin_manifest_audit.py` is its fail-closed guard and names the exact steps.
     const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
 

@@ -105,11 +105,33 @@ pub(crate) async fn get_film_draft(
     ))
 }
 
+/// Save a film draft.
+///
+/// The body is taken as raw JSON and its `productionPlan` is version-scanned BEFORE the typed
+/// decode (sc-24029). An imported plan document at schema version 1 or 2 is a real case — the Film
+/// workspace has an "Import production plan" button — and `Shot` is `deny_unknown_fields`, so
+/// without the scan such a body is refused with `unknown field \`sound\`` at a byte offset instead
+/// of the version refusal that names the remedy. It is done SERVER-side so every client gets it,
+/// and the refusal is the core's own message with no `[plan] <field>:` prefix, because it is
+/// rendered to an operator as written.
+///
+/// A DOCUMENT only, which is why nothing here touches the carry-forward: a plan that arrives in a
+/// PUT body has an author who can edit it, while a v1/v2 plan already STORED in a draft is state
+/// with no author and is upgraded on read by `ProjectStore::carry_film_draft_forward`. A stored v2
+/// draft therefore still opens, and what the client then PUTs back is already current.
 pub(crate) async fn update_film_draft(
     State(state): State<AppState>,
     Path((project_id, draft_id)): Path<(String, String)>,
-    ApiJson(mut draft): ApiJson<FilmDraft>,
-) -> Result<Json<FilmDraft>, ApiError> {
+    ApiJson(body): ApiJson<Value>,
+) -> Result<Json<FilmDraft>, Response> {
+    if let Some(finding) = body
+        .get("productionPlan")
+        .and_then(film_plan::plan_document_version_finding)
+    {
+        return Err(ApiError::bad_request(finding.message).into());
+    }
+    let mut draft: FilmDraft = serde_json::from_value(body)
+        .map_err(|error| crate::json_decode_error_response(error.to_string()))?;
     validate_planning_selection(&draft)?;
     apply_selected_render_regime(&state, &mut draft).await?;
     Ok(Json(
@@ -212,9 +234,7 @@ pub(crate) async fn resolve_film_render_options(
         film_plan::ModelLane::for_current_platform(),
     );
     let default_steps = capabilities.default_steps;
-    let reference_requested = draft.reference_pack.references.iter().any(|reference| {
-        reference.approved && film_plan::BINDABLE_REFERENCE_KINDS.contains(&reference.kind.as_str())
-    });
+    let reference_requested = reference_partition_requested(&draft.reference_pack);
     if reference_requested {
         if let Some(reference_id) = film_plan::reference_partition_for(&capabilities.model_id) {
             let reference = models.iter().find(|entry| {
@@ -354,6 +374,19 @@ fn model_default_steps(entry: &Value) -> Option<u32> {
         .and_then(|defaults| defaults.get("steps"))
         .and_then(Value::as_u64)
         .and_then(|steps| u32::try_from(steps).ok())
+}
+
+/// Does this pack ask the workspace for the family's REFERENCE partition?
+///
+/// Only an approved, image-backed role of a [`film_plan::BINDABLE_REFERENCE_KINDS`] kind does. A
+/// DESCRIBED-ONLY role (sc-24025) never does however right its kind reads: it supplies no image
+/// and cannot be bound, so asking for `minimax_h3_ref` on its account would have the workspace
+/// demand a second 18 GB DiT — and report the render unavailable when it is not installed — for a
+/// role that only ever reaches the model as text.
+fn reference_partition_requested(pack: &ReferencePack) -> bool {
+    pack.references
+        .iter()
+        .any(film_plan::ReferenceEntry::is_bindable_image)
 }
 
 fn render_resolutions(plan: &ProductionPlan, capabilities: &PlannerCapabilities) -> Vec<String> {
@@ -560,7 +593,11 @@ pub(crate) async fn create_film_run(
     if let Some(compiled) = draft.compiled_plan.as_ref() {
         let sha = production_plan_sha256(&draft.production_plan)
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        findings.extend(compiled.staleness_findings(&draft.production_plan, &sha));
+        findings.extend(compiled.staleness_findings(
+            &draft.production_plan,
+            &sha,
+            &draft.reference_pack,
+        ));
     }
     if !findings.is_empty() {
         return Err(invalid_film_document(findings));
@@ -962,6 +999,56 @@ mod render_options_tests {
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+
+    /// A pack of DESCRIBED-ONLY roles selects the BASE partition (sc-24025). Its roles reach the
+    /// model as prompt text and nothing else, so the reference DiT is never required — and a
+    /// workspace that asked for it would report the render unavailable on a machine that has only
+    /// the base checkpoint installed.
+    #[test]
+    fn a_described_only_pack_does_not_request_the_reference_partition() {
+        let pack = |references: Value| -> ReferencePack {
+            serde_json::from_value(json!({
+                "schemaVersion": film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": references
+            }))
+            .expect("the pack parses")
+        };
+
+        // Every bindable KIND, described-only: the kind is right and the image is missing.
+        let described = pack(json!([
+            { "role": "courier", "kind": "character", "description": "Blue jacket." },
+            { "role": "red_parcel", "kind": "prop", "description": "Red box." },
+            { "role": "workshop", "kind": "location", "description": "The workshop." }
+        ]));
+        assert!(
+            !reference_partition_requested(&described),
+            "no image is supplied, so no reference DiT is needed"
+        );
+
+        // ONE image-backed bindable role is all it takes.
+        let mixed = pack(json!([
+            { "role": "courier", "kind": "character", "description": "Blue jacket." },
+            { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png",
+              "description": "Red box." }
+        ]));
+        assert!(reference_partition_requested(&mixed));
+
+        // An image-backed role of a kind that may never be BOUND does not request it either.
+        let unbindable = pack(json!([
+            { "role": "house_style", "kind": "style", "file": "references/house_style.png",
+              "description": "House look." }
+        ]));
+        assert!(!reference_partition_requested(&unbindable));
+
+        // Nor does an UNAPPROVED image-backed one: it is never resolved into a conditioning slot.
+        let unapproved = pack(json!([
+            { "role": "courier", "kind": "character", "file": "references/courier.png",
+              "description": "Blue jacket.", "approved": false }
+        ]));
+        assert!(!reference_partition_requested(&unapproved));
     }
 
     #[test]

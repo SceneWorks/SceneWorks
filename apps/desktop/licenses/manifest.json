@@ -830,6 +830,26 @@
       ]
     },
     {
+      "id": "qwen-image-2-1-pe",
+      "models": [
+        "qwen_image_2_1_pe_t2i",
+        "qwen_image_2_1_pe_i2i"
+      ],
+      "name": "Qwen-Image 2.1 Prompt Rewriters",
+      "publisher": "Hangzhou Tongyi Laboratory Technology Co., Ltd.",
+      "license": "Qwen RESEARCH LICENSE AGREEMENT",
+      "_nonCommercialComment": "Same agreement, and therefore the same flag, as the `qwen-image-2-1` component above: the licence NAME carries no 'non-commercial' marker, but §1(i) + §2(a) make it research/evaluation-only, so `licenseBadge` needs this explicit declaration rather than a regex over the name. Mirrors each catalog entry's own `nonCommercial: true`.",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I",
+      "usage": "OPTIONAL prompt-rewriting models for Qwen-Image 2.1 — one for text-to-image (Qwen/Qwen-Image-2.1-PE-T2I @f3ed7985c788ad75b3ab7223e0c4c51e2a43545b) and one for editing (Qwen/Qwen-Image-2.1-PE-I2I @72927bc08afc99b7888ceb7d7d51a12db3700bbd). They render no images: each turns a short brief into the long descriptive prompt the image model was trained on. Neither is downloaded automatically, and Qwen-Image 2.1 generates and edits fully without them. A SEPARATE component from the `qwen-image-2-1` weights above because they are different repositories, published for a different purpose, under the same agreement; SceneWorks pulls them from Qwen's own repository into the user's cache and re-hosts nothing, so the agreement's §3 redistribution obligations never attach to SceneWorks. The licence is NON-COMMERCIAL — §1(i) defines \"Non-Commercial\" as research or evaluation purposes only, and §2(b) requires a separate commercial licence from Alibaba (model-business@notice.qwencloud.com).",
+      "documents": [
+        {
+          "label": "Qwen RESEARCH LICENSE AGREEMENT",
+          "key": "qwen-image-2-1-research"
+        }
+      ]
+    },
+    {
       "id": "realvisxl",
       "models": [
         "realvisxl",

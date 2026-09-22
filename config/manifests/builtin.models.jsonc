@@ -3297,7 +3297,7 @@
         // GPU-gated (one tier at a time, ~26–30 GB high-water) and the `hf upload` is the epic's
         // terminal story. Until then each pending row carries `pendingArtifact: true`, which is
         // rigidly paired with the null SHA by
-        // `test_qwen_image_2_1_pending_tiers_are_refused_until_their_revision_is_pinned`:
+        // `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`:
         //   * null SHA without `pendingArtifact` ⇒ FAIL (a placeholder shipped as offerable),
         //   * `pendingArtifact` with a real SHA ⇒ FAIL (the flag outlived the upload),
         //   * `default: true` on a pending row ⇒ FAIL (installing the model would queue vapour),
@@ -3427,6 +3427,14 @@
         //   preset ladder (what `modelDimensionConstraints` did before it had these keys) would have
         //   given 1536..2752 — the extremes of the seven buckets — which is not the engine's
         //   envelope and would have refused every legal small size.
+        //
+        // ⚠️ The grid is enforced AT ENQUEUE only because this entry declares the OTHER TWO keys
+        // as well. `requiresDimensionsMultipleOf` on its own stays advisory, as it has always been
+        // on the image lane: the six shipped `mage_flow*` entries declare `16` with no min/max, and
+        // their only reader is the Studio's free Width/Height control, which SNAPS. Enforcing a
+        // bare stride would have turned that silent snap into a 400 and rejected off-grid sizes
+        // those models have always accepted, including stored recipes and workflow replays. See
+        // `image_dimension_error` in crates/sceneworks-core/src/video_request.rs.
         "minDimension": 32,
         "maxDimension": 2752,
         "requiresDimensionsMultipleOf": 32,
@@ -27318,7 +27326,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "b4b5130c851fce62be94c42a208af29143b11d17847496a81d9bc8e7aabd2348",
+              "sha256": "35c538635e39c6319ebb33a0c25bf03aaf9e50dba41dd82305e330307fcef7cf",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27338,12 +27346,12 @@
                 {
                   "path": "Cargo.lock",
                   "byteSize": 250777,
-                  "sha256": "e4382bf9bc9dc984de8a926b576f506984393b67315fe0cd57ffb5ee4a7c14cf"
+                  "sha256": "3a27821ead11d82a03ac17e80f32c001289130b1fa34c2a31a275d5d51612f5d"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "c0d9028df6531261c76154c156b3f3f19c9ef9ac2deba623ed3b3751baba3119"
+                  "sha256": "5572df182a63f181da1891061ae69a6f8638155f37dbfaff2a2dc3e66ef731d2"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -27368,7 +27376,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8876,
-                  "sha256": "dcc03ed690c7691a4d1d66b7b5161283fec002433747c4b8353d6c32c1eca723"
+                  "sha256": "d5550e8dc55becaaeb44afe2b014dc207aed877e961b03b7e078acdfe87916b3"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -27397,8 +27405,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 147682,
-                  "sha256": "7b3f928c6b9a80a6831be9245702b3070b49a87ce136d403cde4226f221a2294"
+                  "byteSize": 147754,
+                  "sha256": "1ac67f48d6a223741d3771d1a7d9ce1e1bf3a81a256cf0b775a5afabe97ebbab"
+                },
+                {
+                  "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
+                  "byteSize": 8820,
+                  "sha256": "dd77e86b64373fc9b7f4af0795b2b671a0af73eb1c536a3c1960ad50eee9f325"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
@@ -27407,13 +27420,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 219831,
-                  "sha256": "ae79a9ee280b55e92c082cc5ad26855ed62e6ff4a55a9f9e2ab118d53e8ca986"
+                  "byteSize": 242990,
+                  "sha256": "4ea7cbfd6567979a9fd9f6ecd7c63881685d4cc527c4f62e2e39e9ff09db5df4"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
-                  "byteSize": 20479,
-                  "sha256": "400d40eee9d547a36b3d47cbee012a7fccdbb6d28d82fcbaa1ef6248904f0a83"
+                  "byteSize": 20515,
+                  "sha256": "5985fbd86d6f8a41d5d6f22f3faf8b16af871ff2ac7a64544bafee79e8c98ba9"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_admission.rs",
@@ -27422,8 +27435,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 309792,
-                  "sha256": "74d830607080a504daf9fe1ecb86b1d39429a534b4add1f7bda866b367503e8a"
+                  "byteSize": 311124,
+                  "sha256": "da33dadf316918eed582abdfbab98f4c613ac9836c36e92abb9073af4f03ae62"
                 },
                 {
                   "path": "package.json",
@@ -27432,8 +27445,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 146554,
-                  "sha256": "9f1176494e0804d44fb4165a4db0f8324185b07c31d03162fdd524835c265173"
+                  "byteSize": 140316,
+                  "sha256": "4efc9da0e06810119538eb0eff543d82e6ae5a3c8f342629783efd99a3b3b71b"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
@@ -27507,8 +27520,8 @@
                 },
                 {
                   "path": "scripts/starvector-production-closure.mjs",
-                  "byteSize": 9370,
-                  "sha256": "68a254ea7600d7903d80c0c7f38878d872edfc794b9478e2d7736a25696ceab0"
+                  "byteSize": 9424,
+                  "sha256": "dd6f8dc9b1796b60b0b5536ed9712314b4ba2de08ee20fc6d534625c8f2abedc"
                 },
                 {
                   "path": "scripts/starvector-terminal-assets.mjs",

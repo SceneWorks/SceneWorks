@@ -19,7 +19,7 @@
   // The pack's plates are the deterministic placeholders `film-harness fixture-images` writes, so
   // the reference conditioning here proves the PLUMBING (the right checkpoint, the right payload,
   // the right record), not likeness. Swap in real approved plates to judge likeness.
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "courier-workshop-ref",
   "version": 1,
   "title": "Courier at the Workshop (mixed partitions)",
@@ -53,7 +53,7 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Empty workshop, door closed, workbench clear.",
       "endState": "Courier standing in the doorway holding the red parcel.",
-      "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
+      "audio": "Room tone, distant birds, a door latch clicking and the door creaking open. No music.",
       // Reference conditioning, in ROLE ORDER: the courier first, the workshop location second.
       // The compiled request's `referenceAssetIds` keeps exactly this order. Both are BINDABLE
       // kinds (character, location) — the pack's `workshop_plate` is a `plate` and a plate is a
@@ -73,7 +73,7 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Courier at the bench with the parcel in hand.",
       "endState": "Red parcel resting on the workbench, hands gone.",
-      "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
+      "audio": "Soft thump of cardboard on wood, sleeves rustling, room tone. No music.",
       // No reference roles at all: this shot stays on the base checkpoint.
       "conditioning": { "mode": "text_to_video" },
       "seed": 23403,

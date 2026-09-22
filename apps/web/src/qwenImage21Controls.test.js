@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,7 @@ import {
 import { minStepsForModel } from "./videoModelLimits.js";
 import { fallbackModels, QWEN_IMAGE_2_1_MODEL_ID } from "./constants.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
+import { OrderedReferenceList } from "./components/OrderedReferenceList.jsx";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
@@ -310,5 +311,55 @@ describe("transparency / RGBA output (sc-24113)", () => {
     }
     // Total: a non-string prompt is not a crash.
     expect(transparencyPromptSuggestion(undefined, true)).toBe(TRANSPARENCY_PROMPT_HINT);
+  });
+});
+
+describe("the ordered-reference rail (sc-24113)", () => {
+  // The rail is the UI half of "reorder = a different request". The pure helpers are covered above;
+  // this covers the component's own contract, which is what both shells depend on.
+  it("renders nothing below two references", () => {
+    // With one reference there is no order to show, and an empty rail is noise beside a picker that
+    // already says "none selected".
+    for (const ids of [[], ["a"], undefined]) {
+      expect(
+        OrderedReferenceList({ assetIds: ids, onChange: () => {} }),
+        JSON.stringify(ids ?? null),
+      ).toBeNull();
+    }
+    expect(OrderedReferenceList({ assetIds: ["a", "b"], onChange: () => {} })).not.toBeNull();
+  });
+
+  it("labels each reference with the ordinal the engine's template uses", () => {
+    const rows = OrderedReferenceList({ assetIds: ["a", "b", "c"], onChange: () => {} }).props
+      .children;
+    expect(rows).toHaveLength(3);
+    // 1-based, matching `<image1>` … — the numbering the prompt conventions for this family use
+    // ("use the second image as a mask").
+    expect(rows.map((row) => row.props.children[0].props.children)).toEqual([
+      "Image 1",
+      "Image 2",
+      "Image 3",
+    ]);
+  });
+
+  it("moves a reference and hands the caller a reordered list", () => {
+    const onChange = vi.fn();
+    const rows = OrderedReferenceList({ assetIds: ["a", "b", "c"], onChange }).props.children;
+    const actionsFor = (index) => rows[index].props.children[2].props.children;
+
+    // "Move later" on the first reference.
+    actionsFor(0)[1].props.onClick();
+    expect(onChange).toHaveBeenCalledWith(["b", "a", "c"]);
+
+    // "Move earlier" on the last.
+    actionsFor(2)[0].props.onClick();
+    expect(onChange).toHaveBeenLastCalledWith(["a", "c", "b"]);
+
+    // The ends cannot move past themselves — DISABLED rather than a silent no-op, so the control
+    // says what it will do before it is pressed.
+    expect(actionsFor(0)[0].props.disabled).toBe(true);
+    expect(actionsFor(2)[1].props.disabled).toBe(true);
+    expect(actionsFor(1)[0].props.disabled).toBe(false);
+    expect(actionsFor(1)[1].props.disabled).toBe(false);
   });
 });

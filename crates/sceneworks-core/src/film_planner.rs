@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::film_plan::{
-    parse_resolution, validate_all, ModelEntries, ModelLane, PlanDiagnostic, PlanLimits,
-    PlanLoraEntry, PlanModel, PlanSound, ProductionPlan, ReferencePack, Shot, ShotConditioning,
-    ShotDependency, BINDABLE_REFERENCE_KINDS, PLAN_SCHEMA_VERSION, SHOT_CONDITIONING_MODES,
+    engine_label_at, parse_resolution, quoted_engine_label, validate_all, ModelEntries, ModelLane,
+    PlanDiagnostic, PlanLimits, PlanLoraEntry, PlanModel, PlanSound, ProductionPlan,
+    ReferenceEntry, ReferencePack, Shot, ShotConditioning, ShotDependency, PLAN_SCHEMA_VERSION,
+    SHOT_CONDITIONING_MODES,
 };
 use crate::jsonc::strip_jsonc_comments;
 use crate::minimax_h3_turbo::TurboRecipe;
@@ -406,15 +407,24 @@ impl PlannerCapabilities {
     /// being offered and then refused a decode later — the planner emits the modes it emitted
     /// before this story, and the plan resolves to the base checkpoint throughout.
     ///
-    /// "Can fill" is counted over [`BINDABLE_REFERENCE_KINDS`] only. An approved `style` or `plate`
+    /// "Can fill" is [`ReferenceEntry::is_bindable_image`], which counts
+    /// `crate::film_plan::BINDABLE_REFERENCE_KINDS` only. An approved `style` or `plate`
     /// is not something a `reference_to_video` shot may bind — a style is a look rather than a
     /// subject, and a plate is placed through the keyframe slots — so a pack approving only those
     /// two fills no reference shot and narrows exactly as an empty pack does.
+    ///
+    /// It is also counted over roles that HAVE AN IMAGE (sc-24027). A described-only role is an
+    /// approval of WORDS, and `reference_to_video` conditions on pixels: `validate_plan_against_pack`
+    /// refuses a described-only role in every conditioning slot (sc-24025), so a pack of them left
+    /// the mode on the envelope, inverted the default to `reference_to_video` for every shot, and
+    /// made the planner write bindings that the validator then refused for the whole round budget.
+    /// The same count decides the reference partition's Turbo offer, so the described-only run also
+    /// stops being shown an adapter for a partition it never dispatches.
     pub fn narrowed_to_pack(mut self, pack: &ReferencePack) -> Self {
         if pack
             .references
             .iter()
-            .any(|entry| entry.approved && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str()))
+            .any(ReferenceEntry::is_bindable_image)
         {
             return self;
         }
@@ -617,8 +627,10 @@ impl PlannerCapabilities {
                 .to_owned()
         } else {
             format!(
-                "Reference conditioning: at most {} reference roles on a reference_to_video shot, \
-                 and an approved reference pack is available — so USE IT. Every shot binds, in \
+                "Reference conditioning: at most {} reference IMAGES on a reference_to_video \
+                 shot — roles that share one image count once, so a shot may bind more roles than \
+                 that when some of them are subjects in the same photograph — and an approved \
+                 reference pack is available — so USE IT. Every shot binds, in \
                  referenceRoles, the approved roles that are on screen in it: start from the list \
                  its beat says it MUST show (copy that list whole — a beat may name two props and \
                  no location, so never swap one of its roles for a different kind) and add any \
@@ -724,8 +736,11 @@ pub struct DraftShot {
     pub end_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>,
+    /// What this shot sounds like — REQUIRED, exactly as [`crate::film_plan::Shot::audio`] is
+    /// (sc-24026). It is not dropped when blank the way the optional fields below are: a blank one
+    /// is carried into the plan so `validate_plan_structure` refuses it NAMING THE SHOT, which is a
+    /// better report than "missing field `audio`" at an anonymous decode position.
+    pub audio: String,
     pub conditioning: ShotConditioning,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -829,13 +844,17 @@ fn normalize_draft(value: &mut Value) {
                 }
             }
         }
-        for field in [
-            "dialogue",
-            "sound",
-            "negativePrompt",
-            "resolution",
-            "beatId",
-        ] {
+        // `audio` is REQUIRED (sc-24026) and `DraftShot::audio` has no serde default, so a shot
+        // that OMITS the key would fail the whole-draft decode at a byte offset: the entire
+        // planner round is thrown away and the repair round is handed `missing field "audio"`
+        // with no shot id to act on. Materialized blank instead, so the shot decodes and
+        // `validate_plan_structure` refuses it by name — the same finding a shot that wrote `""`
+        // gets, which is what the repair round knows how to fix. For the same reason `audio` is
+        // absent from the `drop_if_blank` list below: dropping a blank one would put the key back
+        // where it started.
+        shot.entry("audio")
+            .or_insert_with(|| Value::String(String::new()));
+        for field in ["dialogue", "negativePrompt", "resolution", "beatId"] {
             drop_if_blank(shot, field);
         }
         if let Some(conditioning) = shot
@@ -973,7 +992,7 @@ pub fn draft_to_plan(brief: &ProductionBrief, draft: &PlannerDraft) -> Productio
                 start_state: shot.start_state.clone(),
                 end_state: shot.end_state.clone(),
                 dialogue: shot.dialogue.clone(),
-                sound: shot.sound.clone(),
+                audio: shot.audio.clone(),
                 generated_audio: None,
                 dialogue_clip: None,
                 conditioning: shot.conditioning.clone(),
@@ -1167,13 +1186,14 @@ pub fn role_coverage_findings(
         .filter(|entry| entry.approved)
         .map(|entry| entry.role.as_str())
         .collect();
-    // A role the pack approves AND whose kind may be BOUND as a reference_to_video subject.
+    // A role the pack approves, that HAS an image, and whose kind may be BOUND as a
+    // reference_to_video subject. A described-only role is never bindable however right its kind
+    // reads — `validate_plan_against_pack` refuses one in every conditioning slot (sc-24025) — so
+    // counting it here would have this rule demand a binding the validator then rejects.
     let bindable = |role: &str| {
-        pack.references.iter().any(|entry| {
-            entry.approved
-                && entry.role == role
-                && BINDABLE_REFERENCE_KINDS.contains(&entry.kind.as_str())
-        })
+        pack.references
+            .iter()
+            .any(|entry| entry.role == role && entry.is_bindable_image())
     };
     let mut findings = Vec::new();
     for beat in &brief.required_beats {
@@ -1228,7 +1248,8 @@ pub fn role_coverage_findings(
                 "continuityRoles",
                 format!(
                     "beat {:?} must show {} but {} binds {}, missing {}; write {} into {}'s \
-                     continuityRoles{} and describe {} in its prompt",
+                     continuityRoles{} and SHOW {} on screen in its prompt — name the role and say \
+                     what it does, never restate the pack's description of it",
                     beat.id,
                     beat.required_roles.join(", "),
                     shot.id,
@@ -1413,10 +1434,89 @@ pub fn lora_offer_findings(
     findings
 }
 
+/// Present verbatim in every finding [`anchoring_findings`] raises, so the repair round can tell a
+/// label finding from any other finding about the same field without re-scanning the draft.
+pub const ANCHOR_LABEL_FINDING_MARKER: &str = "The compiler writes every such label itself";
+
+/// The draft's free text, with the label the engine owns found in it: `(field, text)`.
+///
+/// `prompt` and `negativePrompt` are the two that REACH the engine — the compiler runs `prompt`
+/// through the refine rewrite and then leads and trails it with its own sentences
+/// (`film_compile::compile_shot`), and `negativePrompt` is forwarded to the job body as written.
+/// The rest are the plan's own record of the shot and are never dispatched; they are scanned all
+/// the same because a copy-only planner that has written `<Picture 1>` into one prose field has
+/// written it into its neighbours too, and clearing them in one round is cheaper than clearing
+/// them in three.
+///
+/// `audio` is deliberately ABSENT. It is inserted prose, so a label in it is already refused by
+/// `film_plan::validate_shot_structure` through `inserted_prose_findings` — naming the shot, the
+/// `audio` field and the same remedy — and scanning it here would hand the planner two findings
+/// about one value, in two different wordings, for the repair round to reconcile (sc-24026).
+fn labelled_draft_text(shot: &DraftShot) -> Vec<(&'static str, &str)> {
+    [
+        ("prompt", shot.prompt.as_str()),
+        (
+            "negativePrompt",
+            shot.negative_prompt.as_deref().unwrap_or_default(),
+        ),
+        ("beat", shot.beat.as_str()),
+        ("framing", shot.framing.as_str()),
+        ("startState", shot.start_state.as_str()),
+        ("endState", shot.end_state.as_str()),
+        // The planner's record of a spoken line. Not inserted prose — `film_compile` never reads
+        // `Shot::dialogue` — but the one free-text field of a draft shot that nothing else scans,
+        // so a label written here would otherwise be the single place one survives unremarked.
+        ("dialogue", shot.dialogue.as_deref().unwrap_or_default()),
+    ]
+    .into_iter()
+    .filter(|(_, text)| engine_label_at(text).is_some())
+    .collect()
+}
+
+/// Labels the ENGINE owns, written by the PLANNER — `<Picture 1>` and its siblings anywhere in a
+/// draft shot's prose (E2, sc-24027).
+///
+/// The `<Picture N>` a reference is served under is decided positionally by the engine and written
+/// into the prompt by the compiler, after the refine rewrite, from the one function that owns the
+/// reference order (`film_compile::shot_reference_pictures`). A planner that writes a label itself
+/// is therefore naming a picture by a number nothing assigned: the draft's `<Picture 2>` survives
+/// into the dispatched prompt as a binding to an image the shot never supplies.
+///
+/// # Why this is a PLANNER finding and not a document one
+///
+/// It judges a DRAFT, not a plan, and it is deliberately not part of [`validate_all`]: a person who
+/// types `<Picture 1>` into a hand-authored plan's prompt means it — they are writing against an
+/// engine whose grammar this is, with the references in front of them — and `validate`/`compile`
+/// must not refuse them for it. What is unsafe is a language model reproducing the shape of a
+/// label it was shown, which is exactly what this path guards and the hand-authored path cannot
+/// produce. (The one piece of free text where a label is refused on EVERY path is `audio`, because
+/// the compiler repeats that one into the prompt inside its own inserted text, which nothing reads
+/// back — see [`labelled_draft_text`].)
+pub fn anchoring_findings(draft: &PlannerDraft) -> Vec<PlanDiagnostic> {
+    let mut findings = Vec::new();
+    for shot in &draft.shots {
+        for (field, text) in labelled_draft_text(shot) {
+            findings.push(PlanDiagnostic::shot(
+                &shot.id,
+                field,
+                format!(
+                    "{field} contains {}, a label this film's renderer assigns itself — delete it \
+                     from {}'s {field} and say the same thing in plain words. {ANCHOR_LABEL_FINDING_MARKER}, \
+                     after this answer, and numbers it from the shot's referenceRoles, so a label \
+                     written here names a picture this shot never supplies",
+                    quoted_engine_label(text),
+                    shot.id,
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 /// Every finding a generated plan is judged on: the document-level checks the hand-authored path
-/// runs ([`validate_all`]), plus the planner-only ones — beat coverage, shot count and total
-/// running time. The order is deliberate: coverage first, because a dropped beat is the failure
-/// that must never be repaired away by shortening the film.
+/// runs ([`validate_all`]), plus the planner-only ones — beat coverage, engine labels the planner
+/// wrote itself, shot count and total running time. The order is deliberate: coverage first,
+/// because a dropped beat is the failure that must never be repaired away by shortening the film.
 pub fn validate_generated_plan(
     brief: &ProductionBrief,
     draft: &PlannerDraft,
@@ -1429,6 +1529,7 @@ pub fn validate_generated_plan(
     caps: Option<&PlannerCapabilities>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = coverage_findings(brief, draft);
+    findings.extend(anchoring_findings(draft));
     findings.extend(role_coverage_findings(brief, plan, pack));
     findings.extend(shape_findings(brief, plan));
     if let Some(caps) = caps {
@@ -1511,8 +1612,9 @@ pub fn build_planner_request(
         if !beat.required_roles.is_empty() {
             // Named as a requirement, not as colour: this is checked mechanically after the reply.
             out.push_str(&format!(
-                " [this beat MUST show these roles — {} and describe each of them in its \
-                 prompt.]",
+                " [this beat MUST show these roles — {} and SHOW each of them on screen in its \
+                 prompt: name the role and say what it does, never restate the pack's description \
+                 of it.]",
                 required_roles_instruction(beat, caps)
             ));
         }
@@ -1546,11 +1648,50 @@ pub fn build_planner_request(
             continue;
         }
         out.push_str(&format!(
-            "- {} ({}): {}\n",
+            "- {} ({}): {}",
             entry.role,
             entry.kind,
             entry.description.trim()
         ));
+        // A role sharing its image with another is named as sharing it (sc-24024). Binding both
+        // costs the shot ONE reference image rather than two, and the locator is how the planner
+        // knows the two roles are different subjects in one photograph rather than two pictures.
+        let sharing: Vec<&str> = pack
+            .references
+            .iter()
+            // Only an IMAGE can be shared, so this asks the question of files that EXIST: two
+            // described-only roles both answering `None` are not two roles on one photograph, and
+            // comparing the raw options would tell the planner they were (sc-24025).
+            .filter(|other| {
+                other.approved
+                    && entry.file().is_some()
+                    && other.file() == entry.file()
+                    && other.role != entry.role
+            })
+            .map(|other| other.role.as_str())
+            .collect();
+        // A DESCRIBED-ONLY role is usable, and usable in exactly one place (sc-24025). It is a
+        // subject the pack describes but has no picture of, so it belongs in continuityRoles —
+        // where the compiler writes these very words into the prompt — and naming it in
+        // referenceRoles is refused. Said on the role's own line, because that is where the
+        // planner is reading when it decides what to do with it.
+        if entry.is_described_only() {
+            out.push_str(
+                " (no image: name this role in continuityRoles only — never in referenceRoles.)",
+            );
+        }
+        if let Some(locator) = entry.locator() {
+            out.push_str(&format!(" It is {locator} in its image."));
+        }
+        if !sharing.is_empty() {
+            out.push_str(&format!(
+                " That image also shows {} — binding them together costs one reference image, \
+                 not {}.",
+                sharing.join(", "),
+                sharing.len() + 1
+            ));
+        }
+        out.push('\n');
     }
 
     out.push_str("\n# What this model can actually do\n\n");
@@ -1559,6 +1700,52 @@ pub fn build_planner_request(
     out.push_str("\n\n# Output contract\n\n");
     out.push_str(&plan_json_contract(caps, pack));
     out
+}
+
+/// The `audio` requirement restated as something to COPY, for a repair round that has an `audio`
+/// finding in it (E4, sc-24027).
+///
+/// A finding names the shot and the fault; it does not show the shape of the answer. The local 8B
+/// planner reproduces literal JSON it is shown and re-derives prose unreliably (the role-array
+/// copying rule, sc-23406), so the round that has to ADD a key is handed the key and a value to
+/// adapt, written exactly as it goes in the answer. It covers the three faults the `audio` field
+/// can carry at once — missing or blank, opening with the compiler's own `Audio: ` label, and an
+/// engine media label inside inserted prose — because they arrive as findings on the same field
+/// and a planner correcting one must not reintroduce another.
+pub const AUDIO_REQUIREMENT_RESTATEMENT: &str = "Every shot carries an audio key, spelled exactly \
+like this, with the value adapted to what THAT shot sounds like: \"audio\": \"Boots on gravel and \
+a roller door rattling up, in the flat open air of a yard. No music.\" — a silent shot writes \
+\"audio\": \"No audio. Silence.\" A shot where somebody speaks puts the line in it, in quotes, with \
+the delivery: \"audio\": \"The customer says \\\"keep the change\\\", quick and low, over a \
+compressor cycling off screen in a hard-walled garage. No music.\" The value never begins with \
+\"Audio:\" (that label is added when the film is compiled) and never contains a '<' or a '>'.";
+
+/// The anchoring requirement restated as something to COPY, for a repair round carrying a finding
+/// from [`anchoring_findings`]. Same reasoning as [`AUDIO_REQUIREMENT_RESTATEMENT`]: the repair is
+/// a DELETION, and the one thing a copy-only model reliably does with a label it is told to remove
+/// is write a different label, so the line shows the plain-words form the field takes instead.
+pub const ANCHOR_REQUIREMENT_RESTATEMENT: &str = "Delete every \"<Picture 1>\", \"<Audio 1>\" and \
+\"<Video 1>\" label from the JSON. Do not renumber one and do not replace it with another label \
+— write what is there in plain words: \"prompt\": \"The courier sets the red parcel down on the \
+workbench and steps back.\" Naming the role in continuityRoles (and in referenceRoles when the \
+shot binds it) is what makes the renderer see the right picture; the labels are written for you \
+when the film is compiled.";
+
+/// The requirements this round's findings need restated in copyable form, in the order they are
+/// listed above. One line per requirement however many findings raised it: the checklist repeats
+/// every finding verbatim already, and a shape shown twice is a shape the planner may write twice.
+fn requirement_restatements(findings: &[PlanDiagnostic]) -> Vec<&'static str> {
+    let mut restatements = Vec::new();
+    if findings.iter().any(|finding| finding.field == "audio") {
+        restatements.push(AUDIO_REQUIREMENT_RESTATEMENT);
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.message.contains(ANCHOR_LABEL_FINDING_MARKER))
+    {
+        restatements.push(ANCHOR_REQUIREMENT_RESTATEMENT);
+    }
+    restatements
 }
 
 /// The user turn for a repair round: what to change, the beats that must survive the change, the
@@ -1624,6 +1811,9 @@ pub fn build_repair_request(
             "- This pack approves no roles: write continuityRoles: [] on EVERY shot and do not \
              invent role ids from prose nouns.\n",
         );
+    }
+    for restatement in requirement_restatements(findings) {
+        out.push_str(&format!("- {restatement}\n"));
     }
     for finding in findings {
         out.push_str(&format!("- {finding}\n"));
@@ -1766,7 +1956,7 @@ Answer with ONE JSON object and nothing else — no prose, no markdown fence, no
       \"targetDurationSeconds\": <one of the allowed durations, copied exactly>,
       \"startState\": \"<the world at the first frame>\",
       \"endState\": \"<the world at the last frame>\",
-      \"sound\": \"<the diegetic sound of this shot>\",
+      \"audio\": \"<what this shot sounds like: the diegetic sound the action makes, the ambience of the space, and 'No music.' unless this shot wants music — or say outright that it is silent>\",
       \"dialogue\": \"<a spoken line, or omit the field>\",
       \"conditioning\": { \"mode\": \"<one of the allowed modes>\" },
       \"seed\": <an integer, optional>,
@@ -1779,6 +1969,25 @@ Rules:
 - Shot ids ascend in tens: SH010, SH020, SH030 ...
 - Every field name is spelled exactly as above. An extra or misspelled field is rejected outright.
 - Omit an optional field rather than writing null, \"\" or a placeholder.{{LORA_RULE}}
+- audio is REQUIRED on every shot and is never omitted or left blank. The model that renders this \
+film scores its soundtrack from the same text it renders the picture from, so anything the prompt \
+does not describe is invented. A shot that is meant to be silent says so outright — \
+\"No audio. Silence.\" — rather than saying nothing.
+- Write audio as what a microphone standing in the scene would pick up, in this order: the \
+DIEGETIC sound the visible action makes (\"Boots on gravel, a roller door rattling up\"), then the \
+AMBIENCE of the space (\"a wide room with hard reverb\", \"quiet room tone\"), then \"No music.\" \
+— those two words, unless this shot genuinely wants music, in which case name the instrumentation \
+and the mood instead.
+- audio NEVER begins with \"Audio:\". That label is written for you when the film is compiled, and \
+a value that carries it too would send it twice.
+- If somebody SPEAKS in this shot, the line goes in audio, because audio is the only text the \
+renderer scores a voice from: name the speaker, put the exact words in quotes and say how they are \
+delivered, beside the diegetic sound and the ambience. Copy this shape —
+    \"audio\": \"The customer says \\\"keep the change\\\", quick and low, over a compressor \
+cycling off screen in a hard-walled garage. No music.\"
+  Keep the line short enough to SAY inside this shot's duration: one that takes eight seconds to \
+speak does not fit a six-second clip. The dialogue field beside it is the plan's own record of the \
+line and is never rendered from — a shot with a spoken line writes the words in BOTH.
 - beat, framing, prompt, startState and endState are STRINGS — one piece of prose each. Never an \
 object, never a list, and never a role-by-role breakdown.
 - startState and endState describe WHAT THE CAMERA SEES in the first and the last frame of this \
@@ -1799,6 +2008,14 @@ conditioning tasks.
 - first_last_frame needs TWO DIFFERENT roles. The same role in both slots is refused.
 - chainFromShotId names the shot IMMEDIATELY BEFORE this one, or is omitted. It is never a \
 substitute for continuityRoles: a chained shot still names the approved roles it depicts.
+- Never write \"<Picture 1>\", \"<Audio 1>\", \"<Video 1>\" or any other angle-bracket label \
+anywhere in this JSON. Those labels belong to the compiler: it numbers this shot's reference \
+images itself, AFTER you answer, from the referenceRoles you wrote. One written here names a \
+picture the shot never supplies.
+- Never restate a role's description from the approved list above in prompt, and never write which \
+picture shows whom. The compiler writes one identity sentence for every role a shot names and one \
+binding sentence for every role it conditions on, word for word from the pack. Name the role in \
+continuityRoles (and in referenceRoles when the shot binds it) and spend prompt on what HAPPENS.
 {{CONTINUITY_RULE}}{{REFERENCE_RULE}}
 
 One filled shot, for shape only. It is from a DIFFERENT film: copy the spelling and the level of \
@@ -1817,7 +2034,8 @@ Dust turns in the light from the roller door behind them. The camera does not mo
 palm; the customer waits opposite with both hands at their sides.\",
   \"endState\": \"The counter is empty and the customer holds the brass key at chest height; the \
 mechanic's hand is withdrawn.\",
-  \"sound\": \"key scraping on steel, a compressor cycling somewhere off screen\",
+  \"audio\": \"A key scraping across steel and a compressor cycling somewhere off screen, in the \
+hard reverb of a concrete garage. No music.\",
   \"conditioning\": {{EXAMPLE_CONDITIONING}},
   \"continuityRoles\": {{EXAMPLE_CONTINUITY}}
 }";
@@ -1825,6 +2043,7 @@ mechanic's hand is withdrawn.\",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION;
     use serde_json::json;
 
     fn brief_json() -> Value {
@@ -1853,7 +2072,7 @@ mod tests {
 
     fn pack() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -1910,7 +2129,7 @@ mod tests {
     /// A pack that approves nothing — the user who supplied no references (E1).
     fn pack_without_references() -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -1930,7 +2149,7 @@ mod tests {
             "targetDurationSeconds": 14.375,
             "startState": "empty",
             "endState": "not empty",
-            "sound": "room tone",
+            "audio": "room tone, no music",
             "conditioning": { "mode": "text_to_video" },
             "continuityRoles": ["courier", "red_parcel"]
         })
@@ -2423,6 +2642,47 @@ mod tests {
         );
     }
 
+    /// sc-24026. `DraftShot::audio` is required and has no serde default, so a model that OMITS
+    /// the key on one shot would throw the whole round away at an anonymous byte offset and hand
+    /// the repair round `missing field "audio"` with no shot id in it. Materialized blank instead,
+    /// so the draft survives to become a plan and the refusal arrives as the finding that NAMES
+    /// the shot — which is a repair the planner can actually make.
+    #[test]
+    fn a_draft_shot_that_omits_audio_becomes_the_finding_that_names_it_not_a_decode_failure() {
+        let mut first = draft_shot("SH010", "arrival");
+        first.as_object_mut().unwrap().remove("audio");
+        let draft = parse_planner_output(
+            &json!({ "shots": [first, draft_shot("SH020", "delivery"), draft_shot("SH030", "discovery")] })
+                .to_string(),
+        )
+        .expect("a shot with no audio key still decodes");
+        assert_eq!(draft.shots[0].audio, "");
+        assert_eq!(draft.shots[1].audio, "room tone, no music");
+
+        let plan = draft_to_plan(&brief(), &draft);
+        let findings = crate::film_plan::validate_plan_structure(&plan);
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+        assert_eq!(findings[0].field, "audio");
+
+        // A shot that wrote `""` and a shot that omitted the key reach the repair round as the
+        // same finding, which is the point of materializing it.
+        let mut blank = draft_shot("SH010", "arrival");
+        blank["audio"] = json!("");
+        let explicit = parse_planner_output(
+            &json!({ "shots": [blank, draft_shot("SH020", "delivery"), draft_shot("SH030", "discovery")] })
+                .to_string(),
+        )
+        .expect("an explicitly blank audio decodes too");
+        assert_eq!(
+            messages(&crate::film_plan::validate_plan_structure(&draft_to_plan(
+                &brief(),
+                &explicit
+            ))),
+            messages(&findings)
+        );
+    }
+
     #[test]
     fn malformed_planner_output_is_refused_rather_than_coerced() {
         assert!(parse_planner_output("").is_err());
@@ -2431,7 +2691,7 @@ mod tests {
         // An unknown field is refused outright, not dropped.
         let error = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}, "cameraLens": "35mm"}]}"#,
         )
         .expect_err("unknown field refused");
@@ -2456,7 +2716,7 @@ mod tests {
         // column 20" told it nothing and all three decodes came back identical.
         let error = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}},
                 {"id": "SH020", "beatId": "delivery", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s",
@@ -2481,7 +2741,7 @@ mod tests {
                 "targetDurationSeconds": 5.1667,
                 "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
                 "endState": ["the courier fills the doorway", "the parcel is against their chest"],
-                "dialogue": "", "sound": "  ",
+                "dialogue": "", "audio": "  ",
                 "conditioning": {
                     "mode": "text_to_video", "firstFrameRole": "", "lastFrameRole": "",
                     "referenceRoles": [], "chainFromShotId": ""
@@ -2504,14 +2764,14 @@ mod tests {
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667,
                 "startState": {"workshop_plate": "empty workshop", "courier": "not yet in frame"},
-                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+                "endState": "e", "audio": "Room tone, no music.", "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("parses");
         let forwards = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
                 "prompt": "p", "targetDurationSeconds": 5.1667,
                 "startState": {"courier": "not yet in frame", "workshop_plate": "empty workshop"},
-                "endState": "e", "conditioning": {"mode": "text_to_video"}}]}"#,
+                "endState": "e", "audio": "Room tone, no music.", "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("parses");
         assert_eq!(reversed.shots[0].start_state, forwards.shots[0].start_state);
@@ -2522,7 +2782,10 @@ mod tests {
         // A blank placeholder is an omission, not a value: `chainFromShotId: ""` would otherwise be
         // a chain to a shot named "" and `firstFrameRole: ""` a role no pack can contain.
         assert_eq!(shot.dialogue, None);
-        assert_eq!(shot.sound, None);
+        // `audio` is the exception, and deliberately so (sc-24026): it is REQUIRED, so a blank one
+        // is CARRIED rather than dropped, and `validate_plan_structure` then names the shot that
+        // said nothing about sound instead of the decoder reporting a missing field.
+        assert_eq!(shot.audio, "  ");
         assert_eq!(shot.conditioning.chain_from_shot_id, None);
         assert_eq!(shot.conditioning.first_frame_role, None);
         assert_eq!(shot.conditioning.last_frame_role, None);
@@ -2530,7 +2793,7 @@ mod tests {
         // ordinary structural validator reports it as the missing field it is.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": {}, "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": {}, "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {"mode": "text_to_video"}}]}"#,
         )
         .expect("an empty object flattens");
@@ -2541,7 +2804,7 @@ mod tests {
         // about its conditioning; a slot the mode cannot use conditions nothing.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {
                     "mode": "text_to_video", "firstFrameRole": "workshop_plate",
                     "lastFrameRole": "courier", "referenceRoles": []
@@ -2555,7 +2818,7 @@ mod tests {
         // A slot the mode DOES take is untouched, and so is the second slot's absence.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": {
                     "mode": "image_to_video", "firstFrameRole": "workshop_plate",
                     "lastFrameRole": "courier"
@@ -2573,7 +2836,7 @@ mod tests {
         // normalisation and is reported by the validator instead of being deleted.
         let draft = parse_planner_output(
             r#"{"shots": [{"id": "SH010", "beatId": "arrival", "beat": "b", "framing": "f",
-                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                "prompt": "p", "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video", "referenceRoles": ["courier"] },
                 "continuityRoles": ["courier"]}]}"#,
         )
@@ -2833,7 +3096,7 @@ mod tests {
         let caps = capabilities_for(&brief.model, &entry, ModelLane::Mlx);
         assert_eq!(caps.max_reference_images, 3);
         let section = caps.as_prompt_section();
-        assert!(section.contains("at most 3 reference roles"), "{section}");
+        assert!(section.contains("at most 3 reference IMAGES"), "{section}");
         assert!(!section.contains("negativePrompt"), "{section}");
     }
 
@@ -2871,7 +3134,7 @@ mod tests {
         assert_eq!(widened.min_memory_gb, base.min_memory_gb);
 
         let section = widened.as_prompt_section();
-        assert!(section.contains("at most 9 reference roles"), "{section}");
+        assert!(section.contains("at most 9 reference IMAGES"), "{section}");
         assert!(
             section.contains("Every shot binds, in referenceRoles"),
             "{section}"
@@ -2898,7 +3161,7 @@ mod tests {
     }
 
     /// sc-23405 review. "The pack can fill a reference shot" counts only the kinds a
-    /// `reference_to_video` shot may BIND ([`BINDABLE_REFERENCE_KINDS`]).
+    /// `reference_to_video` shot may BIND ([`crate::film_plan::BINDABLE_REFERENCE_KINDS`]).
     ///
     /// A pack may approve a style and a plate and still approve no SUBJECT: Ref2VA binds every image
     /// as a thing to depict, a style is a look rather than a thing, and a plate is placed through the
@@ -2910,7 +3173,7 @@ mod tests {
         let brief = brief();
         let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
         let style_and_plate_only: ReferencePack = serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -3233,7 +3496,8 @@ mod tests {
                 "write [\"courier\", \"red_parcel\", \"workbench_table\", \"workshop_location\"] \
                  into SH020's continuityRoles AND its referenceRoles"
             ) && texts[0].contains("missing workbench_table;")
-                && texts[0].contains("describe workbench_table in its prompt"),
+                && texts[0].contains("SHOW workbench_table on screen in its prompt")
+                && texts[0].contains("never restate the pack's description of it"),
             "{}",
             texts[0]
         );
@@ -3255,7 +3519,7 @@ mod tests {
         assert!(
             texts[0].contains(
                 "write [\"courier\", \"red_parcel\", \"workbench_table\"] into SH020's \
-                 continuityRoles and describe"
+                 continuityRoles and SHOW"
             ) && !texts[0].contains("referenceRoles"),
             "{}",
             texts[0]
@@ -3311,7 +3575,7 @@ mod tests {
                 "a hallucinated role, continuity only",
                 text_to_video.clone(),
                 json!(["courier", "wolf"]),
-                "into SH020's continuityRoles and describe",
+                "into SH020's continuityRoles and SHOW",
             ),
             (
                 "a hallucinated role, bound shot",
@@ -3383,7 +3647,7 @@ mod tests {
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert!(
             texts[0].contains(
-                "write [\"courier\", \"house_style\"] into SH020's continuityRoles and describe"
+                "write [\"courier\", \"house_style\"] into SH020's continuityRoles and SHOW"
             ) && !texts[0].contains("referenceRoles"),
             "{}",
             texts[0]
@@ -3405,6 +3669,98 @@ mod tests {
             pack_role_faults(&repaired).is_empty(),
             "{:?}",
             pack_role_faults(&repaired)
+        );
+    }
+
+    /// A DESCRIBED-ONLY role reaches the planner with the ONE rule that governs it, and a beat
+    /// that requires one is repaired into `continuityRoles` ALONE (sc-24025).
+    ///
+    /// The two halves are the same rule read from two places. The envelope line is what stops the
+    /// planner naming a fileless role in `referenceRoles` in the first place; the coverage hint's
+    /// bindability filter is what stops the REPAIRER being handed an array
+    /// `validate_plan_against_pack` then refuses — a copy-only repairer can never converge on
+    /// that, so the loop would burn every round and give up.
+    #[test]
+    fn a_described_only_role_is_offered_for_continuity_only_and_repaired_there() {
+        let pack: ReferencePack = serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "described-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/courier.png",
+                  "description": "Blue jacket." },
+                // No `file`: words alone.
+                { "role": "recipient", "kind": "character", "description": "Grey apron." }
+            ]
+        }))
+        .expect("the described pack parses");
+        let brief = brief();
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+
+        assert!(
+            request.contains(
+                "- recipient (character): Grey apron. (no image: name this role in \
+                 continuityRoles only — never in referenceRoles.)"
+            ),
+            "a described-only role must be offered with its one rule on its own line: {request}"
+        );
+        assert!(
+            request.contains("- courier (character): Blue jacket.\n"),
+            "an image-backed role is told nothing about having no image: {request}"
+        );
+
+        // A beat that REQUIRES the fileless role, on a `reference_to_video` shot that binds only
+        // the courier. The repair may not name `referenceRoles`: `recipient` is refused there.
+        let mut brief = brief;
+        brief.required_beats[1].required_roles = vec!["courier".to_owned(), "recipient".to_owned()];
+        let mut delivery = draft_shot("SH020", "delivery");
+        delivery["conditioning"] =
+            json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+        delivery["continuityRoles"] = json!(["courier"]);
+        let draft: PlannerDraft = serde_json::from_value(json!({
+            "shots": [draft_shot("SH010", "arrival"), delivery, draft_shot("SH030", "discovery")]
+        }))
+        .expect("draft parses");
+
+        let findings = role_coverage_findings(&brief, &draft_to_plan(&brief, &draft), &pack);
+        let texts = messages(&findings);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].contains(
+                "write [\"courier\", \"recipient\"] into SH020's continuityRoles and SHOW"
+            ) && !texts[0].contains("referenceRoles"),
+            "the hint must not ask for a binding the validator refuses: {}",
+            texts[0]
+        );
+
+        // One round of a repairer that does nothing but copy the array clears coverage, and the
+        // plan it produced is one the pack validator accepts.
+        let mut repaired_draft = draft.clone();
+        assert_eq!(
+            copy_arrays_from_findings(&mut repaired_draft, &findings),
+            1,
+            "{}",
+            texts[0]
+        );
+        let repaired = draft_to_plan(&brief, &repaired_draft);
+        assert!(
+            role_coverage_findings(&brief, &repaired, &pack).is_empty(),
+            "{:?}",
+            messages(&role_coverage_findings(&brief, &repaired, &pack))
+        );
+        assert!(
+            messages(&crate::film_plan::validate_plan_against_pack(
+                &repaired, &pack
+            ))
+            .iter()
+            .all(|message| !message.contains("DESCRIBED-ONLY")),
+            "{:?}",
+            messages(&crate::film_plan::validate_plan_against_pack(
+                &repaired, &pack
+            ))
         );
     }
 
@@ -3443,6 +3799,69 @@ mod tests {
             !plan_json_contract(&bare, &pack()).contains("NEVER listed in referenceRoles"),
             "{}",
             plan_json_contract(&bare, &pack())
+        );
+    }
+
+    /// The two sentences a shared image adds to the planner prompt, and the one it corrects
+    /// (sc-24024). The per-role line has to name the co-subjects and say that binding them costs
+    /// ONE image, and the envelope's cap has to agree with it — it bounds reference IMAGES, so a
+    /// cap of nine admits ten roles when two of them are one photograph. The first draft of this
+    /// prompt said "at most N reference roles" fifteen lines above the sentence that says roles
+    /// are cheaper than that, which is a contradiction the planner reads in one sitting.
+    #[test]
+    fn the_planner_prompt_says_a_shared_image_costs_one_and_the_cap_counts_images() {
+        let brief = brief();
+        let pack: ReferencePack = serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "pair-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/pair.png",
+                  "locator": "the woman on the left", "description": "Blue jacket." },
+                { "role": "recipient", "kind": "character", "file": "references/pair.png",
+                  "locator": "the man on the right", "description": "Grey apron." },
+                { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png",
+                  "description": "Red box." }
+            ]
+        }))
+        .expect("the pair pack parses");
+        let caps = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(&pack);
+        let request = build_planner_request(&brief, &pack, &caps);
+
+        assert!(
+            request.contains(
+                "- courier (character): Blue jacket. It is the woman on the left in its image. \
+                 That image also shows recipient — binding them together costs one reference \
+                 image, not 2."
+            ),
+            "{request}"
+        );
+        assert!(
+            request.contains(
+                "- recipient (character): Grey apron. It is the man on the right in its image. \
+                 That image also shows courier — binding them together costs one reference \
+                 image, not 2."
+            ),
+            "{request}"
+        );
+        assert!(
+            request.contains("- red_parcel (prop): Red box.\n"),
+            "a role with a plate to itself is told nothing about sharing: {request}"
+        );
+
+        // The cap in the same prompt counts IMAGES, and says so where the planner reads it.
+        assert!(
+            request.contains(
+                "Reference conditioning: at most 9 reference IMAGES on a reference_to_video \
+                 shot — roles that share one image count once"
+            ),
+            "{request}"
+        );
+        assert!(
+            !request.contains("reference roles on a reference_to_video shot"),
+            "the superseded role-counting cap must not survive anywhere in the prompt: {request}"
         );
     }
 
@@ -3710,5 +4129,566 @@ mod tests {
         assert!(parse_brief(&value.to_string())
             .expect_err("unknown field refused")
             .contains("tone"));
+    }
+
+    // ── sc-24027: the audio contract, anchoring, and the described-only envelope ─────────────
+
+    /// The shipped pack's cast as WORDS ONLY — the shape of
+    /// `config/film-harness/courier-workshop/references.described.jsonc`: approved roles of
+    /// bindable kinds, every one of them without a file.
+    fn described_only_pack() -> ReferencePack {
+        let mut pack = pack();
+        pack.references.retain(|entry| entry.approved);
+        for entry in &mut pack.references {
+            entry.file = None;
+            entry.locator = None;
+        }
+        assert!(
+            pack.references
+                .iter()
+                .all(crate::film_plan::ReferenceEntry::is_described_only),
+            "the fixture is described-only or this test is about something else"
+        );
+        pack
+    }
+
+    /// The envelope a pack of this shape plans against: the base entry widened to the reference
+    /// partition, then narrowed to the pack, with every shipped accelerator installed.
+    fn caps_for_pack(pack: &ReferencePack) -> PlannerCapabilities {
+        capabilities_for(&brief().model, &model_entry(), ModelLane::Mlx)
+            .with_reference_partition(&reference_entry())
+            .narrowed_to_pack(pack)
+            .with_installed_turbo_loras(&route_ordered_turbo_ids())
+    }
+
+    /// One repair round's request, for the assertions that are about the CONTRACT rather than
+    /// about the findings.
+    fn repair_for(findings: &[PlanDiagnostic], raw: &str, pack: &ReferencePack) -> String {
+        build_repair_request(&brief(), pack, &caps_for_pack(pack), raw, findings, 1, 2)
+    }
+
+    /// 🔴 E4. `audio` is on every shot shape the planner is SHOWN — the template it fills and the
+    /// one worked example it copies — with the wording MiniMax-H3's own prompt guide asks for
+    /// (`apps/web/public/prompt-guides/minimax-h3.md`, "Prompt the audio explicitly"): diegetic
+    /// sound, ambience, "No music." unless music is wanted, silence stated outright, never the
+    /// compiler's own `Audio: ` label, and never a spoken line.
+    ///
+    /// Asserted on the REQUEST the model receives, first round and repair round alike, because the
+    /// contract reaching one and not the other is the drift the shared constant exists to prevent.
+    #[test]
+    fn every_shot_shape_the_planner_is_shown_carries_audio_with_the_guides_wording() {
+        let first = build_planner_request(&brief(), &pack(), &caps_for_pack(&pack()));
+        let repair = repair_for(
+            &[PlanDiagnostic::plan("shots", "no shots at all")],
+            "{\"shots\": []}",
+            &pack(),
+        );
+        for request in [&first, &repair] {
+            // The shape to fill, and the one filled shot to copy: both carry the key.
+            assert!(
+                request.contains("\"audio\": \"<what this shot sounds like:"),
+                "{request}"
+            );
+            assert!(
+                request.contains(
+                    "\"audio\": \"A key scraping across steel and a compressor cycling somewhere \
+                     off screen, in the hard reverb of a concrete garage. No music.\","
+                ),
+                "the one filled shot models the guide's own order: {request}"
+            );
+            assert!(
+                request.contains("audio is REQUIRED on every shot"),
+                "{request}"
+            );
+            assert!(
+                request.contains("the DIEGETIC sound the visible action makes")
+                    && request.contains("then the AMBIENCE of the space")
+                    && request.contains("then \"No music.\""),
+                "{request}"
+            );
+            assert!(
+                request.contains("\"No audio. Silence.\""),
+                "an explicit silence statement is a valid answer: {request}"
+            );
+            assert!(
+                request.contains("audio NEVER begins with \"Audio:\""),
+                "{request}"
+            );
+            // The guide's Voice bullet: the line itself lives in `audio`, because that is the only
+            // text H3 scores a voice from. A planner draft can never PLACE a `dialogueClip`
+            // (`draft_to_plan` writes `dialogue_clip: None`), so nothing here may tell it to leave
+            // the words out — that would silence every spoken line a planned film asks for.
+            assert!(
+                request.contains(
+                    "If somebody SPEAKS in this shot, the line goes in audio, because audio is the \
+                     only text the renderer scores a voice from"
+                ),
+                "{request}"
+            );
+            assert!(
+                request.contains(
+                    "\"audio\": \"The customer says \\\"keep the change\\\", quick and low, over a \
+                     compressor cycling off screen in a hard-walled garage. No music.\""
+                ),
+                "the spoken shape is shown as a literal to copy, with the quotes escaped as JSON \
+                 wants them: {request}"
+            );
+            assert!(
+                !request.contains("NEVER goes in audio"),
+                "nothing may tell the planner to keep a spoken line out of audio: {request}"
+            );
+        }
+    }
+
+    /// 🔴 EVERY spoken `audio` value the planner is shown is one a draft can actually WRITE: valid
+    /// JSON exactly as escaped, surviving the decode with its quotes, and passing validation — the
+    /// document rules refuse `<`, `>` and control characters in inserted prose, never quotation
+    /// marks.
+    ///
+    /// Both places are checked, the contract and the repair round's restatement, because both are
+    /// literals a copy-only planner reproduces byte for byte: one of them escaped wrong is a round
+    /// that cannot parse whatever the model does right.
+    #[test]
+    fn the_spoken_audio_example_decodes_and_validates_with_its_quotes_intact() {
+        let brief = brief();
+        // Lifted out of the text the model is shown, not written out again here: what is under
+        // test is that THAT text is copyable.
+        let marker = "\"audio\": \"The customer says ";
+        let json_value_of = |shown: &str, source: &str| -> String {
+            let start = shown
+                .find(marker)
+                .unwrap_or_else(|| panic!("{source} shows the spoken example: {shown}"));
+            // The value's own closing quote, honouring the escapes — the restatement carries prose
+            // after it on the same line, so "to the end of the line" would not be the literal.
+            let open = start + "\"audio\": ".len();
+            let mut escaped = false;
+            let end = shown[open + 1..]
+                .char_indices()
+                .find_map(|(index, ch)| {
+                    if escaped {
+                        escaped = false;
+                        return None;
+                    }
+                    match ch {
+                        '\\' => {
+                            escaped = true;
+                            None
+                        }
+                        '"' => Some(open + 1 + index),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| panic!("{source} closes the example value: {shown}"));
+            let literal = &shown[start..=end];
+            let decoded: Value =
+                serde_json::from_str(&format!("{{{literal}}}")).unwrap_or_else(|error| {
+                    panic!("{source} is valid JSON as shown: {error} ({literal})")
+                });
+            decoded["audio"]
+                .as_str()
+                .expect("a string value")
+                .to_owned()
+        };
+        let spoken = json_value_of(
+            &plan_json_contract(&caps_for_pack(&pack()), &pack()),
+            "the output contract",
+        );
+        assert_eq!(
+            json_value_of(AUDIO_REQUIREMENT_RESTATEMENT, "the repair restatement"),
+            spoken,
+            "the two literals must not drift apart"
+        );
+        let spoken = spoken.as_str();
+        assert!(
+            spoken.contains("says \"keep the change\""),
+            "the decoded line keeps its quotation marks: {spoken}"
+        );
+
+        let mut value = json!({
+            "shots": [
+                draft_shot("SH010", "arrival"),
+                draft_shot("SH020", "delivery"),
+                draft_shot("SH030", "discovery")
+            ]
+        });
+        value["shots"][1]["audio"] = json!(spoken);
+        value["shots"][1]["dialogue"] = json!("keep the change");
+        let draft = parse_planner_output(&value.to_string()).expect("the draft decodes");
+        assert_eq!(draft.shots[1].audio, spoken);
+        let plan = draft_to_plan(&brief, &draft);
+        let findings = validate_generated_plan(
+            &brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            None,
+        );
+        assert!(findings.is_empty(), "{:?}", messages(&findings));
+    }
+
+    /// 🔴 E1/E2. The contract tells the planner that the labels, the identity text and "which
+    /// picture shows whom" are the COMPILER's, in both rounds.
+    #[test]
+    fn the_contract_tells_the_planner_that_anchoring_is_the_compilers_job() {
+        let first = build_planner_request(&brief(), &pack(), &caps_for_pack(&pack()));
+        let repair = repair_for(
+            &[PlanDiagnostic::plan("shots", "no shots at all")],
+            "{\"shots\": []}",
+            &pack(),
+        );
+        for request in [&first, &repair] {
+            assert!(
+                request.contains(
+                    "Never write \"<Picture 1>\", \"<Audio 1>\", \"<Video 1>\" or any other \
+                     angle-bracket label anywhere in this JSON"
+                ),
+                "{request}"
+            );
+            assert!(
+                request
+                    .contains("it numbers this shot's reference images itself, AFTER you answer"),
+                "{request}"
+            );
+            assert!(
+                request.contains(
+                    "Never restate a role's description from the approved list above in prompt, \
+                     and never write which picture shows whom"
+                ),
+                "{request}"
+            );
+            assert!(
+                request.contains(
+                    "The compiler writes one identity sentence for every role a shot names"
+                ),
+                "{request}"
+            );
+        }
+    }
+
+    /// 🔴 E4. A draft that leaves a shot's `audio` out is a finding NAMING THAT SHOT, and the
+    /// repair round hands the requirement back as something to copy — the key spelled out and a
+    /// value to adapt — rather than as prose about it.
+    #[test]
+    fn a_shot_without_audio_is_named_and_the_repair_round_restates_the_key() {
+        let brief = brief();
+        let mut value = json!({
+            "shots": [
+                draft_shot("SH010", "arrival"),
+                draft_shot("SH020", "delivery"),
+                draft_shot("SH030", "discovery")
+            ]
+        });
+        // Written the way the model gets it wrong: the key is simply absent.
+        value["shots"][1]
+            .as_object_mut()
+            .expect("a shot object")
+            .remove("audio");
+        let raw = value.to_string();
+        let draft = parse_planner_output(&raw).expect("a shot with no audio key still decodes");
+        let plan = draft_to_plan(&brief, &draft);
+        let findings = validate_generated_plan(
+            &brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            None,
+        );
+        let audio: Vec<&PlanDiagnostic> = findings
+            .iter()
+            .filter(|finding| finding.field == "audio")
+            .collect();
+        assert_eq!(audio.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(audio[0].shot_id.as_deref(), Some("SH020"));
+        assert!(audio[0].message.contains("audio is required"), "{audio:?}");
+
+        let repair = repair_for(&findings, &raw, &pack());
+        assert!(
+            repair.contains("[SH020] audio:"),
+            "the finding reaches the model naming the shot and the field: {repair}"
+        );
+        assert!(
+            repair.contains(
+                "Every shot carries an audio key, spelled exactly like this, with the value \
+                 adapted to what THAT shot sounds like: \"audio\": \"Boots on gravel and a roller \
+                 door rattling up, in the flat open air of a yard. No music.\""
+            ),
+            "the repair hands back the key and a value to adapt: {repair}"
+        );
+        assert!(
+            repair.contains("a silent shot writes \"audio\": \"No audio. Silence.\""),
+            "{repair}"
+        );
+
+        // The control: with no audio finding in the round the restatement is not sent, so the
+        // checklist stays about what is actually wrong.
+        let unrelated = repair_for(
+            &[PlanDiagnostic::shot("SH010", "beatId", "not a beat")],
+            &raw,
+            &pack(),
+        );
+        assert!(
+            !unrelated.contains("Every shot carries an audio key"),
+            "{unrelated}"
+        );
+    }
+
+    /// 🔴 E2. A draft that writes an engine label into a shot's prose is a finding NAMING THAT
+    /// SHOT, quoting the label and telling the planner to delete it; the repair round restates the
+    /// deletion in copyable form.
+    ///
+    /// The hand-authored half is the other side of the same rule: a person who types `<Picture 1>`
+    /// into a plan's prompt means it, and `validate_all` — the document path `validate` and
+    /// `compile` run — leaves them alone.
+    #[test]
+    fn a_drafts_picture_label_is_a_finding_naming_the_shot_but_a_hand_authored_one_is_not() {
+        let brief = brief();
+        let mut value = json!({
+            "shots": [
+                draft_shot("SH010", "arrival"),
+                draft_shot("SH020", "delivery"),
+                draft_shot("SH030", "discovery")
+            ]
+        });
+        value["shots"][1]["prompt"] =
+            json!("The courier in <Picture 1> sets the parcel on the bench.");
+        let raw = value.to_string();
+        let draft = parse_planner_output(&raw).expect("the draft decodes");
+        let plan = draft_to_plan(&brief, &draft);
+        let findings = validate_generated_plan(
+            &brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            None,
+        );
+        let labelled: Vec<&PlanDiagnostic> = findings
+            .iter()
+            .filter(|finding| finding.message.contains(ANCHOR_LABEL_FINDING_MARKER))
+            .collect();
+        assert_eq!(labelled.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(labelled[0].shot_id.as_deref(), Some("SH020"));
+        assert_eq!(labelled[0].field, "prompt");
+        assert!(
+            labelled[0].message.contains("prompt contains <Picture 1>,")
+                && labelled[0]
+                    .message
+                    .contains("delete it from SH020's prompt"),
+            "{:?}",
+            labelled[0].message
+        );
+        // The marker opens a sentence in the rendered finding, so it reads as one.
+        assert!(
+            labelled[0]
+                .message
+                .contains("plain words. The compiler writes every such label itself,"),
+            "{:?}",
+            labelled[0].message
+        );
+
+        let repair = repair_for(&findings, &raw, &pack());
+        assert!(
+            repair.contains(
+                "Delete every \"<Picture 1>\", \"<Audio 1>\" and \"<Video 1>\" label from the JSON"
+            ) && repair.contains("Do not renumber one and do not replace it with another label"),
+            "{repair}"
+        );
+
+        // The SAME text, hand-authored: the document path says nothing about it.
+        let document = validate_all(
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+        );
+        assert!(
+            !document
+                .iter()
+                .any(|finding| finding.message.contains("<Picture 1>")),
+            "a person who types the label means it: {:?}",
+            messages(&document)
+        );
+    }
+
+    /// 🔴 The scan reads the label the way the ENGINE does: the keyword after the `<`, whatever
+    /// the case and whatever whitespace sits between them. `< Picture 1 >` and `<\tpicture 1>` are
+    /// the same instruction to MiniMax-H3 as `<Picture 1>`, so a scan that only matched the
+    /// unspaced lower-cased spelling would let exactly the variants a model produces by accident
+    /// through — and `dialogue`, the one free-text field of a draft shot nothing else reads, is
+    /// scanned too.
+    #[test]
+    fn the_label_scan_reads_spacing_case_and_the_dialogue_field() {
+        let brief = brief();
+        for (field, written) in [
+            (
+                "prompt",
+                "The courier in < Picture 1 > sets the parcel down.",
+            ),
+            ("prompt", "The courier in <picture 1> sets the parcel down."),
+            (
+                "prompt",
+                "The courier in <\tPICTURE 1> sets the parcel down.",
+            ),
+            ("dialogue", "As <Picture 2> says: sign here."),
+        ] {
+            let mut value = json!({
+                "shots": [
+                    draft_shot("SH010", "arrival"),
+                    draft_shot("SH020", "delivery"),
+                    draft_shot("SH030", "discovery")
+                ]
+            });
+            value["shots"][1][field] = json!(written);
+            let draft = parse_planner_output(&value.to_string()).expect("the draft decodes");
+            let plan = draft_to_plan(&brief, &draft);
+            let findings = validate_generated_plan(
+                &brief,
+                &draft,
+                &plan,
+                &pack(),
+                None,
+                Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+                None,
+            );
+            let labelled: Vec<&PlanDiagnostic> = findings
+                .iter()
+                .filter(|finding| finding.message.contains(ANCHOR_LABEL_FINDING_MARKER))
+                .collect();
+            assert_eq!(labelled.len(), 1, "{written:?}: {:?}", messages(&findings));
+            assert_eq!(labelled[0].shot_id.as_deref(), Some("SH020"), "{written:?}");
+            assert_eq!(labelled[0].field, field, "{written:?}");
+            // Quoted as the planner wrote it, spacing and all, so the deletion is unambiguous.
+            let quoted = &written[written.find('<').expect("a label")
+                ..=written.find('>').expect("a closing bracket")];
+            assert!(
+                labelled[0].message.contains(quoted),
+                "{written:?}: {:?}",
+                labelled[0].message
+            );
+        }
+
+        // The control: an angle bracket that is NOT one of the engine's labels stays unflagged, so
+        // what this scans for is the label rather than the character.
+        let mut value = json!({
+            "shots": [
+                draft_shot("SH010", "arrival"),
+                draft_shot("SH020", "delivery"),
+                draft_shot("SH030", "discovery")
+            ]
+        });
+        value["shots"][1]["prompt"] = json!("The courier < the recipient in height.");
+        let draft = parse_planner_output(&value.to_string()).expect("the draft decodes");
+        assert!(anchoring_findings(&draft).is_empty());
+    }
+
+    /// 🔴 A label in `audio` is reported ONCE. That field is inserted prose, so
+    /// `validate_shot_structure` already refuses a `<` in it naming the shot; a second, differently
+    /// worded finding from the planner's own scan would give the repair round two instructions
+    /// about one value.
+    #[test]
+    fn an_engine_label_in_audio_is_reported_exactly_once() {
+        let brief = brief();
+        let mut value = json!({
+            "shots": [
+                draft_shot("SH010", "arrival"),
+                draft_shot("SH020", "delivery"),
+                draft_shot("SH030", "discovery")
+            ]
+        });
+        value["shots"][2]["audio"] = json!("Room tone. The voice from <Audio 1>. No music.");
+        let raw = value.to_string();
+        let draft = parse_planner_output(&raw).expect("the draft decodes");
+        let plan = draft_to_plan(&brief, &draft);
+        let findings = validate_generated_plan(
+            &brief,
+            &draft,
+            &plan,
+            &pack(),
+            None,
+            Some((&single_entries(&model_entry()), ModelLane::Mlx)),
+            None,
+        );
+        let about_the_shot: Vec<&PlanDiagnostic> = findings
+            .iter()
+            .filter(|finding| finding.shot_id.as_deref() == Some("SH030"))
+            .collect();
+        assert_eq!(about_the_shot.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(about_the_shot[0].field, "audio");
+        assert!(
+            about_the_shot[0]
+                .message
+                .contains("must not contain '<' or '>'"),
+            "{:?}",
+            about_the_shot[0].message
+        );
+
+        // And the repair round says it once too: the audio restatement covers the label, so the
+        // anchoring restatement is not added beside it.
+        let repair = repair_for(&findings, &raw, &pack());
+        assert!(repair.contains("never contains a '<' or a '>'"), "{repair}");
+        assert!(
+            !repair.contains("Delete every \"<Picture 1>\""),
+            "one value, one instruction: {repair}"
+        );
+    }
+
+    /// 🔴 A described-only pack approves WORDS, and `reference_to_video` conditions on pixels. The
+    /// envelope must therefore narrow exactly as an empty pack's does: no reference mode, no
+    /// reference cap, no accelerator for a partition this film never dispatches, and a worked
+    /// example that models `text_to_video`.
+    ///
+    /// Before sc-24027 the narrowing asked only whether the pack approved a bindable KIND, so this
+    /// pack inverted every shot's default mode to a binding `validate_plan_against_pack` then
+    /// refused (sc-24025) for the whole round budget.
+    #[test]
+    fn a_described_only_pack_offers_neither_reference_conditioning_nor_its_adapter() {
+        let brief = brief();
+        let described = described_only_pack();
+        let base = capabilities_for(&brief.model, &model_entry(), ModelLane::Mlx);
+        let caps = caps_for_pack(&described);
+        assert!(!caps.offers_references());
+        assert_eq!(caps.modes, base.modes);
+        assert_eq!(caps.max_reference_images, 0);
+        assert!(
+            caps.turbo_loras
+                .iter()
+                .all(|offer| offer.model_id == "minimax_h3"),
+            "no adapter for a partition that is never dispatched: {:?}",
+            caps.turbo_loras
+        );
+
+        let request = build_planner_request(&brief, &described, &caps);
+        assert!(
+            request.contains("Reference conditioning: THIS CHECKPOINT HAS NONE"),
+            "{request}"
+        );
+        assert!(
+            request.contains("\"conditioning\": { \"mode\": \"text_to_video\" },"),
+            "the one worked example must not model a mode the envelope withdrew: {request}"
+        );
+        assert!(
+            request.contains(
+                "(no image: name this role in continuityRoles only — never in referenceRoles.)"
+            ),
+            "the described-only roles are still usable, and said to be: {request}"
+        );
+        assert!(request.contains("- courier (character):"), "{request}");
+
+        // The control: give ONE of those roles an image and the envelope widens again, so what
+        // this asserts is the image, not the pack.
+        let mut with_a_photograph = described;
+        with_a_photograph.references[0].file = Some("references/courier.png".to_owned());
+        let widened = caps_for_pack(&with_a_photograph);
+        assert!(widened.offers_references());
+        assert_eq!(widened.max_reference_images, 9);
+        assert!(widened
+            .turbo_loras
+            .iter()
+            .any(|offer| offer.model_id == "minimax_h3_ref"));
     }
 }

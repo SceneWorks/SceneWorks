@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e93ac26629869b1ff23a3765b989d1d3b0106c19da2eba165794c2ffc5906f71",
+    "sceneWorksRevision": "source-tree:ce2a2d8bada4ea6a709e6f51429efe0a429a6e852dd99cd46b105aadc597c678",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "fb99af4474d4a6aeff651e7c717a7a4a9b909e5cc092fe378f2a0ee903db8d3d"
+        "sha256": "6dbcf5da5499b55c417d42ec114fccb498cc4d2b42cb8647e57f5eda42331396"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",

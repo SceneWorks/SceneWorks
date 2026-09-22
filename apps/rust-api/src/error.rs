@@ -284,6 +284,15 @@ impl From<CatalogError> for ApiError {
     }
 }
 
+/// So a handler whose error type is a raw [`Response`] — one that must also be able to answer with
+/// the body shape the JSON extractor's own rejection uses — can still `?` on an [`ApiError`]
+/// (sc-24029).
+impl From<ApiError> for Response {
+    fn from(error: ApiError) -> Self {
+        error.into_response()
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Make every 5xx leave a server-side trace (it previously returned `{detail}`

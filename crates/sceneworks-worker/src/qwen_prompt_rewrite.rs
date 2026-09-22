@@ -95,15 +95,22 @@ pub(crate) const REWRITE_TEMPERATURE: f32 = 1.0;
 pub(crate) const REWRITE_TOP_P: f32 = 0.95;
 pub(crate) const REWRITE_TOP_K: usize = 20;
 
-/// Output budget for a rewrite.
+/// Output budget for a rewrite, PER REWRITER — each card's own published `max_new_tokens`.
 ///
-/// Upstream publishes `max_new_tokens: 16256`, which is a CONTEXT ceiling for their batched vLLM
-/// runner rather than a length the reply ever reaches: the object is one paragraph plus two short
-/// fields, and it emits EOS far below any of these numbers. 4096 is the same generous ceiling the
-/// worker's other JSON-emitting tasks take (`DEFAULT_CAPTION_MAX_NEW_TOKENS`), and it bounds a
-/// runaway reasoning block on a single-request local decode instead of letting one occupy the GPU
-/// for minutes. Callers may still raise it with `payload.maxNewTokens`.
-pub(crate) const REWRITE_MAX_NEW_TOKENS: u32 = 4096;
+/// The two differ, and the difference is not cosmetic: the edit card allows half again as much
+/// because an edit rewrite reasons over up to ten images before it emits.
+///
+/// Capping BELOW the published value is not a safe economy here. Both checkpoints emit a
+/// `<think>` block and THEN the JSON object, so a budget that runs out mid-reasoning loses the
+/// object entirely — the reply is not a shorter rewrite, it is no rewrite. The first cut of this
+/// module took 4096 (the worker's caption ceiling) on the theory that a paragraph plus two short
+/// fields is small; that is true of the OBJECT and false of the reasoning that precedes it.
+///
+/// A budget that is nonetheless exhausted now produces a distinguishable error naming the number
+/// rather than a parse failure — see [`truncated_reply_error`]. Callers may still override with
+/// `payload.maxNewTokens`.
+pub(crate) const T2I_MAX_NEW_TOKENS: u32 = 16256;
+pub(crate) const I2I_MAX_NEW_TOKENS: u32 = 24000;
 
 /// Upper bound on reference images sent to the edit rewriter.
 ///
@@ -155,6 +162,14 @@ impl Rewriter {
         }
     }
 
+    /// The card's own `max_new_tokens` for this rewriter. See [`T2I_MAX_NEW_TOKENS`].
+    pub(crate) fn max_new_tokens(self) -> u32 {
+        match self {
+            Self::TextToImage => T2I_MAX_NEW_TOKENS,
+            Self::Editing => I2I_MAX_NEW_TOKENS,
+        }
+    }
+
     fn expected_system_prompt_sha256(self) -> &'static str {
         match self {
             Self::TextToImage => T2I_SYSTEM_PROMPT_SHA256,
@@ -196,12 +211,20 @@ pub(crate) fn load_system_prompt_verifying(
         ))
     })?;
     verify_system_prompt_digest(&bytes, rewriter, expected_sha256)?;
-    String::from_utf8(bytes).map_err(|error| {
+    let template = String::from_utf8(bytes).map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "{}'s {SYSTEM_PROMPT_FILE} is not valid UTF-8: {error}",
             rewriter.repo()
         ))
-    })
+    })?;
+    // Trailing whitespace is stripped, matching upstream's own loaders, which read the file as
+    // `open(...).read().strip()`. The file ends with a newline, so passing it verbatim would send
+    // the model a system turn one character different from the one it was tuned with.
+    //
+    // AFTER the digest check, deliberately: the freeze covers the file's RAW BYTES, so trimming
+    // first would verify a string that is not what is on disk and let a re-push that only changed
+    // trailing whitespace slip through.
+    Ok(template.trim().to_owned())
 }
 
 /// Verify a system-prompt blob against a frozen digest.
@@ -246,6 +269,34 @@ pub(crate) struct RewriteSuggestion {
     /// Which input image the output resolution should follow ("<image1>"), or empty when
     /// `wh_ratio` is stated. T2I never sets this.
     pub(crate) ratio_follow: String,
+}
+
+/// The error for a reply the decoder ran out of budget on, rather than a bare parse failure.
+///
+/// Both checkpoints emit a `<think>` block and THEN the JSON object, so exhausting the budget
+/// loses the object entirely: the user sees "did not return a JSON object", which reads as a broken
+/// model when the actual cause is a ceiling and the actual fix is a number. This names both.
+pub(crate) fn truncated_reply_error(rewriter: Rewriter, max_new_tokens: u32) -> String {
+    format!(
+        "the {} rewriter's reply was cut off at {max_new_tokens} tokens before it finished — raise \
+         `maxNewTokens` and try again (these checkpoints reason first and emit the JSON object \
+         last, so a budget that runs out loses the whole object rather than shortening it)",
+        rewriter.repo()
+    )
+}
+
+/// The cleaned reply, trimmed to `limit` characters for an error message.
+///
+/// A parse failure that discards the reply leaves nobody anything to act on — not the user, not the
+/// next reader of the log. Truncated because a reply can be thousands of characters and an error
+/// message is not a transcript.
+pub(crate) fn reply_excerpt(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_owned();
+    }
+    let head: String = trimmed.chars().take(limit).collect();
+    format!("{head}…")
 }
 
 /// Parse a rewriter reply into a suggestion.
@@ -507,6 +558,41 @@ mod tests {
         assert!(error.contains("mutually exclusive"), "{error}");
     }
 
+    /// A budget exhausted mid-reasoning gets its own error, naming the ceiling and the fix.
+    ///
+    /// Both checkpoints reason first and emit the JSON object LAST, so running out of tokens loses
+    /// the object entirely. The generic parse error ("did not return a JSON object") then reads as
+    /// a broken model when the cause is a number the caller controls.
+    #[test]
+    fn a_truncated_reply_names_the_ceiling_rather_than_reading_as_a_broken_model() {
+        let message = truncated_reply_error(Rewriter::Editing, 1024);
+        assert!(message.contains("cut off at 1024 tokens"), "{message}");
+        assert!(message.contains("maxNewTokens"), "{message}");
+        // Names WHICH rewriter, since the two carry different ceilings.
+        assert!(message.contains(PE_I2I_REPO), "{message}");
+        // And says why a short budget loses everything rather than shortening the reply — without
+        // that, "raise the limit" looks like a guess.
+        assert!(message.contains("reason first"), "{message}");
+    }
+
+    /// A parse failure keeps a bounded excerpt of the reply.
+    ///
+    /// Discarding it leaves nobody anything to act on: not the user reading the job error, not
+    /// whoever reads the log. Bounded, because a reply can be thousands of characters.
+    #[test]
+    fn a_parse_failure_keeps_a_bounded_excerpt_of_the_reply() {
+        assert_eq!(reply_excerpt("  short reply  ", 500), "short reply");
+        let long = "x".repeat(900);
+        let excerpt = reply_excerpt(&long, 500);
+        assert_eq!(excerpt.chars().count(), 501, "500 chars plus the ellipsis");
+        assert!(excerpt.ends_with('…'));
+        // Character-wise, not byte-wise: a multi-byte reply must not be sliced mid-codepoint.
+        let multibyte = "é".repeat(400);
+        let excerpt = reply_excerpt(&multibyte, 100);
+        assert_eq!(excerpt.chars().count(), 101);
+        assert!(excerpt.starts_with('é'));
+    }
+
     #[test]
     fn a_non_object_or_unparseable_reply_is_refused_by_name() {
         assert!(parse_rewrite("not json").is_err());
@@ -560,18 +646,25 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_matching_the_frozen_digest_is_read_back_verbatim() {
+    fn a_snapshot_matching_the_frozen_digest_is_read_back_trimmed() {
         // The freeze accepts the pinned bytes. The digest is computed here rather than vendored
         // because the real 18 KB file is Qwen-licensed prose this repo deliberately does not carry.
         let dir = tempfile::tempdir().unwrap();
-        let body = "# Edit Prompt Enhancer\n\nReturn one JSON object.\n";
+        // Trailing whitespace, exactly as the shipped files end.
+        let body = "# Edit Prompt Enhancer\n\nReturn one JSON object.\n\n";
         std::fs::write(dir.path().join(SYSTEM_PROMPT_FILE), body).unwrap();
+        // The digest covers the RAW BYTES — that trailing whitespace included — so the freeze still
+        // detects a re-push that changed nothing else.
         let frozen = hex_digest(body.as_bytes());
         assert_eq!(frozen.len(), 64);
-        assert_eq!(
-            load_system_prompt_verifying(dir.path(), Rewriter::Editing, &frozen).unwrap(),
-            body
-        );
+
+        let loaded = load_system_prompt_verifying(dir.path(), Rewriter::Editing, &frozen).unwrap();
+        // The TEMPLATE is trimmed, matching upstream's own `open(...).read().strip()`. Passing the
+        // file verbatim would send the model a system turn one character different from the one it
+        // was tuned with.
+        assert_eq!(loaded, body.trim());
+        assert_ne!(loaded, body, "the trailing whitespace must be stripped");
+        assert!(!loaded.ends_with('\n'));
     }
 
     #[test]
@@ -599,6 +692,41 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains(PE_I2I_REPO), "{message}");
         assert!(message.contains(SYSTEM_PROMPT_FILE), "{message}");
+    }
+
+    /// The frozen digests are the FREEZE. Pin their exact values.
+    ///
+    /// `the_frozen_digests_are_recorded` below only checks SHAPE — 64 hex characters — so mutating
+    /// either constant to any other well-formed digest left the whole suite GREEN while silently
+    /// disarming the one check that detects an upstream re-push. These literals are the assertion
+    /// that a digest cannot be changed casually.
+    ///
+    /// ⚠️ **Changing a value here is not a test fix.** It means the pinned revision's
+    /// `system_prompt.txt` is claimed to be different prose, so the new digest must be RE-DERIVED
+    /// from that revision and the `revision` constant reviewed alongside it:
+    ///
+    /// ```text
+    /// shasum -a 256 ~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1-PE-T2I/snapshots/<rev>/system_prompt.txt
+    /// ```
+    #[test]
+    fn the_frozen_digests_are_the_pinned_revisions_own() {
+        assert_eq!(
+            T2I_SYSTEM_PROMPT_SHA256,
+            "a77c9a06c59b120741141d9514b95682bb8761d02bec49ca61def7b2b3d9fb99",
+            "re-derive from {PE_T2I_REPO} @ {PE_T2I_REVISION} before changing this"
+        );
+        assert_eq!(
+            I2I_SYSTEM_PROMPT_SHA256,
+            "e378fea686a1431581ba4c654d332ae96adad633f144ae738ec8ce9c4fd66439",
+            "re-derive from {PE_I2I_REPO} @ {PE_I2I_REVISION} before changing this"
+        );
+        // The two templates are genuinely different documents (10,045 vs 18,344 bytes upstream), so
+        // an accidental copy-paste of one digest over the other is itself a failure.
+        assert_ne!(T2I_SYSTEM_PROMPT_SHA256, I2I_SYSTEM_PROMPT_SHA256);
+        // The revisions they were derived from, pinned in the same breath: a digest is only
+        // meaningful against a stated revision.
+        assert_eq!(PE_T2I_REVISION, "f3ed7985c788ad75b3ab7223e0c4c51e2a43545b");
+        assert_eq!(PE_I2I_REVISION, "72927bc08afc99b7888ceb7d7d51a12db3700bbd");
     }
 
     #[test]

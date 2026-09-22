@@ -158,6 +158,7 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     draft["title"] = json!("Workshop delivery");
     draft["productionPlan"]["shots"][0]["prompt"] =
         json!("A courier enters a workshop carrying a red parcel.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, saved) = request(
         app.clone(),
         "PUT",
@@ -417,6 +418,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
 
     referenced = imported_draft;
     referenced["productionPlan"]["shots"][0]["prompt"] = json!("Courier close-up");
+    referenced["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     referenced["productionPlan"]["shots"][0]["conditioning"] = json!({
         "mode": "reference_to_video",
         "referenceRoles": ["courier"]
@@ -424,6 +426,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
     let mut plain_shot = referenced["productionPlan"]["shots"][0].clone();
     plain_shot["id"] = json!("SH020");
     plain_shot["prompt"] = json!("An empty workshop establishing shot");
+    plain_shot["audio"] = json!("Room tone. No music.");
     plain_shot["conditioning"] = json!({"mode": "text_to_video", "referenceRoles": []});
     plain_shot["continuityRoles"] = json!([]);
     referenced["productionPlan"]["shots"]
@@ -574,6 +577,7 @@ async fn film_sound_route_stages_prerecorded_audio_and_pins_it_with_the_run() {
         .unwrap()
         .to_owned();
     staged["productionPlan"]["shots"][0]["prompt"] = json!("A courier speaks.");
+    staged["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     staged["productionPlan"]["shots"][0]["dialogue"] = json!("The parcel is here.");
     staged["productionPlan"]["shots"][0]["dialogueClip"] = json!({
         "role": "courier_line", "offsetSeconds": 0.25, "sourceInSeconds": 0,
@@ -639,6 +643,7 @@ async fn unapproved_reference_binding_is_a_named_finding() {
     )
     .await;
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Hero enters");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     draft["productionPlan"]["shots"][0]["conditioning"] =
         json!({"mode": "reference_to_video", "referenceRoles": ["hero"]});
     let (_, saved) = request(
@@ -703,6 +708,7 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
         "refinePrompts": false
     });
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Manual prompt stays intact.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, saved) = request(
         app.clone(),
         "PUT",
@@ -954,6 +960,7 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     let authored_review = draft["reviewPlan"]["shots"]["SH010"].clone();
     let mut candidate = draft["productionPlan"].clone();
     candidate["shots"][0]["prompt"] = json!("Generated candidate prompt.");
+    candidate["shots"][0]["audio"] = json!("Room tone. No music.");
     let mut added_shot = candidate["shots"][0].clone();
     added_shot["id"] = json!("SH020");
     candidate["shots"].as_array_mut().unwrap().push(added_shot);
@@ -963,7 +970,10 @@ async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
         .join(&draft_id);
     std::fs::create_dir_all(&planning_root).unwrap();
     let mut compiled = json!({
-        "schemaVersion": 3,
+        // The version this build reads, not a literal: a hand-written compiled fixture pinned to a
+        // number is refused BY VERSION after the next schema bump, and the symptom is this test
+        // failing on an unrelated assertion about the applied plan's revision.
+        "schemaVersion": sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
         "planId": draft_id,
         "planVersion": 1,
         "planSha256": "synthetic-candidate-fixture",
@@ -1099,6 +1109,7 @@ async fn film_render_refuses_an_authorized_revision_changed_by_another_session()
     let draft_id = draft["id"].as_str().unwrap().to_owned();
     let authorized_revision = draft["revision"].clone();
     draft["productionPlan"]["shots"][0]["prompt"] = json!("Another session changed the prompt");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, _) = request(
         app.clone(),
         "PUT",
@@ -1155,6 +1166,7 @@ async fn film_render_store_pin_rechecks_revision_after_route_validation() {
     let draft_id = draft["id"].as_str().unwrap().to_owned();
     draft["productionPlan"]["shots"][0]["prompt"] =
         json!("A courier walks across a quiet workshop.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (_, saved) = request(
         app.clone(),
         "PUT",
@@ -1181,6 +1193,7 @@ async fn film_render_store_pin_rechecks_revision_after_route_validation() {
         .unwrap();
     let mut concurrent = saved;
     concurrent["productionPlan"]["shots"][0]["prompt"] = json!("Changed after route validation");
+    concurrent["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
     let (status, _) = request(
         app.clone(),
         "PUT",
@@ -1223,4 +1236,427 @@ async fn planning_repair_ceiling_is_rejected_before_creating_an_operation() {
         .contains("between 0 and 5"));
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(jobs, json!([]));
+}
+
+/// sc-24028. The exact request bodies the Film workspace's reference panel posts, fed through the
+/// real route. The panel's vitest suite asserts these same shapes on the client side; this is the
+/// half that proves the server can decode them — a described-only add carries NO `assetId` key at
+/// all, and a second role on one image carries the `locator` the core requires.
+#[tokio::test]
+async fn film_reference_route_authors_described_only_roles_and_shared_image_locators() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Workspace authoring"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (_, draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Workspace authoring"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}/references");
+
+    // Described-only: no `assetId` key at all, which is what the panel omits when there is no
+    // image. `FilmReferenceInput` is `deny_unknown_fields`, so the omission is the contract.
+    let (status, described) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 1,
+            "role": "courier",
+            "kind": "character",
+            "description": "The courier: blue jacket, carries the parcel.",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{described}");
+    let entry = described["referencePack"]["references"][0].clone();
+    assert_eq!(entry["role"], "courier");
+    assert!(
+        entry.get("file").is_none(),
+        "a described-only role must be stored with no file: {entry}"
+    );
+    assert!(
+        entry.get("sourceAssetId").is_none(),
+        "a fileless role must not claim a library asset either: {entry}"
+    );
+
+    // A GET of the pack returns it — the reload the workspace does.
+    let (status, pack) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}/reference-pack"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pack["references"][0], entry);
+
+    // Blank description and no image: the CORE's refusal, not one this route states again.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 2,
+            "role": "silent",
+            "kind": "character",
+            "description": "  ",
+            "approved": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no `file` and no `description`"),
+        "{refused}"
+    );
+
+    // Two roles on ONE image, with the `locator` key the panel marks required at that moment.
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "pair.png",
+        "image/png",
+        PNG_32X32,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+    let (status, first) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 2,
+            "assetId": asset_id,
+            "role": "driver",
+            "kind": "character",
+            "description": "The driver: grey coat.",
+            "locator": "the woman on the left",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+
+    let (status, unlocated) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 3,
+            "assetId": asset_id,
+            "role": "guard",
+            "kind": "character",
+            "description": "The guard: high collar.",
+            "locator": Value::Null,
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unlocated}");
+    assert!(
+        unlocated["detail"]
+            .as_str()
+            .unwrap()
+            .contains("share the file"),
+        "{unlocated}"
+    );
+
+    let (status, second) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "draftRevision": 3,
+            "assetId": asset_id,
+            "role": "guard",
+            "kind": "character",
+            "description": "The guard: high collar.",
+            "locator": "the man on the right",
+            "approved": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    let references = second["referencePack"]["references"].as_array().unwrap();
+    assert_eq!(references.len(), 3);
+    let shared = format!("references/{asset_id}.png");
+    assert_eq!(references[1]["file"], json!(shared));
+    assert_eq!(
+        references[2]["file"],
+        json!(shared),
+        "one asset added twice is ONE file under two roles"
+    );
+    assert_eq!(references[1]["locator"], "the woman on the left");
+    assert_eq!(references[2]["locator"], "the man on the right");
+
+    // Everything survives the reload.
+    let (status, reloaded) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/films/{draft_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(
+        reloaded["referencePack"]["references"],
+        second["referencePack"]["references"]
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// sc-24029 — the feature-end review's findings
+// -------------------------------------------------------------------------------------------
+
+/// A compiled document for `draft`, current against BOTH of its documents.
+///
+/// The hashes come from the compiler's own functions rather than from literals, so this fixture
+/// cannot drift from what the store and preflight compute — and so a schema bump is a version
+/// refusal rather than this helper quietly producing a document nothing reads.
+fn current_compiled_for(draft: &Value) -> Value {
+    use sceneworks_core::film_compile::{
+        production_plan_sha256, reference_pack_sha256, COMPILED_PLAN_SCHEMA_VERSION,
+    };
+    let plan: sceneworks_core::film_plan::ProductionPlan =
+        serde_json::from_value(draft["productionPlan"].clone()).expect("the draft's plan decodes");
+    let pack: sceneworks_core::film_plan::ReferencePack =
+        serde_json::from_value(draft["referencePack"].clone()).expect("the draft's pack decodes");
+    let requests: Vec<Value> = plan
+        .shots
+        .iter()
+        .map(|shot| {
+            json!({
+                "shotId": shot.id,
+                "beat": shot.beat,
+                "mode": shot.conditioning.mode,
+                "model": plan.model.id,
+                "partitionReason": "base conditioning",
+                "prompt": shot.prompt,
+                "promptSource": "authored",
+                "durationSeconds": shot.target_duration_seconds,
+                "fps": 24,
+                "width": 576,
+                "height": 320,
+                "referenceRoles": [],
+                "continuityRoles": []
+            })
+        })
+        .collect();
+    json!({
+        "schemaVersion": COMPILED_PLAN_SCHEMA_VERSION,
+        "planId": plan.id,
+        "planVersion": plan.version,
+        "planSha256": production_plan_sha256(&plan).expect("the plan hashes"),
+        "referencePackId": pack.id,
+        "referencePackVersion": pack.version,
+        "referencePackSha256": reference_pack_sha256(&pack).expect("the pack hashes"),
+        "compiledAt": "2026-09-19T00:00:00Z",
+        "model": {"id": plan.model.id, "tier": plan.model.tier, "fps": 24, "lane": "mlx"},
+        "requests": requests
+    })
+}
+
+/// sc-24029, E5/E7. Editing a reference pack description invalidates the draft's compiled plan,
+/// and the refusal names the PACK — not a derived field, and not after a run has been created.
+///
+/// The pack is an input to the prompt: every binding sentence and every identity-lock sentence is
+/// written out of a pack entry's own description. Before this, the compiled document survived a
+/// pack edit marked current, `create_film_run` checked staleness and created the run anyway, and
+/// the mismatch surfaced later as a difference in `insertedText` — the wrong cause, with a
+/// CLI-only remedy, after the run was already pinned.
+#[tokio::test]
+async fn editing_a_reference_pack_description_refuses_a_run_and_names_the_pack() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Pack edit"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap().to_owned();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Pack edit"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}");
+
+    // A described-only role, so the draft carries a pack whose DESCRIPTION is the thing the
+    // compiler would repeat — the case this staleness key exists for.
+    draft["referencePack"]["references"] = json!([{
+        "role": "courier",
+        "kind": "character",
+        "description": "The courier: blue jacket, carries the parcel."
+    }]);
+    draft["productionPlan"]["shots"][0]["prompt"] =
+        json!("A courier crosses a cluttered workshop and sets a parcel on the bench.");
+    draft["productionPlan"]["shots"][0]["audio"] = json!("Room tone. No music.");
+    draft["productionPlan"]["shots"][0]["continuityRoles"] = json!(["courier"]);
+    let (status, draft) = request(app.clone(), "PUT", &route, draft).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+
+    let mut draft = draft;
+    draft["compiledPlan"] = current_compiled_for(&draft);
+    let (status, draft) = request(app.clone(), "PUT", &route, draft).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    // The store carried the compile across its own revision bump, so it is still current: the
+    // pack refusal below is caused by the EDIT, not by the save.
+    let (status, run) = request(
+        app.clone(),
+        "POST",
+        &format!("{route}/runs"),
+        json!({"selectedShotIds": ["SH010"]}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the unedited pack renders: {run}"
+    );
+
+    // NOW edit the description. Nothing about the plan changes.
+    let mut draft = draft;
+    let plan_before = draft["productionPlan"].clone();
+    draft["referencePack"]["references"][0]["description"] =
+        json!("The courier: red quilted jacket, carries the parcel.");
+    let (status, saved) = request(app.clone(), "PUT", &route, draft).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["productionPlan"]["shots"], plan_before["shots"],
+        "a pack edit changes no shot"
+    );
+
+    let runs_before = std::path::Path::new(project["path"].as_str().unwrap()).join("films/runs");
+    let count_before = std::fs::read_dir(&runs_before).map_or(0, Iterator::count);
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &format!("{route}/runs"),
+        json!({"selectedShotIds": ["SH010"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    let detail = refusal["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("the reference pack changed since these requests were compiled")
+            && detail.contains("recompile, or use authored prompts"),
+        "the refusal names the pack and both remedies: {refusal}"
+    );
+    assert!(
+        !detail.contains("insertedText") && !detail.contains("InsertedText"),
+        "the cause is the pack, not a derived field: {refusal}"
+    );
+    assert!(
+        !detail.contains("has changed since it was compiled"),
+        "a pack edit is not reported as a stale PLAN: {refusal}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&runs_before).map_or(0, Iterator::count),
+        count_before,
+        "nothing is created and nothing is pinned"
+    );
+}
+
+/// sc-24029, E6. A plan DOCUMENT imported at a schema version this build does not read is refused
+/// by VERSION, with the remedy — not by serde with `unknown field sound` at a byte offset.
+///
+/// The Film workspace has an "Import production plan" button, so a v1/v2 document reaching a PUT
+/// body is an ordinary user action. The scan runs server-side, ahead of the typed decode, so every
+/// client gets the same refusal.
+#[tokio::test]
+async fn an_imported_plan_document_at_an_unsupported_schema_version_is_refused_by_version() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Import"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap().to_owned();
+    let (_, mut draft) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/films"),
+        json!({"title": "Import"}),
+    )
+    .await;
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    let route = format!("/api/v1/projects/{project_id}/films/{draft_id}");
+
+    // Exactly what a version 2 document on disk looks like: the old version, and `sound` where
+    // version 3 requires `audio`. Both halves matter — the second is what serde reports first.
+    draft["productionPlan"]["schemaVersion"] = json!(2);
+    for shot in draft["productionPlan"]["shots"].as_array_mut().unwrap() {
+        let shot = shot.as_object_mut().unwrap();
+        shot.remove("audio");
+        shot.insert("sound".to_owned(), json!("Room tone."));
+    }
+    let (status, refusal) = request(app.clone(), "PUT", &route, draft).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    let body = refusal.to_string();
+    assert!(
+        body.contains("unsupported plan schema version 2"),
+        "the refusal is about the VERSION: {refusal}"
+    );
+    assert!(body.contains("audio"), "and it names the remedy: {refusal}");
+    assert!(
+        !body.contains("unknown field"),
+        "serde's own message must never be what the operator is handed: {refusal}"
+    );
+    // The message is rendered to an operator as written, with no `[plan] <field>:` scope prefix.
+    assert!(
+        !body.contains("[plan]"),
+        "no diagnostic scope prefix reaches the UI: {refusal}"
+    );
+
+    // And the carry-forward is untouched: a v2 plan already STORED in a draft is state with no
+    // author, so it still opens. Written straight to disk, which is how such a draft exists.
+    let path = std::path::Path::new(project["path"].as_str().unwrap())
+        .join("films/drafts")
+        .join(format!("{draft_id}.json"));
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stored["productionPlan"]["schemaVersion"] = json!(2);
+    for shot in stored["productionPlan"]["shots"].as_array_mut().unwrap() {
+        let shot = shot.as_object_mut().unwrap();
+        shot.remove("audio");
+        shot.insert("sound".to_owned(), json!("Room tone."));
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+    let (status, reopened) = request(app, "GET", &route, Value::Null).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a STORED v2 draft is carried forward on read, not refused: {reopened}"
+    );
+    assert_eq!(
+        reopened["productionPlan"]["schemaVersion"],
+        json!(sceneworks_core::film_plan::PLAN_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        reopened["productionPlan"]["shots"][0]["audio"],
+        json!("Room tone.")
+    );
 }

@@ -3054,6 +3054,59 @@ label {
   opacity: 0.75;
 }
 
+/* The ordered-reference rail (sc-24113), shared by Image Studio and the Simple shell. The order of
+   these references is part of the request for a model whose template numbers them, so the ordinal
+   is shown and the arrows edit it in place. */
+.ordered-references {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ordered-reference {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface-2, var(--surface));
+  font-size: 12.5px;
+}
+
+.ordered-reference-ordinal {
+  flex: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.ordered-reference-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ordered-reference-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.ordered-reference-actions button {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+.ordered-reference-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 /* The transparency toggle's second half (sc-24113): this model has no transparency MODE, so the
    toggle only keeps the alpha channel and the PROMPT decides whether it holds a cut-out. The
    affordance is inline copy plus a button that edits the visible prompt — never a silent append. */
@@ -11257,6 +11310,15 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-bindings label { display: grid; gap: 4px; }
 .ve-film-reference-row > input { min-width: 140px; flex: 1; }
 .ve-film-reference-check { display: flex !important; align-items: center; }
+.ve-film-reference-note { flex-basis: 100%; color: var(--text-muted); font-size: 11px; }
+.ve-film-reference-described {
+  min-width: 140px;
+  flex: 1;
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
 .ve-film-file-button input { max-width: 220px; }
 .ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
 .ve-film-bindings li span { min-width: 140px; }
@@ -11399,6 +11461,12 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-preflight dd { min-width: 0; }
+.ve-film-field-help { color: var(--text-muted); font-size: 11px; }
+.ve-film-field-help-more > summary { color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.ve-film-inserted-text { display: grid; gap: 3px; margin: 0; padding-left: 18px; }
+.ve-film-inserted-text li { color: var(--text-muted); overflow-wrap: anywhere; }
+.ve-film-inserted-text em { margin-right: 6px; color: var(--text); font-style: normal; font-weight: 650; }
 .ve-film-review { display: grid; gap: 12px; }
 .ve-film-review > details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .ve-film-review > details > summary { cursor: pointer; font-weight: 650; }
