@@ -8,18 +8,25 @@ import { FilmShots } from "./FilmShots.jsx";
 function makeDraft() {
   const shot = (id, beat) => ({
     id, beat, framing: "wide", prompt: `${beat} prompt`, targetDurationSeconds: 5.1667,
-    startState: "start", endState: "end", conditioning: { mode: "text_to_video", referenceRoles: [] },
+    startState: "start", endState: "end", audio: "Room tone. No music.", conditioning: { mode: "text_to_video", referenceRoles: [] },
     continuityRoles: [], dependsOn: [],
   });
   return {
     id: "film_1",
     productionPlan: {
-      schemaVersion: 2, id: "film_1", version: 2, title: "Film", synopsis: "",
+      schemaVersion: 3, id: "film_1", version: 2, title: "Film", synopsis: "",
       model: { id: "minimax_h3", tier: "q4", fps: 24, resolution: "576x320", loras: [] },
       limits: { maxRunSeconds: 3600, maxShotSeconds: 2700, maxAttemptsPerShot: 1, maxMemoryGb: 96 },
       sound: {}, shots: [shot("SH010", "Arrival"), shot("SH020", "Reveal")],
     },
-    referencePack: { references: [{ role: "hero", approved: true }, { role: "plate", approved: true }] },
+    referencePack: { references: [
+      { role: "hero", approved: true, file: "references/hero.png" },
+      { role: "plate", approved: true, file: "references/plate.png" },
+      // DESCRIBED-ONLY (sc-24025): approved, but with no image. It belongs in continuityRoles and
+      // nowhere else — the server refuses it in every conditioning slot.
+      { role: "recipient", approved: true, description: "Grey work apron." },
+      { role: "rejected", approved: false, file: "references/rejected.png" },
+    ] },
   };
 }
 
@@ -97,6 +104,28 @@ describe("FilmShots", () => {
     expect(latest.selection).toEqual(["SH020"]);
   });
 
+  // sc-24025. `validate_plan_against_pack` refuses a DESCRIBED-ONLY role in every conditioning
+  // slot, so offering one in the two keyframe selects or in the reference-role suggestions would
+  // let the editor build a draft the server rejects. It belongs in continuityRoles, and that is
+  // the one input that suggests it.
+  it("offers a described-only role for continuity only and never for conditioning", async () => {
+    await render();
+    const selectFor = (prefix) => [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.startsWith(prefix)).querySelector("select");
+    // `option.value` falls back to the text for an option with no value attribute, so this is the
+    // role list with the selects' empty "None" entry dropped.
+    const optionValues = (element) => [...element.querySelectorAll("option")]
+      .map((option) => option.value).filter(Boolean);
+
+    for (const prefix of ["First frame role", "Last frame role"]) {
+      expect(optionValues(selectFor(prefix))).toEqual(["hero", "plate"]);
+    }
+    expect(optionValues(container.querySelector("#film-reference-role-options")))
+      .toEqual(["hero", "plate"]);
+    expect(optionValues(container.querySelector("#film-continuity-role-options")))
+      .toEqual(["hero", "plate", "recipient"]);
+  });
+
   it("shows field findings, effective settings and recorded refinement identity", async () => {
     const compiled = {
       requests: [{ shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24, durationSeconds: 5.1667, mode: "text_to_video", referenceRoles: [], effectiveSteps: 4, loras: ["turbo"], promptSource: "refined" }],
@@ -107,6 +136,106 @@ describe("FilmShots", () => {
     expect(container.textContent).toContain("576×320");
     expect(container.textContent).toContain("Qwen/Qwen3.6-27B");
     expect(container.textContent).toContain("target minimax_h3");
+  });
+
+  // sc-24028. `insertedText` is what the COMPILER wrote around the authored prompt (sc-24023).
+  // The preflight has to show it apart from the authored text, labelled by kind, or a reviewer
+  // cannot tell which sentences they are responsible for.
+  it("shows the compiler's inserted text per kind, apart from the authored prompt", async () => {
+    const compiled = {
+      requests: [{
+        shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24,
+        durationSeconds: 5.1667, mode: "reference_to_video", referenceRoles: ["hero"],
+        promptSource: "authored", authoredPrompt: "The courier crosses the workshop.",
+        insertedText: [
+          { kind: "reference_binding", text: "The courier is the person shown in <Picture 1>." },
+          { kind: "continuity_description", text: "Grey work apron." },
+          { kind: "audio", text: "Audio: Room tone. No music." },
+          { kind: "no_speech", text: "No speech." },
+        ],
+      }],
+    };
+    await render({ compiled });
+    const inserted = container.querySelector('[aria-label="Text the compiler added to SH010"]');
+    expect([...inserted.querySelectorAll("li")].map((item) => item.querySelector("em").textContent))
+      .toEqual(["Reference binding", "Continuity description", "Audio", "No speech"]);
+    expect([...inserted.querySelectorAll("li span")].map((item) => item.textContent)).toEqual([
+      "The courier is the person shown in <Picture 1>.",
+      "Grey work apron.",
+      "Audio: Room tone. No music.",
+      "No speech.",
+    ]);
+    // It is its own labelled row, immediately after the prompt row — not mixed into it.
+    const insertedDd = inserted.closest("dd");
+    expect(insertedDd.previousElementSibling.tagName).toBe("DT");
+    expect(insertedDd.previousElementSibling.textContent).toBe("Added by the compiler");
+    const promptDt = [...inserted.closest("dl").querySelectorAll("dt")]
+      .find((term) => term.textContent === "Prompt");
+    expect(promptDt.nextElementSibling.textContent).toBe("authored");
+  });
+
+  it("shows no inserted-text block when the compiler added nothing", async () => {
+    const compiled = {
+      requests: [{
+        shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24,
+        durationSeconds: 5.1667, mode: "text_to_video", referenceRoles: [], promptSource: "authored",
+      }],
+    };
+    await render({ compiled });
+    expect(container.querySelector('[aria-label="Text the compiler added to SH010"]')).toBeNull();
+    expect(container.textContent).not.toContain("Added by the compiler");
+  });
+
+  // sc-24026. `audio` is required on every shot by plan schema 3, and this textarea is the only
+  // place in the workspace it can be written or repaired.
+  it("edits the required audio sentence into the shot the draft saves", async () => {
+    await render();
+    const audio = container.querySelector('textarea[aria-label="Shot SH010 audio"]');
+    expect(audio.value).toBe("Room tone. No music.");
+    await act(async () => change(audio, "A door latch clicking. No music."));
+    expect(latest.draft.productionPlan.shots[0].audio).toBe("A door latch clicking. No music.");
+    // The edit lands on the selected shot only.
+    expect(latest.draft.productionPlan.shots[1].audio).toBe("Room tone. No music.");
+
+    // Clearing it is allowed in the editor — a blank value is refused by the server as a finding
+    // that names the shot, not blocked here, so the user can retype it in place.
+    await act(async () => change(container.querySelector('textarea[aria-label="Shot SH010 audio"]'), ""));
+    expect(latest.draft.productionPlan.shots[0].audio).toBe("");
+  });
+
+  // sc-24028. The field is load-bearing prose, and the two things an operator cannot guess are
+  // that silence must be SAID and that the "Audio:" label is the compiler's to write.
+  it("explains under the audio field that silence is valid and the prefix is added for you", async () => {
+    await render();
+    const help = container.querySelector('textarea[aria-label="Shot SH010 audio"]').closest("label");
+    expect(help.textContent).toContain("Silence is a valid answer");
+    expect(help.textContent).toContain("No audio. Silence.");
+    expect(help.textContent).toContain("adds the “Audio:” label itself");
+    // Speech: both halves of the rule, because the two shots behave oppositely.
+    expect(help.textContent).toContain("places a dialogue clip, the harness speaks that line itself, so leave the words out of Audio");
+    expect(help.textContent).toContain("otherwise a spoken line — who speaks, the words, and the delivery — belongs in Audio");
+    // The longer guidance sits in the page's collapsed-by-default disclosure, not in one long line.
+    const more = help.querySelector("details");
+    expect(more.open).toBe(false);
+    expect(more.querySelector("summary").textContent).toBe("More about the Audio field");
+  });
+
+  // sc-24028. A planner-produced draft arrives with `audio` already written; the field has to show
+  // that text rather than an empty box the operator would refill.
+  it("shows the audio a planner already wrote into the shot", async () => {
+    const planned = makeDraft();
+    planned.productionPlan.shots[0].audio = "Rain on a tin roof, distant traffic. No music.";
+    await render({ draft: planned });
+    expect(container.querySelector('textarea[aria-label="Shot SH010 audio"]').value)
+      .toBe("Rain on a tin roof, distant traffic. No music.");
+  });
+
+  it("shows a shot-named audio finding under the audio field", async () => {
+    await render({ findings: [{ shotId: "SH010", field: "audio", message: "audio is required: say what this shot sounds like" }] });
+    const audio = container.querySelector('textarea[aria-label="Shot SH010 audio"]');
+    const findings = audio.closest("label").nextElementSibling;
+    expect(findings?.className).toContain("ve-film-findings");
+    expect(findings.textContent).toContain("audio is required: say what this shot sounds like");
   });
 
   it("imports supported production and compiled documents without a JSON-only editing path", async () => {

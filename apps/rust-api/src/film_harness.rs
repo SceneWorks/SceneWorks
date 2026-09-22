@@ -1723,9 +1723,9 @@ fn compiled_for_run(
             // still say what compiling it would say? The second is what keeps a hand-edited
             // `compiled.json` — the document every dispatched field but the prompt is read from —
             // from reaching the route unjudged, since `validate_all` only ever reads the plan.
-            let mut findings = compiled.staleness_findings(plan, plan_sha256);
+            let mut findings = compiled.staleness_findings(plan, plan_sha256, pack);
             if findings.is_empty() {
-                findings = compiled.conformance_findings(plan, entries, lane);
+                findings = compiled.conformance_findings(plan, pack, entries, lane);
             }
             if findings.is_empty() {
                 Ok(compiled)
@@ -1793,6 +1793,7 @@ pub(crate) async fn preflight_documents(
     let catalog = resolve_plan_catalog(&client, plan).await?;
     findings.extend(model_findings(
         plan,
+        pack,
         &catalog,
         require_installed,
         &facts,
@@ -2168,7 +2169,7 @@ pub async fn validate(
     let compiled = read_compiled_for(options)?;
     if let Some((compiled, path)) = compiled.as_ref() {
         let plan_bytes = std::fs::read(&options.plan_path)?;
-        let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes));
+        let mut stale = compiled.staleness_findings(&plan, &sha256_hex(&plan_bytes), &pack);
         if !stale.is_empty() {
             stale.insert(0, compiled_document_header(path));
             findings.append(&mut stale);
@@ -2190,6 +2191,7 @@ pub async fn validate(
         let catalog = resolve_plan_catalog(&client, &plan).await?;
         let mut findings = model_findings(
             &plan,
+            &pack,
             &catalog,
             options.require_installed,
             &facts,
@@ -2205,7 +2207,8 @@ pub async fn validate(
         if findings.is_empty() {
             if let (Some((compiled, path)), Some(entries)) = (compiled.as_ref(), catalog.entries())
             {
-                let mut conformance = compiled.conformance_findings(&plan, &entries, facts.lane());
+                let mut conformance =
+                    compiled.conformance_findings(&plan, &pack, &entries, facts.lane());
                 if !conformance.is_empty() {
                     findings.push(compiled_document_header(path));
                     findings.append(&mut conformance);
@@ -2307,6 +2310,7 @@ fn platform_reachability_finding(
 /// that depend on the PLAN — how many references a shot carries, and the model/mode spelling.
 fn reference_payload_findings(
     plan: &ProductionPlan,
+    pack: &ReferencePack,
     entries: &ModelEntries<'_>,
 ) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
@@ -2322,10 +2326,18 @@ fn reference_payload_findings(
         let mut payload = JsonObject::new();
         payload.insert("model".to_owned(), json!(partition.model_id));
         payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
+        // One placeholder per PICTURE, not per role (sc-24024): roles sharing a pack file are
+        // supplied as one image, so a shot binding ten roles across nine files posts nine ids. The
+        // count comes from `shot_reference_pictures` — the same function the dispatch builds the
+        // real list with — so this gate judges the length the route will actually receive.
+        let pictures = sceneworks_core::film_compile::shot_reference_pictures(
+            &shot.conditioning.reference_roles,
+            pack,
+        );
         payload.insert(
             "referenceAssetIds".to_owned(),
             Value::Array(
-                (0..shot.conditioning.reference_roles.len())
+                (0..pictures.len())
                     .map(|index| json!(format!("placeholder_reference_{index}")))
                     .collect(),
             ),
@@ -2383,8 +2395,11 @@ pub(crate) fn model_entry_findings(
     findings
 }
 
+/// Takes the PACK because two of the rules below count the images a shot SUPPLIES rather than the
+/// roles it names, and only the pack says which of a shot's roles share one file (sc-24024).
 fn model_findings(
     plan: &ProductionPlan,
+    pack: &ReferencePack,
     catalog: &PlanCatalog,
     require_installed: bool,
     facts: &HostFacts,
@@ -2402,10 +2417,11 @@ fn model_findings(
     };
     findings.extend(film_plan::validate_plan_against_model(
         plan,
+        pack,
         &entries,
         facts.lane(),
     ));
-    findings.extend(reference_payload_findings(plan, &entries));
+    findings.extend(reference_payload_findings(plan, pack, &entries));
     findings
 }
 
@@ -2481,13 +2497,14 @@ impl Prepared {
 async fn prepare(
     client: &Client<'_>,
     plan: &ProductionPlan,
+    pack: &ReferencePack,
     export: bool,
     require_installed: bool,
     selection: Option<&[String]>,
 ) -> Result<Result<Prepared, Vec<PlanDiagnostic>>, HarnessError> {
     let facts = discover_host(client).await?;
     let catalog = resolve_plan_catalog(client, plan).await?;
-    let mut findings = model_findings(plan, &catalog, require_installed, &facts, selection);
+    let mut findings = model_findings(plan, pack, &catalog, require_installed, &facts, selection);
     if findings.is_empty() {
         findings.extend(host_findings(plan, &facts, export));
     }
@@ -2875,6 +2892,19 @@ impl Session<'_> {
     /// Import every pack reference the record does not already name. An import the record missed
     /// (imported, then the controller died) is found by its `filmHarness` provenance rather than
     /// imported twice, so replay never doubles a project's reference assets.
+    ///
+    /// ONE ASSET PER DISTINCT FILE (sc-24024). Roles that name the same pack `file` are one image
+    /// with several subjects in it, so they are uploaded once and every one of them resolves to
+    /// that single asset id — which is what makes the dispatched `referenceAssetIds` carry one
+    /// entry for a shared photograph, matching the one `<Picture N>` the compiler wrote for it.
+    /// The record still carries one [`ReferenceAssetRecord`] per ROLE, all pointing at that asset:
+    /// the record answers "what was this role conditioned on", and dropping the extra rows would
+    /// lose the answer for every role but the first.
+    ///
+    /// "The same file" is the pack's `file` string, compared literally, exactly as
+    /// `film_compile::shot_reference_pictures` compares it. Nothing here canonicalizes through the
+    /// filesystem: two entries that mean one image must spell its path one way, or the compiler
+    /// would number two pictures while the import created one asset.
     async fn ensure_references(&mut self) -> Result<(), HarnessError> {
         let project_id = self.project_id()?;
         for existing in &self.record.references {
@@ -2896,7 +2926,17 @@ impl Session<'_> {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let references = self.pack.references.clone();
+        // Only roles with an IMAGE are imported (sc-24025). A described-only role has no bytes to
+        // upload, no asset to tag and nothing to put in `role_assets` — it reaches the model as
+        // words the compiler writes into the prompt, and the run record's `references` stays what
+        // it has always been: the list of images this run imported.
+        let references: Vec<film_plan::ReferenceEntry> = self
+            .pack
+            .references
+            .iter()
+            .filter(|reference| reference.file().is_some())
+            .cloned()
+            .collect();
         // One listing for the whole pass, not one per reference: anything imported later in this
         // loop is this controller's own and is already recorded.
         // `includeRejected` / `includeTrashed` default to FALSE on the route, and a human reviewing
@@ -2922,29 +2962,71 @@ impl Session<'_> {
         } else {
             Vec::new()
         };
+        // file -> the asset that file is already imported as, seeded from the record so a resume
+        // that got halfway through a shared group reuses the asset its first role landed on
+        // instead of uploading the same bytes a second time.
+        let mut file_assets: BTreeMap<String, String> = self
+            .record
+            .references
+            .iter()
+            .map(|existing| (existing.file.clone(), existing.asset_id.clone()))
+            .collect();
+        // The roles each file carries, in pack order. Computed up front because the tag PATCH
+        // REPLACES an asset's tag set: tagging a shared asset role by role would leave it wearing
+        // only the last role's tag, and a query for "the asset the courier was conditioned on"
+        // would miss it.
+        let mut roles_by_file: BTreeMap<&str, Vec<&film_plan::ReferenceEntry>> = BTreeMap::new();
+        for reference in &references {
+            let Some(file) = reference.file() else {
+                continue;
+            };
+            roles_by_file.entry(file).or_default().push(reference);
+        }
         for reference in &references {
             if imported.contains(&reference.role) {
                 continue;
             }
-            let path = pack_dir.join(&reference.file);
+            // Total, though `references` was already filtered to roles that name one: the file is
+            // read, hashed, uploaded and recorded below, and every one of those steps wants the
+            // path itself rather than an `Option` unwrapped four times (sc-24025).
+            let Some(file) = reference.file() else {
+                continue;
+            };
+            let path = pack_dir.join(file);
             let bytes = std::fs::read(&path)?;
             let sha256 = sha256_hex(&bytes);
-            let asset_id = match find_imported_reference(
-                &already_imported,
-                &self.record.run_id,
-                &reference.role,
-                &sha256,
-            ) {
-                Some(asset_id) => asset_id,
-                None => {
-                    self.import_reference(&project_id, reference, &path, &sha256)
-                        .await?
-                }
+            let sharing = roles_by_file
+                .get(file)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let asset_id = match file_assets.get(file) {
+                // Already uploaded in this pass (or by an earlier controller): the shared image is
+                // sent once, so this role adopts that asset rather than creating a second copy of
+                // the same picture.
+                Some(asset_id) => asset_id.clone(),
+                None => match find_imported_reference(
+                    &already_imported,
+                    &self.record.run_id,
+                    // The FIRST role on this file is the one the upload stamped its provenance
+                    // with, so that is the role a crash-window adoption looks for.
+                    sharing
+                        .first()
+                        .map_or(reference.role.as_str(), |first| first.role.as_str()),
+                    &sha256,
+                ) {
+                    Some(asset_id) => asset_id,
+                    None => {
+                        self.import_reference(&project_id, reference, sharing, &path, &sha256)
+                            .await?
+                    }
+                },
             };
+            file_assets.insert(file.to_owned(), asset_id.clone());
             // On BOTH branches: the upload and the tag PATCH are two writes, so a controller that
             // died between them leaves an asset the adoption finds but nothing has tagged. The
-            // PATCH replaces the tag set, so re-applying it to an already-tagged asset is a no-op.
-            self.tag_reference(&project_id, &asset_id, reference)
+            // PATCH replaces the tag set, so re-applying it to an already-tagged asset is a no-op —
+            // and it carries EVERY role sharing the file, for the same reason.
+            self.tag_reference(&project_id, &asset_id, reference, sharing)
                 .await?;
             if reference.approved {
                 self.role_assets
@@ -2953,7 +3035,7 @@ impl Session<'_> {
             self.record.references.push(ReferenceAssetRecord {
                 role: reference.role.clone(),
                 kind: reference.kind.clone(),
-                file: reference.file.clone(),
+                file: file.to_owned(),
                 sha256,
                 asset_id,
                 approved: reference.approved,
@@ -3653,10 +3735,18 @@ impl Session<'_> {
         Ok((asset_id, duration_seconds))
     }
 
+    /// Upload one reference IMAGE. `sharing` is every pack role that names this file, in pack
+    /// order, which for the ordinary case is just `reference` itself (sc-24024).
+    ///
+    /// The top-level `role` / `referenceKind` / `approved` stay the FIRST sharing role's, because
+    /// that triple is what [`find_imported_reference`] matches a crash-window adoption on. The
+    /// per-role truth — which subject each role is, and its locator — goes in `roles`, so the asset
+    /// itself says the photograph holds two people rather than only naming one of them.
     async fn import_reference(
         &self,
         project_id: &str,
         reference: &film_plan::ReferenceEntry,
+        sharing: &[&film_plan::ReferenceEntry],
         path: &Path,
         sha256: &str,
     ) -> Result<String, HarnessError> {
@@ -3676,12 +3766,25 @@ impl Session<'_> {
             Some("webp") => "image/webp",
             _ => "image/png",
         };
+        let head = sharing.first().copied().unwrap_or(reference);
+        let roles: Vec<Value> = sharing
+            .iter()
+            .map(|entry| {
+                json!({
+                    "role": entry.role,
+                    "referenceKind": entry.kind,
+                    "locator": entry.locator(),
+                })
+            })
+            .collect();
         let mut provenance = json!({
             "filmHarness": {
                 "kind": "reference",
-                "role": reference.role,
-                "referenceKind": reference.kind,
-                "approved": reference.approved,
+                "role": head.role,
+                "referenceKind": head.kind,
+                "approved": head.approved,
+                // Every role this ONE image is bound to (sc-24024). A single-role image lists one.
+                "roles": roles,
                 // sc-23403: whether this plate was GENERATED as a fixture or supplied by a person,
                 // carried onto the asset so the answer survives the pack document. It changes
                 // nothing else — a generated reference is imported, tagged and conditioned on
@@ -3753,28 +3856,39 @@ impl Session<'_> {
     /// it) but tagged distinctly, so a query for the conditioning-eligible references cannot pick
     /// it up. Applied by [`Session::ensure_references`] to a freshly imported asset AND to an
     /// adopted one, because the tags are a second write the crash window can swallow.
+    /// `sharing` is every pack role that names this asset's file, and it always CONTAINS
+    /// `reference` — `ensure_references` builds it by looking `reference` up in a map keyed on
+    /// every reference's own file. A shared image wears a `role:` tag for EACH of them
+    /// (sc-24024): the PATCH replaces the whole tag set, so tagging a shared asset one role at a
+    /// time would leave it wearing only the last, and a query for the asset the courier was
+    /// conditioned on would come back empty.
     async fn tag_reference(
         &self,
         project_id: &str,
         asset_id: &str,
         reference: &film_plan::ReferenceEntry,
+        sharing: &[&film_plan::ReferenceEntry],
     ) -> Result<(), HarnessError> {
+        // Roles sharing a file are validated to AGREE on `approved`, so any of them answers this.
         let kind_tag = if reference.approved {
             REFERENCE_TAG
         } else {
             UNAPPROVED_REFERENCE_TAG
         };
+        debug_assert!(
+            sharing.iter().any(|entry| entry.role == reference.role),
+            "the group a reference is tagged under always contains that reference"
+        );
+        let mut tags = vec![json!(kind_tag)];
+        for entry in sharing {
+            tags.push(json!(harness_asset_tag("role", &entry.role)));
+        }
+        tags.push(json!(harness_asset_tag("pack", &self.pack.id)));
         self.client
             .expect_ok(
                 "PATCH",
                 &format!("/api/v1/projects/{project_id}/assets/{asset_id}/tags"),
-                Some(json!({
-                    "tags": [
-                        kind_tag,
-                        harness_asset_tag("role", &reference.role),
-                        harness_asset_tag("pack", &self.pack.id)
-                    ]
-                })),
+                Some(json!({ "tags": tags })),
             )
             .await?;
         Ok(())
@@ -3786,7 +3900,11 @@ impl Session<'_> {
 
     /// Make sure the record holds one entry per plan shot, in plan order, without disturbing the
     /// entries a previous controller wrote.
-    fn ensure_shot_records(&mut self) {
+    ///
+    /// Refuses the run when a shot's conditioning role was never imported as an asset (sc-24023):
+    /// see [`Session::resolve_new_shot_conditioning`].
+    fn ensure_shot_records(&mut self) -> Result<(), HarnessError> {
+        let mut resolved = self.resolve_new_shot_conditioning()?;
         let mut ordered: Vec<ShotRunRecord> = Vec::with_capacity(self.plan.shots.len());
         for shot in &self.plan.shots {
             if let Some(index) = self
@@ -3807,20 +3925,18 @@ impl Session<'_> {
                 .request(&shot.id)
                 .expect("every plan shot compiled a request");
             let (width, height) = (request.width, request.height);
+            // Resolved by `CompiledRequest::resolve_conditioning` above — the SAME function that
+            // walks `shot_reference_pictures`, which the compiler numbered this request's
+            // `<Picture N>` with (sc-24023) — so the position an asset takes here is the number the
+            // prompt already promised for it. The record is what `work_attempt` dispatches from, so
+            // this is the list the engine sees.
+            let conditioning = resolved
+                .remove(&shot.id)
+                .expect("every shot without a record resolved its conditioning above");
             let assets = ConditioningAssets {
-                first_frame_asset_id: request
-                    .first_frame_role
-                    .as_ref()
-                    .and_then(|role| self.role_assets.get(role).cloned()),
-                last_frame_asset_id: request
-                    .last_frame_role
-                    .as_ref()
-                    .and_then(|role| self.role_assets.get(role).cloned()),
-                reference_asset_ids: request
-                    .reference_roles
-                    .iter()
-                    .filter_map(|role| self.role_assets.get(role).cloned())
-                    .collect(),
+                first_frame_asset_id: conditioning.first_frame_asset_id,
+                last_frame_asset_id: conditioning.last_frame_asset_id,
+                reference_asset_ids: conditioning.reference_asset_ids,
             };
             ordered.push(ShotRunRecord {
                 shot_id: shot.id.clone(),
@@ -3834,7 +3950,10 @@ impl Session<'_> {
                     height,
                     fps: request.fps,
                     dialogue: shot.dialogue.clone(),
-                    sound: shot.sound.clone(),
+                    // The record keeps its own v2 field name while the plan's moved to `audio`
+                    // (sc-24026): renaming it would refuse every in-flight run's resume for a
+                    // spelling, and the value it records is the same sentence it always was.
+                    sound: Some(shot.audio.clone()),
                     // The policy the export will obey for this shot — its own override, or the
                     // run-level default it inherits (sc-22712). Resolved here, at the same moment
                     // the rest of the intended state is, so the record says what was intended
@@ -3850,6 +3969,52 @@ impl Session<'_> {
             });
         }
         self.record.shots = ordered;
+        Ok(())
+    }
+
+    /// The conditioning assets for every plan shot that does not have a record yet, resolved
+    /// through [`CompiledRequest::resolve_conditioning`] — the ONE resolver, shared
+    /// with the job-body builder, so the dispatched `referenceAssetIds` and the `<Picture N>` the
+    /// compiler wrote into the prompt come out of one walk of `shot_reference_pictures` (sc-24023).
+    ///
+    /// A role with no imported asset is a finding that refuses the run. Dropping it instead would
+    /// shift every LATER asset one position off the picture number the prompt already promised, and
+    /// nothing downstream — not the record, not the route, not a reviewer reading `compiled.json` —
+    /// can see that the model was bound to the wrong image. `validate_plan_against_pack` makes it
+    /// unreachable today; this is the site that enforces it rather than assuming it.
+    ///
+    /// Runs as a whole pass BEFORE `ensure_shot_records` reorders anything, so a refusal cannot
+    /// leave the record half-drained.
+    fn resolve_new_shot_conditioning(
+        &self,
+    ) -> Result<BTreeMap<String, ResolvedConditioning>, HarnessError> {
+        let mut resolved = BTreeMap::new();
+        let mut findings: Vec<PlanDiagnostic> = Vec::new();
+        for shot in &self.plan.shots {
+            if self
+                .record
+                .shots
+                .iter()
+                .any(|existing| existing.shot_id == shot.id)
+            {
+                continue;
+            }
+            let request = self
+                .compiled
+                .request(&shot.id)
+                .expect("every plan shot compiled a request");
+            match request.resolve_conditioning(&self.pack, &self.role_assets) {
+                Ok(assets) => {
+                    resolved.insert(shot.id.clone(), assets);
+                }
+                Err(mut shot_findings) => findings.append(&mut shot_findings),
+            }
+        }
+        if findings.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(HarnessError::Validation(findings))
+        }
     }
 
     fn is_selected(&self, shot_id: &str) -> bool {
@@ -3858,7 +4023,7 @@ impl Session<'_> {
 
     /// Reconcile and, where the limits still allow it, dispatch every selected shot.
     async fn work_shots(&mut self) -> Result<(), HarnessError> {
-        self.ensure_shot_records();
+        self.ensure_shot_records()?;
         self.persist()?;
         for index in 0..self.plan.shots.len() {
             let shot = self.plan.shots[index].clone();
@@ -4050,6 +4215,7 @@ impl Session<'_> {
                     attempt: attempt_number,
                     tier: self.plan.model.tier.as_deref(),
                     idempotency_key: Some(&key),
+                    pack: &self.pack,
                     role_assets: &self.role_assets,
                 },
                 &ResolvedConditioning {
@@ -5538,6 +5704,7 @@ async fn run_with_control_inner(
     let prepared = match prepare(
         &client,
         &plan,
+        &pack,
         options.export,
         options.require_installed,
         options.shot_ids.as_deref(),
@@ -5753,6 +5920,7 @@ async fn continue_run(
     let prepared = prepare(
         &client,
         &plan,
+        &pack,
         export,
         options.require_installed,
         Some(selection),
@@ -6937,7 +7105,7 @@ mod unit_tests {
             "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
             "shots": [{
                 "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
-                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "reference_to_video", "referenceRoles": roles }
             }]
         }))
@@ -6946,8 +7114,13 @@ mod unit_tests {
             .as_object()
             .cloned()
             .unwrap();
-        let findings =
-            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry));
+        // An EMPTY pack: none of these roles is declared, so none can share a file with another
+        // and the shot supplies ten images — the case this gate exists for (sc-24024).
+        let findings = reference_payload_findings(
+            &plan,
+            &empty_pack(),
+            &ModelEntries::single("some_model", &entry),
+        );
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
         assert!(findings[0].message.contains("at most 9"), "{findings:?}");
@@ -6960,15 +7133,28 @@ mod unit_tests {
             "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
             "shots": [{
                 "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
-                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" }
             }]
         }))
         .expect("plan parses");
-        assert!(
-            reference_payload_findings(&plan, &ModelEntries::single("some_model", &entry))
-                .is_empty()
-        );
+        assert!(reference_payload_findings(
+            &plan,
+            &empty_pack(),
+            &ModelEntries::single("some_model", &entry)
+        )
+        .is_empty());
+    }
+
+    /// A pack declaring nothing, for the gates whose plans name roles no pack ever approved.
+    fn empty_pack() -> film_plan::ReferencePack {
+        serde_json::from_value(json!({
+            "schemaVersion": film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "empty",
+            "version": 1,
+            "references": [],
+        }))
+        .expect("the empty pack parses")
     }
 
     #[test]
