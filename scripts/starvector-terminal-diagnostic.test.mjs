@@ -294,14 +294,22 @@ test("current built-in manifest supplies the exact diagnostic model and Detailed
 });
 
 test("current source derives one exact inference pin without a workflow input", async () => {
+  // The diagnostic derives its pin from the checked-out source alone — one exact 40-hex revision,
+  // no workflow input. That is the claim in this test's name and it survives a pin bump.
   const pin = await readCurrentInferencePin(root);
+  assert.match(pin, /^[a-f0-9]{40}$/);
   const campaign = JSON.parse(await readFile(new URL("../release/starvector-terminal-campaign-v1.json", import.meta.url), "utf8"));
   assert.equal(campaign.inference_contract.repository, "SceneWorks/inference");
-  assert.equal(pin, campaign.inference_contract.revision);
+  // check.yml's terminal-contract clone is NOT the live pin. It is the sealed campaign's
+  // validator-source revision, because `verifyInferenceCheckout` rejects any checkout whose HEAD is
+  // not exactly that revision. Tying these two lines to the Cargo pin froze the live pin to a
+  // completed campaign; tying them to the sealed revision is what they actually have to satisfy.
+  const sealed = campaign.inference_contract.validator_source.revision;
+  assert.match(sealed, /^[a-f0-9]{40}$/);
   const checkWorkflow = await readFile(path.join(root, ".github/workflows/check.yml"), "utf8");
   const fetch = checkWorkflow.slice(checkWorkflow.indexOf("      - name: Fetch the exact public inference terminal contract"));
-  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=2 origin ${pin}`));
-  assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${pin}`));
+  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=2 origin ${sealed}`));
+  assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${sealed}`));
 });
 
 test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {
