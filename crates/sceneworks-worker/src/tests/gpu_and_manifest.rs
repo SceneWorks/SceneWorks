@@ -532,8 +532,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     // RED and the id must be deleted from this list — which is what re-arms the descriptor-drift
     // assertions for it. The steady state is an empty slice.
     //
-    // DELETING THE ROW IS NOT THE WHOLE JOB. Five things are inert while the provider is absent,
-    // and the pin bump owns all of them (sc-24108 review; the terminal story carries them):
+    // DELETING THE ROW IS NOT THE WHOLE JOB. Seven things are inert while the providers are
+    // absent, and the pin bump owns all of them (sc-24108 review + sc-24109; the terminal story
+    // carries them). Items 1–5 are the MLX half; 6–7 are the Candle half:
     //
     //   1. this list — remove `"qwen_image_2_1"`, which re-arms the guidance / negative-prompt
     //      descriptor-drift assertions below;
@@ -552,9 +553,21 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     //   5. `config/engine-capabilities/capabilities.mlx.json` (and `runtime/`) — re-dump on the macOS
     //      lane. A new engine id cannot appear in a dump taken at the old pin, and the file must
     //      never be hand-authored.
+    //   6. (sc-24109) `crates/sceneworks-worker/src/image_jobs/tests.rs` — remove
+    //      `"qwen_image_2_1"` from `PENDING_PIN_CANDLE_MODELS` in
+    //      `every_scheduler_routed_candle_image_has_a_native_worker_route`. That list is this one's
+    //      candle twin and is self-deleting the same way: it asserts the id does NOT resolve to a
+    //      linked candle image generator, so it goes red on the windows-candle lane at the bump.
+    //   7. (sc-24109) `config/engine-capabilities/capabilities.candle.json` — re-dump on a
+    //      Linux/Windows lane (it CANNOT be produced on macOS), then run
+    //      `scripts/generate-manifest-memory-declarations.mjs` so the manifest's `candle` block
+    //      gains its generated `memoryStrategyContract`. Until then the candle route reports the
+    //      consumer fallback and `candle.minMemoryGb` is its only memory claim. The windows-candle
+    //      lane's `compare-engine-capability-facts` is what forces this: a fresh dump that carries
+    //      the new provider will not match the checked-in one.
     //
-    // …and then `npm run generate:memory-matrix` + `npm run generate:memory-anchors`, because (2)
-    // and (5) move the matrix's inputs.
+    // …and then `npm run generate:memory-matrix` + `npm run generate:memory-anchors`, because (2),
+    // (5) and (7) move the matrix's inputs.
     const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
 
     // Every row is covered by the expectation table (no row added without a flag pair here).

@@ -3352,7 +3352,7 @@
       },
       "ui": {
         "label": "Qwen Image 2.1",
-        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon. A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The weights are downloaded from Qwen's own repository on first use; SceneWorks does not re-host them.",
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. One bf16 snapshot serves both backends — there is no precision tier to pick on either. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The weights are downloaded from Qwen's own repository on first use; SceneWorks does not re-host them.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Qwen Image 2.1 Prompt Guide",

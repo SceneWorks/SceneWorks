@@ -4485,41 +4485,43 @@ fn candle_supported_flags_a_torch_only_image_model() {
         .starts_with("candle_unsupported:"));
 }
 
-/// sc-24108: `qwen_image_2_1` is the first shipped image id that is MLX-routed with NO candle lane
-/// of any shape — not a conditioning gap, a PLATFORM boundary. The generic unrouted-family wording
-/// ("this model **or its requested conditioning shape** has no candle/CUDA lane") invites an
-/// off-Mac user to go looking for a request they can fix, and there isn't one. Pin the wording that
-/// says so, and the citation that names the Candle port.
+/// sc-24109 retires sc-24108's "macOS-only model" refusal for `qwen_image_2_1`: the native
+/// Candle/CUDA port serves the id off-Mac, so a candle worker CLAIMS a plain 2.1 text-to-image job
+/// through the same oracle that used to refuse it.
+///
+/// This is the one assertion that cannot be made from the routing tables alone — `candle_supported`
+/// is the gate an off-Mac worker actually consults, and a refusal here is what would leave the job
+/// terminal-failed on a Windows/Linux host no matter what the catalog said. The negative half is
+/// the discriminator: not only is the job claimed, none of the retired refusal's wording can still
+/// reach a user.
 #[test]
-fn candle_refusal_names_qwen_image_2_1_as_macos_only() {
+fn candle_claims_qwen_image_2_1_text_to_image_off_mac() {
     let store = store("candle-oracle-qwen-2-1");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
     );
-    let reason = candle_supported(&job).unwrap_err();
+    assert!(
+        candle_supported(&job).is_ok(),
+        "an off-Mac worker must claim a plain Qwen Image 2.1 txt2img job (sc-24109)"
+    );
+
+    // A conditioned request is still refused — 2.1 declares an empty conditioning set on BOTH
+    // backends — and it is refused for the CARRIER, not for a platform boundary that no longer
+    // exists, so the reason names something the user can act on.
+    let conditioned = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "referenceAssetId": "ref_1" }),
+    );
+    let reason = candle_supported(&conditioned).unwrap_err();
     assert_eq!(reason.model.as_deref(), Some("qwen_image_2_1"));
-    assert_eq!(reason.feature, "macOS-only model");
     let message = reason.candle_error_message();
     assert!(message.starts_with("candle_unsupported:"));
     assert!(
-        message.contains("only on the native MLX backend"),
-        "the refusal must say WHY it cannot run here: {message}"
-    );
-    assert!(
-        message.contains("no change to the request will route it here"),
-        "it must also say the user cannot fix it by editing the request: {message}"
-    );
-    assert!(
-        message.contains("sc-24109"),
-        "and it must name the Candle port that ends the boundary: {message}"
-    );
-    // A plain txt2img request is not a conditioning refusal, so the generic unrouted-family text
-    // must NOT be what the user sees.
-    assert!(
-        !message.contains("or its requested conditioning shape"),
-        "the generic unrouted-family wording is misleading for this id: {message}"
+        !message.contains("only on the native MLX backend"),
+        "the retired macOS-only refusal must be unreachable: {message}"
     );
 }
 
