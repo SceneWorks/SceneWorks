@@ -13925,6 +13925,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: refine_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&make_request()),

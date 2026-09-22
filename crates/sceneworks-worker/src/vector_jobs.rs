@@ -685,6 +685,9 @@ fn native_starvector_request(
             temperature: request.sampling.temperature,
             top_p: request.sampling.top_p,
             top_k,
+            // SceneWorks exposes no presence-penalty knob; 0.0 is the contract's "disabled"
+            // value and preserves the sampling behaviour from before the field existed.
+            presence_penalty: 0.0,
             repetition_penalty: request.sampling.repetition_penalty,
             repetition_context,
         },

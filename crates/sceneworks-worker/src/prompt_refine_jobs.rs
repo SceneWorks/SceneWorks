@@ -1218,6 +1218,10 @@ pub(crate) async fn run_prompt_refine_job(
     // `tokio::spawn` keeps the existing `CancelJoinGuard` teardown seam (sc-8804, F-003) unchanged.
     let refine_spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
+        // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
+        // Prism GGUF load. The refiners (including the vision tasks) load snapshot directories
+        // that carry their own projector, so `None` preserves the existing behaviour.
+        projector_source: None,
         quantize: None,
     };
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
@@ -3075,6 +3079,7 @@ mod tests {
         let err = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: dir.path().to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3111,6 +3116,7 @@ mod tests {
         let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
         let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
@@ -3203,6 +3209,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
 
@@ -3294,6 +3301,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
 
@@ -3401,6 +3409,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3474,6 +3483,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3549,6 +3559,7 @@ mod tests {
         let describer = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3614,6 +3625,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&request),
@@ -3692,6 +3704,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&request),
@@ -3939,6 +3952,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &reqs,

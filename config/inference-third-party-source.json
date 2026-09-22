@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 0b084cbf (inference main, merge of PR #992 for SC-22261 receipt limit behaviors). The delta from c5c8c2a7 contains only the receipt README, new receipt schema, validator script, and validator tests. No production Rust source, dependency, embedded asset, provenance candidate path, or ported-source marker changed. Current reviewed population: 683 provenance candidates and 97 production-Rust crate prefixes. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
-  "inferenceRevision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
-  "auditDigest": "bf33609355684bb50e6f5b68ef1798b6e8b57c968ec30d4c76061079fbc98eda",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision b120a876 (inference main, merge of PR #1003: block-allocated MLX KV cache plus JoyCaption per-token progress). The delta from 0b084cbf adds exactly one provenance candidate, crates/contracts/core-llm/core-llm-testkit/src/comparison.rs, a testkit comparison helper the marker scan now matches; no candidate path was removed, no normalized ported-source marker changed, no source-area assignment changed, and the 14 other differing rows differ only in git_blob_sha1. The production-Rust crate prefix list is unchanged. Current reviewed population: 684 provenance candidates and 97 production-Rust crate prefixes. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are otherwise outside this production inventory.",
+  "inferenceRevision": "b120a876fa8820c462d57657514e77a305579236",
+  "auditDigest": "d0aa72438282e6419d5f4760ea1ad8cf0c85a27967104a235f218e5da7f47fec",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
+    "revision": "b120a876fa8820c462d57657514e77a305579236",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 683,
-    "populationSha256": "ef31b3d48803e9e9be6bc309970c0d2711815a20947aef0371269686de4009c0"
+    "matchedFiles": 684,
+    "populationSha256": "ccd534a1ae671a05b61836663ed5bd0cee301aa2b063961cea4cd363aad707dc"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "0b084cbf46b5b4f4f561305ef116268b57eecf7f",
+    "revision": "b120a876fa8820c462d57657514e77a305579236",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
