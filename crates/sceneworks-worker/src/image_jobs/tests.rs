@@ -27411,3 +27411,103 @@ mod qwen_image_2_1_tiers {
         );
     }
 }
+
+/// sc-24112 — the count the declared admission envelope is priced against.
+///
+/// To `qwen_image_2_1` a working image IS an ordered condition image: upstream ships ONE pipeline,
+/// and "editing" is that call with one or more condition images. So `sourceAssetId` has to be
+/// counted alongside the reference carriers — leaving it out under-prices an edit by a whole
+/// reference block, and an under-price admits a request the engine cannot run.
+///
+/// The three carriers are mutually exclusive by the router's own rule
+/// (`routing::conditioned_reference_count` fails a multi-carrier payload closed), so in practice
+/// exactly one is populated; `max` is what makes a payload that somehow carries two price the
+/// larger rather than the first one checked.
+#[test]
+fn the_admission_reference_count_prices_every_condition_carrier() {
+    let count = |payload: Value| {
+        super::reference_image_count(&ImageRequest::from_payload(
+            payload.as_object().expect("payload object"),
+        ))
+    };
+    assert_eq!(count(json!({ "prompt": "p" })), 0);
+    assert_eq!(count(json!({ "referenceAssetId": "a" })), 1);
+    // The Image Editor's working image. *Mutation that reds this:* a plural-else-singular chain
+    // that never looks at `sourceAssetId`.
+    assert_eq!(count(json!({ "sourceAssetId": "a" })), 1);
+    assert_eq!(count(json!({ "referenceAssetIds": ["a", "b", "c"] })), 3);
+    // Blank ids are "not supplied", the same reading every other carrier check uses.
+    assert_eq!(count(json!({ "referenceAssetId": "   " })), 0);
+    assert_eq!(count(json!({ "sourceAssetId": "" })), 0);
+    assert_eq!(count(json!({ "referenceAssetIds": ["a", "  ", "c"] })), 2);
+    // A payload carrying two prices the larger, not the first.
+    assert_eq!(
+        count(json!({ "sourceAssetId": "a", "referenceAssetIds": ["a", "b"] })),
+        2
+    );
+}
+
+/// The seam the worker's image entry point calls REFUSES an over-envelope request rather than
+/// shrinking it, and the refusal names the number. Driven over the SHIPPED catalog entry, so the
+/// envelope under test is the declared one rather than a fixture.
+#[test]
+fn an_over_envelope_qwen_image_2_1_request_is_refused_with_its_number() {
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+
+    // A legal ten-reference request at the default preset: 57 600 joint tokens against a declared
+    // 58 016. ADMITTED — refusing it would be the over-pricing the engine's own fix pass withdrew.
+    assert_eq!(
+        crate::admission_geometry::refuse_over_envelope(
+            "qwen_image_2_1",
+            &entry,
+            2048,
+            2048,
+            10,
+            1
+        ),
+        None
+    );
+
+    // Over the largest preset AREA with both sides individually legal — the case a max-side check
+    // waves through.
+    let refusal =
+        crate::admission_geometry::refuse_over_envelope("qwen_image_2_1", &entry, 2752, 2048, 0, 1)
+            .expect("2752x2048 is 5.63 Mpx against a 4.30 Mpx envelope");
+    assert!(refusal.contains("4300800"), "{refusal}");
+    assert!(
+        refusal.contains("refused rather than silently resized"),
+        "a refusal must say it is a refusal, not a resize: {refusal}"
+    );
+
+    // Eleven references is past what the joint layout can express.
+    let refusal = crate::admission_geometry::refuse_over_envelope(
+        "qwen_image_2_1",
+        &entry,
+        2048,
+        2048,
+        11,
+        1,
+    )
+    .expect("eleven references exceed the declared ten");
+    assert!(refusal.contains("10"), "{refusal}");
+    assert!(
+        refusal.contains("silently dropping references"),
+        "{refusal}"
+    );
+}

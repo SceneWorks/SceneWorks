@@ -324,25 +324,30 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 
 /// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
 ///
-/// Counts the plural multi-reference list, falling back to the singular carrier — the same
-/// `reference_asset_ids` / `reference_asset_id` pair every reference-capable route reads, so the
-/// count the envelope prices is the count the engine will be handed. A model with no envelope never
-/// consults this, so it costs nothing on every other route.
+/// The three carriers are MUTUALLY EXCLUSIVE — `routing::conditioned_reference_count` fails a
+/// request closed when more than one is populated — so the count is simply whichever one is
+/// present: the plural multi-reference list, the singular `referenceAssetId`, or the Image
+/// Editor's `sourceAssetId`. All three are counted rather than just the reference pair: to this
+/// engine a working image IS an ordered condition image (upstream ships ONE pipeline and "editing"
+/// is the same call with condition images), so leaving `sourceAssetId` out would under-price an
+/// edit by one full reference block.
+///
+/// `max` rather than a fallback chain, so a payload that somehow carries two still prices the
+/// larger — under-counting is the direction that admits a request the engine cannot run. A model
+/// with no declared envelope never consults this, so it costs nothing on every other route.
 fn reference_image_count(request: &ImageRequest) -> u32 {
     let plural = request
         .reference_asset_ids
         .iter()
         .filter(|id| !id.trim().is_empty())
         .count();
-    if plural > 0 {
-        return u32::try_from(plural).unwrap_or(u32::MAX);
-    }
-    u32::from(
-        request
-            .reference_asset_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty()),
-    )
+    let non_blank = |id: &Option<String>| {
+        u32::from(id.as_deref().is_some_and(|value| !value.trim().is_empty()))
+    };
+    u32::try_from(plural)
+        .unwrap_or(u32::MAX)
+        .max(non_blank(&request.reference_asset_id))
+        .max(non_blank(&request.source_asset_id))
 }
 
 fn validate_prompt_enhancement_route(
