@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
+import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -1473,6 +1475,21 @@ export function ModelManagerScreen() {
             acknowledged={licenseAcknowledged}
             onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
             onOpenSettings={() => setActiveView("Settings")}
+          />
+        ) : null}
+        {/* The PERSISTENT half of the licence surface (sc-24108). The gate above disappears the
+            moment the model finishes installing, which used to take the restriction with it — this
+            row keeps the licence name, the link and the full notice reachable from model details
+            for the whole life of the install. Its condition is the PRESENCE of licence terms, not
+            the install state; `gateVisible` only stops the same paragraphs being printed twice
+            while the gate is still on screen. */}
+        {!cleanupOnly ? (
+          <ModelLicenseSummary
+            licenseName={licenseComponentForModel(model.id)?.license}
+            licenseUrl={model.licenseUrl}
+            licenseNotice={model.licenseNotice}
+            nonCommercial={model.nonCommercial === true}
+            gateVisible={licenseGateApplies}
           />
         ) : null}
         {incomplete ? (

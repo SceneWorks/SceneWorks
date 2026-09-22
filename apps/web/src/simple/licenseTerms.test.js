@@ -70,6 +70,36 @@ describe("modelLicenseRows", () => {
     expect(fluxDev.badge.label).toBe("Non-commercial");
   });
 
+  it("badges a restricted component whose licence NAME carries no marker (sc-24108)", () => {
+    // The Qwen RESEARCH LICENSE AGREEMENT is research/evaluation-only (§1(i), §2(a)) but its
+    // TITLE says nothing of the kind, so the name match alone badges it "Commercial OK". The
+    // component's explicit `nonCommercial: true` is what makes the badge right, and this pins
+    // BOTH halves: the declaration is present on the shipped component, and the badge prefers it.
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual(["qwen_image_2_1"]);
+    expect(component.nonCommercial).toBe(true);
+    // The title genuinely does NOT match the historical classifier — i.e. the flag is load-bearing
+    // here, not redundant belt-and-braces.
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+
+    const row = modelLicenseRows(bundledLicenses).find((entry) => entry.id === "qwen-image-2-1");
+    expect(row).toBeTruthy();
+    expect(row.license).toBe("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(row.badge.label).toBe("Non-commercial");
+  });
+
+  it("falls back to the licence name for a component that declares no flag", () => {
+    // Every pre-existing component keeps the badge it had: no `nonCommercial` key, name match only.
+    const fluxDev = bundledLicenses.find((entry) => entry.id === "flux1-dev");
+    expect(fluxDev?.nonCommercial).toBeUndefined();
+    expect(licenseBadge(fluxDev).label).toBe("Non-commercial");
+    const apache = bundledLicenses.find((entry) => entry.id === "qwen-image");
+    expect(apache?.nonCommercial).toBeUndefined();
+    expect(licenseBadge(apache).label).toBe("Commercial OK");
+  });
+
   it("surfaces the alternate decoder terms for every compatible catalog product", () => {
     const decoder = bundledLicenses.find((component) => component.id === "wan2_1_t2v_14b_diffusers");
     expect(decoder?.models).toEqual([]);

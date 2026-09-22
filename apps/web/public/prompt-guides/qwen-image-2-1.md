@@ -7,8 +7,12 @@ readable text. 2.1 renders natively at 2048 px square and up to 2752 px on its l
 suits work where the detail has to survive at print size rather than being upscaled afterwards.
 
 This is a different model from **Qwen Image** (the 2512 weights) in the same catalog — a different
-checkpoint with a different text encoder. Prompts do transfer between the two, but seeds, LoRAs and
-exact framing do not.
+checkpoint with a different text encoder. Prompts do transfer between the two, but seeds and exact
+framing do not.
+
+**Adapters are not supported for this model in this release.** The engine refuses LoRA and LoKr
+outright, and the catalog advertises no compatible family, so the Studio offers none — a Qwen Image
+LoRA will not load here. Everything below is prompt-side.
 
 ## Prompt Shape
 

@@ -790,6 +790,21 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         .collect();
 
     match cause {
+        // sc-24108: `qwen_image_2_1` is the first shipped image id that is MLX-routed with NO
+        // candle lane of any shape, so the generic wording below — "this model (or its requested
+        // conditioning shape)" — is actively misleading for it: there is no shape the user could
+        // change. Name the real situation and the story that ends it, so an off-Mac user reading a
+        // terminal-failed job knows this is a platform boundary and not something they submitted
+        // wrong. `epic 24107` is the citation; sc-24109 is the Candle port.
+        CandleImageRefusal::UnroutedFamily if model == "qwen_image_2_1" => UnsupportedReason::new(
+            Some(model),
+            "macOS-only model",
+            "Qwen Image 2.1 runs only on the native MLX backend, so it has no candle/CUDA lane off \
+             a Mac in this release — no change to the request will route it here. Its Candle port \
+             is sc-24109; until that lands, render it on an Apple Silicon worker or pick a \
+             candle-routed image model.",
+            Some("epic 24107"),
+        ),
         CandleImageRefusal::UnroutedFamily => UnsupportedReason::new(
             Some(model),
             "unsupported image model / shape",

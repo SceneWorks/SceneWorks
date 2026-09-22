@@ -218,6 +218,27 @@ pub(crate) async fn create_image_job(
             let count = image_default_count(entry).unwrap_or(4);
             job_payload.insert("count".to_owned(), Value::from(count));
         }
+        // The model's declared `limits.hardMinSteps` / `limits.steps`, enforced at IMAGE enqueue
+        // (sc-24108). Until now this key was video-only — `steps_limit_error`'s two call sites were
+        // `create_video_job` and the worker's video lane — and the schema said so. Qwen-Image 2.1 is
+        // the first image model with a real sampling floor: its engine refuses `steps < 2`, so
+        // `advanced.steps: 1` used to travel all the way to the MLX provider and die there, which
+        // reaches the user as a failed render rather than a 400 naming the floor.
+        //
+        // Same shape as the video call site: the count is read off `job_payload` (post-preset, so
+        // the gate judges what is actually enqueued), rejected rather than clamped — raising the
+        // step count for the caller silently doubles the compute they asked for — and ABSENT means
+        // no floor, so every image model that declares nothing is byte-for-byte unchanged. Today
+        // exactly one does.
+        if let Some(steps) = job_payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(requested_steps)
+        {
+            if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
     }
     validate_job_lora_compatibility_with(
         &state,

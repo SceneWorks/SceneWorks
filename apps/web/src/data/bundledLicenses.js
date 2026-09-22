@@ -229,3 +229,26 @@ export const bundledLicenses = (manifest.components ?? []).map((component) => ({
 }));
 
 export const licensesIntro = manifest.description ?? "";
+
+/**
+ * The bundled licence component that PRIMARILY attributes a catalog model, or null.
+ *
+ * Matches on `models[]` — the exclusive primary-attribution field `check-license-coverage` uses —
+ * and deliberately NOT on `appliesToModels[]`, which lists products a component's terms merely
+ * COMPOSE with (the Wan 2.1 alternate decoder applies to five models it does not license). Used to
+ * label a model's persistent licence row with the licence's real name (sc-24108); the catalog entry
+ * carries `licenseUrl`/`licenseNotice` but no human licence name of its own.
+ *
+ * @param {string} modelId
+ * @param {Array<object>} [components]
+ */
+export function licenseComponentForModel(modelId, components = bundledLicenses) {
+  if (!modelId) {
+    return null;
+  }
+  return (
+    (components ?? []).find(
+      (component) => Array.isArray(component?.models) && component.models.includes(modelId),
+    ) ?? null
+  );
+}

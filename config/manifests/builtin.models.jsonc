@@ -3257,8 +3257,15 @@
       "limits": {
         // Exactly the seven upstream presets, in the engine's own order: 1:1, 4:3, 3:4, 3:2, 2:3,
         // 16:9, 9:16. Every side is a multiple of the engine's ÷32 request stride and sits inside
-        // its [32, 2752] envelope — `shipped_image_geometry_is_within_the_pinned_engine_envelope`
-        // re-checks both against the PINNED descriptor, so this list cannot drift off the engine.
+        // its [32, 2752] envelope.
+        //
+        // `shipped_image_geometry_is_within_the_pinned_engine_envelope` re-checks both against the
+        // PINNED descriptor — but ONLY on a lane that links the provider, and it skips any id whose
+        // engine does not resolve. The SceneWorks branch pins an inference revision that predates
+        // `mlx-gen-qwen-image-2-1`, so for the length of the epic these buckets are checked against
+        // the engine NOWHERE in CI; they were verified by hand against a local build at the
+        // provider's own revision, and the epic's terminal pin bump is what puts them under the
+        // guard for real.
         "resolutions": [
           "2048x2048",
           "2400x1792",
@@ -3269,6 +3276,14 @@
           "1536x2752"
         ],
         "count": [1, 2, 4],
+        // The engine refuses `steps < 2` outright (S1 contract: DEFAULT_STEPS 40, steps >= 2), and
+        // 2 is the smallest schedule with an intermediate sigma — one evaluation is a single Euler
+        // jump from pure noise. Without this key `advanced.steps: 1` travelled all the way to the
+        // MLX provider and died there, which the user sees as a failed render; declared, it is a
+        // 400 at enqueue naming the floor. sc-24108 added the IMAGE enqueue reader for this key
+        // (`create_image_job`); it was video-only before, and this is the first image model to
+        // declare a sampling floor.
+        "hardMinSteps": 2,
         // The engine runs one flow-match Euler loop (`run_flow_sampler` over the dynamic-shift
         // exponential schedule) and exposes no curated solver menu at this pin, so the menu is the
         // engine-default sentinel alone. Advertising the full diffusers flow menu here would be a
@@ -26827,7 +26842,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "9cff979cd7b16bc4df778bacdfaf0dccb5ac8dabdc2dcdd5f3a00b458953b1e1",
+              "sha256": "bd8da8f38fb8963ee02d03f40f522f76601387ddf273f791c580c3efe9501114",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26861,8 +26876,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 123271,
-                  "sha256": "b5070a361fb275c0a2d8c0bbb0180a5ca72c4533991476911e5dd4bf972f0c4a"
+                  "byteSize": 124616,
+                  "sha256": "46fc70f46fe05303215d0b969cd1430ae3a98a61883536dd523dd8a8d07a4460"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -26896,8 +26911,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 141073,
-                  "sha256": "fd5e8033d373cf2c7ec2774bba32b21ae516e4624a40129f2a74313b97a93e91"
+                  "byteSize": 143597,
+                  "sha256": "d69a30e6d6c296df0982bf2f669048eaf37423612fde9221d23dd983da6801b4"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
@@ -26941,8 +26956,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 134070,
-                  "sha256": "46e585ea823d0a1b3b76835c85d05c2c640e41493b2d5c2b2e552b1f8cc68666"
+                  "byteSize": 134488,
+                  "sha256": "c523e519f4ec182cc7fe4015cda2a3255a8756f5dcd14d918baf7c7737f113e8"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
