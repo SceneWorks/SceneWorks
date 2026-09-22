@@ -811,6 +811,23 @@
       ]
     },
     {
+      "id": "qwen-image-2-1",
+      "models": [
+        "qwen_image_2_1"
+      ],
+      "name": "Qwen-Image 2.1",
+      "publisher": "Hangzhou Tongyi Laboratory Technology Co., Ltd.",
+      "license": "Qwen RESEARCH LICENSE AGREEMENT",
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image-2.1",
+      "usage": "Text-to-image model. A SEPARATE component from the Apache-2.0 `qwen-image` entry above: Qwen-Image 2.1 is a different checkpoint under a different licence, and the two share no weights. SceneWorks downloads the pinned upstream snapshot (Qwen/Qwen-Image-2.1 @790c92633540aa0cb11d9abf19eb46d861714758) directly into the user's own cache on first use and re-hosts nothing, so the agreement's §3 redistribution obligations never attach to SceneWorks. The licence is NON-COMMERCIAL — §1(i) defines \"Non-Commercial\" as research or evaluation purposes only, and §2(b) requires a separate commercial licence from Alibaba (model-business@notice.qwencloud.com). It restricts the Materials, not their outputs. §4(b) additionally requires \"Built with Qwen\" or \"Improved using Qwen\" in the documentation of any AI model trained or fine-tuned on these weights that is then distributed.",
+      "documents": [
+        {
+          "label": "Qwen RESEARCH LICENSE AGREEMENT",
+          "key": "qwen-image-2-1-research"
+        }
+      ]
+    },
+    {
       "id": "realvisxl",
       "models": [
         "realvisxl",

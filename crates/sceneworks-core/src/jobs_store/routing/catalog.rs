@@ -824,6 +824,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
     // which flipped krea/ideogram/boogu but not qwen). User LoRA/LoKr applies on the packed tiers.
     ModelCaps::new("qwen_image", true, true, false, false, true),
+    // Qwen-Image 2.1 (sc-24108, epic 24107): a SEPARATE model from the 2512-weights `qwen_image`
+    // row above — different snapshot, different latent space, different licence. MLX-only at this
+    // pin: the native Candle port is sc-24109, so `candle_routed` stays false and an off-Mac
+    // worker never claims the job (the sc-9495 superset invariant then forces the three candle
+    // capability columns false too). bf16 only until the tier turnkey lands in sc-24112.
+    ModelCaps::new("qwen_image_2_1", true, false, false, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2231,6 +2237,7 @@ mod tests {
         "flux_schnell",
         "flux_dev",
         "qwen_image",
+        "qwen_image_2_1",
         "qwen_image_edit",
         "qwen_image_edit_2509",
         "qwen_image_edit_2511",

@@ -183,6 +183,24 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
     },
+    // Qwen-Image 2.1 (sc-24108, epic 24107) — its OWN engine id, not a variant of the row above.
+    // `mlx-gen-qwen-image-2-1` registers `qwen_image_2_1`; the 2512 provider is untouched.
+    //
+    // `default_repo` is the UPSTREAM Hugging Face repo, not a SceneWorks re-host: the snapshot is
+    // public and ungated, and the Qwen RESEARCH LICENCE's §3 redistribution duties are ones the
+    // product never triggers because it pulls at runtime into the user's own cache.
+    //
+    // 40 steps is the engine's own `DEFAULT_STEPS`. `default_guidance` is 1.0 because 2.1's
+    // guidance axis is TRUE-CFG: the scale only engages once the request carries a negative
+    // prompt, so 1.0 means "CFG off until the user asks for it" rather than "no guidance support".
+    ModelRow {
+        sceneworks_id: "qwen_image_2_1",
+        engine_id: "qwen_image_2_1",
+        default_repo: "Qwen/Qwen-Image-2.1",
+        default_steps: 40,
+        default_guidance: 1.0,
+        adapter_label: "mlx_qwen_2_1",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1743,6 +1761,7 @@ mod tests {
         "z_image",
         "z_image_edit",
         "qwen_image",
+        "qwen_image_2_1",
         "qwen_image_edit_2511",
         "qwen_image_edit_2511_lightning",
         "lens",
@@ -1851,6 +1870,13 @@ mod tests {
             | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a
+            // literal for the same reason the Mage arm above is — the provider keeps its
+            // `SIZE_MULTIPLE` private, so there is no const to re-export. The value is the
+            // engine's own `SIZE_MULTIPLE`; `shipped_image_geometry_is_within_the_pinned_engine_envelope`
+            // re-checks every advertised bucket against it on the lane that links the provider.
+            "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1885,6 +1911,13 @@ mod tests {
             | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a
+            // literal for the same reason the Mage arm above is — the provider keeps its
+            // `SIZE_MULTIPLE` private, so there is no const to re-export. The value is the
+            // engine's own `SIZE_MULTIPLE`; `shipped_image_geometry_is_within_the_pinned_engine_envelope`
+            // re-checks every advertised bucket against it on the lane that links the provider.
+            "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2118,6 +2151,8 @@ mod tests {
             ("mage_flow_edit_base", 16),
             ("lens", 16),
             ("qwen_image", 16),
+            // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
+            ("qwen_image_2_1", 32),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

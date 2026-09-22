@@ -2,17 +2,17 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 98,
+    "modelCount": 99,
     "importedFamilyCount": 4,
-    "cellCount": 955,
+    "cellCount": 959,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 51,
     "exceptionCount": 10
   },
   "sources": {
     "apiContractEntry": "cb99c9eae213af49e90adf0b3fb1c2ed89e419af8907587e87ab8ad841e6e1e4",
-    "apiDto": "a0e588bf79de1c4f4bfa74061f42e329b92c9700d4b5c5c97a4f27899235ef06",
-    "apiGeneration": "cdce23ddf9fb466bb8b7b4a4a754dabcd2908d8081a31a7e0eb7093eef3c5a41",
+    "apiDto": "e7b3bef233d919abd20583128beeeda6fdd87fa992566e02563630224dc9f358",
+    "apiGeneration": "b5070a361fb275c0a2d8c0bbb0180a5ca72c4533991476911e5dd4bf972f0c4a",
     "apiValidation": "60a46aa0b42f00caf0cdb7a6f720f5627589f93e54ba31da4d2917ac8e44d9a7",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "3d46fb5b5de95a3a662020e7a59a3db2bec5f10c195b8b5ae93141abc3db2f71",
@@ -22,16 +22,16 @@
     "descriptorMlxRuntime": "c0acc06015dee7ebdfb13a181818ee569c860cb781784926470059b45a23bad2",
     "descriptorPreviewFacts": "df83a4d19b7644fcf117509f7611980389db380a5fcc02ee17ac1f19e3d5c5eb",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "b451064a8057ff8a6d97ca4ae17bd7c3db3af0ed0d63b03d02cfbe81899db5cc",
-    "modelImportDefaults": "d8c158e20ffeac282c8887696c4f96e05ceca1636bde9896e71d7faf10c3e3d3",
+    "manifest": "2543b201df91cbf1cc80474431dfa4150c14d6ee484bfc6f989be7f1189b10c9",
+    "modelImportDefaults": "76396f74c2f2b9501b391618851c9ee8d3fd4f59c88e3dff4ef32624f9a9110b",
     "routerCandle": "794455a403de845173d1fbb266f02596c06888117a4a1305680edbe38f7b0864",
-    "routerCatalog": "ad7e85c2ef8d6c115ee2bc9d28109a0ab5129e70c57197cf7e1f1b8339673f09",
-    "routerGaps": "578018d718907022242af86acf93a6dd8c26cadd3b98797f161c489ce77e9726",
-    "routerMlx": "66228de54a60d71f655e2e31ac7ead5ba67627d4baebf6ecd6206d38fcfa42ea",
+    "routerCatalog": "1405dc356c00ef4b313549dc290bca37e7bf76b746515178ba52544da41d9aeb",
+    "routerGaps": "9a921547d06308201906bb78db2d79e8c6b98bd91b8654bb1e66297227185284",
+    "routerMlx": "e3cee2880514e2647da5d52f750b3aa66c7aa7280763b3a3914b73654752b083",
     "scheduler": "6d562b941430b2074c0b265bc935fcdfcfcf072d6972c6a54db5aebc75e4877b",
     "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
     "webAudioStudio": "1fa9058bcd9a279b22559a4ae68216b0a674d130369ce694760997f4021470c6",
-    "webFallbackCatalog": "868ee967cbc96e7f0e53a22e942f7275cf69e9b1c8d165f183f2d8559203ba5c",
+    "webFallbackCatalog": "c4187d55ff28b1144c0f7a4cf331b72f702de21da4c6b772597c8cc19942e7fd",
     "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
     "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -46,7 +46,7 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
     "workerDispatch": "5f51460ce6ba44991591b0c2bfc147d1df7bdfb76b42477c8fcce0075a363a5e",
-    "workerEngineTable": "9d7fc5f333a93a9e2115bd81a1fe1d4f2dd45d48e743dc43c3f6a09f5e2643b3",
+    "workerEngineTable": "fd5e8033d373cf2c7ec2774bba32b21ae516e4624a40129f2a74313b97a93e91",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "4b0c57c32ec6cfed7895ca9ba76dbb864aa576f0ed081dc2a853f31b86539a65",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
@@ -4187,6 +4187,44 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "qwen_image_2_1",
+      "family": "qwen-image-2-1",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {

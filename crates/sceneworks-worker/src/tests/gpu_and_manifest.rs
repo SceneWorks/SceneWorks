@@ -407,6 +407,11 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
         ("qwen_image", true, true),
+        // Qwen-Image 2.1 (sc-24108): a true-CFG family — the engine takes a real negative branch
+        // and a `true_cfg` scale. Listed here so the count guard below still covers every row, but
+        // its descriptor cannot be read until the epic's terminal pin bump carries
+        // `mlx-gen-qwen-image-2-1` (see PENDING_PIN_ENGINE_IDS).
+        ("qwen_image_2_1", true, true),
         ("qwen_image_edit", true, true),
         ("qwen_image_edit_2509", true, true),
         ("qwen_image_edit_2511", true, true),
@@ -516,9 +521,29 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit", true, true),
         ("mage_flow_edit_turbo", false, false),
     ];
+    // MODEL_TABLE rows whose engine the CURRENTLY PINNED `runtime-macos` bundle does not register,
+    // because the provider crate arrives with this epic's terminal pin bump (sc-24108: the
+    // SceneWorks half of Qwen-Image 2.1 lands on the epic branch before the one pin bump that
+    // FEATURE_DEVELOPMENT invariant 5 allows, so for the length of the epic the row exists and the
+    // engine does not).
+    //
+    // This is NOT an allowance for a broken mapping. The loop below asserts that every id named
+    // here genuinely fails to resolve, so the moment the pin carries the provider this test goes
+    // RED and the id must be deleted from this list — which is what re-arms the descriptor-drift
+    // assertions for it. The steady state is an empty slice.
+    const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
+
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
     for (id, guidance, negative) in expected {
+        if PENDING_PIN_ENGINE_IDS.contains(id) {
+            assert!(
+                mlx_model(id).is_none(),
+                "{id} now resolves through the registry — the pin bump landed, so remove it from \
+                 PENDING_PIN_ENGINE_IDS and let its descriptor-derived flags be checked"
+            );
+            continue;
+        }
         let m = mlx_model(id).unwrap_or_else(|| panic!("{id} resolves through the registry"));
         assert_eq!(
             m.supports_guidance(),

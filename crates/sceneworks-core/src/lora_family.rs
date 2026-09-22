@@ -555,6 +555,11 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
     match normalize_model_family(family).as_str() {
         "z-image" => Some("z_image_diffusers"),
         "qwen-image" => Some("qwen_image"),
+        // Qwen-Image 2.1 (sc-24108) is its OWN family, not a spelling of `qwen-image`:
+        // `normalize_model_family` only lower-cases and `_`→`-`, so "qwen-image-2-1" never
+        // collapses onto "qwen-image" and the two never share an adapter stamp or a LoRA pool.
+        // Native MLX only at this pin; lineage label, never a Torch adapter.
+        "qwen-image-2-1" => Some("qwen_image_2_1"),
         "lens" => Some("lens_turbo"),
         "sensenova-u1" => Some("sensenova_u1"),
         "flux" => Some("flux_diffusers"),
@@ -609,6 +614,9 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // re-declare it, but the family default shouldn't claim what it can't do.
         ("image", "z-image") => vec!["text_to_image"],
         ("image", "qwen-image") => vec!["text_to_image"],
+        // Qwen-Image 2.1 (sc-24108): text-to-image only at this pin. Edit conditioning is a
+        // later slice, so the family default must not claim it.
+        ("image", "qwen-image-2-1") => vec!["text_to_image"],
         // Qwen Image, Lens, Chroma, imported SDXL, and imported Mage-Flow have no distinct
         // style-variation execution mode. Their builtin entries and imported-family defaults must
         // agree where both exist so an imported checkpoint cannot restore the hidden no-op removed

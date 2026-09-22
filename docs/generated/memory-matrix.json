@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:058220542fec6b687e4da8b495c6161308904dcc35c692e2a652c532043c65d8",
+    "sceneWorksRevision": "source-tree:6dba5c445bd244fcfb02ee27eeb63bd58df8dddace23f1596b6a35d7d6ea0a1a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6e829d70e8c5d44dafc7c3a09bebd6232b1e77ea762336969a3adf99c1468652"
+        "sha256": "2400c53bbe31ef5b740d879a83a3a44f866f001f478d5fa113c69a7596154159"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "76127fae0cebcb306b3b66d010803e3f4b9a7b24e21f771f02136acf1578c9e0"
+        "sha256": "e6bfa82ca3bf90752e89945b7fe1baa019f2012b7a0592a6dece5174a94e00c8"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -17,11 +17,11 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "39dc0043b8a3d447d0765fc70e96dd3b835090bdbe2f35299bcf2f945cabb8a1"
+        "sha256": "c4633c822361aa41b3542cf5d46164c591a9b2d9bfeccdf12f353bcb28330aee"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "1216490b7ed6d9af6f2c008bb40935ae5af8d403c2b7d791bc5a6d74164c9398"
+        "sha256": "458f5bb22787028cdcb0a726d3efaeb3c2f5ba2cc66dd2fa5e4259273f5b62e1"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "314891c85132170c97b7a205d946711d13a0c6f337230ba618ba99600051ccf5"
+        "sha256": "d9ce2be13b0036b8e98ddbb5f14e8788c8f0ccc31e1c126bab0763663f2e6bf6"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 64,
+    "catalogEntries": 65,
     "catalogEntriesByModality": {
-      "image": 53,
+      "image": 54,
       "video": 11
     },
-    "cells": 9390,
+    "cells": 9400,
     "publishedCells": 3810,
-    "elidedCells": 5580,
+    "elidedCells": 5590,
     "elidedByState": {
-      "Implemented": 1178,
-      "Missing": 4402
+      "Implemented": 1180,
+      "Missing": 4410
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
-    "mlxStagedStaticCoverageDenominator": 53,
+    "mlxStagedStaticCoverageDenominator": 54,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 247,
-    "analyticOnlyCells": 96,
+    "analyticOnlyCells": 97,
     "anchoredCells": 3810,
     "staleAnchors": 243,
     "attestedAnchors": 4,
@@ -2893,6 +2893,48 @@
           ],
           "overlays": [
             "control",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "qwen_image_2_1",
+      "name": "Qwen Image 2.1",
+      "modality": "image",
+      "familyGroup": 15511,
+      "family": "qwen-image-2-1",
+      "resolvedRoute": "qwen_image_2_1",
+      "resolvedRoutes": {
+        "mlx": "qwen_image_2_1"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx"
+      ],
+      "owningFamilyStories": {
+        "mlx": 15511
+      },
+      "owningModelStories": {
+        "mlx": 24108
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
             "lora",
             "none"
           ],
@@ -15600,6 +15642,66 @@
           "lora": 0,
           "none": 0
         }
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 2,
+      "states": {
+        "Implemented": 2
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
       }
     },
     {
@@ -240885,6 +240987,7 @@
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:resident",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:staged_residency"
     ],
+    "qwen_image_2_1": [],
     "qwen_image_edit_2511": [
       "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:identity:resident",
       "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:lora:bounded_attention",

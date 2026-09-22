@@ -200,6 +200,23 @@ const seededFallbackModels = [
     },
   },
   {
+    // Qwen Image 2.1 (sc-24108) — a separate model from `qwen_image` above, not a newer build of
+    // it. Text-to-image only: NO poseLibrary / controlModes / controlScale, because the 2.1
+    // provider declares no conditioning at all. ⚠️ No `image` block: ABSENT MEANS TRUE, and 2.1 is
+    // a true-CFG family that takes both a guidance scale and a negative prompt.
+    id: "qwen_image_2_1",
+    name: "Qwen Image 2.1",
+    type: "image",
+    capabilities: ["text_to_image"],
+    ui: {
+      description: "Qwen-Image 2.1 text-to-image target (research licence).",
+      promptGuide: {
+        title: "Qwen Image 2.1 Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1.md",
+      },
+    },
+  },
+  {
     id: "z_image_edit",
     // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
     // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.

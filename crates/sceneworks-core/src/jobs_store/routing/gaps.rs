@@ -1076,6 +1076,15 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "base Qwen-Image reference / edit_image conditioning is not available in the native flow on Mac unless it is the strict-pose ControlNet tier.",
             Some("epic 3401"),
         ),
+        // sc-24108: 2.1 is text-to-image ONLY at this pin — the provider declares an empty
+        // conditioning set, so unlike base `qwen_image` there is not even a strict-pose tier to
+        // fall through to. Edit conditioning is the separate sc-24110 work.
+        "qwen_image_2_1" => UnsupportedReason::new(
+            Some(model),
+            "reference / edit / pose conditioning",
+            "Qwen Image 2.1 is text-to-image only in this release — it accepts no reference, source, mask or pose conditioning. Use Qwen Image Edit for a reference-conditioned render.",
+            Some("epic 24107"),
+        ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
             Some(model),
             "reference (XLabs IP-Adapter)",

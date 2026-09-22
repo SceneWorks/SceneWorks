@@ -12283,6 +12283,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:qwen_image_2_1:mlx:default",
+      "modelId": "qwen_image_2_1",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:qwen_image_edit_2511_lightning:candle:bf16",
       "modelId": "qwen_image_edit_2511_lightning",
       "modelFamily": "qwen-image",

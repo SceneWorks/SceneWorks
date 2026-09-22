@@ -157,6 +157,11 @@ string_enum! {
         ProceduralPreview => "procedural_preview",
         ZImageDiffusers => "z_image_diffusers",
         QwenImage => "qwen_image",
+        // sc-24108: Qwen-Image 2.1 stamps its own adapter id rather than reusing `qwen_image`.
+        // The recipe records which weights produced an asset, and 2.1's snapshot, latent space
+        // and licence are all different from 2512's — a shared stamp would make the two
+        // indistinguishable on replay.
+        QwenImage21 => "qwen_image_2_1",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",

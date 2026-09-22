@@ -66,6 +66,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
+        "qwen_image_2_1" => qwen_image_2_1_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
@@ -331,6 +332,35 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
         return false;
     }
     true
+}
+
+/// Qwen-Image 2.1 (sc-24108, epic 24107) MLX-routing conditions: plain text-to-image and nothing
+/// else. This is NOT [`qwen_mlx_eligible`]'s twin — the 2.1 provider declares an empty conditioning
+/// set at this pin (no Reference, no MultiReference, no control branch), so there is no strict-pose
+/// tier to let through and every conditioned carrier is refused. The manifest matches
+/// (`capabilities: ["text_to_image"]`, no `ui.poseLibrary`, no `ui.controlModes`), so the Studio
+/// never offers a shape this refuses and `classify_image_gap` names the reason if the API is
+/// driven directly.
+///
+/// `loras` is deliberately NOT inspected. The engine refuses adapters with a typed `Unsupported`,
+/// which surfaces as an actionable job failure; refusing here instead would leave the job
+/// unclaimable by anything (2.1 has no Candle route until sc-24109) and it would sit queued
+/// forever — the Anima defect of sc-10523.
+pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    if !matches!(
+        payload.get("mode").and_then(Value::as_str),
+        None | Some("image_generation" | "text_to_image")
+    ) {
+        return false;
+    }
+
+    !(has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        || has_nonempty_or_malformed_string(payload, "referenceAssetId")
+        || has_nonempty_or_malformed_string(payload, "maskAssetId")
+        || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+        || has_nonempty_array(payload, "controls")
+        || has_nonempty_array(payload, "controlnets")
+        || has_nonempty_nested_array(payload, "advanced", "poses"))
 }
 
 /// Qwen-Image-Edit (sc-3397/sc-3398) MLX-routing conditions. The `qwen_image_edit` /

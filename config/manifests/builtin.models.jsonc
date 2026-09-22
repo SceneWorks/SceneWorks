@@ -3166,6 +3166,151 @@
       }
     },
     {
+      // Qwen-Image 2.1 (sc-24108, epic 24107) — a NEW catalog id beside the 2512-weights
+      // `qwen_image` entry above, NOT a re-point of it. Different architecture, different
+      // snapshot, different licence: a 20B single-stream flow-matching DiT on a 64-channel /
+      // 16x-spatial latent (vs 2512's 16-channel z16), a Qwen3-VL language tower as the text
+      // encoder (vs 2512's Qwen2.5-VL), and the Qwen RESEARCH LICENSE (vs 2512's Apache-2.0).
+      // Nothing about `qwen_image`, `qwen_image_edit_2511` or the Fun-Controlnet-Union strict
+      // control tier is shared with this entry — in particular, none of 2512's measured memory
+      // rows apply here and none are copied (epic requirement E5).
+      //
+      // Native MLX only at this pin (inference `mlx-gen-qwen-image-2-1`, engine id
+      // `qwen_image_2_1`). The Candle port is sc-24109; until it lands the routing catalog row
+      // carries `candle_routed: false`, so an off-Mac worker never claims the job and the user
+      // gets the routing lane's own "no Mac worker" reason rather than a half-wired refusal.
+      // Q4/Q8 exist in the engine but the tier turnkey + bundles are sc-24112 — this entry ships
+      // the bf16 upstream snapshot and nothing else, so there is no `quantize` key and no tier
+      // matrix to resolve.
+      "id": "qwen_image_2_1",
+      "name": "Qwen Image 2.1",
+      "family": "qwen-image-2-1",
+      "type": "image",
+      "adapter": "qwen_image_2_1",
+      "capabilities": ["text_to_image"],
+      // True-CFG family: the engine takes a real negative branch and a `true_cfg` scale that only
+      // engages once a negative prompt is present. Both axes are therefore TRUE, which is what an
+      // absent `image` block already means (sc-15299 polarity), so nothing is declared here.
+      "downloads": [
+        // The UPSTREAM diffusers snapshot, pulled directly and whole — no SceneWorks re-host.
+        // `Qwen/Qwen-Image-2.1` is a public, UNGATED repo, so there is nothing a mirror would buy
+        // except a second copy under a licence (Qwen RESEARCH) whose §3 redistribution terms we
+        // deliberately never trigger: SceneWorks pulls at runtime into the user's own cache and
+        // redistributes no weights (see scripts/check-no-nc-weights.mjs). An empty `files` list is
+        // the whole-repo snapshot convention; the engine loads the tree as-is
+        // (model_index.json + processor/ + scheduler/ + text_encoder/ + transformer/ + vae/).
+        //
+        // `estimatedSizeBytes` is the EXACT byte total of the pinned revision's tree, summed from
+        // the resolved blobs of that snapshot on disk (33,134,949,212 B = 30.86 GiB), not an
+        // estimate: 4 text-encoder shards (17.53 GB), 2 transformer shards (14.23 GB), the VAE
+        // (1.35 GB), the tokenizer/processor corpus and the small configs.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` are null because NOTHING has been measured for
+        // 2.1 yet. They are filled by the epic-end measurement campaign, never by copying the
+        // 2512 rows.
+        //
+        // NO `variant` KEY, deliberately. A `variant` declares a user-selectable PRECISION TIER,
+        // and this release has none: one artifact, no `mlx.quantize`, no tier subdirs, nothing for
+        // a tier picker to offer. Tagging it `bf16` would advertise a precision axis the product
+        // cannot serve — and would make the catalog claim an MLX-only `precisionTier/bf16` cell
+        // that the cross-backend parity register would then have to carry as an approved
+        // exception. sc-24112 adds the real Q4/Q8 tier artifacts and the `variant` tags with them.
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1",
+          "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+          "files": [],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 33134949212,
+          "footprint": { "diskSizeBytes": 33134949212, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1"
+      },
+      // `gated` is deliberately ABSENT: the Hub repo is public, so there is no access request and
+      // no token to collect. `requiresLicenseAcknowledgment` is the credential-free half of the
+      // sc-7872 gate (the `minimax_h3` precedent) — it blocks the download behind an in-app accept
+      // and surfaces `licenseNotice` on the Models screen and in the Setup wizard.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+      // Transcribed from the LICENSE file beside the pinned weights ("Qwen RESEARCH LICENSE
+      // AGREEMENT", release date 2026-09-20); the clause-by-clause evidence is
+      // inference:docs/licensing/sc-24108-qwen-research-licence-evidence.md.
+      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" SceneWorks itself never redistributes these weights — it downloads them from Qwen's own repository into your machine on first use. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs): "Non-Commercial"
+      // is §1(i) of the agreement above, so a build that ever embedded these weights must fail.
+      "nonCommercial": true,
+      "defaults": {
+        // The engine's own 1:1 preset (config.rs PRESETS) and DEFAULT_STEPS. Guidance is
+        // `true_cfg`, whose engine default is 1.0 — i.e. CFG off until the user types a negative
+        // prompt, at which point the scale becomes live. `count` is 1 rather than the catalog's
+        // usual 4: a 2048-square 40-step render on a 20B DiT is not a batch-of-four default.
+        "resolution": "2048x2048",
+        "steps": 40,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Exactly the seven upstream presets, in the engine's own order: 1:1, 4:3, 3:4, 3:2, 2:3,
+        // 16:9, 9:16. Every side is a multiple of the engine's ÷32 request stride and sits inside
+        // its [32, 2752] envelope — `shipped_image_geometry_is_within_the_pinned_engine_envelope`
+        // re-checks both against the PINNED descriptor, so this list cannot drift off the engine.
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ],
+        "count": [1, 2, 4],
+        // The engine runs one flow-match Euler loop (`run_flow_sampler` over the dynamic-shift
+        // exponential schedule) and exposes no curated solver menu at this pin, so the menu is the
+        // engine-default sentinel alone. Advertising the full diffusers flow menu here would be a
+        // knob the worker silently falls back from (sc-7127).
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      // The engine refuses adapters outright at this pin (`supports_lora`/`supports_lokr` false,
+      // typed Unsupported), so there is no LoRA family to advertise and the Studio's LoRA rail
+      // stays closed for this id.
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // NO `calibrations` and NO `memoryStrategyContract`: the provider publishes no
+      // memory-strategy ladder at this pin, so the route stays the consumer fallback (the spec is
+      // handed to the engine unshaped) exactly as `ideogram_4` did on MLX before its ladder
+      // landed. `minMemoryGb` is therefore the ONLY memory claim this entry makes, and it is a
+      // DERIVED FLOOR, not a measurement: the pinned snapshot's own tensor bytes are 30.86 GiB
+      // (DiT 13.25 + Qwen3-VL tower 16.33 + VAE 1.26), all of which are resident together on the
+      // native path, and the language tower runs f32 activations over its bf16 weights. 48 GB
+      // gates that floor with room for the activation transient at the 2048-square default
+      // without gating a 64 GB Mac. It is NOT a measured peak and must not be cited as one; the
+      // real numbers come from the epic-end campaign, and 2512's rows are a different model.
+      "mlx": {
+        "minMemoryGb": 48
+      },
+      "ui": {
+        "label": "Qwen Image 2.1",
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon. A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The weights are downloaded from Qwen's own repository on first use; SceneWorks does not re-host them.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
+            { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
+          ]
+        }
+      }
+    },
+    {
       "id": "qwen_image_edit_2511",
       "name": "Qwen Image Edit (2511)",
       "family": "qwen-image",
@@ -26682,7 +26827,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "9e949da40d2f1b32c505ff147fe1216224994ce7ede20febb34a35b4c70dfa77",
+              "sha256": "9cff979cd7b16bc4df778bacdfaf0dccb5ac8dabdc2dcdd5f3a00b458953b1e1",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26751,8 +26896,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 138683,
-                  "sha256": "9d7fc5f333a93a9e2115bd81a1fe1d4f2dd45d48e743dc43c3f6a09f5e2643b3"
+                  "byteSize": 141073,
+                  "sha256": "fd5e8033d373cf2c7ec2774bba32b21ae516e4624a40129f2a74313b97a93e91"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",

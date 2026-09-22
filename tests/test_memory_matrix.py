@@ -774,7 +774,15 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-23648 restores missing MLX streaming declarations: SDXL q4/q8 add
+    Last moved: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
+    bf16 artifact with no `variant`, so it contributes exactly five NEW lanes
+    (`qwen_image_2_1:mlx:<rung>`) and moves nothing else. Its provider publishes no
+    memory-strategy ladder at this pin, so only `resident` is implemented (2 coordinates: the
+    single tier x text_to_image x {none, lora} overlay pair) and the other four rungs are Missing.
+    No existing lane gained, lost or moved a coordinate, and no Candle lane exists to pin — the
+    Candle port is sc-24109.
+
+    Previously: sc-23648 restores missing MLX streaming declarations: SDXL q4/q8 add
     five supported mode/overlay coordinates per tier (implemented 3 -> 13), and
     RealVisXL Lightning bf16/q8 add two per tier (implemented 2 -> 6). These are
     provider-validated declarations, with no new measurements or other census moves.

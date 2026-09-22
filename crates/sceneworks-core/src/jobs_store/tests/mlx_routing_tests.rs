@@ -1,8 +1,8 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
-    instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible, sdxl_mlx_lane,
-    video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_image_2_1_mlx_eligible,
+    qwen_mlx_eligible, realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible,
+    sdxl_mlx_lane, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
     z_image_mlx_eligible, JobSnapshot, MlxSdxlLane, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS,
     MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
@@ -487,6 +487,61 @@ fn qwen_edit_reference_falls_back_but_pose_and_lycoris_route_mlx() {
     // Third-party LyCORIS on a plain txt2img qwen job now routes MLX (epic 3641).
     assert!(qwen_mlx_eligible(&object(json!({
         "loras": [{ "networkType": "lycoris" }]
+    }))));
+}
+
+/// sc-24108: the MLX worker must CLAIM a plain Qwen-Image 2.1 text-to-image job, and must refuse
+/// every conditioned shape — 2.1's provider declares an empty conditioning set, so unlike base
+/// `qwen_image` there is no strict-pose tier to fall through to.
+///
+/// Both halves matter. 2.1 has no Candle route until sc-24109, so an over-narrow predicate would
+/// leave a job nothing can claim and it would sit "Waiting for an available worker" forever (the
+/// Anima defect, sc-10523) — which is why `image_request_mlx_eligible` is exercised through the
+/// public entry point here, not just the predicate.
+#[test]
+fn qwen_image_2_1_routes_text_to_image_to_mlx_and_refuses_conditioning() {
+    assert!(MLX_ROUTED_MODELS.contains(&"qwen_image_2_1"));
+
+    // A bare txt2img job, an explicit mode, and the legacy mode spelling all claim.
+    for payload in [
+        json!({}),
+        json!({ "mode": "text_to_image" }),
+        json!({ "mode": "image_generation" }),
+        json!({ "prompt": "a lighthouse", "width": 2048, "height": 2048, "steps": 40, "seed": 7 }),
+        json!({ "negativePrompt": "watermark", "advanced": { "guidanceScale": 4.0 } }),
+    ] {
+        assert!(
+            image_request_mlx_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the MLX worker must claim a plain 2.1 txt2img job: {payload}"
+        );
+    }
+
+    // Every conditioned carrier is refused: the engine has nowhere to put it.
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "referenceAssetId": "ref_1" }),
+        json!({ "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "maskAssetId": "mask_1" }),
+        json!({ "advanced": { "poses": [{ "id": "p1" }] } }),
+        json!({ "controls": [{ "kind": "canny" }] }),
+        json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
+    ] {
+        assert!(
+            !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "2.1 declares no conditioning and must refuse: {payload}"
+        );
+    }
+
+    // An adapter is NOT a routing refusal (see the predicate's doc comment): the worker claims the
+    // job and the engine returns a typed Unsupported, which is an actionable failure rather than a
+    // job nothing can pick up.
+    assert!(qwen_image_2_1_mlx_eligible(&object(json!({
+        "loras": [{ "networkType": "lora" }]
+    }))));
+
+    // The 2512 entry is untouched by all of this — it still takes its strict-pose tier.
+    assert!(qwen_mlx_eligible(&object(json!({
+        "advanced": { "poses": [{ "id": "p1" }] }
     }))));
 }
 

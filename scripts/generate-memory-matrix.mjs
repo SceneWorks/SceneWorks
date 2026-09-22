@@ -132,6 +132,10 @@ export const MODEL_STORIES = {
   z_image: { mlx: 15457, candle: 16170 },
   z_image_edit: { mlx: 15458, candle: 15862 },
   qwen_image: { mlx: 15459, candle: 15865 },
+  // Qwen-Image 2.1 (sc-24108, epic 24107). NO `candle` key on purpose: 2.1 advertises MLX only
+  // until the Candle port (sc-24109) lands, and a Candle owner here would silently attribute
+  // Candle cells to a story scoped to Metal. sc-24109 adds the key when it adds the backend.
+  qwen_image_2_1: { mlx: 24108 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },

@@ -1770,6 +1770,94 @@ fn qwen_image_quant_and_lora_stay_on_candle() {
     ));
 }
 
+/// sc-24108/sc-24109: the two `qwen_image_2_1` providers declare DIFFERENT quant surfaces — the
+/// MLX provider advertises `supported_quants: [Q4, Q8]`, the Candle provider advertises
+/// `supported_quants: []` and refuses an on-the-fly quantize with a typed Unsupported at load. A
+/// per-model-id quant list would merge those two into one and offer a Windows/CUDA caller a tier
+/// the Candle route rejects the moment it loads.
+///
+/// SceneWorks cannot merge them, and this pins the two facts that make that true:
+///
+/// 1. The quant admission column is PER BACKEND. `ModelCaps` carries `candle_quant` /
+///    `candle_quant_lora` for the Candle lane only; the MLX lane's tier surface is the manifest's
+///    own `mlx` block. There is no shared "supported quants for this model" field for the two to
+///    collapse into, and `qwen_image_2_1` is `candle_routed: false` at this pin (the Candle port is
+///    sc-24109), so its three Candle capability columns are compile-time forced false by the
+///    sc-9495 superset invariant.
+/// 2. The catalog advertises NO tier at all today: one bf16 artifact with no `variant`, and no
+///    `mlx.quantize`. So neither lane can offer q4 or q8 — not because the offer is filtered, but
+///    because there is nothing to offer.
+///
+/// sc-24112 ships the real tier artifacts. When it does, it must tag them per lane rather than
+/// adding `variant` rows and assuming both backends serve them — this test is where that mistake
+/// shows up, because a Candle-routed `qwen_image_2_1` tier-select would start passing here.
+#[test]
+fn qwen_image_2_1_offers_no_candle_quant_tier() {
+    // Not Candle-routed at all yet: no shape of this model is claimable off-Mac.
+    assert!(!CANDLE_ROUTED_MODELS.contains(&"qwen_image_2_1"));
+    assert!(!image_request_candle_eligible(
+        "qwen_image_2_1",
+        &object(json!({ "prompt": "a lighthouse" }))
+    ));
+
+    // A tier-select is refused on the Candle lane for both bit widths the MLX provider advertises.
+    for bits in [4, 8] {
+        assert!(
+            !image_request_candle_eligible(
+                "qwen_image_2_1",
+                &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+            ),
+            "qwen_image_2_1 must not offer a Q{bits} tier on the candle lane — its candle provider \
+             declares supported_quants: [] and would refuse the load"
+        );
+    }
+
+    // The base `qwen_image` (2512) lane is untouched by any of this: it IS a candle packed-quant
+    // family and keeps its tier-select. The contrast is the point — the two ids do not share a
+    // quant surface any more than they share weights.
+    assert!(image_request_candle_eligible(
+        "qwen_image",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+
+    // And the catalog itself advertises no tier for 2.1 on either lane: one artifact, no `variant`,
+    // no `mlx.quantize`.
+    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
+        crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let downloads = entry["downloads"].as_array().expect("downloads array");
+    assert_eq!(
+        downloads.len(),
+        1,
+        "2.1 ships exactly one artifact at this pin"
+    );
+    assert!(
+        downloads
+            .iter()
+            .all(|download| download.get("variant").is_none()),
+        "a `variant` declares a user-selectable precision tier; 2.1 has none until sc-24112"
+    );
+    assert!(
+        entry["mlx"].get("quantize").is_none(),
+        "no `mlx.quantize` either — the MLX lane loads the bf16 snapshot as published"
+    );
+    assert!(
+        entry.get("candle").is_none(),
+        "and no `candle` block at all: the Candle route is sc-24109"
+    );
+}
+
 #[test]
 fn z_image_quant_tier_select_stays_on_candle() {
     // Z-Image's q4/q8/bf16 turnkeys are already packed. `mlxQuantize` selects the directory; it does
