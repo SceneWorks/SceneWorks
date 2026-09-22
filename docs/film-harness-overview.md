@@ -626,9 +626,9 @@ files are a second 18.78 GB download that `model.weights` never named
 
 ## Evaluation discipline
 
-The harness is evaluated, not merely exercised. Two reports ship, with the same rubric, the same six
-shots and the same evaluator method, so the numbers are comparable column for column
-(`docs/film-harness-evaluation-phase-2.md:8`):
+The harness is evaluated, not merely exercised. Three reports ship, with the same rubric, the same
+six shots and the same evaluator method, so the numbers are comparable column for column
+(`docs/film-harness-evaluation-phase-2.md:8`, `docs/film-harness-evaluation-phase-3.md`):
 
 - an advance-declared **rubric** (identity, costume, location, parcel continuity, action completion,
   cut, 0/1/2 each; sound once at sequence level) with the decision rule stated before any frame was
@@ -642,7 +642,7 @@ shots and the same evaluator method, so the numbers are comparable column for co
   (`docs/film-harness-evaluation-phase-2.md:139`);
 - **cost metrics** per cell: wall clock, s/step, peak memory, and wall per accepted second.
 
-Headline numbers, both passes:
+Headline numbers, all three passes:
 
 | pass | configuration | picture /72 | render wall | s/step | peak | wall per accepted second |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -651,10 +651,22 @@ Headline numbers, both passes:
 | 2 | six shots, turbo 4-step, edge 2048 | **64** | 4 722 s | 135–167 | 24.3 GB | **152 s** |
 | 2 | SH010 alone at 1344x768, 50 steps | 12/12 | 23 961 s | 457 | 28.8 GB | 4 638 s |
 | 2 | SH010 + SH050, reference edge 1024, 50 steps | 24/24 (vs 22/24 at 2048) | 3 376 s | 30–32 | 16.3 GB | 327 s |
+| 3 (2026-09-22) | prompt anchoring on, references + turbo 4-step, edge 2048 | **65** (+ 2/2 sound) | 4 876 s | — | 33.7 GB † | 157 s |
+| 3 | described-only, **no references**, base `minimax_h3`, turbo 4-step | **49** | 570 s | — | 33.7 GB † | 55 s (570 s / 10.33 s accepted — SH010 + SH020; the other four shots were rejections) |
 
-Source: `docs/film-harness-evaluation-phase-2.md:360`–`:367`. Phase 1 recommended **revise**; phase 2
-recommended **continue** (`docs/film-harness-evaluation-phase-2.md:461`). Neither report authorizes
-the next phase, and both say so at the top.
+† one guard-sampled peak for the whole A6a + A6b + locator stack, not a per-cell figure, and a
+transient at the refiner→H3 handover; steady-state rendering sat at 15–29 GB
+(`docs/film-harness-evaluation-phase-3.md`, § *Memory*).
+
+Source: `docs/film-harness-evaluation-phase-2.md:360`–`:367` and
+`docs/film-harness-evaluation-phase-3.md` §4–§5. Phase 1 recommended **revise**; phase 2 recommended
+**continue**  (`docs/film-harness-evaluation-phase-2.md:461`); phase 3 records measurements and makes
+no recommendation. No report authorizes the next phase, and all three say so at the top.
+
+Phase 3's two picture scores are **not** like-for-like with phase 2's. The 65/72 cell re-renders
+phase 2's turbo film with the anchoring sentences added, so every take is a different draw at the
+same seed — "no regression, and the plates still dominate", not "+1 from anchoring". The 49/72 cell
+has no baseline at all; it characterizes the described-only path.
 
 ## Subcommands
 
@@ -722,7 +734,9 @@ figure at `:103`–`:105`).
 - the edge-1024 takes are different draws from the edge-2048 takes at the same seed, so their
   per-shot deltas mix sampling with fidelity;
 - the turbo default was **not reached through the planner** in that pass: the plans were
-  hand-authored, so cell (e) is about the recipe, not about a user getting to it;
+  hand-authored, so cell (e) is about the recipe, not about a user getting to it. **Closed in phase
+  3**, where the unmodified brief planned in one repair round
+  (`docs/film-harness-evaluation-phase-3.md` §2);
 - the no-reference baseline was not re-rendered; its comparability rests on a code reading and on the
   determinism phase 1 measured.
 

@@ -1168,3 +1168,116 @@ async fn the_planner_plans_both_shipped_pack_shapes_with_audio_and_no_labels_of_
         );
     }
 }
+
+/// sc-24029. A per-shot rewrite that ran out of output budget stops mid-sentence, and the job still
+/// reports success because its text is non-empty — that is how a film shot shipped with a prompt cut
+/// at 3026 chars. The compile must REFUSE such a rewrite rather than bake half a sentence into the
+/// dispatched request: the shot falls back to the prompt its author wrote, exactly as `--no-refine`
+/// would leave it, and the run says so through a non-fatal finding naming the shot.
+///
+/// Driven through the shipped `run_fake_refine_job` seam, so the `generation.finishReason` under
+/// test is read off the same job snapshot the GPU path reads. No weights, no GPU.
+#[tokio::test]
+async fn a_rewrite_that_exhausted_its_token_budget_falls_back_to_the_authored_prompt() {
+    let harness = Harness::start(true, Vec::new()).await;
+    let plan_path = Path::new(FIXTURE_DIR).join("plan.jsonc");
+    let plan = sceneworks_core::film_plan::read_plan_file(&plan_path).expect("plan.jsonc parses");
+
+    // Control: the same compile with an ordinary EOS finish keeps the rewrite.
+    {
+        let mut script = harness.script.lock();
+        script.refine_template = Some("rewritten: {prompt}".to_owned());
+        script.refine_finish_reason = None;
+    }
+    let mut options = planner_options(&harness, "refine-stop");
+    options.refine_prompts = true;
+    let accepted = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &plan_path,
+    )
+    .await
+    .expect("the plan compiles with a completed rewrite");
+    assert!(
+        accepted.findings.is_empty(),
+        "a rewrite that finished on EOS raises nothing: {:?}",
+        accepted.findings
+    );
+    for request in &accepted.compiled.requests {
+        assert_eq!(
+            request.prompt_source,
+            sceneworks_core::film_compile::PromptSource::Refined,
+            "{}",
+            request.shot_id
+        );
+        assert!(
+            request.prompt.contains("rewritten:"),
+            "{}: {}",
+            request.shot_id,
+            request.prompt
+        );
+    }
+
+    // The defect: every rewrite stops on `length`.
+    harness.script.lock().refine_finish_reason = Some("length".to_owned());
+    let mut options = planner_options(&harness, "refine-length");
+    options.refine_prompts = true;
+    let artifacts = film_planner::compile_existing(
+        &harness.transport,
+        &planner_llm(&harness),
+        &options,
+        &plan_path,
+    )
+    .await
+    .expect("a truncated rewrite is not fatal — the authored prompt is a valid request");
+
+    assert_eq!(
+        artifacts.compiled.requests.len(),
+        plan.shots.len(),
+        "the film still compiles in full"
+    );
+    for request in &artifacts.compiled.requests {
+        assert_eq!(
+            request.prompt_source,
+            sceneworks_core::film_compile::PromptSource::Authored,
+            "{} kept a truncated rewrite",
+            request.shot_id
+        );
+        assert!(
+            !request.prompt.contains("rewritten:"),
+            "{}: the discarded rewrite reached the dispatched prompt: {}",
+            request.shot_id,
+            request.prompt
+        );
+        let authored = &plan
+            .shots
+            .iter()
+            .find(|shot| shot.id == request.shot_id)
+            .expect("the request names a shot of the plan")
+            .prompt;
+        assert!(
+            request.prompt.contains(authored.as_str()),
+            "{}: the author's own words must survive: {}",
+            request.shot_id,
+            request.prompt
+        );
+    }
+
+    // And the run SAYS so, per shot, rather than dropping the rewrite silently.
+    let flagged: Vec<&str> = artifacts
+        .findings
+        .iter()
+        .map(|finding| finding.shot_id.as_deref().unwrap_or("plan"))
+        .collect();
+    let expected: Vec<&str> = plan.shots.iter().map(|shot| shot.id.as_str()).collect();
+    assert_eq!(flagged, expected, "{:?}", artifacts.findings);
+    assert!(
+        artifacts
+            .findings
+            .iter()
+            .all(|finding| finding.message.contains("output budget")),
+        "{:?}",
+        artifacts.findings
+    );
+}

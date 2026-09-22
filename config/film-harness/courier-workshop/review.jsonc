@@ -313,7 +313,7 @@
         },
         {
           "id": "sh050_recipient", "topic": "character_identity", "frames": "last",
-          "intended": "The recipient — a woman, not the courier — is at the workbench.",
+          "intended": "The recipient — a man, not the courier — is at the workbench.",
           "ask": "Is at least one person visible in this frame? Answer with exactly one word: yes, no, or unclear.",
           "expect": ["yes"],
           "contradict": ["no"]

@@ -1011,6 +1011,10 @@ pub(crate) struct WorkerScript {
     /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
     /// by the shot's own prompt.
     pub(crate) refine_template: Option<String>,
+    /// sc-24029: the `generation.finishReason` the fake refine result reports. `None` reports
+    /// `"stop"`, exactly as the real worker does for a decode that ended on EOS; `Some("length")`
+    /// is the truncated-but-non-empty rewrite the planner must refuse.
+    pub(crate) refine_finish_reason: Option<String>,
     /// sc-23404: fail every `audio_generate` job — the "the TTS model refused / fell over" path.
     pub(crate) audio_fails: bool,
     /// sc-23404: never complete an `audio_generate` job (honouring a cancel), so a test can spend
@@ -1942,6 +1946,13 @@ async fn run_fake_refine_job(
             .unwrap_or_else(|| "{prompt}".to_owned())
             .replace("{prompt}", &prompt)
     };
+    // The real worker records how the decode ENDED on the success result too (sc-24029), because
+    // a rewrite that stopped on `length` is non-empty and therefore completes normally.
+    let finish_reason = script
+        .lock()
+        .refine_finish_reason
+        .clone()
+        .unwrap_or_else(|| "stop".to_owned());
     post_progress(
         app,
         job_id,
@@ -1950,6 +1961,11 @@ async fn run_fake_refine_job(
             "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
             "result": {
                 "originalPrompt": prompt, "refinedPrompt": refined,
+                "generation": {
+                    "finishReason": finish_reason,
+                    "usage": { "promptTokens": 900, "generatedTokens": 1536 },
+                    "maxNewTokens": 1536
+                },
                 "executionIdentity": {
                     "provider": "native", "model": "fixture/model-keyed-refiner",
                     "backend": "fixture", "thinkingMode": "disabled"

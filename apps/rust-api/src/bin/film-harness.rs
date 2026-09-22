@@ -445,6 +445,12 @@ async fn plan_or_compile(command: &str, transport: &HttpTransport, parsed: &Pars
                     request.prompt.chars().count()
                 );
             }
+            // Non-fatal findings (sc-24029): the documents were written, and something in them is
+            // less than was asked for. Printed here rather than swallowed, so a compile that
+            // silently dropped a rewrite is visible without reading `compiled.json`.
+            for finding in &artifacts.findings {
+                println!("  FINDING: {finding}");
+            }
             println!(
                 "edit {} by hand if you want to change it, then re-run `film-harness compile` and \
                  `film-harness validate`",

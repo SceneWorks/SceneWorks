@@ -53,11 +53,22 @@ edge at 1024 against 2048 (4.4x cheaper per step, no rubric loss on two shots), 
 recipe (`plan.v2.turbo.jsonc`, the film in 1 h 19 m instead of 14 h at −2 rubric points, with the
 texture and motion-smear cost the stills show); no defect on the render, record or assembly paths, but
 one open defect on the expected user path — the default brief yielded no valid plan in 2 or 5 repair
-rounds, so every plan run was hand-authored (being fixed on
-`story/sc-23406-epic-23401-film-harness-phase-2-planner`; that result is not part of the evaluation's
-evidence); the reviewer measured on a
+rounds, so every plan run was hand-authored (**since fixed**: the phase-3 pass planned the unmodified
+brief in one repair round — see below); the reviewer measured on a
 third labeled set (`config/film-harness/review-eval/evaluation-phase-2-cell-a-takes.jsonc`); and a
 **continue** recommendation with its reasoning and the follow-up candidates it does not authorize.
+
+**Evaluated again on 2026-09-22 (phase 3)** — see
+[film-harness-evaluation-phase-3.md](film-harness-evaluation-phase-3.md) (epic 24017, sc-24029): the
+prompt-anchoring mechanisms measured in 2 h 03 m of GPU — inserted-text verification passing on
+**all 18** compiled requests across three packs; the reference turbo film at **65/72 picture + 2/2
+sound** against phase 2's turbo 64/72 (read as *no regression*, not +1, because the prompts changed);
+a no-reference described-only film at **49/72** characterizing the text identity lock, which held
+wardrobe, props and setting but not a face, and whose **reach is exactly the roles the plan lists**
+(every shot omitting `workshop_location` from `continuityRoles` left the workshop); the shared-plate
+locator path compiled and verified but **never rendered**; phase 2's open planner defect confirmed
+**fixed** (the unmodified brief planned in one repair round); and five findings, none in the
+anchoring code.
 
 ## Documents
 
