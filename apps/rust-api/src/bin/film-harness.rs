@@ -263,15 +263,32 @@ async fn main_async(args: Vec<String>) -> ExitCode {
     if command == "validate" {
         return match film_harness::validate(Some(&transport), &parsed.options).await {
             Ok((plan, pack)) => {
+                // Roles AND images, because several roles may name one file (sc-24024) and it is
+                // the image count that `limits.maxReferenceAssets` bounds.
+                let images: std::collections::BTreeSet<&str> = pack
+                    .references
+                    .iter()
+                    .filter_map(sceneworks_core::film_plan::ReferenceEntry::file)
+                    .collect();
+                // And how many roles are DESCRIBED-ONLY (sc-24025): they cost no image and can be
+                // bound by no shot, so a pack whose roles mostly have no plates is something the
+                // operator should see here rather than discover when a binding is refused.
+                let described_only = pack
+                    .references
+                    .iter()
+                    .filter(|entry| entry.is_described_only())
+                    .count();
                 println!(
-                    "plan {:?} v{} ({} shots) and reference pack {:?} v{} ({} references) validate \
-                     against {} on {}",
+                    "plan {:?} v{} ({} shots) and reference pack {:?} v{} ({} references over {} \
+                     images, {} described-only) validate against {} on {}",
                     plan.id,
                     plan.version,
                     plan.shots.len(),
                     pack.id,
                     pack.version,
                     pack.references.len(),
+                    images.len(),
+                    described_only,
                     plan.model.id,
                     parsed.api_url
                 );
@@ -427,6 +444,12 @@ async fn plan_or_compile(command: &str, transport: &HttpTransport, parsed: &Pars
                     request.prompt_source,
                     request.prompt.chars().count()
                 );
+            }
+            // Non-fatal findings (sc-24029): the documents were written, and something in them is
+            // less than was asked for. Printed here rather than swallowed, so a compile that
+            // silently dropped a rewrite is visible without reading `compiled.json`.
+            for finding in &artifacts.findings {
+                println!("  FINDING: {finding}");
             }
             println!(
                 "edit {} by hand if you want to change it, then re-run `film-harness compile` and \

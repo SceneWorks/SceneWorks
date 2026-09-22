@@ -146,6 +146,16 @@ mod execution_planner;
     allow(dead_code)
 )]
 mod refine_model_cache;
+// Bounds MLX's free-buffer cache across a long LLM decode (sc-24029). Dead off both natives for the
+// same reason `refine_model_cache` is: nothing there decodes on a resident text model.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod mlx_decode_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
 // (sc-3723). All-targets: the table is pure data and the derivation runs off-macOS off an

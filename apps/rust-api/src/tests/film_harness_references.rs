@@ -160,7 +160,10 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
     let generated: Vec<_> = pack.references.iter().filter(|e| e.generated).collect();
     assert_eq!(generated.len(), 5);
     for entry in &generated {
-        let path = options.out_dir.join(&entry.file);
+        // A generated plate is always written to disk, so it always names its file (sc-24025).
+        let path = options
+            .out_dir
+            .join(entry.file().expect("a generated plate names its file"));
         let bytes = std::fs::read(&path).expect("plate written");
         assert!(
             bytes.starts_with(b"\x89PNG"),

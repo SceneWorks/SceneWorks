@@ -108,8 +108,19 @@ pub struct LlmRequest {
 
 #[derive(Debug, Clone)]
 pub struct PlannerReferenceImage {
-    pub role: String,
+    /// Every approved pack role this ONE image carries, in pack order, each with its `locator`
+    /// when it declares one (sc-24024). A photograph of two people is sent once and labelled for
+    /// both, rather than twice under two role names: the planner would otherwise see the same
+    /// picture twice, and the duplicate would count against the adapter's own per-request image
+    /// and byte caps.
+    pub roles: Vec<PlannerReferenceRole>,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannerReferenceRole {
+    pub role: String,
+    pub locator: Option<String>,
 }
 
 /// One completed LLM request: the text, and what it cost (sc-22715). `job_id` and
@@ -123,6 +134,10 @@ pub struct LlmReply {
     pub execution: Option<PlannerExecutionRecord>,
     pub elapsed_seconds: f64,
     pub peak_memory_bytes: Option<u64>,
+    /// How the decode ENDED, as the backend reported it (sc-24029): `"stop"`, `"length"`, … A
+    /// `"length"` reply is truncated mid-sentence, and the shot-rewrite caller must refuse it
+    /// rather than compile it — see [`compile_and_write`]. `None` when the backend reported none.
+    pub finish_reason: Option<String>,
 }
 
 pub type LlmFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmReply, HarnessError>> + Send + 'a>>;
@@ -377,6 +392,15 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                         let identity = result
                             .and_then(|result| result.get("executionIdentity"))
                             .and_then(Value::as_object);
+                        // sc-24029: the worker records how the decode ended on the SUCCESS result
+                        // too, because a rewrite that stopped on `length` is non-empty and so
+                        // completes normally while being truncated mid-sentence.
+                        let finish_reason = result
+                            .and_then(|result| result.get("generation"))
+                            .and_then(|generation| generation.get("finishReason"))
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(str::to_owned);
                         let execution = identity.map(|identity| PlannerExecutionRecord {
                             job_id: Some(job_id.clone()),
                             provider: identity
@@ -404,7 +428,7 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             temperature: None,
                             reference_pixels_sent: None,
                             duration_seconds: Some(started.elapsed().as_secs_f64()),
-                            finish_reason: None,
+                            finish_reason: finish_reason.clone(),
                             failure_code: None,
                             thinking: thinking.clone(),
                             usage: None,
@@ -416,6 +440,7 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             execution,
                             elapsed_seconds: started.elapsed().as_secs_f64(),
                             peak_memory_bytes,
+                            finish_reason,
                         });
                     }
                     "interrupted" if adopted => {
@@ -620,6 +645,10 @@ pub struct PlannerArtifacts {
     pub compiled_path: PathBuf,
     /// Repair rounds actually taken (0 when the first draft validated).
     pub repair_rounds: u32,
+    /// Non-fatal findings raised while compiling (sc-24029). Today: a shot whose refiner rewrite
+    /// ran out of output budget and was discarded in favour of its authored prompt. The artifacts
+    /// ARE valid — these say what is less than the caller asked for, not that nothing was produced.
+    pub findings: Vec<PlanDiagnostic>,
 }
 
 /// Resolve the model entry and the capability envelope the planner will be held to, refusing the
@@ -804,6 +833,7 @@ async fn prepare(
         resolve_envelope(transport, &brief, &pack, options.require_installed, &facts).await?;
     let findings = brief_model_findings(
         &brief,
+        &pack,
         catalog
             .base_entry()
             .expect("resolve_envelope refuses without an entry"),
@@ -838,6 +868,7 @@ async fn prepare(
 /// of that validator, so this is the same rules on the same code, not a second copy of them.
 fn brief_model_findings(
     brief: &ProductionBrief,
+    pack: &ReferencePack,
     entry: &JsonObject<String, Value>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
@@ -855,8 +886,11 @@ fn brief_model_findings(
     };
     // The probe has NO shots, so no shot can resolve to a partition: a single-entry view is the
     // whole truth for the plan-level rules this runs.
+    // The pack is INERT here for the same reason the empty `shots` list is: the only rule that
+    // reads it is the per-shot reference count, and this probe has no shots (sc-24024).
     film_plan::validate_plan_against_model(
         &probe,
+        pack,
         &film_plan::ModelEntries::single(&brief.model.id, entry),
         lane,
     )
@@ -893,14 +927,36 @@ pub async fn generate_with_refiner(
     let rounds = options.rounds();
     let mut request = build_planner_request(&brief, &pack, &caps);
     let reference_images = if options.send_reference_pixels {
-        pack.references
-            .iter()
-            .filter(|entry| entry.approved)
-            .map(|entry| PlannerReferenceImage {
-                role: entry.role.clone(),
-                path: pack_dir(&options.reference_pack_path).join(&entry.file),
-            })
-            .collect()
+        {
+            // Grouped by the pack's `file` string, exactly as the compiler and the import group it
+            // (sc-24024), so one image is sent once however many roles name it.
+            let dir = pack_dir(&options.reference_pack_path);
+            let mut images: Vec<PlannerReferenceImage> = Vec::new();
+            let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
+            // Pixels come from FILES. A described-only role has none (sc-24025): it reaches the
+            // planner through the text envelope's role listing and nowhere else, and grouping it
+            // here would join every fileless role into one bogus image at the pack directory.
+            for entry in pack.references.iter().filter(|entry| entry.approved) {
+                let Some(file) = entry.file() else {
+                    continue;
+                };
+                let role = PlannerReferenceRole {
+                    role: entry.role.clone(),
+                    locator: entry.locator().map(str::to_owned),
+                };
+                match by_file.get(file).copied() {
+                    Some(index) => images[index].roles.push(role),
+                    None => {
+                        by_file.insert(file, images.len());
+                        images.push(PlannerReferenceImage {
+                            roles: vec![role],
+                            path: dir.join(file),
+                        });
+                    }
+                }
+            }
+            images
+        }
     } else {
         Vec::new()
     };
@@ -1009,7 +1065,7 @@ pub async fn generate_with_refiner(
             return Err(cost.preserve_on_error(error));
         }
     }
-    let (compiled, compiled_path) = compile_and_write(
+    let (compiled, compiled_path, findings) = compile_and_write(
         refiner,
         options,
         &plan,
@@ -1027,6 +1083,7 @@ pub async fn generate_with_refiner(
         compiled,
         compiled_path,
         repair_rounds: round,
+        findings,
     })
 }
 
@@ -1129,7 +1186,7 @@ pub(crate) async fn compile_existing_with_executions(
         }
     }
     let plan_bytes = std::fs::read(plan_path)?;
-    let (compiled, compiled_path) = compile_and_write(
+    let (compiled, compiled_path, findings) = compile_and_write(
         llm,
         options,
         &plan,
@@ -1154,6 +1211,7 @@ pub(crate) async fn compile_existing_with_executions(
         compiled,
         compiled_path,
         repair_rounds,
+        findings,
     })
 }
 
@@ -1252,10 +1310,11 @@ async fn compile_and_write(
     plan_bytes: &[u8],
     mut cost: PlannerCost,
     repair_rounds: u32,
-) -> Result<(CompiledPlan, PathBuf), HarnessError> {
+) -> Result<(CompiledPlan, PathBuf, Vec<PlanDiagnostic>), HarnessError> {
     let result = async {
         std::fs::create_dir_all(&options.out_dir)?;
         let mut refined = BTreeMap::new();
+        let mut findings = Vec::new();
         if options.refine_prompts {
             // Read once, not once per shot: the guide is the same for every rewrite in this compile.
             // The guide is a property of the FAMILY the plan declares, so it comes off the base entry
@@ -1278,6 +1337,30 @@ async fn compile_and_write(
                     })
                     .await?;
                 cost.record(&reply);
+                // sc-24029: a rewrite that ran out of output budget is truncated mid-sentence —
+                // non-empty, so the job completed, but not a finished thought. Compiling it would
+                // bake half a sentence into the dispatched request (a film shot shipped that way,
+                // cut at 3026 chars). Treat it as a FAILED rewrite instead: this shot keeps the
+                // prompt its author wrote, exactly as `--no-refine` would leave it, and the run
+                // says so. Not fatal — the rest of the film still refines, and the authored prompt
+                // is a legitimate request.
+                if reply.finish_reason.as_deref() == Some("length") {
+                    findings.push(PlanDiagnostic::shot(
+                        &shot.id,
+                        "prompt",
+                        format!(
+                            "the refiner exhausted its output budget on this shot ({}), so the \
+                             rewrite was truncated mid-sentence and was discarded; the shot keeps \
+                             its authored prompt",
+                            reply
+                                .job_id
+                                .as_deref()
+                                .map(|id| format!("job {id}"))
+                                .unwrap_or_else(|| "finishReason \"length\"".to_owned()),
+                        ),
+                    ));
+                    continue;
+                }
                 refined.insert(shot.id.clone(), reply.text);
             }
         }
@@ -1309,25 +1392,56 @@ async fn compile_and_write(
                 .map_err(|error| HarnessError::Io(error.to_string()))?
                 + "\n",
         )?;
-        Ok((compiled, compiled_path))
+        Ok((compiled, compiled_path, findings))
     }
     .await;
     result.map_err(|error| cost.preserve_on_error(error))
 }
 
-/// The prompt guide to forward on every rewrite of this compile.
+/// What the FILM path tells the refiner on top of the model's own guide (sc-24029).
+///
+/// The guide the harness forwards is the product's own `minimax-h3.md`, and that guide teaches
+/// `<Picture N>` as the way to give a reference a job — "the woman from `<Picture 1>`". It is
+/// right for a person writing one prompt against references they chose, and wrong for this path:
+/// here the numbering is assigned by [`sceneworks_core::film_compile::shot_reference_pictures`]
+/// from the shot's own `referenceRoles`, and the binding sentences are written by the compiler
+/// AFTER the rewrite. A label the refiner writes therefore names a picture by a number nothing
+/// assigned, and the worker's marker filter deliberately keeps `<Picture N>` rather than stripping
+/// it.
+///
+/// Said HERE, in the film path's own text, rather than in the worker's embedded rewrite asset:
+/// that asset belongs to every caller of `prompt_refine` (the "Refine" button included), where the
+/// guide's advice is correct, and its file is hash-pinned into the StarVector production closure.
+/// This block is appended after the guide so it is the last word on the subject.
+///
+/// It is guidance, not a guarantee — a language model may write a label anyway. The GUARANTEE is
+/// `film_compile::compile_shot`, which refuses a refined prompt containing one.
+const FILM_REFINE_LABEL_RULE: &str = "\
+# Film harness rules (these override the guide above)
+
+- NEVER write an engine media label — `<Picture 1>`, `<Audio 1>`, `<Video 1>`, or any `<...>` of \
+that shape — into the rewritten prompt. In this pipeline the labels are assigned and written by \
+the compiler AFTER your rewrite, numbered from the shot's own reference list, so a label you write \
+names a picture the request does not supply and the rewrite is rejected.
+- Describe the subject in plain words instead (\"the courier\", \"the workshop\"). The compiler \
+adds the sentence that ties each subject to its picture.";
+
+/// The prompt guide to forward on every rewrite of this compile, plus the film path's own rules.
 ///
 /// `--prompt-guide FILE` wins and is an ERROR when unreadable — a guide the caller named and did
 /// not get is not the same run as one they never asked for. Otherwise the catalog entry's own
 /// `ui.promptGuide.path` is resolved against this checkout's web assets, so a local run gets the
 /// guide with no flag; the rust-api serves that path only in an `embed-web` build, so it cannot be
 /// fetched from `--api` in general and is read from disk or not at all.
+///
+/// [`FILM_REFINE_LABEL_RULE`] is appended whichever guide was resolved, and is forwarded ALONE
+/// when none was: the hazard it addresses is a property of this path, not of the guide.
 fn resolve_prompt_guide(
     options: &PlannerOptions,
     entry: &JsonObject<String, Value>,
 ) -> Result<Option<String>, HarnessError> {
-    if let Some(path) = options.prompt_guide_path.as_deref() {
-        let text = std::fs::read_to_string(path).map_err(|error| {
+    let guide = if let Some(path) = options.prompt_guide_path.as_deref() {
+        Some(std::fs::read_to_string(path).map_err(|error| {
             HarnessError::Validation(vec![PlanDiagnostic::plan(
                 "planner.promptGuide",
                 format!(
@@ -1335,10 +1449,16 @@ fn resolve_prompt_guide(
                     path.display()
                 ),
             )])
-        })?;
-        return Ok(Some(text));
-    }
-    Ok(declared_prompt_guide_path(entry).and_then(|path| std::fs::read_to_string(path).ok()))
+        })?)
+    } else {
+        declared_prompt_guide_path(entry).and_then(|path| std::fs::read_to_string(path).ok())
+    };
+    Ok(Some(match guide {
+        Some(guide) if !guide.trim().is_empty() => {
+            format!("{}\n\n{FILM_REFINE_LABEL_RULE}", guide.trim_end())
+        }
+        _ => FILM_REFINE_LABEL_RULE.to_owned(),
+    }))
 }
 
 /// Where this checkout keeps the web asset a catalog entry's `ui.promptGuide.path` names, if the
@@ -1801,7 +1921,7 @@ mod tests {
             "shots": [{
                 "id": "SH010", "beatId": "arrival",
                 "beat": "The courier arrives at the door.", "framing": "wide",
-                "prompt": "p", "targetDurationSeconds": 5.0, "startState": "a", "endState": "b",
+                "prompt": "p", "targetDurationSeconds": 5.0, "startState": "a", "endState": "b", "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" }
             }]
         }))
@@ -1809,7 +1929,7 @@ mod tests {
         // No beat here declares `requiredRoles`, so the pack only has to exist.
         let pack: sceneworks_core::film_plan::ReferencePack =
             serde_json::from_value(serde_json::json!({
-                "schemaVersion": 1,
+                "schemaVersion": sceneworks_core::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
                 "id": "courier-refs",
                 "version": 1,
                 "references": [

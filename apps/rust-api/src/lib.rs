@@ -574,6 +574,16 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
         JsonRejection::JsonSyntaxError(error) => error.body_text(),
         other => other.body_text(),
     };
+    json_decode_error_response(detail)
+}
+
+/// The 422 body a failed JSON decode answers with, as ONE definition (sc-24029).
+///
+/// A handler that has to look at its body BEFORE the typed decode extracts a `Value` and decodes
+/// the typed shape itself, so it also has to report a decode failure itself. Without this it would
+/// invent a second shape for the same failure, and the same malformed body would be reported two
+/// ways depending on which route received it.
+pub(crate) fn json_decode_error_response(detail: String) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(json!({

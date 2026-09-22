@@ -27,8 +27,11 @@ default, candle-less Desktop installer. See "Deletion is deferred" below.
   moves here caller-side — `build_refine_system_prompt` (rewrite rules + image/video medium switch +
   guide → the request `system`) and `clean_refine_output` (reasoning-block / code-fence / quote
   cleanup over the reply), ports of the Python `build_system_prompt` / `clean_output`. Sampling
-  (temp 0.7 / top_p 0.9 / max_new_tokens 512), the empty-output → error behavior, and the
-  `{originalPrompt, refinedPrompt}` result shape match the Python path.
+  (temp 0.7 / top_p 0.9), the empty-output → error behavior, and the
+  `{originalPrompt, refinedPrompt}` result shape match the Python path. The output budget no longer
+  does: the Python path's `max_new_tokens` 512 was raised to 1536 in sc-24029, because this task also
+  carries the per-shot film refine, whose output contract is `MAX_PROMPT_CHARS` = 4000 chars — see
+  `DEFAULT_REFINE_MAX_NEW_TOKENS` in `prompt_refine_jobs.rs`.
 - **Routing**: unchanged in `jobs_store` — `prompt_refine` is routed purely by capability match
   (`required_capability` → `"prompt_refine"`); the candle confinement gate only filters
   image/video/caption shapes, so it is inert for `prompt_refine`.

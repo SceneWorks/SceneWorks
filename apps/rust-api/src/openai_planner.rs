@@ -248,6 +248,8 @@ impl PlannerLlm for OpenAiPlannerLlm {
                     text,
                     thinking: execution.thinking.clone(),
                     elapsed_seconds: execution.duration_seconds.unwrap_or_default(),
+                    // sc-24029: same refusal applies to a hosted planner's truncated reply.
+                    finish_reason: execution.finish_reason.clone(),
                     execution: Some(execution),
                     ..LlmReply::default()
                 }),
@@ -343,9 +345,24 @@ fn multimodal_content(
             "webp" => "image/webp",
             _ => "image/png",
         };
+        // Every role this ONE image carries (sc-24024): a photograph holding two people is one
+        // image labelled for both subjects, each with the locator that picks it out, rather than
+        // the same bytes sent twice under two role names.
+        let roles = image
+            .roles
+            .iter()
+            .map(|role| match role.locator.as_deref() {
+                Some(locator) => format!("{} ({locator})", role.role),
+                None => role.role.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         content.push(json!({
             "type": "text",
-            "text": format!("Approved reference role: {}", image.role),
+            "text": format!(
+                "Approved reference role{}: {roles}",
+                if image.roles.len() == 1 { "" } else { "s" }
+            ),
         }));
         content.push(json!({
             "type": "image_url",
@@ -433,6 +450,7 @@ fn status_detail(status: reqwest::StatusCode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_planner::PlannerReferenceRole;
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -749,7 +767,20 @@ mod tests {
         for payload in &payloads {
             assert_ne!(payload["task"], "film_plan");
             assert_eq!(payload["modelId"], "minimax_h3");
-            assert_eq!(payload["guide"], "Exact target model guide");
+            let guide = payload["guide"]
+                .as_str()
+                .expect("the rewrite carries a guide");
+            assert!(
+                guide.starts_with("Exact target model guide"),
+                "the TARGET model's guide rides with the rewrite, verbatim and first: {guide:?}"
+            );
+            // The film path's own rules follow it on the external planner's rewrites too
+            // (sc-24029): the refiner here is the same native, model-keyed one, and the label it
+            // must not write is numbered by the compiler whichever planner drafted the plan.
+            assert!(
+                guide.contains("NEVER write an engine media label"),
+                "the film path tells this refiner not to write a label either: {guide:?}"
+            );
             assert_eq!(payload["workflow"], "video");
         }
         let cost = artifacts.compiled.planner.as_ref().unwrap();
@@ -762,7 +793,30 @@ mod tests {
             assert_eq!(execution.request_timeout_seconds, Some(30));
         }
         for request in &artifacts.compiled.requests {
-            assert!(request.prompt.starts_with("Native shot rewrite:"));
+            // CONTAINED, not leading: since sc-24025 the compiler's identity text leads any shot
+            // that names a continuity role it does not bind to an image, and these shots bind
+            // nothing. What this test is about is that the NATIVE refiner produced the text, so it
+            // asserts the rewrite survived and that only recorded inserted text precedes it.
+            let rewrite_at = request
+                .prompt
+                .find("Native shot rewrite:")
+                .unwrap_or_else(|| panic!("{}: {}", request.shot_id, request.prompt));
+            let leading: String = request
+                .inserted_text
+                .iter()
+                .filter(|piece| {
+                    piece.kind.placement()
+                        == sceneworks_core::film_compile::InsertedTextPlacement::Leading
+                })
+                .map(|piece| piece.text.clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                request.prompt[..rewrite_at].trim(),
+                leading.trim(),
+                "{}: only the compiler's own leading text precedes the rewrite",
+                request.shot_id
+            );
         }
         let recovered = crate::film_planner::compile_existing_with_executions(
             &harness.transport,
@@ -998,7 +1052,10 @@ mod tests {
         std::fs::write(image.path(), b"pixels").unwrap();
         let image_request = || {
             request(vec![PlannerReferenceImage {
-                role: "hero".to_owned(),
+                roles: vec![PlannerReferenceRole {
+                    role: "hero".to_owned(),
+                    locator: None,
+                }],
                 path: image.path().to_path_buf(),
             }])
         };
@@ -1038,6 +1095,76 @@ mod tests {
             Arc::new(|| false),
         )
         .is_err());
+    }
+
+    /// One photograph of two people is sent ONCE, labelled for both subjects with the locator that
+    /// picks each out (sc-24024). The label is the only thing telling the external planner that
+    /// the two roles are two subjects in one image rather than two pictures, so it is asserted
+    /// verbatim — including the plural, which is what says a single-role image is labelled
+    /// differently from a shared one.
+    #[tokio::test]
+    async fn a_shared_reference_image_is_sent_once_and_labelled_for_every_role_it_carries() {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(image.path(), b"pixels").unwrap();
+        let lone = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(lone.path(), b"pixels").unwrap();
+
+        let (base_url, seen) = fixture(
+            StatusCode::OK,
+            json!({"choices": [{"message": {"content": "{}"}}]}),
+            Duration::ZERO,
+        )
+        .await;
+        let llm = OpenAiPlannerLlm::new(
+            reqwest::Client::new(),
+            connection(base_url),
+            None,
+            options("disabled", true),
+            Arc::new(|| false),
+        )
+        .unwrap();
+        llm.complete(request(vec![
+            PlannerReferenceImage {
+                roles: vec![
+                    PlannerReferenceRole {
+                        role: "courier".to_owned(),
+                        locator: Some("the woman on the left".to_owned()),
+                    },
+                    PlannerReferenceRole {
+                        role: "recipient".to_owned(),
+                        locator: Some("the man on the right".to_owned()),
+                    },
+                ],
+                path: image.path().to_path_buf(),
+            },
+            PlannerReferenceImage {
+                roles: vec![PlannerReferenceRole {
+                    role: "red_parcel".to_owned(),
+                    locator: None,
+                }],
+                path: lone.path().to_path_buf(),
+            },
+        ]))
+        .await
+        .unwrap();
+
+        let body = seen.lock().unwrap()[0].1.to_string();
+        assert!(
+            body.contains(
+                "Approved reference roles: courier (the woman on the left), recipient (the man \
+                 on the right)"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("Approved reference role: red_parcel"),
+            "a lone role is labelled in the singular and carries no locator: {body}"
+        );
+        assert_eq!(
+            body.matches("data:image").count(),
+            2,
+            "two files, two images — the shared photograph is sent once: {body}"
+        );
     }
 
     #[tokio::test]
@@ -1122,7 +1249,10 @@ mod tests {
             }
             let error = llm
                 .complete(request(vec![PlannerReferenceImage {
-                    role: "hero".to_owned(),
+                    roles: vec![PlannerReferenceRole {
+                        role: "hero".to_owned(),
+                        locator: None,
+                    }],
                     path: image,
                 }]))
                 .await
