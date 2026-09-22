@@ -38,13 +38,47 @@ use crate::video_request::{
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
 use crate::MAX_PROMPT_CHARS;
 
-/// Schema version of [`ProductionPlan`] documents this module reads and writes. Version 2 (sc-22711)
-/// adds `shots[].dependsOn`; a version 1 plan reads unchanged and simply declares no edges.
-pub const PLAN_SCHEMA_VERSION: u32 = 2;
+/// Schema version of [`ProductionPlan`] documents this module reads and writes.
+///
+/// **2** (sc-22711) added `shots[].dependsOn`.
+/// **3** (sc-24026) replaces the optional `shots[].sound` prose with a REQUIRED [`Shot::audio`].
+/// The rename is the point rather than a tidy-up: `sound` was traceability-only prose that never
+/// left the documents, while `audio` is dispatched — MiniMax-H3 generates its soundtrack from the
+/// same prompt as the picture, so a shot that says nothing about sound gets whatever the model
+/// invents. Requiring it is what makes "this shot is silent" a statement the plan had to make.
+///
+/// Versions 1 and 2 are REFUSED, not migrated: the harness is unreleased, every checked-in document
+/// moved with this bump, and a v2 plan read under a default would dispatch an empty audio sentence
+/// on every shot — exactly the silence this version exists to remove.
+pub const PLAN_SCHEMA_VERSION: u32 = 3;
 /// Plan schema versions this build accepts.
-pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[1, 2];
+pub const SUPPORTED_PLAN_SCHEMA_VERSIONS: &[u32] = &[PLAN_SCHEMA_VERSION];
+/// The label `film_compile::audio_text` writes in front of a shot's [`Shot::audio`] when it
+/// composes the dispatched prompt (sc-24026).
+///
+/// Declared here rather than in the compiler because it is also what `validate_shot_structure`
+/// refuses an authored value for starting with: the compiler owns the prefix, so a plan that
+/// carries it too would dispatch it twice. One constant, so the check and the text it guards can
+/// never disagree about the spelling.
+pub const AUDIO_PROMPT_PREFIX: &str = "Audio:";
 /// Schema version of [`ReferencePack`] documents this module reads and writes.
-pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 adds two things, and both are ADDITIVE — a version 1 document needs no edit for
+/// either unless two of its roles share one file:
+///
+///   * (sc-24024) `references[].locator` — the phrase that picks one subject out of an image
+///     several roles share ("the woman on the left").
+///   * (sc-24025) `references[].file` itself becomes OPTIONAL. An entry with no file is a
+///     DESCRIBED-ONLY role: a subject the pack describes but has no picture of, carried into
+///     every shot that names it by the compiler's identity lock rather than by an image.
+///
+/// This is the same wording [`validate_reference_pack`] refuses a wrong version with, so the
+/// constant and the message an author actually reads cannot drift.
+///
+/// Only the current version is read. The harness is unreleased, so a version 1 document is refused
+/// by version rather than migrated on read: the alternative is a build that silently accepts a pack
+/// whose author could not have known about the rule that now governs shared files.
+pub const REFERENCE_PACK_SCHEMA_VERSION: u32 = 2;
 /// Schema version of [`RunRecord`] documents this module writes. Version 2 (sc-22711) adds the
 /// durable resume state: `state`, `stop`, per-attempt idempotency keys and rejections, per-shot
 /// take selection and review flags, and the human decision log.
@@ -424,8 +458,17 @@ pub struct Shot {
     pub end_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sound: Option<String>,
+    /// What this shot SOUNDS like, as one sentence the compiler appends to the dispatched prompt
+    /// (sc-24026). Diegetic sound, ambience, music or "no music" — or an explicit statement of
+    /// silence ("No audio. Silence.").
+    ///
+    /// REQUIRED on every shot, and never pattern-matched: MiniMax-H3 generates its soundtrack from
+    /// the same prompt as the picture, so whatever the prompt does not describe the model invents.
+    /// A blank value is refused rather than defaulted, because "the author had nothing to say about
+    /// sound" and "this shot is silent" are different films and only the author knows which one this
+    /// is. It replaces the optional `sound` prose of schema version 2, which never left the
+    /// documents.
+    pub audio: String,
     /// Override the run-level generated-audio policy for this shot (sc-22712).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_audio: Option<GeneratedAudio>,
@@ -436,8 +479,19 @@ pub struct Shot {
     pub conditioning: ShotConditioning,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
-    /// Roles the shot depicts (traceability only; they are not sent to the model). Every entry
-    /// must exist in the pack.
+    /// Roles the shot depicts. Every entry must exist in the pack.
+    ///
+    /// These ARE sent to the model, as text (sc-24025). For every role listed here that this shot
+    /// does NOT bind to an image — a described-only role, or an image-backed one on a shot that
+    /// resolves to the base checkpoint or simply binds nothing — the compiler inserts the pack's
+    /// `description` of it, word for word, into the dispatched prompt. That is the identity lock:
+    /// reference images are optional in this harness, and a subject nothing conditions on drifts
+    /// as soon as two shots word it differently, so the compiler words it once and repeats itself.
+    /// A role this shot DOES bind already carries its description in its binding sentence and is
+    /// not described twice.
+    ///
+    /// Listing a role here is therefore a claim about the film, not a note in the margin: it says
+    /// this shot shows that subject, and the prompt will say so.
     #[serde(default)]
     pub continuity_roles: Vec<String>,
     /// Shots this one depends on (sc-22711). Declaring the edge is what lets the harness flag this
@@ -576,13 +630,79 @@ pub struct ReferenceEntry {
     pub role: String,
     pub kind: String,
     /// Image path relative to the pack document's directory.
-    pub file: String,
+    ///
+    /// SEVERAL roles may name the SAME file (sc-24024) — one photograph holding two people is one
+    /// image with two subjects in it. The file is then supplied to the engine ONCE, under one
+    /// `<Picture N>` that every role sharing it is bound to, and imported as ONE project asset.
+    /// "The same file" means this string, compared literally: bindings in this repo are keyed on
+    /// the configured path, and resolving through the filesystem would make two packs that read
+    /// identically behave differently depending on symlinks and case folding.
+    ///
+    /// OPTIONAL (sc-24025). A role with no file is DESCRIBED-ONLY: it exists so the compiler can
+    /// say the same words about it in every shot that names it in `continuityRoles`, which is the
+    /// only thing holding a subject steady in a film whose shots have no image to condition on.
+    /// Reference images are optional in this harness, and a described-only role is how a pack
+    /// describes a courier it has no photograph of.
+    ///
+    /// A described-only role therefore takes no part in anything an image does: it is never
+    /// grouped with another role by file, never imported as a project asset, never counted against
+    /// the reference limit, never sent as planner pixels, and may carry no [`ReferenceEntry::locator`]
+    /// (a locator picks a subject out of an image, and there is no image to pick it out of). It is
+    /// never BINDABLE either — [`validate_plan_against_pack`] refuses one named in any
+    /// `conditioning.*` slot — because conditioning supplies a picture and this role has none.
+    ///
+    /// An entry with NEITHER a file nor a [`ReferenceEntry::description`] is refused by name: it
+    /// says nothing and shows nothing, so no shot could depict it and nothing could be written
+    /// about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The phrase that picks THIS role's subject out of [`ReferenceEntry::file`] — "the woman on
+    /// the left", "the parcel on the bench" (sc-24024).
+    ///
+    /// Required on every role that shares its file with another, because a picture holding two
+    /// people cannot bind two roles without saying which is which: the compiler writes "The courier
+    /// is the woman on the left in `<Picture 1>`." Optional on a role with an image to itself,
+    /// where "the person shown in `<Picture 1>`" is already unambiguous — but honoured when given,
+    /// since a lone reference may still be a crowded photograph.
+    ///
+    /// **A noun phrase, with its article, that completes "The courier is …".** The compiler drops
+    /// the phrase in verbatim and adds nothing of its own, so the leading "the"/"a" is the
+    /// author's to supply: "the woman on the left" reads "The courier is the woman on the left in
+    /// `<Picture 1>`.", while "woman on the left" reads "The courier is woman on the left in
+    /// `<Picture 1>`." Nothing can check this — a locator is free prose — so it is stated here,
+    /// in the refusal that asks for one, and in the pack documentation.
+    ///
+    /// Repeated into the dispatched prompt, so it is held to the same rules as
+    /// [`ReferenceEntry::description`]: no `<` or `>`, no control characters, whitespace
+    /// normalized by `film_compile::normalized_description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
     /// Project-library asset this reference was copied from, when it entered through the Film
     /// workspace. The copied file remains the runnable input; this id is provenance and lets the
     /// authoring UI identify the original without making a pinned run depend on mutable library
     /// state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_asset_id: Option<String>,
+    /// What this role IS, in the author's own words — and, because the compiler repeats it into
+    /// prompts, the words that hold it steady from shot to shot.
+    ///
+    /// **Write it as a COMPLETE SENTENCE about the subject, naming the subject itself.** The
+    /// compiler repeats it verbatim (whitespace normalized by `film_compile::normalized_description`)
+    /// as a sentence of its own and supplies nothing but a closing `.` when the text lacks terminal
+    /// punctuation. It never prefixes the role name, so the description has to carry its own
+    /// subject or the prompt reads as a fragment: "The courier: blue jacket, carries the parcel."
+    /// and "Small bright red cardboard parcel." both work; "blue jacket" alone does not.
+    ///
+    /// ONE rule for both places it is repeated, so the two never drift (sc-24025):
+    ///   * appended to a reference's binding sentence — "The courier is the person shown in
+    ///     `<Picture 1>`. The courier: blue jacket, carries the parcel." (sc-24023);
+    ///   * inserted ALONE as the text identity lock, on every shot that lists this role in
+    ///     `continuityRoles` without binding its image, which is what keeps a described subject
+    ///     worded identically across a film whose shots carry no reference (sc-24025).
+    ///
+    /// Both go through `film_compile::description_sentence`. REQUIRED on a described-only role
+    /// (one with no [`ReferenceEntry::file`]): it is everything that role is. Optional on an
+    /// image-backed one, which still shows the picture when it says nothing.
     #[serde(default)]
     pub description: String,
     /// Only approved references may be used as conditioning.
@@ -601,6 +721,54 @@ pub struct ReferenceEntry {
     /// and asset it came out of. Present only on a `generated` entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GeneratedReference>,
+}
+
+impl ReferenceEntry {
+    /// This entry's image path, or `None` when the role is DESCRIBED-ONLY (sc-24025).
+    ///
+    /// THE one reading of the field, so everything that treats a role as having a picture — the
+    /// grouping that decides which roles share a `<Picture N>`, the import, the planner's pixel
+    /// upload, the file-existence check — agrees on what "has an image" means. A declared but
+    /// blank path is `None` here AND a finding from [`reference_image_file_findings`], so a pack
+    /// that writes `"file": "  "` is refused rather than silently read as described-only.
+    pub fn file(&self) -> Option<&str> {
+        self.file
+            .as_deref()
+            .map(str::trim)
+            .filter(|file| !file.is_empty())
+    }
+
+    /// Whether this role exists only as words: no image, and therefore nothing to condition on,
+    /// import, number or count against a reference limit (sc-24025).
+    pub fn is_described_only(&self) -> bool {
+        self.file().is_none()
+    }
+
+    /// Whether this entry may actually be BOUND as a `reference_to_video` subject: approved, with
+    /// an image, of a [`BINDABLE_REFERENCE_KINDS`] kind (sc-24029).
+    ///
+    /// THE one spelling of the three-part question, because three places ask it and a pack that
+    /// answered differently in any of them would be a pack the workspace offers a partition for
+    /// and the validator then refuses a binding in: the workspace's reference-partition demand
+    /// (`films::reference_partition_requested`), the planner envelope's narrowing
+    /// (`film_planner::PlannerCapabilities::narrowed_to_pack`) and the brief's role-coverage rule
+    /// (`film_planner::role_coverage_findings`). Behaviour is unchanged at all three — each was
+    /// already this conjunction, written out.
+    pub fn is_bindable_image(&self) -> bool {
+        self.approved
+            && !self.is_described_only()
+            && BINDABLE_REFERENCE_KINDS.contains(&self.kind.as_str())
+    }
+
+    /// This entry's locator, trimmed, or `None` when it declares none or declares only whitespace.
+    /// The one reading of the field, so the validator that REQUIRES one on a shared file and the
+    /// compiler that writes one into a sentence agree on what "has a locator" means.
+    pub fn locator(&self) -> Option<&str> {
+        self.locator
+            .as_deref()
+            .map(str::trim)
+            .filter(|locator| !locator.is_empty())
+    }
 }
 
 /// Provenance of one generated reference plate (sc-23403).
@@ -689,14 +857,77 @@ pub fn read_plan_file(path: &Path) -> Result<ProductionPlan, PlanDiagnostic> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         PlanDiagnostic::plan("plan", format!("cannot read {}: {error}", path.display()))
     })?;
-    parse_plan(&text)
-        .map_err(|error| PlanDiagnostic::plan("plan", format!("{}: {error}", path.display())))
+    parse_plan_document(&text).map_err(|diagnostic| {
+        PlanDiagnostic::plan(
+            diagnostic.field,
+            format!("{}: {}", path.display(), diagnostic.message),
+        )
+    })
 }
 
-/// Parse a plan from JSON/JSONC text.
-pub fn parse_plan(text: &str) -> Result<ProductionPlan, String> {
+/// The message [`validate_plan_structure`] and the document pre-scan both report for a plan this
+/// build does not read — written once so the refusal names the same remedy wherever it surfaces.
+fn unsupported_plan_schema_message(version: u32) -> String {
+    format!(
+        "unsupported plan schema version {version} (this build reads \
+         {SUPPORTED_PLAN_SCHEMA_VERSIONS:?}); a version 1 or 2 plan predates the required \
+         shots[].audio sentence — set \"schemaVersion\": {PLAN_SCHEMA_VERSION} and give every shot \
+         an \"audio\" value saying what it sounds like (or that it is silent)"
+    )
+}
+
+/// Parse a plan document, reporting a version this build cannot read BEFORE the typed decode
+/// (sc-24026).
+///
+/// The pre-scan is what makes the version refusal reachable at all. Schema version 3 renamed
+/// `shots[].sound` to a required `shots[].audio`, and [`Shot`] is `deny_unknown_fields`, so a
+/// version 1 or 2 document fails inside serde with `unknown field \`sound\`` at a byte offset —
+/// [`validate_plan_structure`]'s remedy sentence is never reached, and the operator is handed a
+/// parser position instead of the one line that fixes it. Every plan DOCUMENT comes through here:
+/// the CLI's `--plan`, and the `plan.json` each run pins and reads back on resume, replace-take and
+/// review.
+///
+/// Refusal, never migration: a document has an author who can edit it, and a version 2 plan carried
+/// forward under an empty default would dispatch a silent prompt on every shot while reporting
+/// clean. Project-store DRAFTS are the other case and are carried forward on read instead, because
+/// a draft's `schemaVersion` is state with no author and no way to edit it — see
+/// `ProjectStore::carry_film_draft_forward`.
+pub fn parse_plan_document(text: &str) -> Result<ProductionPlan, PlanDiagnostic> {
     let stripped = strip_jsonc_comments(text);
-    serde_json::from_str(&stripped).map_err(|error| error.to_string())
+    let scouted: Value = serde_json::from_str(&stripped)
+        .map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))?;
+    if let Some(finding) = plan_document_version_finding(&scouted) {
+        return Err(finding);
+    }
+    // Decoded from the text rather than from `scouted` so a genuine structural error still carries
+    // serde's line and column.
+    serde_json::from_str(&stripped).map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+}
+
+/// The version pre-scan of [`parse_plan_document`], over an already-parsed JSON value.
+///
+/// Exposed because a plan DOCUMENT reaches this build by two routes and both must refuse the same
+/// way (sc-24029). The CLI hands over text and gets the scan for free; the workspace receives a
+/// plan inside a `FilmDraft` PUT body, which axum has already decoded as JSON, and without this it
+/// would run the typed decode first and answer `unknown field \`sound\`` at a byte offset instead
+/// of the one line that fixes the document.
+///
+/// A DOCUMENT only. A stored draft's `productionPlan` is state with no author, and is carried
+/// forward on read instead — see `ProjectStore::carry_film_draft_forward`.
+///
+/// A value with no `schemaVersion`, or one that is not a number, is not judged here: it is the
+/// typed decode's to refuse, which it does with the field name.
+pub fn plan_document_version_finding(document: &Value) -> Option<PlanDiagnostic> {
+    let version = document.get("schemaVersion").and_then(Value::as_u64)?;
+    let version = u32::try_from(version).unwrap_or(u32::MAX);
+    (!SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&version))
+        .then(|| PlanDiagnostic::plan("schemaVersion", unsupported_plan_schema_message(version)))
+}
+
+/// Parse a plan from JSON/JSONC text. [`parse_plan_document`] with the diagnostic flattened, for
+/// the callers that only print one string.
+pub fn parse_plan(text: &str) -> Result<ProductionPlan, String> {
+    parse_plan_document(text).map_err(|diagnostic| diagnostic.message)
 }
 
 /// Read and parse a reference pack document (JSONC tolerated).
@@ -743,10 +974,7 @@ pub fn validate_plan_structure(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
     if !SUPPORTED_PLAN_SCHEMA_VERSIONS.contains(&plan.schema_version) {
         findings.push(PlanDiagnostic::plan(
             "schemaVersion",
-            format!(
-                "unsupported plan schema version {} (this build reads {SUPPORTED_PLAN_SCHEMA_VERSIONS:?})",
-                plan.schema_version
-            ),
+            unsupported_plan_schema_message(plan.schema_version),
         ));
     }
     if !is_safe_plan_id(&plan.id) {
@@ -1345,7 +1573,162 @@ fn validate_shot_structure(shot: &Shot) -> Vec<PlanDiagnostic> {
     if let Some(clip) = &shot.dialogue_clip {
         findings.extend(validate_dialogue_clip(id, clip));
     }
+    // The audio sentence (sc-24026). Required and never pattern-matched: "No audio. Silence." is a
+    // complete, valid answer, and the only thing refused is having said NOTHING. The same two
+    // checks a pack description gets apply, because it lands in the dispatched prompt the same way.
+    if shot.audio.trim().is_empty() {
+        findings.push(PlanDiagnostic::shot(
+            id,
+            "audio",
+            "audio is required: say what this shot sounds like (diegetic sound, ambience, music or \
+             \"no music\"), or state that it is silent — MiniMax-H3 scores the prompt it is given, \
+             so anything left unsaid is invented",
+        ));
+    } else if shot
+        .audio
+        .trim_start()
+        .get(..AUDIO_PROMPT_PREFIX.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(AUDIO_PROMPT_PREFIX))
+    {
+        // sc-24026. The compiler writes the `Audio: ` prefix itself (`film_compile::audio_text`),
+        // so an author who wrote it too would dispatch `Audio: Audio: room tone`. Refused rather
+        // than stripped: a value that opens with the label is an author who misread the field, and
+        // silently rewriting authored prose would make the plan a false record of itself.
+        findings.push(PlanDiagnostic::shot(
+            id,
+            "audio",
+            format!(
+                "audio must not start with {AUDIO_PROMPT_PREFIX:?}: the compiler writes that \
+                 prefix into the dispatched prompt itself, so keeping it here would send it twice \
+                 — state only what the shot sounds like"
+            ),
+        ));
+    }
+    findings.extend(
+        inserted_prose_findings("audio", "audio", &shot.audio)
+            .into_iter()
+            .map(|(field, message)| PlanDiagnostic::shot(id, field, message)),
+    );
     findings
+}
+
+/// The checks ONE piece of authored text the compiler repeats into a dispatched prompt must pass —
+/// a pack entry's `description` (sc-24023) and a shot's `audio` sentence (sc-24026).
+///
+/// Such text is not inert prose: the compiler repeats it into the sentence it writes into the
+/// dispatched prompt, inside `insertedText` — the one field
+/// `film_compile::CompiledPlan::conformance_findings` treats as the compiler's own authored, derived
+/// text and therefore never reads back. So text carrying `<Picture 3>` or `<Audio 1>` forges a
+/// binding to media the shot never supplies, and the compiled document still reports clean. Refused
+/// here, at the document boundary, rather than stripped, because a forged marker is an authoring
+/// mistake to name.
+///
+/// Ordinary line breaks and tabs are NOT refused — multi-line prose is a reasonable thing to write —
+/// they are collapsed to single spaces by `film_compile::normalized_description` before they reach a
+/// prompt. Every other control character is a byte no author typed on purpose.
+///
+/// Returns `(field, message)` pairs rather than diagnostics, because the same two checks are raised
+/// as a PLAN-level finding on a pack entry and as a SHOT-level finding on a shot's audio, and the
+/// caller is the one that knows which.
+fn inserted_prose_findings(field: &str, noun: &str, text: &str) -> Vec<(String, String)> {
+    let mut findings = Vec::new();
+    if text.contains(['<', '>']) {
+        findings.push((
+            field.to_owned(),
+            format!(
+                "{noun} {text:?} must not contain '<' or '>': it is repeated into the dispatched \
+                 prompt, where a marker like <Picture 1> would bind the model to media this shot \
+                 never supplies"
+            ),
+        ));
+    }
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        findings.push((
+            field.to_owned(),
+            format!(
+                "{noun} {text:?} must not contain control characters: it is repeated into the \
+                 dispatched prompt verbatim apart from whitespace"
+            ),
+        ));
+    }
+    findings
+}
+
+/// The keywords of the angle-bracket labels the ENGINE owns, lower-cased for a case-insensitive
+/// scan. MiniMax-H3 applies `<Picture N>` positionally to the references a request supplies, and
+/// the same grammar names its other media slots; the compiler is the only thing in this pipeline
+/// that may write one (`film_compile::inserted_text_for_shot`).
+pub const ENGINE_MEDIA_LABELS: &[&str] = &["picture", "audio", "video"];
+
+/// The byte offset of the first engine label in `text`, or `None`.
+///
+/// Matched at each `<` by skipping ASCII whitespace and comparing the keyword that follows,
+/// case-insensitively — not as a substring, because the engine reads `< Picture 1 >` and
+/// `<\tpicture 1>` as the label too, and a `contains("<picture")` test lets exactly the spellings
+/// an author is most likely to produce by accident through unflagged.
+///
+/// THE ONE implementation, here beside [`inserted_prose_findings`] because every rule about text
+/// that must not forge a label is stated in this module: the planner asks it of a DRAFT
+/// (`film_planner::anchoring_findings`), and the compiler asks it of the REFINER's rewrite and of
+/// the middle it recovers from a dispatched prompt (`film_compile`). A second copy would let the
+/// three drift into three different readings of the same grammar.
+pub fn engine_label_at(text: &str) -> Option<usize> {
+    text.char_indices()
+        .filter(|(_, ch)| *ch == '<')
+        .find_map(|(start, _)| -> Option<usize> {
+            let after = text[start + 1..].trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+            ENGINE_MEDIA_LABELS
+                .iter()
+                .any(|label| {
+                    after
+                        .get(..label.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(label))
+                })
+                .then_some(start)
+        })
+}
+
+/// The label as it was written, for quoting back: from the `<` of the first engine label to its
+/// closing `>`, or to the end of a short run when the author never closed it.
+///
+/// Beside [`engine_label_at`] and for the same reason: a finding that quotes the label is how both
+/// the planner's repair round and the compiler's refusal say WHICH label they found.
+pub fn quoted_engine_label(text: &str) -> String {
+    let start = engine_label_at(text).unwrap_or(0);
+    let rest = &text[start..];
+    match rest.find('>') {
+        Some(end) => rest[..=end].to_owned(),
+        // Unclosed: quote a bounded run rather than the rest of the paragraph.
+        None => rest.chars().take(24).collect(),
+    }
+}
+
+/// THE rule for every pack-authored phrase the compiler repeats into a prompt, as a plan-level
+/// diagnostic. One function over every such field because they are repeated by the same code into
+/// the same sentence, and a check that covered only `description` would let a `locator` say
+/// `<Picture 3>` (sc-24023, sc-24024).
+fn reference_prose_findings(field: &str, name: &str, text: &str) -> Vec<PlanDiagnostic> {
+    inserted_prose_findings(&format!("{field}.{name}"), name, text)
+        .into_iter()
+        .map(|(field, message)| PlanDiagnostic::plan(field, message))
+        .collect()
+}
+
+/// [`reference_prose_findings`] for one pack entry's `description`.
+fn reference_description_findings(field: &str, description: &str) -> Vec<PlanDiagnostic> {
+    reference_prose_findings(field, "description", description)
+}
+
+/// The same rules for [`ReferenceEntry::locator`] (sc-24024). A locator is repeated into the
+/// binding sentence exactly as a description is — "The courier is **the woman on the left** in
+/// `<Picture 1>`." — so a locator that forged a marker would forge one just as effectively.
+fn reference_locator_findings(field: &str, locator: Option<&str>) -> Vec<PlanDiagnostic> {
+    locator
+        .map(|locator| reference_prose_findings(field, "locator", locator))
+        .unwrap_or_default()
 }
 
 /// Structural findings on the reference pack alone.
@@ -1374,6 +1757,44 @@ fn reference_image_file_findings(field: &str, file: &str) -> Vec<PlanDiagnostic>
         return vec![PlanDiagnostic::plan(
             format!("{field}.file"),
             format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    // ONE path may be spelled ONE way (sc-24024). Everything that decides whether two roles share
+    // an image compares this string LITERALLY — `film_compile::shot_reference_pictures`,
+    // `shared_reference_file_findings`, `Session::ensure_references` — so `references/pair.png`
+    // and `./references/pair.png` (likewise `references//pair.png`, `references/./pair.png`,
+    // `references/pair.png/`, a `\` separator) would import ONE photograph of two people twice,
+    // number it `<Picture 1>` and `<Picture 2>`, and require a `locator` on neither: exactly the
+    // silent ambiguity this feature exists to remove, and nothing downstream catches it — the
+    // import keys on role, so even an identical sha256 does not collapse them.
+    //
+    // Refused rather than canonicalized on read, for the reason the literal comparison exists in
+    // the first place: a pack document has to mean the same thing on every machine, and a
+    // normalizing read would quietly make two entries one without the author ever seeing it.
+    let forward_slashed = file.replace('\\', "/");
+    let canonical = std::path::Path::new(&forward_slashed)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if canonical.is_empty() {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!("file {file:?} must be a relative path inside the pack directory"),
+        )];
+    }
+    if canonical != file {
+        return vec![PlanDiagnostic::plan(
+            format!("{field}.file"),
+            format!(
+                "file {file:?} must be spelled in canonical form, as {canonical:?}: no leading \
+                 \"./\", no \".\" component, no doubled '/', no trailing '/', no '\\'. Roles \
+                 share one image when this string matches LITERALLY, so a second spelling of one \
+                 path is imported and numbered as a second image"
+            ),
         )];
     }
     if file.contains(['\r', '\n']) || !is_safe_reference_basename(basename) {
@@ -1452,6 +1873,140 @@ fn generated_reference_findings(field: &str, entry: &ReferenceEntry) -> Vec<Plan
     findings
 }
 
+/// The rules that apply to a FILE several roles name, and to nothing else (sc-24024).
+///
+/// Sharing is the point of the feature — one photograph of two people is one image with two
+/// subjects — and each of these rules exists because the shared file collapses something that was
+/// per-role into something per-image:
+///
+///   * **Every sharing role needs a `locator`.** The roles are bound to ONE `<Picture N>`, so
+///     "The courier is the person shown in `<Picture 1>`. The recipient is the person shown in
+///     `<Picture 1>`." tells the model nothing. The finding names every role and the file, because
+///     the author is looking at a document whose entries they know by name.
+///   * **Their locators must differ.** Two roles picking the same subject out of one image is the
+///     same ambiguity written out longhand.
+///   * **They must agree on `approved`.** One file is imported as ONE project asset, and the asset
+///     carries exactly one approval tag; roles that disagree would make the tag depend on which of
+///     them the import happened to reach last.
+///   * **They must agree on `generated` / `generation`.** That provenance describes the FILE — the
+///     job that rendered it, its sha256 — so two roles on one file cannot honestly claim two.
+fn shared_reference_file_findings(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
+    // Only roles with an IMAGE can share one (sc-24025). A described-only role has no file, so it
+    // is not grouped with anything — and emphatically not with the other described-only roles,
+    // which is what a naive grouping on the raw `Option` would do by treating `None` as a path they
+    // all name.
+    let mut groups: BTreeMap<&str, Vec<&ReferenceEntry>> = BTreeMap::new();
+    for entry in &pack.references {
+        if let Some(file) = entry.file() {
+            groups.entry(file).or_default().push(entry);
+        }
+    }
+    let mut findings = Vec::new();
+    // Two spellings that differ only by ASCII case are ONE file on a case-insensitive volume —
+    // which APFS and NTFS are by default — while every comparison in this feature is literal. The
+    // compiler would number two pictures of one photograph and require a locator on neither, so
+    // the pack has to pick a spelling rather than have one picked for it.
+    let mut by_fold: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for entry in &pack.references {
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let spellings = by_fold.entry(file.to_ascii_lowercase()).or_default();
+        if !spellings.contains(&file) {
+            spellings.push(file);
+        }
+    }
+    for spellings in by_fold.values() {
+        if spellings.len() < 2 {
+            continue;
+        }
+        findings.push(PlanDiagnostic::plan(
+            "referencePack.references.file",
+            format!(
+                "files {} differ only by ASCII case, so a case-insensitive volume holds ONE file \
+                 while this pack is read as {}; spell one path one way, or the roles naming them \
+                 will be bound to two pictures of the same image",
+                spellings
+                    .iter()
+                    .map(|spelling| format!("{spelling:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                spellings.len()
+            ),
+        ));
+    }
+    for (file, entries) in groups {
+        if entries.len() < 2 {
+            continue;
+        }
+        let roles = entries
+            .iter()
+            .map(|entry| format!("{:?}", entry.role))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let missing: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.locator().is_none())
+            .map(|entry| format!("{:?}", entry.role))
+            .collect();
+        if !missing.is_empty() {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.locator",
+                format!(
+                    "roles {roles} share the file {file:?}, so each of them needs a `locator` \
+                     saying which subject in that image it names: a phrase that completes \"The \
+                     {} is …\", article included, e.g. \"the woman on the left\" — the compiler \
+                     writes the phrase in verbatim and supplies no article of its own; {} declare \
+                     none",
+                    entries[0].role,
+                    missing.join(", ")
+                ),
+            ));
+        } else {
+            let mut locators: Vec<&str> =
+                entries.iter().filter_map(|entry| entry.locator()).collect();
+            let before = locators.len();
+            locators.sort_unstable();
+            locators.dedup();
+            if locators.len() != before {
+                findings.push(PlanDiagnostic::plan(
+                    "referencePack.references.locator",
+                    format!(
+                        "roles {roles} share the file {file:?} but do not all have a DIFFERENT \
+                         `locator`; two roles picking the same subject out of one image is the \
+                         ambiguity a locator exists to remove"
+                    ),
+                ));
+            }
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.approved != entries[0].approved)
+        {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.approved",
+                format!(
+                    "roles {roles} share the file {file:?} but disagree on `approved`; the file is \
+                     imported as ONE asset carrying ONE approval, so it is approved for all of \
+                     them or for none"
+                ),
+            ));
+        }
+        if entries.iter().any(|entry| {
+            entry.generated != entries[0].generated || entry.generation != entries[0].generation
+        }) {
+            findings.push(PlanDiagnostic::plan(
+                "referencePack.references.generation",
+                format!(
+                    "roles {roles} share the file {file:?} but declare different generation \
+                     provenance; the provenance describes the IMAGE, so one file has one"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     if pack.schema_version != REFERENCE_PACK_SCHEMA_VERSION {
@@ -1459,7 +2014,10 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             "referencePack.schemaVersion",
             format!(
                 "unsupported reference pack schema version {} (this build reads \
-                 {REFERENCE_PACK_SCHEMA_VERSION})",
+                 {REFERENCE_PACK_SCHEMA_VERSION}); set \"schemaVersion\": \
+                 {REFERENCE_PACK_SCHEMA_VERSION} — version 2 only ADDS the optional \
+                 references[].locator and makes references[].file itself optional, so a version 1 \
+                 document needs no other edit unless two of its roles share one file",
                 pack.schema_version
             ),
         ));
@@ -1516,9 +2074,62 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
                 ),
             ));
         }
-        findings.extend(reference_image_file_findings(&field, &entry.file));
+        // An image-backed role's path is held to every rule it always was. A DESCRIBED-ONLY role
+        // (sc-24025) has no path to check and must instead carry the words that are all it is —
+        // and may carry no locator, which points at a subject inside an image it does not have.
+        match entry.file.as_deref() {
+            Some(file) => findings.extend(reference_image_file_findings(&field, file)),
+            None => {
+                if entry.description.trim().is_empty() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.description"),
+                        format!(
+                            "reference {:?} has no `file` and no `description`: a role with no \
+                             image is DESCRIBED-ONLY, so its description is the whole of it — \
+                             give it one, or give the role an image",
+                            entry.role
+                        ),
+                    ));
+                }
+                if entry.locator().is_some() {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.locator"),
+                        format!(
+                            "reference {:?} has no `file` but declares a `locator`; a locator \
+                             picks one subject out of an IMAGE (\"the woman on the left\"), and \
+                             this role has none — put the words in `description` instead",
+                            entry.role
+                        ),
+                    ));
+                }
+                // An entry that names an IMAGE anywhere is not described-only, whatever the
+                // missing `file` says. `sourceAssetId` and a `generation` block both describe a
+                // picture that exists, and `file` is the only thing that says where the run reads
+                // it: without one, `ensure_references` imports nothing, `films.rs` leaves the
+                // reference partition out of the request, and anyone who binds the role is refused
+                // by name. Silently reclassifying it is the one outcome nobody could debug, so it
+                // is refused here instead. The Film workspace's own add-reference route
+                // (`ProjectStore::add_film_reference`) writes `file` and `sourceAssetId` together
+                // or writes neither — the described-only role it authors with no `assetId` drops
+                // both — so this can never refuse a draft the UI authored.
+                if entry.source_asset_id.is_some() || entry.generated || entry.generation.is_some()
+                {
+                    findings.push(PlanDiagnostic::plan(
+                        format!("{field}.file"),
+                        format!(
+                            "reference {:?} declares sourceAssetId/generation but no `file`; a \
+                             role backed by an image must name the file it is stored as",
+                            entry.role
+                        ),
+                    ));
+                }
+            }
+        }
+        findings.extend(reference_description_findings(&field, &entry.description));
+        findings.extend(reference_locator_findings(&field, entry.locator.as_deref()));
         findings.extend(generated_reference_findings(&field, entry));
     }
+    findings.extend(shared_reference_file_findings(pack));
     // Sound entries live in their own namespace: a role may be an image OR a sound, never both,
     // because the two are placed through different slots and a collision would make
     // `referenceRoles: ["theme"]` resolve to something a video model cannot take.
@@ -1559,6 +2170,9 @@ pub fn validate_reference_pack(pack: &ReferencePack) -> Vec<PlanDiagnostic> {
             ));
         }
         findings.extend(validate_sound_source(&field, entry));
+        // Same rule as an image entry's: a sound description is prose a compiler-owned binding
+        // sentence may repeat, so it may not forge a marker of its own (sc-24023).
+        findings.extend(reference_description_findings(&field, &entry.description));
         let Some(declared) = entry.file.as_deref() else {
             continue;
         };
@@ -1750,6 +2364,25 @@ pub fn validate_plan_against_pack(
                         format!("reference role {role:?} is not approved for conditioning"),
                     ));
                 }
+                // A DESCRIBED-ONLY role is never bindable, in ANY conditioning slot (sc-24025).
+                // Every one of them supplies a picture — `referenceRoles` a Ref2VA subject image,
+                // the keyframe slots a literal frame — and this role has no image at all. Refused
+                // here rather than left to fail at import, because the import is a whole run's
+                // worth of setup later and the refusal it would raise names a missing file rather
+                // than the authoring mistake. `continuityRoles` is exactly where such a role
+                // BELONGS: the compiler writes its description into the prompt from there.
+                Some(entry) if entry.is_described_only() && field.starts_with("conditioning.") => {
+                    findings.push(PlanDiagnostic::shot(
+                        &shot.id,
+                        field,
+                        format!(
+                            "reference role {role:?} is DESCRIBED-ONLY — it declares no `file`, so \
+                             there is no image to condition on. Name it in this shot's \
+                             continuityRoles instead, where its description is written into the \
+                             prompt word for word; or give the pack entry an image"
+                        ),
+                    ));
+                }
                 Some(_) => {}
             }
         }
@@ -1819,7 +2452,11 @@ fn validate_sound_against_pack(plan: &ProductionPlan, pack: &ReferencePack) -> V
 pub fn validate_reference_pack_files(pack: &ReferencePack, pack_dir: &Path) -> Vec<PlanDiagnostic> {
     let mut findings = Vec::new();
     for (index, entry) in pack.references.iter().enumerate() {
-        let path = pack_dir.join(&entry.file);
+        // A described-only role names no file, so there is none to find on disk (sc-24025).
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let path = pack_dir.join(file);
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
             Ok(_) => findings.push(PlanDiagnostic::plan(
@@ -2811,8 +3448,12 @@ pub fn shot_resolution(
 /// `reference_to_video` shot against the base entry would refuse a shot the route would have
 /// accepted, and judging a `text_to_video` shot against the reference entry would refuse one the
 /// base checkpoint renders every day.
+///
+/// Takes the PACK because one of those rules — `limits.maxReferenceAssets` — counts the images a
+/// shot supplies, and only the pack says which of a shot's roles share one (sc-24024).
 pub fn validate_plan_against_model(
     plan: &ProductionPlan,
+    pack: &ReferencePack,
     entries: &ModelEntries<'_>,
     lane: ModelLane,
 ) -> Vec<PlanDiagnostic> {
@@ -2917,14 +3558,22 @@ pub fn validate_plan_against_model(
                 ),
             ));
         }
-        let references = shot.conditioning.reference_roles.len();
-        if references > caps.images {
+        // PICTURES, not roles (sc-24024). `maxReferenceAssets` bounds the images the request
+        // SUPPLIES, and roles that share a file are supplied once — so a ten-role shot over nine
+        // files is inside a cap of nine, and counting roles would refuse a request the route
+        // accepts. Counted by the one function that decides the supply order, so the number checked
+        // here is the length of the list `resolve_conditioning` will build.
+        let pictures =
+            crate::film_compile::shot_reference_pictures(&shot.conditioning.reference_roles, pack)
+                .len();
+        if pictures > caps.images {
+            let roles = shot.conditioning.reference_roles.len();
             findings.push(PlanDiagnostic::shot(
                 id,
                 "conditioning.referenceRoles",
                 format!(
-                    "{references} reference roles exceed {model_id}'s limits.maxReferenceAssets \
-                     of {}",
+                    "{roles} reference roles supply {pictures} distinct images, exceeding \
+                     {model_id}'s limits.maxReferenceAssets of {}",
                     caps.images
                 ),
             ));
@@ -3042,7 +3691,7 @@ pub fn validate_all(
         findings.extend(validate_reference_pack_files(pack, dir));
     }
     if let Some((entries, lane)) = model_entry {
-        findings.extend(validate_plan_against_model(plan, entries, lane));
+        findings.extend(validate_plan_against_model(plan, pack, entries, lane));
     }
     findings
 }
@@ -3363,6 +4012,13 @@ pub struct IntendedState {
     pub fps: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<String>,
+    /// What the shot was declared to sound like: [`Shot::audio`], the same sentence the compiler
+    /// dispatched (sc-24026). Since schema version 3 it is always present, because `audio` is
+    /// required on every shot.
+    ///
+    /// The FIELD keeps the name `sound` for run-record compatibility: it is serialized into run
+    /// records already on disk, written when it held the optional version-2 `shots[].sound` prose,
+    /// and renaming it would make every one of those records fail to read back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
     /// The generated-audio policy this shot resolved to — its own override if it declared one,
@@ -3852,7 +4508,7 @@ mod tests {
 
     fn plan_json() -> Value {
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 1,
             "title": "Courier",
@@ -3861,13 +4517,13 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["red_parcel"]
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.1667, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.1667, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "image_to_video", "firstFrameRole": "workshop_plate" },
                     "continuityRoles": ["red_parcel"]
                 }
@@ -3877,7 +4533,7 @@ mod tests {
 
     fn pack_json() -> Value {
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "courier-refs",
             "version": 1,
             "references": [
@@ -4173,6 +4829,7 @@ mod tests {
         assert!(validate_plan_against_pack(&plan, &pack).is_empty());
         assert!(validate_plan_against_model(
             &plan,
+            &pack,
             &single_entries(&model_entry()),
             ModelLane::Mlx
         )
@@ -4190,6 +4847,67 @@ mod tests {
         bad["shots"][0]["framng"] = json!("wide");
         let error = parse_plan(&bad.to_string()).expect_err("unknown field refused");
         assert!(error.contains("framng"), "{error}");
+    }
+
+    /// sc-24026. Every run pins its `plan.json` and reads it back on resume, replace-take and
+    /// review. A run pinned before schema version 3 holds a version 2 document with
+    /// `shots[].sound`, and `Shot` is `deny_unknown_fields` — so without the pre-scan the read dies
+    /// inside serde at a byte offset, `validate_plan_structure` is never reached, and the operator
+    /// is handed a parser position with no remedy in it. The pre-scan is what makes the version
+    /// refusal the thing they actually see.
+    #[test]
+    fn a_version_2_plan_document_is_refused_by_version_with_the_remedy_not_by_serde_position() {
+        let mut value = plan_json();
+        value["schemaVersion"] = json!(2);
+        for shot in value["shots"].as_array_mut().unwrap() {
+            let shot = shot.as_object_mut().unwrap();
+            shot.remove("audio");
+            shot.insert("sound".to_owned(), json!("Room tone. No music."));
+        }
+        let document = value.to_string();
+
+        let diagnostic =
+            parse_plan_document(&document).expect_err("a version 2 plan document is refused");
+        assert_eq!(diagnostic.field, "schemaVersion");
+        assert!(
+            diagnostic
+                .message
+                .contains("unsupported plan schema version 2")
+                && diagnostic.message.contains("shots[].audio")
+                && diagnostic
+                    .message
+                    .contains(&format!("\"schemaVersion\": {PLAN_SCHEMA_VERSION}")),
+            "the refusal names the version and the edit that fixes it: {diagnostic:?}"
+        );
+        assert!(
+            !diagnostic.message.contains("unknown field")
+                && !diagnostic.message.contains("missing field")
+                && !diagnostic.message.contains("line "),
+            "the operator gets the remedy, not a serde position: {diagnostic:?}"
+        );
+
+        // The pinned path and the CLI path are the same entry, so both get it.
+        let flattened = parse_plan(&document).expect_err("parse_plan refuses it too");
+        assert_eq!(flattened, diagnostic.message);
+        let file = tempfile::NamedTempFile::new().expect("temp plan");
+        std::fs::write(file.path(), &document).expect("plan writes");
+        let from_file = read_plan_file(file.path()).expect_err("read_plan_file refuses it too");
+        assert_eq!(from_file.field, "schemaVersion");
+        assert!(
+            from_file
+                .message
+                .contains("unsupported plan schema version 2"),
+            "{from_file:?}"
+        );
+
+        // A genuine structural error at a supported version still reports as one, so the pre-scan
+        // has not swallowed serde's own diagnostics.
+        let mut malformed = plan_json();
+        malformed["shots"][0]["framng"] = json!("wide");
+        let decode =
+            parse_plan_document(&malformed.to_string()).expect_err("unknown field still refused");
+        assert_eq!(decode.field, "plan");
+        assert!(decode.message.contains("framng"), "{decode:?}");
     }
 
     #[test]
@@ -4369,7 +5087,7 @@ mod tests {
         let mut value = plan_json();
         let third = json!({
             "id": "SH030", "beat": "leave", "framing": "wide", "prompt": "the courier leaves",
-            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty",
+            "targetDurationSeconds": 5.1667, "startState": "parcel on table", "endState": "empty", "audio": "Room tone, no music.",
             "conditioning": { "mode": "text_to_video", "chainFromShotId": "SH010" },
             "continuityRoles": ["red_parcel"]
         });
@@ -4487,6 +5205,7 @@ mod tests {
         );
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4529,6 +5248,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &single_entries(&model_entry()),
             ModelLane::Mlx,
         ));
@@ -4597,6 +5317,7 @@ mod tests {
         // reference_to_video and 9 images), the bare one against `minimax_h3`.
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4622,6 +5343,7 @@ mod tests {
         // dispatched at the base checkpoint, and the shot that binds nothing is untouched.
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &single_entries(&base),
             ModelLane::Mlx,
         ));
@@ -4654,6 +5376,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4672,6 +5395,7 @@ mod tests {
         let plan: ProductionPlan = serde_json::from_value(mixed_plan_json()).unwrap();
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &ModelEntries::single("ltx_2_5", &base),
             ModelLane::Mlx,
         ));
@@ -4701,8 +5425,338 @@ mod tests {
         // References are OPTIONAL: a shot that binds none is never refused for it.
         let plan: ProductionPlan = serde_json::from_value(plan_json()).unwrap();
         assert!(
-            validate_plan_against_model(&plan, &entries, ModelLane::Mlx).is_empty(),
+            validate_plan_against_model(&plan, &pack(), &entries, ModelLane::Mlx).is_empty(),
             "a plan with no reference shots must still validate on a split family"
+        );
+    }
+
+    /// A pack of `roles` character entries over `files` distinct plates: the first
+    /// `roles - files + 1` roles share plate 0 and carry locators, the rest get one each
+    /// (sc-24024).
+    fn crowded_pack(roles: usize, files: usize) -> ReferencePack {
+        assert!(files <= roles && files >= 1);
+        let shared = roles - files + 1;
+        let entries: Vec<Value> = (0..roles)
+            .map(|index| {
+                let plate = index
+                    .saturating_sub(shared.saturating_sub(1))
+                    .min(files - 1);
+                let mut entry = json!({
+                    "role": format!("role_{index}"),
+                    "kind": "character",
+                    "file": format!("references/plate_{plate}.png"),
+                });
+                if index < shared && shared > 1 {
+                    entry["locator"] = json!(format!("the {index}th person from the left"));
+                }
+                entry
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "crowded-refs",
+            "version": 1,
+            "references": entries,
+        }))
+        .expect("the crowded pack parses")
+    }
+
+    /// `limits.maxReferenceAssets` bounds the IMAGES a request supplies, and roles sharing a file
+    /// are supplied once (sc-24024). So ten roles over nine files fit a cap of nine, and ten roles
+    /// over ten files do not — the one difference between the two runs below is which pack the
+    /// same plan is counted against.
+    #[test]
+    fn the_reference_cap_counts_distinct_files_not_bound_roles() {
+        let base = model_entry();
+        let reference = reference_model_entry();
+        let entries = ModelEntries::with_reference_partition(
+            "minimax_h3",
+            &base,
+            Some(("minimax_h3_ref", &reference)),
+        );
+        let mut value = mixed_plan_json();
+        value["shots"][0]["conditioning"]["referenceRoles"] =
+            json!((0..10).map(|i| format!("role_{i}")).collect::<Vec<_>>());
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+
+        let nine_files = crowded_pack(10, 9);
+        assert!(
+            validate_reference_pack(&nine_files).is_empty(),
+            "{:?}",
+            messages(&validate_reference_pack(&nine_files))
+        );
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &nine_files,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings.is_empty(),
+            "ten roles over nine files supply nine images, inside a cap of nine: {findings:?}"
+        );
+
+        let ten_files = crowded_pack(10, 10);
+        let findings = messages(&validate_plan_against_model(
+            &plan,
+            &ten_files,
+            &entries,
+            ModelLane::Mlx,
+        ));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("[SH010] conditioning.referenceRoles")
+                    && m.contains("10 distinct images")
+                    && m.contains("maxReferenceAssets")
+                    && m.contains('9')),
+            "{findings:?}"
+        );
+    }
+
+    /// The rules a FILE several roles name has to satisfy (sc-24024), each refused by naming the
+    /// roles and the file the author has to go and look at.
+    #[test]
+    fn roles_sharing_one_file_need_distinct_locators_and_one_approval() {
+        let shared = |edit: &dyn Fn(&mut Value)| -> ReferencePack {
+            let mut value = json!({
+                "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "pair-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character", "file": "references/pair.png",
+                        "locator": "the woman on the left"
+                    },
+                    {
+                        "role": "recipient", "kind": "character", "file": "references/pair.png",
+                        "locator": "the man on the right"
+                    }
+                ]
+            });
+            edit(&mut value);
+            serde_json::from_value(value).expect("the pair pack parses")
+        };
+
+        // The control: two roles on one file, each saying which subject it is, is legal.
+        assert!(
+            validate_reference_pack(&shared(&|_| {})).is_empty(),
+            "{:?}",
+            messages(&validate_reference_pack(&shared(&|_| {})))
+        );
+
+        // A locator that is absent, or present but blank, is no locator.
+        for blank in [json!(null), json!("   ")] {
+            let pack = shared(&|value: &mut Value| {
+                value["references"][1]["locator"] = blank.clone();
+            });
+            let findings = messages(&validate_reference_pack(&pack));
+            assert!(
+                findings.iter().any(|m| m.contains("locator")
+                    && m.contains("\"courier\"")
+                    && m.contains("\"recipient\"")
+                    && m.contains("references/pair.png")),
+                "{blank} must be refused, naming both roles and the file: {findings:?}"
+            );
+        }
+
+        // Two roles picking the SAME subject out of one image says nothing either.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][1]["locator"] = json!("the woman on the left");
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("locator") && m.contains("DIFFERENT")),
+            "{findings:?}"
+        );
+
+        // One asset carries one approval, so the roles on it cannot disagree about it.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][1]["approved"] = json!(false);
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("approved") && m.contains("references/pair.png")),
+            "{findings:?}"
+        );
+
+        // A locator reaches the dispatched prompt verbatim, so it may no more forge a picture
+        // marker than a description may.
+        let findings = messages(&validate_reference_pack(&shared(&|value: &mut Value| {
+            value["references"][0]["locator"] = json!("the woman in <Picture 3>");
+        })));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("locator") && m.contains("'<' or '>'")),
+            "{findings:?}"
+        );
+    }
+
+    /// DESCRIBED-ONLY is decided by the ABSENCE of an image, and `file` is not the only place an
+    /// entry claims one (sc-24025). An entry carrying `sourceAssetId`, `generated: true` or a
+    /// `generation` block has a picture behind it, and `file` is the only thing that says where
+    /// the run reads it — so with no `file` it is refused rather than silently reclassified into a
+    /// role whose image is dropped from `ensure_references`, left out of the route's partition
+    /// request, and refused by name to anyone who binds it.
+    #[test]
+    fn a_fileless_entry_that_claims_an_image_is_refused_rather_than_called_described_only() {
+        let generation = json!({
+            "model": "flux_krea", "mode": "text_to_image", "prompt": "a courier",
+            "width": 1024, "height": 1024, "jobId": "job-1", "assetId": "asset-1",
+            "sha256": "abc", "createdAt": "2026-09-19T00:00:00Z"
+        });
+        let fileless = |edit: &dyn Fn(&mut Value)| -> Vec<String> {
+            let mut value = json!({
+                "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": [{
+                    "role": "courier", "kind": "character",
+                    "description": "The courier: blue jacket."
+                }]
+            });
+            edit(&mut value);
+            let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: words and nothing else is exactly what a described-only role is.
+        assert!(fileless(&|_| {}).is_empty(), "{:?}", fileless(&|_| {}));
+
+        for (name, edit) in [
+            (
+                "sourceAssetId",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["sourceAssetId"] = json!("asset-1");
+                }) as Box<dyn Fn(&mut Value)>,
+            ),
+            (
+                "generated",
+                Box::new(|value: &mut Value| {
+                    value["references"][0]["generated"] = json!(true);
+                }),
+            ),
+            (
+                "generation",
+                Box::new({
+                    let generation = generation.clone();
+                    move |value: &mut Value| {
+                        value["references"][0]["generation"] = generation.clone();
+                    }
+                }),
+            ),
+        ] {
+            let findings = fileless(&*edit);
+            assert!(
+                findings.iter().any(|message| {
+                    message.contains("\"courier\"")
+                        && message.contains("sourceAssetId/generation but no `file`")
+                }),
+                "{name} with no `file` must be refused by name: {findings:?}"
+            );
+        }
+    }
+
+    /// Sharing is decided by comparing `file` LITERALLY, so a path the filesystem would resolve to
+    /// one image but this pack spells two ways is refused (sc-24024). Left unrefused, one
+    /// photograph of two people is imported twice, numbered `<Picture 1>` and `<Picture 2>`, and
+    /// — because the entries never group — neither role is asked for a locator: the exact
+    /// ambiguity the feature removes, reintroduced by a stray `./`.
+    #[test]
+    fn a_reference_file_must_already_be_in_canonical_lexical_form() {
+        let with_file = |file: &str| -> Vec<String> {
+            let mut value = pack_json();
+            value["references"][0]["file"] = json!(file);
+            let pack: ReferencePack =
+                serde_json::from_value(value).expect("the pack parses whatever the path says");
+            messages(&validate_reference_pack(&pack))
+        };
+
+        // The control: the spelling every checked-in pack uses is accepted.
+        assert!(
+            with_file("references/workshop_plate.png").is_empty(),
+            "{:?}",
+            with_file("references/workshop_plate.png")
+        );
+
+        for spelling in [
+            "./references/workshop_plate.png",
+            "references//workshop_plate.png",
+            "references/./workshop_plate.png",
+            "references/workshop_plate.png/",
+            "references\\workshop_plate.png",
+        ] {
+            let findings = with_file(spelling);
+            assert!(
+                findings.iter().any(|m| m.contains("canonical form")
+                    && m.contains("\"references/workshop_plate.png\"")),
+                "{spelling:?} must be refused, naming the canonical spelling: {findings:?}"
+            );
+        }
+    }
+
+    /// Two spellings that differ only by case are ONE file on APFS and two in this pack, so the
+    /// pack is refused rather than read as two pictures of one photograph (sc-24024).
+    #[test]
+    fn two_reference_files_differing_only_by_case_are_refused() {
+        let mut value = pack_json();
+        value["references"][0]["file"] = json!("references/plate.png");
+        value["references"][1]["file"] = json!("references/Plate.png");
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings
+                .iter()
+                .any(|m| m.contains("differ only by ASCII case")
+                    && m.contains("\"references/plate.png\"")
+                    && m.contains("\"references/Plate.png\"")),
+            "{findings:?}"
+        );
+    }
+
+    /// A locator is free prose, so nothing can check that it reads as a noun phrase — but the
+    /// refusal that ASKS for one has to say that the article is the author's to supply, because
+    /// "woman on the left" yields "The courier is woman on the left in <Picture 1>." in silence.
+    #[test]
+    fn the_missing_locator_refusal_says_the_article_is_the_authors_to_supply() {
+        let value = json!({
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
+            "id": "pair-refs",
+            "version": 1,
+            "references": [
+                { "role": "courier", "kind": "character", "file": "references/pair.png" },
+                { "role": "recipient", "kind": "character", "file": "references/pair.png" }
+            ]
+        });
+        let pack: ReferencePack = serde_json::from_value(value).expect("the pair pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings.iter().any(|m| m.contains("locator")
+                && m.contains("The courier is …")
+                && m.contains("the woman on the left")),
+            "{findings:?}"
+        );
+    }
+
+    /// A version 1 pack is refused BY VERSION, and the refusal says what to do about it (E6).
+    #[test]
+    fn a_version_1_reference_pack_is_refused_by_version() {
+        let mut value = pack_json();
+        value["schemaVersion"] = json!(1);
+        let pack: ReferencePack = serde_json::from_value(value).expect("pack parses");
+        let findings = validate_reference_pack(&pack);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.field == "referencePack.schemaVersion"
+                    && finding.message.contains("version 1")
+                    && finding.message.contains("schemaVersion")
+                    && finding.message.contains("locator")
+            }),
+            "{:?}",
+            messages(&findings)
         );
     }
 
@@ -4721,6 +5775,7 @@ mod tests {
         );
         let findings = messages(&validate_plan_against_model(
             &plan,
+            &pack(),
             &entries,
             ModelLane::Mlx,
         ));
@@ -4944,6 +5999,60 @@ mod tests {
         }
     }
 
+    /// sc-24023. A description is repeated into the compiler-owned binding sentence, inside
+    /// `insertedText` — the one field `film_compile::CompiledPlan::conformance_findings` reads as
+    /// the compiler's own derived text and never checks against anything. So a description that
+    /// spells a marker would forge a binding to media the shot never supplies and the compiled
+    /// document would still report clean. Refused here, on both entry namespaces, because a later
+    /// story binds a sound entry's description the same way (`<Audio N>`).
+    #[test]
+    fn a_description_that_forges_a_media_marker_is_refused() {
+        let mut pack_value = sound_pack_json();
+        pack_value["references"][1]["description"] = json!("Actually the parcel in <Picture 3>.");
+        pack_value["sound"][2]["description"] = json!("The bed in <Audio 1>");
+        let pack: ReferencePack = serde_json::from_value(pack_value).expect("pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        for expected in ["referencePack.references[1].description", "<Picture 3>"] {
+            assert!(
+                findings.iter().any(|finding| finding.contains(expected)),
+                "expected a finding containing {expected:?}: {findings:#?}"
+            );
+        }
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("referencePack.sound[2].description")),
+            "a sound description is bound the same way: {findings:#?}"
+        );
+        // The shipped shape — ordinary prose, and a description that WRAPS — is untouched: the
+        // compiler collapses its whitespace rather than the document refusing it.
+        let mut clean = sound_pack_json();
+        clean["references"][1]["description"] = json!("Small bright red parcel,\n  centre frame.");
+        let clean: ReferencePack = serde_json::from_value(clean).expect("pack parses");
+        assert!(
+            !messages(&validate_reference_pack(&clean))
+                .iter()
+                .any(|finding| finding.contains("description")),
+            "{:#?}",
+            messages(&validate_reference_pack(&clean))
+        );
+    }
+
+    /// The other half of the same rule: a byte no author typed on purpose never reaches the prompt.
+    #[test]
+    fn a_description_carrying_a_control_character_is_refused() {
+        let mut pack_value = pack_json();
+        pack_value["references"][1]["description"] = json!("Small red parcel\u{0007}");
+        let pack: ReferencePack = serde_json::from_value(pack_value).expect("pack parses");
+        let findings = messages(&validate_reference_pack(&pack));
+        assert!(
+            findings.iter().any(|finding| finding
+                .contains("referencePack.references[1].description")
+                && finding.contains("control characters")),
+            "{findings:#?}"
+        );
+    }
+
     #[test]
     fn out_of_range_gains_fades_and_offsets_are_refused() {
         let mut plan_value = sound_plan_json();
@@ -5080,17 +6189,176 @@ mod tests {
 
     fn plan_with_edges(edges: Value) -> ProductionPlan {
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"][1]["dependsOn"] = edges;
         serde_json::from_value(value).expect("plan parses")
     }
 
     #[test]
-    fn a_v1_plan_still_reads_and_declares_no_edges() {
+    fn a_v1_or_v2_plan_is_refused_by_version_and_named_the_remedy() {
+        // sc-24026. Both older versions are refused BY VERSION rather than read under a default:
+        // neither carries `shots[].audio`, and a plan read with an empty one would dispatch six
+        // shots whose soundtrack the model invents while every document reported clean.
+        for stale in [1, 2] {
+            let mut value = plan_json();
+            value["schemaVersion"] = json!(stale);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = messages(&validate_plan_structure(&plan));
+            assert!(
+                findings.iter().any(|message| {
+                    message.contains("schemaVersion")
+                        && message.contains(&stale.to_string())
+                        && message.contains("audio")
+                }),
+                "version {stale} must be refused by version, naming the remedy: {findings:?}"
+            );
+        }
+        // The current version, otherwise identical, is accepted — so the refusal above is about the
+        // version and not about anything else in the document.
         let plan = plan();
-        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
         assert!(validate_plan_structure(&plan).is_empty());
         assert!(plan.shots.iter().all(|shot| shot.depends_on.is_empty()));
+    }
+
+    /// sc-24026. `audio` is required on every shot: a missing key does not parse, a blank one is a
+    /// finding that NAMES the shot, and a value that states silence is simply accepted — the
+    /// validator never reads the prose, because "this shot is silent" is a legitimate answer and
+    /// the only unanswerable one is saying nothing.
+    #[test]
+    fn a_shot_without_an_audio_sentence_is_refused_naming_the_shot() {
+        let mut value = plan_json();
+        value["shots"][1].as_object_mut().unwrap().remove("audio");
+        let error = serde_json::from_value::<ProductionPlan>(value)
+            .expect_err("a shot with no audio key does not parse")
+            .to_string();
+        assert!(error.contains("audio"), "{error}");
+
+        for blank in ["", "   ", "\n\t"] {
+            let mut value = plan_json();
+            value["shots"][1]["audio"] = json!(blank);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{blank:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH020"), "{blank:?}");
+            assert_eq!(findings[0].field, "audio", "{blank:?}");
+        }
+
+        // Silence, stated. Accepted verbatim and with no finding anywhere.
+        let mut value = plan_json();
+        value["shots"][1]["audio"] = json!("No audio. Silence.");
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_plan_structure(&plan).is_empty(),
+            "{:?}",
+            messages(&validate_plan_structure(&plan))
+        );
+        assert_eq!(plan.shots[1].audio, "No audio. Silence.");
+    }
+
+    /// The audio sentence reaches the dispatched prompt verbatim, so it gets the SAME two document
+    /// -boundary checks a pack description does (sc-24026) — and gets them as a SHOT finding, so
+    /// the operator is told which shot forged the marker.
+    #[test]
+    fn an_audio_sentence_may_not_forge_a_marker_or_carry_control_characters() {
+        for (audio, expected) in [
+            ("The bed from <Audio 1>.", "'<' or '>'"),
+            ("room tone\u{7}", "control characters"),
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{audio:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{audio:?}");
+            assert_eq!(findings[0].field, "audio", "{audio:?}");
+            assert!(findings[0].message.contains(expected), "{:?}", findings[0]);
+        }
+        // Newlines and tabs are NOT refused — `film_compile::normalized_description` collapses them
+        // before the sentence reaches a prompt, exactly as it does for a pack description.
+        let mut value = plan_json();
+        value["shots"][0]["audio"] = json!("room tone,\n\ta door latch");
+        let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+        assert!(validate_plan_structure(&plan).is_empty());
+    }
+
+    /// sc-24026. `film_compile::audio_text` writes `Audio: ` in front of the author's words, so an
+    /// `audio` value that repeats the label would dispatch `Audio: Audio: room tone`. Refused
+    /// naming the shot rather than stripped: the value is authored prose, and silently rewriting it
+    /// would make the plan a false record of what was dispatched.
+    #[test]
+    fn an_audio_sentence_may_not_repeat_the_prefix_the_compiler_writes() {
+        for audio in [
+            "Audio: room tone",
+            "audio: room tone",
+            "AUDIO: room tone",
+            "  Audio: room tone",
+            "Audio:room tone",
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            let findings = validate_plan_structure(&plan);
+            assert_eq!(findings.len(), 1, "{audio:?}: {findings:?}");
+            assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{audio:?}");
+            assert_eq!(findings[0].field, "audio", "{audio:?}");
+            assert!(
+                findings[0]
+                    .message
+                    .contains("the compiler writes that prefix"),
+                "the refusal says whose prefix it is: {:?}",
+                findings[0]
+            );
+        }
+
+        // Only the OPENING label is refused. The word elsewhere, and a sentence that merely starts
+        // with "Audio" as a word, are ordinary prose.
+        for audio in [
+            "Room tone. Audio: mixed low.",
+            "Audio equipment hums in the corner.",
+        ] {
+            let mut value = plan_json();
+            value["shots"][0]["audio"] = json!(audio);
+            let plan: ProductionPlan = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_plan_structure(&plan).is_empty(),
+                "{audio:?}: {:?}",
+                messages(&validate_plan_structure(&plan))
+            );
+        }
+    }
+
+    /// No document this repository ships trips the prefix refusal — the check is a guard on future
+    /// authoring, not a break for the plans already checked in.
+    #[test]
+    fn no_shipped_plan_repeats_the_audio_prefix() {
+        let mut checked = 0;
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/film-harness/courier-workshop");
+        for entry in std::fs::read_dir(&shipped).expect("the shipped plan directory is readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !name.starts_with("plan") || !name.ends_with(".jsonc") {
+                continue;
+            }
+            let plan = read_plan_file(&path).unwrap_or_else(|e| panic!("{name} reads: {e}"));
+            for shot in &plan.shots {
+                assert!(
+                    !shot
+                        .audio
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("audio:"),
+                    "{name} shot {} repeats the compiler's prefix: {:?}",
+                    shot.id,
+                    shot.audio
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "the shipped plans were actually walked");
     }
 
     #[test]
@@ -5140,7 +6408,6 @@ mod tests {
     #[test]
     fn a_dependency_cycle_is_refused() {
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"][0]["dependsOn"] = json!([{ "shotId": "SH020", "kind": "conditioning" }]);
         value["shots"][1]["dependsOn"] = json!([{ "shotId": "SH010", "kind": "continuity" }]);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
@@ -5166,7 +6433,6 @@ mod tests {
             })
             .collect();
         let mut value = plan_json();
-        value["schemaVersion"] = json!(2);
         value["shots"] = Value::Array(shots);
         let plan: ProductionPlan = serde_json::from_value(value).unwrap();
         assert!(
@@ -5260,7 +6526,7 @@ mod tests {
     /// A pack carrying exactly `sound`, so the findings under test are the sound findings.
     fn sound_pack(entries: Value) -> ReferencePack {
         serde_json::from_value(json!({
-            "schemaVersion": 1,
+            "schemaVersion": REFERENCE_PACK_SCHEMA_VERSION,
             "id": "pack",
             "version": 1,
             "references": [

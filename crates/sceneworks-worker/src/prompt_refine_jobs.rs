@@ -14,8 +14,10 @@
 //! rewrite rules + image/video/audio medium switch + guide assembly (`build_refine_system_prompt`, into the
 //! request `system`) and the reasoning-block / code-fence / surrounding-quote cleanup
 //! (`clean_refine_output`, over the model reply). Sampling matches the Python path (temperature 0.7,
-//! top_p 0.9, max_new_tokens 512), as does the empty-output → error behavior and the `{originalPrompt,
-//! refinedPrompt}` result shape.
+//! top_p 0.9), as does the empty-output → error behavior and the `{originalPrompt, refinedPrompt}`
+//! result shape. The output budget no longer does: the Python path's 512 tokens could not cover the
+//! `MAX_PROMPT_CHARS` contract once this task began carrying the per-shot film refine (sc-24029) —
+//! see `DEFAULT_REFINE_MAX_NEW_TOKENS`.
 
 use super::*;
 
@@ -35,24 +37,42 @@ const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
-// Output-length cap. The free-text rewrite is a one-liner (512 is ample), but the two caption tasks
-// (magic-prompt + image_caption) emit a full Ideogram JSON caption — multi-element, with bboxes,
-// #RRGGBB palettes and (since sc-8199) optional per-element palettes — which truncates well past 2048
-// tokens on busy images (sc-8210: `EOF while parsing a list` mid-`elements`). 4096 ≈ ~11.6k chars of
-// headroom; a well-formed caption emits EOS far below the cap, so a higher ceiling only rescues the
-// truncating cases. Callers may still override via the `maxNewTokens` payload field.
+// Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
+// caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element
+// palettes — which truncates well past 2048 tokens on busy images (sc-8210: `EOF while parsing a
+// list` mid-`elements`). 4096 ≈ ~11.6k chars of headroom; a well-formed caption emits EOS far below
+// the cap, so a higher ceiling only rescues the truncating cases. Callers may still override via the
+// `maxNewTokens` payload field.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
+// The free-text rewrite was budgeted as a one-liner (512 tokens) when its only caller refined a
+// single sentence. It is now also the per-shot film refine (`film_planner.rs` sends no `task`, so a
+// shot prompt classifies as `Rewrite`), whose output contract is `MAX_PROMPT_CHARS` = 4000 chars of
+// multi-field MiniMax-H3 prose.
+//
+// Sized from MEASUREMENT, not from a nominal ratio: sc-24029's six shot rewrites at the old 512-token
+// cap emitted 1584-2922 chars (`a5-image/smoke.log` in that story's evidence dir), i.e. this
+// refiner's prose runs ~5.7 chars/token and 512 tokens tops out around 2900 chars — BELOW the
+// 4000-char contract, so a rewrite with more to say stopped on `MaxTokens` mid-sentence rather than
+// on EOS (a film shot shipped cut at 3026/4000 chars). At that measured ratio the contract needs only
+// ~700 tokens; 1536 is a little over twice that, so the contract is reachable with real headroom for
+// a denser rewrite. A rewrite that has said what it has to say still emits EOS far below the cap, so
+// this only rescues the truncating cases.
+//
+// `the_rewrite_budget_covers_the_refined_prompt_char_contract` guards it at 2.83 chars/token, which
+// is deliberately NOT the prose ratio above: it is the conservative floor the JSON-caption path
+// implies (4096 ≈ ~11.6k chars), so the assertion holds even for the densest output this task can
+// emit. 1536 clears that floor too (~4350 chars).
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
+const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
 // longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
 #[cfg(any(
@@ -1357,8 +1377,19 @@ pub(crate) async fn run_prompt_refine_job(
                 // dropped (the consumer loop returned early on a POST failure / 409): trip the engine flag
                 // so generation bails instead of running unheard (sc-8804, F-003 — the swallowed
                 // closed-channel leak, preserved verbatim from the old bounded-channel behavior).
+                //
+                // The same per-token callback carries the sc-24029 MLX cache bound. MLX's freed-buffer
+                // cache is PROCESS-GLOBAL, not per-thread; this callback is used because it is the
+                // only hook interleaved with the decode itself — every other seam runs before
+                // `generate` starts or after it returns, when the cache has already peaked. Side
+                // effect of that global scope: up to once per 16 streamed token events (plus once at
+                // decode end) this also discards buffers a CONCURRENT image render had cached, which
+                // that render then re-allocates. Declared BEFORE `on_event` so it outlives the borrow
+                // and its terminal clear fires after the generate below returns or errors.
+                let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                 let mut on_event = |event: StreamEvent| {
                     if let StreamEvent::Token { index, .. } = event {
+                        cache_bound.note_event();
                         if progress_tx
                             .send((index as u32 + 1, max_new_tokens))
                             .is_err()
@@ -1541,6 +1572,9 @@ pub(crate) async fn run_prompt_refine_job(
                 &model,
                 backend,
                 thinking_mode_name,
+                output.finish_reason,
+                output.usage,
+                max_new_tokens,
             )),
             backend,
         ),
@@ -1649,11 +1683,39 @@ fn refine_progress(
     }
 }
 
+/// How the decode ended, beside the budget it ended against (sc-24029).
+///
+/// Carried on BOTH the success and the failure result. A `Rewrite` that stops on
+/// `FinishReason::Length` is non-empty and therefore a "success" as far as this job is concerned,
+/// but its text is truncated mid-sentence — and the caller that cannot tolerate that (the film
+/// planner's per-shot rewrite, whose output feeds a compiled request) has no other way to know.
+/// Purely additive: no existing key changes shape, so every current reader is unaffected.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn generation_block(
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
+) -> Value {
+    json!({
+        "finishReason": finish_reason_name(finish_reason),
+        "usage": {
+            "promptTokens": usage.prompt_tokens,
+            "generatedTokens": usage.generated_tokens,
+        },
+        "maxNewTokens": max_new_tokens,
+    })
+}
+
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn refine_result(
     original_prompt: &str,
     refined_prompt: &str,
@@ -1661,6 +1723,9 @@ fn refine_result(
     model: &str,
     backend: &str,
     thinking_mode: &str,
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
@@ -1668,6 +1733,10 @@ fn refine_result(
     if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
         result.insert("thinking".to_owned(), json!(thinking));
     }
+    result.insert(
+        "generation".to_owned(),
+        generation_block(finish_reason, usage, max_new_tokens),
+    );
     result.insert(
         "executionIdentity".to_owned(),
         json!({
@@ -1740,14 +1809,7 @@ fn refine_failure_result(
     }
     result.insert(
         "generation".to_owned(),
-        json!({
-            "finishReason": finish_reason_name(finish_reason),
-            "usage": {
-                "promptTokens": usage.prompt_tokens,
-                "generatedTokens": usage.generated_tokens,
-            },
-            "maxNewTokens": max_new_tokens,
-        }),
+        generation_block(finish_reason, usage, max_new_tokens),
     );
     result.insert(
         "executionIdentity".to_owned(),
@@ -1778,6 +1840,12 @@ mod tests {
             "Qwen/Qwen3.6-27B",
             "mlx",
             "enabled",
+            Some(gen_core::core_llm::FinishReason::Stop),
+            gen_core::core_llm::Usage {
+                prompt_tokens: 1_024,
+                generated_tokens: 32,
+            },
+            4_096,
         );
         assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
         assert_eq!(result["thinking"], "private reasoning");
@@ -1789,6 +1857,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("private reasoning"));
+    }
+
+    /// sc-24029. A `Rewrite` that stops on `Length` is non-empty, so it completes as a SUCCESS —
+    /// and the caller that must not compile truncated prose (the film planner's per-shot rewrite)
+    /// could not tell, because `finishReason` was recorded only on the failure result. The success
+    /// result now carries the same additive `generation` object.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn a_truncated_but_non_empty_rewrite_reports_its_length_finish_on_the_success_result() {
+        use gen_core::core_llm::{FinishReason, Usage};
+
+        let result = refine_result(
+            "a courier sets a parcel down",
+            "A courier sets the parcel on the bench. overall_soundscape:\n  The only",
+            None,
+            "TheDrummer/Anubis-Mini-8B-v1",
+            "mlx",
+            "disabled",
+            Some(FinishReason::Length),
+            Usage {
+                prompt_tokens: 900,
+                generated_tokens: 1_536,
+            },
+            1_536,
+        );
+        assert_eq!(result["generation"]["finishReason"], "length");
+        assert_eq!(result["generation"]["usage"]["promptTokens"], 900);
+        assert_eq!(result["generation"]["usage"]["generatedTokens"], 1_536);
+        assert_eq!(result["generation"]["maxNewTokens"], 1_536);
+        // Additive only: the keys every existing reader uses are untouched.
+        assert_eq!(result["originalPrompt"], "a courier sets a parcel down");
+        assert!(result["refinedPrompt"].as_str().unwrap().ends_with("only"));
+        assert_eq!(result["executionIdentity"]["backend"], "mlx");
     }
 
     #[test]
@@ -1969,6 +2073,35 @@ mod tests {
         assert_eq!(RefineTask::Rewrite.done_message(), "Prompt refined.");
     }
 
+    /// sc-24029. The per-shot film refine is dispatched with no `task` field
+    /// (`film_planner.rs`), so it classifies as `Rewrite` and takes that task's budget — while the
+    /// prompt it must produce is bounded by `sceneworks_core::MAX_PROMPT_CHARS`. A budget that
+    /// cannot reach the contract truncates the rewrite mid-sentence and still reports success,
+    /// which is how a 3026/4000-char film shot prompt shipped. Asserted as the CONTRACT (budget ×
+    /// chars-per-token ≥ the char cap) rather than as a literal, so shrinking the budget or raising
+    /// the cap fails here rather than in a render.
+    #[test]
+    fn the_rewrite_budget_covers_the_refined_prompt_char_contract() {
+        // ~2.83 chars/token, from the JSON-caption path this file already states (4096 ≈ ~11.6k
+        // chars). This is a deliberately CONSERVATIVE FLOOR, not the rate this task's prose
+        // actually achieves: sc-24029 measured the refiner's shot rewrites at ~5.7 chars/token
+        // (1584-2922 chars from a 512-token budget). The floor is used here so the assertion holds
+        // even for the densest output the task can emit; the budget clears both figures.
+        const CHARS_PER_TOKEN: f64 = 11_600.0 / 4096.0;
+
+        let budget = f64::from(DEFAULT_REFINE_MAX_NEW_TOKENS);
+        let reachable_chars = budget * CHARS_PER_TOKEN;
+        let required = sceneworks_core::MAX_PROMPT_CHARS;
+
+        assert!(
+            reachable_chars >= required as f64,
+            "the Rewrite budget of {DEFAULT_REFINE_MAX_NEW_TOKENS} tokens reaches only \
+             {reachable_chars:.0} chars at {CHARS_PER_TOKEN:.2} chars/token, short of the \
+             {required}-char refined-prompt contract; a film shot rewrite would stop on MaxTokens \
+             mid-sentence instead of on EOS",
+        );
+    }
+
     #[test]
     fn resolve_max_new_tokens_defaults_and_override() {
         // Caption tasks (magic-prompt + image_caption) get the larger default so the JSON closes
@@ -1990,10 +2123,12 @@ mod tests {
             resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe),
             1024
         );
-        // The free-text rewrite stays at the small default.
+        // The free-text rewrite carries the per-shot film refine, whose output contract is
+        // `MAX_PROMPT_CHARS` (sc-24029: 512 tokens cut a shot prompt off mid-sentence at 3026
+        // chars, because generation ended on `MaxTokens` rather than on EOS).
         assert_eq!(
             resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite),
-            512
+            1536
         );
         // An explicit positive override wins for any task.
         for task in [
@@ -2019,7 +2154,7 @@ mod tests {
                 &obj(serde_json::json!({ "maxNewTokens": "nope" })),
                 RefineTask::Rewrite
             ),
-            512
+            1536
         );
     }
 
@@ -2335,6 +2470,52 @@ mod tests {
             assert!(refines_for_minimax_h3(Some(model_id)));
         }
         assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
+    }
+
+    /// sc-24023. The marker ban must leave the engine's OWN reference labels alone.
+    ///
+    /// `<Picture N>`, `<Audio N>` and `<Video N>` are what the H3 text encoder itself prefixes each
+    /// supplied reference with, and from sc-24023 the film compiler writes sentences that bind a
+    /// role to one of them. They look exactly like the seven dead markers — angle-bracketed
+    /// literals in the prompt — and a filter that ate them would silently unbind every reference
+    /// shot while leaving a prompt that still reads correctly to a human.
+    ///
+    /// The ban is a fixed seven-literal list, so this passes as written; the test exists because
+    /// the next person to widen that list to a pattern has to see it go red.
+    #[test]
+    fn the_marker_ban_leaves_the_engines_own_reference_labels_alone() {
+        let bound = "The courier is the person shown in <Picture 1>. The parcel is the object \
+                     shown in <Picture 2>. She speaks with the voice from <Audio 1>, moving like \
+                     <Video 1>.";
+        // Byte for byte: a prompt made only of reference labels contains no dead marker, so the
+        // filter must not touch it at all — not even the whitespace collapse.
+        assert_eq!(strip_untrained_markers(bound), bound);
+
+        // And with a dead marker mixed in, the dead one goes and the labels stay. This is the case
+        // that separates "the filter ignores these" from "the filter never ran".
+        let baited = format!("<d>[English] Delivery.</d> {bound}");
+        let stripped = strip_untrained_markers(&baited);
+        assert!(
+            first_ci(&stripped, "<d>").is_none() && first_ci(&stripped, "</d>").is_none(),
+            "the dead dialogue markers must still go: {stripped}"
+        );
+        for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+            assert!(
+                stripped.contains(label),
+                "{label} is the engine's own reference label and must survive: {stripped}"
+            );
+        }
+        assert!(stripped.contains("[English] Delivery."), "{stripped}");
+
+        // Through the real reply path for both H3 partitions, which is where a refined film prompt
+        // actually meets the ban.
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            let refined = finalize_refined_output(&baited, false, Some(model_id));
+            for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+                assert!(refined.contains(label), "{model_id}: {refined}");
+            }
+            assert!(first_ci(&refined, "<d>").is_none(), "{model_id}: {refined}");
+        }
     }
 
     #[test]

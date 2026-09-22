@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { addFilmSound } from "../../api/films.js";
 import { AssetMedia, assetCanRenderAsAudio } from "../assetMedia.jsx";
+import { FindingList, SOUND_FIELD_PREFIX } from "./filmFindings.jsx";
 
 const KINDS = ["dialogue", "ambience", "music", "sfx"];
 const SPEECH_MODELS = ["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"];
@@ -39,8 +40,14 @@ function SfxBeds({ disabled, sound, onChange }) {
   </div>;
 }
 
-export function FilmSound({ activeProject, assets = [], disabled, draft, onChange, onReplaceDraft, saveDraft, setNotice, token }) {
+export function FilmSound({ activeProject, assets = [], disabled, draft, findings = [], onChange, onReplaceDraft, saveDraft, setNotice, token }) {
   const audioAssets = useMemo(() => assets.filter(assetCanRenderAsAudio), [assets]);
+  // The sound half of the reference pack is authored HERE, so its findings are shown here
+  // (sc-24028). The References step deliberately leaves them alone, and between the two panels
+  // every pack-level finding the server reports is displayed somewhere.
+  const soundFindings = findings.filter((finding) => (
+    finding.shotId == null && finding.field.startsWith(SOUND_FIELD_PREFIX)
+  ));
   const [assetId, setAssetId] = useState("");
   const [role, setRole] = useState("");
   const [kind, setKind] = useState("dialogue");
@@ -78,6 +85,11 @@ export function FilmSound({ activeProject, assets = [], disabled, draft, onChang
     <details className="ve-film-section" open>
       <summary>Sound and dialogue</summary>
       <p className="ve-film-help">Add recorded or synthesized dialogue and sequence sound beds.</p>
+      <FindingList
+        label="Sound findings"
+        messages={soundFindings.map((finding) => finding.message)}
+      />
+
       <div className="ve-film-form">
         <label>Generated picture audio<select aria-label="Generated picture audio" disabled={disabled} value={draft.productionPlan.sound.generatedAudio ?? "mute"} onChange={(event) => onChange((next) => { next.productionPlan.sound.generatedAudio = event.target.value; })}><option value="mute">Mute generated clip audio</option><option value="include">Include generated clip audio</option></select></label>
         <label>Dialogue bus gain<input aria-label="Dialogue bus gain" disabled={disabled} max="4" min="0" step="0.01" type="number" value={draft.productionPlan.sound.dialogue?.gain ?? 1} onChange={(event) => onChange((next) => { next.productionPlan.sound.dialogue ??= { gain: 1, muted: false }; next.productionPlan.sound.dialogue.gain = number(event.target.value, 1); })} /></label>
