@@ -396,8 +396,21 @@ function declaredPeakGb(byTier, backend, tier) {
 // fallback for every helper below — and deliberately NOT cross-lane: a candle host with no candle
 // evidence gets null (the caller shows nothing) rather than the MLX integer, because `qwen_image`'s
 // mlx 50 / candle 56 proves the MLX blanket can sit BELOW the candle requirement.
-export function blanketFloorGb(model, backend) {
+// A `tier` (sc-24112) prefers that tier's OWN declared floor from `<backend>.minMemoryGbByTier`
+// before falling back to the blanket scalar. A model whose tiers have genuinely different floors —
+// `qwen_image_2_1` spans 23 to 48 GB across q4/q8/bf16 — otherwise quotes its heaviest tier's
+// requirement at a user who picked the lightest, which reads as "your machine is too small" for a
+// tier that fits it comfortably. Both keys carry the SAME already-padded semantics, so neither gets
+// headroom added here; a tier with no row falls through to the scalar, which stays the conservative
+// number. Callers with no tier in hand pass nothing and get today's blanket answer unchanged.
+export function blanketFloorGb(model, backend, tier = null) {
   const block = backend === "candle" ? model?.candle : model?.mlx;
+  if (typeof tier === "string" && tier.trim() !== "") {
+    const perTier = numberOrNull(block?.minMemoryGbByTier?.[tier.trim()]);
+    if (perTier !== null && perTier > 0) {
+      return perTier;
+    }
+  }
   const gb = numberOrNull(block?.minMemoryGb);
   return gb !== null && gb > 0 ? gb : null;
 }

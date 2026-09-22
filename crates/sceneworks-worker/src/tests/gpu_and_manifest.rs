@@ -566,8 +566,19 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     //      lane's `compare-engine-capability-facts` is what forces this: a fresh dump that carries
     //      the new provider will not match the checked-in one.
     //
+    //   8. (sc-24112) `crates/sceneworks-worker/src/memory_route_registry.rs` — the two
+    //      `qwen_image_2_1` rules are registered ALREADY (MLX + Candle, `BF16_Q4_Q8`, `TEXT_ONLY`,
+    //      `PLAIN`), but nothing in that file's tests forces them, so re-read them against the
+    //      pinned descriptor at the bump: confirm the provider still declares exactly those tiers
+    //      and still refuses every adapter, and narrow the rows if it does not.
+    //
     // …and then `npm run generate:memory-matrix` + `npm run generate:memory-anchors`, because (2),
     // (5) and (7) move the matrix's inputs.
+    //
+    // SEPARATELY FROM THE PIN — the epic's TERMINAL story owns the tier upload, which is what
+    // turns sc-24112's DECLARED q8/q4 tiers into installable ones. That is not a pin-bump item and
+    // must not be folded into one; `test_qwen_image_2_1_pending_tiers_are_refused_until_their_revision_is_pinned`
+    // in `tests/test_builtin_manifest_audit.py` is its fail-closed guard and names the exact steps.
     const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
 
     // Every row is covered by the expectation table (no row added without a flag pair here).
@@ -3117,40 +3128,109 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
 }
 
 
-/// sc-24109 — the INPUTS the candle VRAM fit gate reads for `qwen_image_2_1`, pinned on a lane that
-/// can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
-/// `qwen_image_2_1_resolves_its_candle_peak_from_the_derived_min_memory_floor` first executes on the
-/// windows-candle CI lane).
+/// sc-24109/sc-24112 — the INPUTS the two fit gates read for `qwen_image_2_1`, pinned on a lane
+/// that can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
+/// `qwen_image_2_1_resolves_a_derived_candle_floor_per_tier` first executes on the windows-candle
+/// CI lane; this is the manifest half, which runs everywhere).
 ///
-/// The consequence this guards is not a rounding error, it is a product decision: with NO `candle`
-/// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, every
-/// tier resolves to this floor and the gate REFUSES the load pre-flight below it. 48 GB refuses a
-/// 32 GB RTX 5090 and a 40 GB A100 for the bf16 install — correctly, since the snapshot alone is
-/// 30.86 GiB of weights — so the number must not drift silently in either direction.
+/// The consequence this guards is not a rounding error, it is a product decision. With NO `candle`
+/// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, a tier
+/// resolves to a floor and the gate REFUSES the load pre-flight below it. sc-24109's single 48 GB
+/// number refused a 32 GB RTX 5090 and a 40 GB A100 — correctly for a bf16-only install whose
+/// weights are 28.61 GiB resident. sc-24112 keeps that number for bf16 and gives q8 and q4 their
+/// own, which is what makes those cards usable. Neither may drift silently in either direction.
 #[test]
-fn qwen_image_2_1_declares_the_derived_candle_vram_floor_and_no_measured_row() {
+fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() {
     let models = builtin_models_manifest();
     let entry = models
         .iter()
         .find(|model| model["id"] == "qwen_image_2_1")
         .expect("qwen_image_2_1 is in the shipped catalog");
-    let candle = entry
-        .get("candle")
-        .expect("sc-24109 declares the off-Mac candle block; without it the fit gate is SKIPPED");
 
-    assert_eq!(
-        candle["minMemoryGb"], 48,
-        "the derived floor the candle fit gate admits against (snapshot tensor bytes 30.86 GiB + \
-         the 2048-square activation transient). Changing it changes which cards are refused"
+    // BOTH lanes carry the same ladder, because both hold the same bytes resident. They are equal
+    // by shared derivation, not because one was copied from the other — which is why the loop
+    // below asserts the same numbers against each block rather than asserting the blocks are equal.
+    for backend in ["mlx", "candle"] {
+        let block = entry.get(backend).unwrap_or_else(|| {
+            panic!("the {backend} block must exist; without it the {backend} floor is unstated")
+        });
+        assert_eq!(
+            block["minMemoryGb"], 48,
+            "{backend}: the SCALAR stays the conservative fallback for any tier with no row \
+             (today `nvfp4`). Lowering it to the default tier's floor would under-predict an \
+             unlisted tier, and an under-prediction admits a load that OOMs"
+        );
+        let by_tier = block
+            .get("minMemoryGbByTier")
+            .unwrap_or_else(|| panic!("{backend}: sc-24112 declares a per-tier floor"));
+        for (tier, floor) in [("bf16", 48), ("q8", 31), ("q4", 23)] {
+            assert_eq!(
+                by_tier[tier], floor,
+                "{backend}/{tier}: DERIVED as ceil(resident peak at the 2048-square default in GB \
+                 x 1.25) — bf16 35.36 GiB, q8 23.08 GiB, q4 16.54 GiB. The rule is validated by \
+                 reproducing sc-24109's own 48 for bf16; changing a number here changes which \
+                 cards are refused"
+            );
+        }
+        assert_eq!(
+            by_tier.as_object().map(serde_json::Map::len),
+            Some(3),
+            "{backend}: a row for a tier the catalog does not ship would gate a tier nobody can \
+             select, and a missing row silently falls through to the conservative scalar"
+        );
+        // bf16 is UNCHANGED from sc-24109. The story opens cards for the quantized tiers; it does
+        // not loosen the dense one, and a reviewer coming back to this should see that stated.
+        assert_eq!(by_tier["bf16"], block["minMemoryGb"]);
+    }
+
+    assert!(
+        entry["candle"].get("vramGbByTier").is_none(),
+        "a measured per-tier row would WIN over these floors in predicted_peak_gb; nothing has \
+         been measured for 2.1 on CUDA, so declaring one would be an unmeasured claim wearing an \
+         evidence flag. The epic's terminal measurement story adds them"
     );
     assert!(
-        candle.get("vramGbByTier").is_none(),
-        "a measured per-tier row would WIN over minMemoryGb in predicted_peak_gb; nothing has been \
-         measured for 2.1 on CUDA, so declaring one would be an unmeasured claim"
+        entry["candle"].get("measured").is_none() && entry["candle"].get("sequentialPeakGb").is_none(),
+        "the sibling evidence keys must be absent for the same reason"
     );
-    assert_eq!(
-        entry["mlx"]["minMemoryGb"], 48,
-        "the unified-memory twin, derived from the same tensor bytes — the two floors are the same \
-         number because they are the same derivation, not because either was copied"
-    );
+}
+
+/// sc-24112 — the ADMISSION ENVELOPE the catalog mirrors from the provider, pinned beside the
+/// memory floors because the two answer different questions about the same request and are easy to
+/// confuse: the floors say whether the WEIGHTS fit the host, the envelope says whether the REQUEST
+/// fits the engine.
+///
+/// `crate::admission_geometry` owns the behaviour and its own tests; this asserts the shipped
+/// catalog actually carries the block, because the gate is declaration-driven and a missing block
+/// makes it silently inert rather than loud.
+#[test]
+fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let geometry = entry
+        .get("admissionGeometry")
+        .expect("sc-24112 declares the envelope; without it the request gate is a no-op");
+    for (key, value) in [
+        ("maxSide", 2752),
+        ("maxPresetArea", 4_300_800),
+        ("maxTargetImageTokens", 16_800),
+        ("maxReferenceImages", 10),
+        ("tokensPerMaxReference", 4_096),
+        ("maxJointTokens", 58_016),
+        ("pixelsPerToken", 16),
+        ("maxBatch", 8),
+    ] {
+        assert_eq!(
+            geometry[key], value,
+            "{key} is mirrored from the provider's own admission_geometry(); a value invented here \
+             would gate requests against a bound the engine does not have"
+        );
+    }
+    // The largest-AREA preset is neither the widest nor the square default. Stated here because it
+    // is the mistake the whole field exists to prevent.
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2752 * 1536);
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2048 * 2048);
 }

@@ -2160,10 +2160,143 @@ pub(crate) fn resolve_weights_dir(
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
     // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
     // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
+    // Qwen-Image 2.1 (sc-24112) — a SPLIT-REPO tier layout, and the reason it cannot use
+    // `standard_tier_subdir`: that resolver descends into `<root>/<tier>/` of ONE repo, and 2.1's
+    // three tiers do not live in one repo. bf16 IS the released upstream snapshot at its own root
+    // (the converter refuses to emit a `bf16/` copy, and re-hosting unmodified weights would be a
+    // §3 redistribution SceneWorks does not need to make), while q8 and q4 are `q8/`/`q4/` subdirs
+    // of the SceneWorks re-host. So the tier picks the REPO first, then the subdir.
+    //
+    // Exactly the shape the Ideogram-4 branch above already has, with the halves swapped: there
+    // the packed tiers are the turnkey and bf16 lives in a separate shared repo; here bf16 is the
+    // upstream tree and the packed pair is the re-host. Both fall back to the resolved default
+    // rather than half-loading when the requested tier is not on disk.
+    //
+    // Repo and revision come from the MANIFEST's own download rows, not from consts here: the
+    // catalog is the pin authority (F-029), and reading it means the terminal story's revision pin
+    // reaches the loader by editing one place. A row still carrying the null-SHA placeholder
+    // resolves to nothing, so a pending tier falls back to the installed default instead of
+    // pointing the loader at a snapshot directory that cannot exist.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if request.model == "qwen_image_2_1" {
+        if let Some(tier_dir) = qwen_image_2_1_tier_dir(settings, request) {
+            return Ok(Some(tier_dir));
+        }
+        return Ok(snapshot);
+    }
+    // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
+    // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
+    // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
+    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
+    // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
     if uses_standard_tier_layout(request) {
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
+}
+
+/// The installed tier directory for a `qwen_image_2_1` request, or `None` to fall back to the
+/// model's default snapshot (sc-24112).
+///
+/// Resolution, in order:
+///
+/// 1. the requested tier (`advanced.mlxQuantize`: `<= 0` ⇒ bf16, `1..=4` ⇒ q4, anything else ⇒ the
+///    app-wide q8 default, matching [`standard_tier_subdir`]'s own rule so a 2.1 job and every
+///    other matrix job read one knob the same way);
+/// 2. then, if that tier is not installed, the remaining tiers **densest first** (bf16 → q8 → q4),
+///    so a partial install never silently lands on the washed q4 — the identical fallback ordering
+///    every other tier resolver uses, and the identical reason.
+///
+/// A tier is "installed" when its resolved directory holds a loadable `transformer/`. The bf16 tier
+/// is the upstream repo ROOT (no tier subdir); q8 and q4 are subdirs of the re-host. Nothing here
+/// quantizes, converts, or substitutes a tier silently in the sense that matters: the resolved tier
+/// is recorded and reported, exactly as the shared resolver's fallback is.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_tier_dir(settings: &Settings, request: &ImageRequest) -> Option<PathBuf> {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let requested = match bits {
+        Some(bits) if bits <= 0 => "bf16",
+        Some(bits) if bits <= 4 => "q4",
+        _ => "q8",
+    };
+    let installed = |tier: &str| -> Option<PathBuf> {
+        let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
+        // The same "has a loadable backbone" probe the shared resolver applies, spelled for this
+        // family's diffusers layout: a sharded `transformer/` with its index, or a single file.
+        let transformer = dir.join("transformer");
+        let loadable = transformer
+            .join("diffusion_pytorch_model.safetensors.index.json")
+            .is_file()
+            || transformer
+                .join("diffusion_pytorch_model.safetensors")
+                .is_file();
+        loadable.then_some(dir)
+    };
+    installed(requested).or_else(|| {
+        ["bf16", "q8", "q4"]
+            .into_iter()
+            .filter(|tier| *tier != requested)
+            .find_map(installed)
+    })
+}
+
+/// Where `tier`'s snapshot directory would be, read off the request's OWN manifest entry.
+///
+/// `None` when the catalog declares no such tier, when its revision is still the sc-24112
+/// null-SHA placeholder (the artifact is not published, so there is nothing to point at), or when
+/// that pinned snapshot is not in the cache. The `files` glob's leading path component is what
+/// names the subdir — `["q8/*"]` ⇒ `q8/` — and an empty `files` (the whole-repo upstream bf16 row)
+/// means the snapshot ROOT, which is exactly the distinction that makes this family split-repo.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_declared_tier_dir(
+    settings: &Settings,
+    request: &ImageRequest,
+    tier: &str,
+) -> Option<PathBuf> {
+    let entry = Value::Object(request.model_manifest_entry.clone());
+    let download = sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+        &entry, tier,
+    )?;
+    if sceneworks_core::model_artifacts::artifact_selection::is_pending_artifact_download(&download)
+    {
+        return None;
+    }
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let revision = download.get("revision").and_then(Value::as_str)?;
+    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
+    let subdir = download
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .and_then(|pattern| pattern.split('/').next())
+        // Confined to a single plain directory name. The value is a checked-in catalog string
+        // rather than user input, but a glob is still a string a future edit could widen, and a
+        // traversal component here would point the LOADER outside the cache — cheap to refuse.
+        .filter(|component| {
+            !component.is_empty()
+                && *component != "*"
+                && !component.starts_with('.')
+                && component
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        });
+    match subdir {
+        Some(component) => Some(root.join(component)),
+        None => Some(root),
+    }
 }
 
 /// FLUX.1's generic Candle route reads only the hosted packed q4/q8 turnkeys. The shared resolver

@@ -969,6 +969,33 @@
               }
             }
           },
+          "admissionGeometry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "maxSide",
+              "maxPresetArea",
+              "maxTargetImageTokens",
+              "maxReferenceImages",
+              "tokensPerMaxReference",
+              "maxJointTokens",
+              "pixelsPerToken",
+              "maxBatch"
+            ],
+            "x-sceneworks-contract": "binding",
+            "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/admission_geometry.rs", "anchor": "AdmissionGeometry::from_manifest" }],
+            "description": "The engine's own request-admission envelope, mirrored from the provider's `memory_strategy::admission_geometry()` (sc-24112). Declared ONLY for a route whose joint attention sequence grows with the REFERENCE COUNT as well as the target area — a consumer that knows only limits.resolutions cannot bound such a route, because the transient is linear in the joint sequence and references are extra image-token blocks. The gate this feeds REFUSES an over-envelope request naming the number; it never silently shrinks the geometry, drops references, or downgrades a tier. These are structural counts from the frozen engine geometry, not measurements.",
+            "properties": {
+              "maxSide": { "type": "integer", "minimum": 1, "description": "Longest side any declared preset uses (the engine's Capabilities::max_size)." },
+              "maxPresetArea": { "type": "integer", "minimum": 1, "description": "Largest preset AREA in pixels. Deliberately separate from maxSide: the widest preset and the largest-area preset are usually different, and a consumer that budgeted from maxSide or from the default preset would under-budget the real worst case." },
+              "maxTargetImageTokens": { "type": "integer", "minimum": 1, "description": "Latent tokens the largest-area preset contributes (maxPresetArea / pixelsPerToken^2)." },
+              "maxReferenceImages": { "type": "integer", "minimum": 0, "description": "Most reference images the engine's joint layout can express. A request above this is refused here as well as by the engine." },
+              "tokensPerMaxReference": { "type": "integer", "minimum": 0, "description": "Latent tokens ONE reference adds. For a route that fits every condition image to a fixed output resolution this is constant in the target size, and pricing references at the target's own token count instead over-states the worst case — a consumer refusing requests that would in fact have fitted." },
+              "maxJointTokens": { "type": "integer", "minimum": 1, "description": "The worst-case joint sequence the attention runs over: conditioning tokens + maxTargetImageTokens + maxReferenceImages x tokensPerMaxReference. This is the single quantity admission gates on." },
+              "pixelsPerToken": { "type": "integer", "minimum": 1, "description": "Pixels one latent token covers on each axis (the VAE spatial scale times the patch size)." },
+              "maxBatch": { "type": "integer", "minimum": 1, "description": "Images one request may ask for (the engine's Capabilities::max_count). They render sequentially, so this multiplies time rather than peak." }
+            }
+          },
           "recommended": { "type": "boolean" },
           "autoDownload": { "type": "boolean" },
           "macOnly": { "type": "boolean" },
@@ -1279,6 +1306,15 @@
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\")" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
+              },
+              "minMemoryGbByTier": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "type": "integer", "minimum": 1 },
+                "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }],
+                "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own."
               },
               "measuredSiblingActiveDiskFraction": {
                 "type": "number",
@@ -1594,6 +1630,15 @@
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
                 "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
+              },
+              "minMemoryGbByTier": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "type": "integer", "minimum": 1 },
+                "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "tier_floor_gb(candle, tier_key)" }],
+                "description": "Per-tier form of candle.minMemoryGb, for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar — an ALREADY-PADDED floor that predicted_peak_gb returns as-is, with NO HEADROOM_GB added. That is the whole reason this key is not vramGbByTier: that ladder is a raw measured/estimated PEAK, the gate pads it, and a row there is an evidence claim the sibling `measured` flag classifies. This key makes no evidence claim, so a DERIVED floor can live here honestly while vramGbByTier stays empty. Resolution order in predicted_peak_gb: vramGbByTier[tier] + headroom, else minMemoryGbByTier[tier], else minMemoryGb. A tier with no row therefore lands on the scalar, which must stay conservative for every unlisted key (including nvfp4)."
               },
               "vramGbByTier": {
                 "type": "object",
@@ -1945,6 +1990,10 @@
                   "type": "boolean",
                   "default": false,
                   "description": "Whether replacing an older receipt-backed install is mandatory. When true, stale files are not considered usable; omitted/false preserves the installed model and surfaces updateAvailable."
+                },
+                "pendingArtifact": {
+                  "type": "boolean",
+                  "description": "This variant is DECLARED but its artifact is not published yet (sc-24112). The row carries the null SHA 0000000000000000000000000000000000000000 as its revision — schema-valid 40-hex and unmistakably not a commit — and the pairing is rigid in both directions: a null SHA without this flag, or this flag with a real SHA, is a manifest-audit failure. A pending row is never queued for download, never counted as installable, and may never be `default: true`; the catalog still ENUMERATES it, so the tier axis and its picker are real before the artifact lands. Removing the flag and pinning the real revision is a single edit, which is the whole point: there is no separate switch to forget."
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],

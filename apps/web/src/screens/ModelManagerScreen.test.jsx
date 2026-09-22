@@ -1613,7 +1613,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   // carrying variant / installState / downloadSizeBytes / footprint. Tiers are sized so the RAM
   // suggestion lands on q4 at 32 GB (budget 28.8 GB: q4 estimated peak 18 GB fits; q8/bf16 overflow)
   // and on bf16 at 512 GB (budget 460.8 GB: bf16 estimated peak 38 GB fits).
-  function matrixModel({ installed = [] } = {}) {
+  function matrixModel({ installed = [], pending = [], notDeletable = [] } = {}) {
     // diskGb (on-disk footprint, req #1 — this is what the row must render) is deliberately distinct
     // from downloadGb (compressed download) so the assertions prove the displayed size comes from
     // footprint.diskSizeBytes, not downloadSizeBytes. The RAM suggestion keys off diskGb.
@@ -1632,8 +1632,18 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       hasVariantMatrix: true,
       variants: tiers.map((tier) => ({
         variant: tier.variant,
-        installState: installed.includes(tier.variant) ? "installed" : "missing",
+        // sc-24112: `pending` is the API's third install state for a declared-but-unpublished
+        // tier, and `tierDeletable: false` is how it reports a tier the per-tier delete cannot
+        // reclaim on its own (a whole-repo row with no `files` scope).
+        installState: pending.includes(tier.variant)
+          ? "pending"
+          : installed.includes(tier.variant)
+            ? "installed"
+            : "missing",
         cacheState: installed.includes(tier.variant) ? "complete" : "missing",
+        pendingArtifact: pending.includes(tier.variant),
+        tierDeletable:
+          !pending.includes(tier.variant) && !notDeletable.includes(tier.variant),
         downloadSizeBytes: tier.downloadGb * GB,
         footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
       })),
@@ -1892,6 +1902,50 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       expect.objectContaining({ id: "z_image_turbo" }),
       "q8",
     );
+  });
+
+  // sc-24112: a DECLARED-but-unpublished tier (`pendingArtifact`). The catalog advertises it so the
+  // tier axis is real before the bytes exist — the memory ladder, the fit gates and this panel are
+  // all built against it — but its artifact is not on the Hub yet and its revision is the null-SHA
+  // placeholder. The API refuses the download with the reason, so the row must NOT offer a
+  // checkbox that would queue a fetch that cannot resolve; it says why instead.
+  it("offers no download for a tier whose artifact is not published yet", async () => {
+    await render([
+      matrixModel({
+        installed: ["bf16"],
+        pending: ["q4", "q8"],
+      }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    for (const label of ["Q4", "Q8"]) {
+      const row = rowFor(label);
+      expect(row.querySelector("input").disabled).toBe(true);
+      expect(row.querySelector(".status-badge").textContent).toBe("not published yet");
+      // …and nothing to reclaim, because nothing was ever fetched.
+      expect(row.querySelector(".model-tier-delete")).toBeNull();
+    }
+    // The published tier is unaffected: still listed, still selectable-as-installed.
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+  });
+
+  // sc-24112: the per-tier delete is offered only for a tier the API can actually reclaim ALONE.
+  // A whole-repo tier (`files: []` — `qwen_image_2_1`'s bf16 IS the upstream snapshot) is the model
+  // rather than a slice of it, and `DELETE /models/:id/variants/:variant` refuses it with "delete
+  // the whole model instead". Before this story every variant row carried a file glob and the API's
+  // own comment assumed it always would, so the button was offered unconditionally on an installed
+  // tier — which would now render a Delete that always errors.
+  it("hides the per-tier delete on an installed tier the API cannot reclaim alone", async () => {
+    await render([
+      matrixModel({ installed: ["bf16", "q8"], notDeletable: ["bf16"] }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+    expect(rowFor("bf16").querySelector(".model-tier-delete")).toBeNull();
+    // A scoped sibling still reclaims normally, so this is a per-row fact and not the control
+    // being switched off.
+    expect(rowFor("Q8").querySelector(".model-tier-delete")).toBeTruthy();
   });
 
   // sc-12025: convert-at-install models (mlxTiers, e.g. Anima) render no download panel, so they get

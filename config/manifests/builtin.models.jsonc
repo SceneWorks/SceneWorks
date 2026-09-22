@@ -3181,11 +3181,26 @@
       // `candle_routed: true`, so the SAME request — seven presets, ÷32 stride, 40 steps, seed,
       // negative prompt, true-CFG guidance, count — is claimable on whichever worker the host has.
       //
-      // The tier surface is NOT shared between them and must never be merged: the MLX provider
-      // advertises `supported_quants: [Q4, Q8]`, the Candle provider advertises `[]`. Neither can
-      // offer a tier today regardless, because the tier turnkey + bundles are sc-24112 — this
-      // entry ships the bf16 upstream snapshot and nothing else, so there is no `quantize` key on
-      // either lane and no tier matrix to resolve.
+      // sc-24112 — THREE INSTALLABLE TIERS, ON BOTH BACKENDS, from pinned reproducible bundles.
+      //
+      // The tier surface is per-backend truthful and is still NOT a merged per-model-id list — it
+      // is simply that, after inference PR #1007, the two providers happen to declare the SAME
+      // pair: MLX `supported_quants: [Q4, Q8]` and Candle `supported_quants: [Q4, Q8]` (it was
+      // `[]` at sc-24109). Both backends load the SAME packed artefacts: MLX packed-detects the
+      // triple, Candle's `AdaptLinear::linear_detect_gs` does the same on the DiT and the Qwen3
+      // tower. `spec.quantize` on Candle is therefore a tier SELECTOR, exactly as on MLX — a dense
+      // snapshot plus a quantize request is a typed refusal ("no on-the-fly quantization"), NOT a
+      // fallback. The two declarations are still read separately (`ModelCaps::candle_quant` is the
+      // Candle column; the `mlx` block is the MLX one) and `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
+      // — renamed for the new truth — is where a merge would show up.
+      //
+      // A tier is a WHOLE-PIPELINE contract here, unlike the 2512 `qwen_image` entry above: q4 runs
+      // q4 through the DiT *and* the Qwen3 language tower. There is no `precisionFloors` row and no
+      // `mlx.denseTextEncoderTier`. 2512 pairs a ~20B DiT with a ~7B Qwen2.5-VL tower, so its dense
+      // tower is a minority of the footprint; 2.1 pairs a 7.12B DiT with a 7.57B Qwen3 tower, and
+      // under staged residency the floor is `max(tower, DiT + VAE)` — a dense tower would pin that
+      // floor at ~14.5 GiB at EVERY tier and q4 would buy ~0.3 GiB over q8. The earlier
+      // Q4→Q8 text-encoder floor was WITHDRAWN in #1007's fix pass for exactly that reason.
       "id": "qwen_image_2_1",
       "name": "Qwen Image 2.1",
       "family": "qwen-image-2-1",
@@ -3213,12 +3228,11 @@
         // 2.1 yet. They are filled by the epic-end measurement campaign, never by copying the
         // 2512 rows.
         //
-        // NO `variant` KEY, deliberately. A `variant` declares a user-selectable PRECISION TIER,
-        // and this release has none: one artifact, no `mlx.quantize`, no tier subdirs, nothing for
-        // a tier picker to offer. Tagging it `bf16` would advertise a precision axis the product
-        // cannot serve — and would make the catalog claim an MLX-only `precisionTier/bf16` cell
-        // that the cross-backend parity register would then have to carry as an approved
-        // exception. sc-24112 adds the real Q4/Q8 tier artifacts and the `variant` tags with them.
+        // sc-24112 TAGS THIS ROW `variant: "bf16"`. It is the densest of three installable tiers
+        // now, so the precision axis is real and a tier picker has something to offer. bf16 is the
+        // one tier the converter REFUSES to produce (it is the released snapshot itself), which is
+        // why it alone still comes from `Qwen/Qwen-Image-2.1` while q8/q4 come from the SceneWorks
+        // re-host below.
         //
         // NO `platforms` KEY either, as of sc-24109. The MLX-only slice restricted this artifact to
         // `["macos"]` so a Windows/Linux install could not download 31 GB of weights nothing on
@@ -3230,9 +3244,101 @@
           "provider": "huggingface",
           "repo": "Qwen/Qwen-Image-2.1",
           "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+          "variant": "bf16",
+          "default": true,
           "files": [],
           "estimatedSizeBytes": 33134949212,
           "footprint": { "diskSizeBytes": 33134949212, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ── The SceneWorks re-host: q8 and q4, one complete standalone snapshot per subdir ───────
+        //
+        // `SceneWorks/qwen-image-2-1-mlx` with `q8/` and `q4/` subdirs, each a complete
+        // `from_snapshot`-loadable tree in the released layout (model_index.json + processor/ +
+        // scheduler/ + text_encoder/ + transformer/ + vae/) whose two packable components are
+        // already affine-quantized at group 64, plus a `SHA256SUMS` manifest of everything the
+        // converter wrote and the upstream LICENSE/README. Produced by
+        // `mlx-gen-qwen-image-2-1`'s `convert::prequantize_turnkey`, which is byte-reproducible and
+        // byte-identical to `mlx_rs::ops::quantize` over the bf16 source. There is no `bf16/`
+        // subdir: the converter refuses to emit one, because the dense tier IS the upstream
+        // snapshot and a second copy would be a §3 redistribution of unmodified weights.
+        //
+        // ⚠️ REDISTRIBUTION. Unlike the ungated upstream pull above, these two ARE a SceneWorks
+        // re-host of Qwen-RESEARCH-licensed weights, so §3 is triggered and its three obligations
+        // travel IN the artefact: each tier subdir carries a copy of the Agreement (LICENSE), a
+        // README marking the files that were changed (the two quantized components, with the tier
+        // and group size), and the verbatim attribution notice. `licenseNotice`/`licenseUrl` below
+        // apply to all three tiers, and `requiresLicenseAcknowledgment` gates every one of them —
+        // the sc-24109 accept is per MODEL, not per artifact, so a q4 install cannot skip it.
+        // `nonCommercial: true` keeps `scripts/check-no-nc-weights.mjs` fatal on any build that
+        // embeds these bytes; re-hosting them on the Hub is not embedding them in a build.
+        //
+        // ⚠️ THE REVISION IS A PLACEHOLDER AND THE AUDIT REFUSES TO SHIP IT.
+        // `0000000000000000000000000000000000000000` is the null SHA — schema-valid 40-hex, and
+        // unmistakably not a commit. The artefacts DO NOT EXIST ON THE HUB YET: conversion is
+        // GPU-gated (one tier at a time, ~26–30 GB high-water) and the `hf upload` is the epic's
+        // terminal story. Until then each pending row carries `pendingArtifact: true`, which is
+        // rigidly paired with the null SHA by
+        // `test_qwen_image_2_1_pending_tiers_are_refused_until_their_revision_is_pinned`:
+        //   * null SHA without `pendingArtifact` ⇒ FAIL (a placeholder shipped as offerable),
+        //   * `pendingArtifact` with a real SHA ⇒ FAIL (the flag outlived the upload),
+        //   * `default: true` on a pending row ⇒ FAIL (installing the model would queue vapour),
+        //   * nothing pending, yet `default` not on the LIGHTEST tier ⇒ FAIL (the terminal story
+        //     must move `default` to q4 when it pins the revisions; the catalog convention is
+        //     lightest-tier default, as `qwen_image` / `qwen_image_edit_2511` above).
+        // `pendingArtifact` is also what keeps the download/install path from queueing a fetch of a
+        // revision that does not resolve. The tier PICKER still enumerates all three (the variant
+        // axis is a catalog declaration, and the terminal story publishes into it).
+        //
+        // `estimatedSizeBytes` is DERIVED, not observed — there is nothing on disk to sum yet. The
+        // method, applied to the EXACT bf16 tree total above (33,134,949,212 B), is the one the
+        // engine's own `memory_strategy::derived::packed_bytes` uses, so the two cannot drift:
+        //
+        //   tier_bytes = 33_134_949_212
+        //              + (packed(DIT_LINEAR_PARAMS, bits)  - DIT_LINEAR_PARAMS  * 2)
+        //              + (packed(LM_LINEAR_PARAMS,  bits)  - LM_LINEAR_PARAMS   * 2)
+        //   packed(p, bits) = p * bits / 8 + (p / 64) * 4      // codes + one bf16 scale and bias
+        //                                                      // per group of 64
+        //   DIT_LINEAR_PARAMS = 7_115_112_448   (the DiT's 232 group-quantizable 2-D Linears)
+        //   LM_LINEAR_PARAMS  = 6_945_767_424   (the tower's 252 decoder Linears)
+        //
+        // Everything else in the tree is byte-copied and therefore cancels: the DiT's 65 RMSNorm
+        // scales, the tower's 145 norm scales, its 622 M dense token embedding, the untied
+        // `lm_head` and the whole `model.visual.*` vision tower (on disk, never loaded by this
+        // route), the f32 VAE, and the tokenizer/processor/scheduler corpus. The derivation omits
+        // the per-tier `SHA256SUMS` (a few KB) and is not adjusted for it.
+        //
+        //   q8 = 33_134_949_212 + (7_559_806_976 - 14_230_224_896)
+        //                       + (8_625_537_024 - 13_891_534_848) = 19_952_874_332  (18.58 GiB)
+        //   q4 = 33_134_949_212 + (4_002_250_752 - 14_230_224_896)
+        //                       + (5_151_653_312 - 13_891_534_848) = 12_922_434_396  (12.03 GiB)
+        //
+        // These are DERIVED UNTIL THE UPLOAD PINS A REVISION. The terminal story replaces the null
+        // SHA with the real one and re-sums the resolved blobs, exactly as the bf16 row's total was
+        // obtained; if the observed total differs the DERIVATION is what is wrong, and the comment
+        // above says which term to correct.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` stay null on every tier: nothing has been
+        // measured for 2.1 on either backend, and the per-tier derived ladder lives in the
+        // `mlx`/`candle` blocks below where it is labelled derived.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "0000000000000000000000000000000000000000",
+          "variant": "q8",
+          "pendingArtifact": true,
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19952874332,
+          "footprint": { "diskSizeBytes": 19952874332, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "0000000000000000000000000000000000000000",
+          "variant": "q4",
+          "pendingArtifact": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 12922434396,
+          "footprint": { "diskSizeBytes": 12922434396, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3248,7 +3354,7 @@
       // Transcribed from the LICENSE file beside the pinned weights ("Qwen RESEARCH LICENSE
       // AGREEMENT", release date 2026-09-20); the clause-by-clause evidence is
       // inference:docs/licensing/sc-24108-qwen-research-licence-evidence.md.
-      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" SceneWorks itself never redistributes these weights — it downloads them from Qwen's own repository into your machine on first use. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a record of exactly which files were changed, and the attribution notice above inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
       // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs): "Non-Commercial"
       // is §1(i) of the agreement above, so a build that ever embedded these weights must fail.
       "nonCommercial": true,
@@ -3308,52 +3414,157 @@
         "families": [],
         "types": []
       },
-      // NO `calibrations` and NO `memoryStrategyContract`: the provider publishes no
-      // memory-strategy ladder at this pin, so the route stays the consumer fallback (the spec is
-      // handed to the engine unshaped) exactly as `ideogram_4` did on MLX before its ladder
-      // landed. `minMemoryGb` is therefore the ONLY memory claim this entry makes, and it is a
-      // DERIVED FLOOR, not a measurement: the pinned snapshot's own tensor bytes are 30.86 GiB
-      // (DiT 13.25 + Qwen3-VL tower 16.33 + VAE 1.26), all of which are resident together on the
-      // native path, and the language tower runs f32 activations over its bf16 weights. 48 GB
-      // gates that floor with room for the activation transient at the 2048-square default
-      // without gating a 64 GB Mac. It is NOT a measured peak and must not be cited as one; the
-      // real numbers come from the epic-end campaign, and 2512's rows are a different model.
-      "mlx": {
-        "minMemoryGb": 48
+      // ── ADMISSION GEOMETRY (sc-24112) ────────────────────────────────────────────────────────
+      //
+      // Mirrored VERBATIM from the provider's `memory_strategy::admission_geometry()`, which both
+      // backends publish identically. It exists because `limits.resolutions` cannot bound this
+      // route: the DiT attends over a JOINT sequence whose length grows with the REFERENCE COUNT
+      // as well as the target area, and the activation transient is linear in that sequence. A
+      // consumer that budgeted from the largest side, or from the default preset, would under-
+      // budget the real worst case — and one that priced a reference at the TARGET's token count
+      // would over-budget it by more than 3x and refuse requests that would in fact have fitted.
+      //
+      //   maxSide                2752   the longest side any preset uses
+      //   maxPresetArea     4_300_800   2400x1792 — NEITHER the widest preset (2752x1536, 4.23 Mpx)
+      //                                 NOR the square default (2048x2048, 4.19 Mpx). 4.30 Mpx.
+      //   maxTargetImageTokens 16_800   maxPresetArea / 16^2  (150 x 112)
+      //   maxReferenceImages       10   what the joint layout can express (upstream's README cap)
+      //   tokensPerMaxReference 4_096   (1024/16)^2. CONSTANT in the target size: the engine's
+      //                                 `reference::prepare` fits EVERY condition image to its
+      //                                 1024^2 output_resolution before the vision tower and the
+      //                                 VAE see it, so a reference costs the same at every preset.
+      //   maxJointTokens       58_016   256 + 16_800 + 10 x 4_096 — the quantity to gate on
+      //   pixelsPerToken           16   the VAE's spatial scale (patch_size is 1; latents unpatched)
+      //   maxBatch                  8   images per request; they render SEQUENTIALLY, so this
+      //                                 multiplies time, not peak
+      //
+      // The gate this feeds REFUSES and never silently shrinks: an over-envelope request is a typed
+      // refusal naming the number, not a quietly resized image, a dropped reference or a downgraded
+      // tier. A legal 10-reference request at the default preset (256 + 16_384 + 40_960 = 57_600
+      // tokens) is ADMITTED — it is inside the envelope, and refusing it would be the over-pricing
+      // failure described above.
+      //
+      // These are structural counts off the frozen engine geometry, not measurements. The request-
+      // time per-image checks (the 1..=10 bound, RGBA conversion, the smart_resize/VAE grid
+      // agreement) stay in the engine's `reference` module, where a bad reference is a REQUEST
+      // refusal rather than a memory refusal.
+      "admissionGeometry": {
+        "maxSide": 2752,
+        "maxPresetArea": 4300800,
+        "maxTargetImageTokens": 16800,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 4096,
+        "maxJointTokens": 58016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8
       },
-      // sc-24109 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same upstream snapshot,
-      // same seven presets and same true-CFG request contract; only the tensor backend differs.
+      // ── THE DERIVED MEMORY LADDER (sc-24112) ─────────────────────────────────────────────────
       //
-      // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` is
-      // `x-sceneworks-contract: binding` and is read by crates/sceneworks-worker/src/vram_gate.rs
-      // (`predicted_peak_gb`). With NO `candle` block the fit gate is skipped ENTIRELY and a
-      // too-small card discovers it is too small by OOMing mid-load; with one — and with no
-      // `vramGbByTier` row to win ahead of it — EVERY tier key resolves to this floor and the gate
-      // REFUSES the load before it starts on any card with less free VRAM. At 48 that deliberately
-      // includes a 32 GB RTX 5090 and a 40 GB A100 for this bf16 install: the snapshot alone is
-      // 30.86 GiB of weights, which cannot sit resident with a 2048-square activation transient on
-      // either. A refusal that names the number is the intended behaviour; a reactive OOM is not.
-      // sc-24112's SceneWorks half adds q8/q4 tiers with genuinely lower floors, which is what
-      // makes those cards usable — not loosening this number.
-      // Asserted by `qwen_image_2_1_resolves_its_candle_peak_from_the_derived_min_memory_floor`
-      // (vram_gate, candle lane) and `qwen_image_2_1_declares_the_derived_candle_vram_floor_and_no_measured_row`.
+      // Every number in the two backend blocks below is DERIVED and NONE is measured. They come
+      // from the engine's own `memory_strategy::derived` module — parameter counts x dtype width
+      // for the weights, plus a structural count of the live tensors in the ported forward for the
+      // transient — and NOT ONE of them is copied from the 2512 `qwen_image` rows above. That
+      // route's DiT is ~3x this one and its text tower is a different architecture; its measured
+      // anchor is not evidence here (epic requirement E5). The engine itself refuses to launder
+      // these into evidence: it registers NO `ActivationMemoryRegistration`, so
+      // `activation_memory_bytes_1024("qwen_image_2_1")` answers None and callers fall back to the
+      // asset-facts + generic-headroom estimate path where the safety margin applies. The epic's
+      // TERMINAL measurement story owns the real anchor; nothing here is it.
       //
-      // `minMemoryGb` 48 is the VRAM twin of the `mlx` floor above and is DERIVED the same way,
-      // from the pinned snapshot's own 30.86 GiB of tensor bytes (DiT 13.25 + Qwen3-VL tower 16.33
-      // + VAE 1.26), all of which the native path holds resident together, plus room for the
-      // 2048-square activation transient. It is NOT a measurement and must never be cited as one —
-      // there has been no CUDA render of 2.1 on any host.
+      // The ladder, at the 2048-square default preset, in GiB:
+      //
+      //   tier | tower  | DiT   | VAE  | resident | staged floor | activation       | peak
+      //        |        |       |      | (all 3)  | max(tower,   | untiled / 512-64 | resident /
+      //        |        |       |      |          |  DiT+VAE)    | bounded decode   | bounded
+      //   -----+--------+-------+------+----------+--------------+------------------+------------
+      //   bf16 | 14.10  | 13.25 | 1.26 |  28.61   |    14.51     |  6.75 / 1.66     | 35.36 / 16.17
+      //   q8   |  8.03  |  7.04 | 1.26 |  16.33   |     8.30     |  6.75 / 1.66     | 23.08 /  9.96
+      //   q4   |  4.80  |  3.73 | 1.26 |   9.78   |     4.99     |  6.75 / 1.66     | 16.54 /  6.65
+      //
+      // The VAE is dense f32 at every tier (all-conv, no group-quantizable 2-D leaf) and the
+      // activation transient is tier-INDEPENDENT (bf16 activations over packed weights), which is
+      // why only the two packable components move. At the largest-AREA preset (2400x1792, not the
+      // square default) the transient is 6.92 untiled / 1.70 bounded.
+      //
+      // The staged floor is `max(tower, DiT + VAE)` and NEVER the sum: `Residency::from_policy`
+      // loads the Qwen3 tower, encodes, DROPS it, then loads the DiT and VAE. That is the whole
+      // reason the tower is packed on this route where 2512 leaves it dense — see the tier note at
+      // the top of this entry.
+      //
+      // `minMemoryGbByTier` turns the ladder into a per-tier floor with the rule
+      // `ceil(resident_peak_at_the_default_preset_in_GB x 1.25)`, one rule applied three times:
+      //
+      //   bf16  35.36 GiB = 37.97 GB  x1.25 = 47.46 -> 48   (EXACTLY the sc-24109/sc-24112 number,
+      //                                                      which is how the rule is validated)
+      //   q8    23.08 GiB = 24.79 GB  x1.25 = 30.98 -> 31
+      //   q4    16.54 GiB = 17.76 GB  x1.25 = 22.20 -> 23
+      //
+      // The scalar `minMemoryGb` STAYS 48 and is not "the default tier's floor": it is the
+      // conservative fallback for any tier key not in the map (today, `nvfp4`). Falling through to
+      // a light tier's floor for an unknown tier would be a PERMISSIVE under-prediction, which
+      // admits a load that OOMs — the one failure mode these gates exist to prevent.
+      //
+      // Still NO `calibrations` and NO `memoryStrategyContract` on either lane: the provider's
+      // ladder declaration reaches SceneWorks only through the pin-bound engine-capability dumps,
+      // which cannot be hand-authored and cannot be produced at this branch's pin. Until the epic's
+      // terminal pin bump both routes stay the consumer fallback (the spec is handed to the engine
+      // unshaped), exactly as `ideogram_4` did on MLX before its ladder landed.
+      "mlx": {
+        "minMemoryGb": 48,
+        "minMemoryGbByTier": { "bf16": 48, "q8": 31, "q4": 23 },
+        // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
+        // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
+        // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
+        // changes nothing today and states the fact where a reader looks for it. There is no
+        // `minQualityTier` floor: all three tiers are honest whole-pipeline tiers here (no dense
+        // component is held above the selection), so nothing needs clamping up.
+        "quantize": 8
+      },
+      // sc-24109/sc-24112 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same seven
+      // presets and same true-CFG request contract as MLX; only the tensor backend differs. As of
+      // inference PR #1007 it also loads the same packed tier artefacts.
+      //
+      // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` and
+      // `candle.minMemoryGbByTier` are `x-sceneworks-contract: binding` and are read by
+      // crates/sceneworks-worker/src/vram_gate.rs (`predicted_peak_gb`). With NO `candle` block the
+      // fit gate is skipped ENTIRELY and a too-small card discovers it is too small by OOMing
+      // mid-load; with one, the gate REFUSES the load before it starts on any card with less free
+      // VRAM than the resolved floor. A refusal that names the number is the intended behaviour; a
+      // reactive OOM is not.
+      //
+      // WHAT sc-24112 CHANGES HERE, and what it does not. sc-24109 set a single 48 GB floor for
+      // every tier key, which deliberately refused a 32 GB RTX 5090 and a 40 GB A100 — correct for
+      // a bf16-only install whose weights alone are 28.61 GiB resident. It is the WRONG answer for
+      // q8 (16.33 GiB) and q4 (9.78 GiB), and it is those tiers, not a loosened bf16 number, that
+      // make those cards usable. `minMemoryGbByTier` states each tier's own derived floor; bf16's
+      // stays exactly 48, so no card that could run bf16 before is affected in either direction.
+      //
+      // The resolution order in `predicted_peak_gb` is: `vramGbByTier[tier]` + HEADROOM_GB, else
+      // `minMemoryGbByTier[tier]`, else `minMemoryGb`. The new key sits in the middle BECAUSE it is
+      // already padded — a measured row is a raw peak the gate pads, and putting a derived floor
+      // there would pad it twice AND, via the sibling `measured` flag, file it as evidence.
+      // Nothing about 2.1 has been measured on any CUDA host, so `vramGbByTier` stays ABSENT.
+      //
+      // Derived candle floors (the ladder and the `x1.25` rule are documented in full above the
+      // `mlx` block; the two lanes share one derivation because they hold the same bytes resident):
+      //   bf16 48 GB — resident peak 35.36 GiB at 2048^2
+      //   q8   31 GB — resident peak 23.08 GiB  → admits a 32 GB RTX 5090 and a 40 GB A100
+      //   q4   23 GB — resident peak 16.54 GiB  → admits a 24 GB card as well
+      // The scalar `minMemoryGb` stays 48 as the conservative fallback for a tier key with no row
+      // (today `nvfp4`): falling through to a light tier's floor would be a PERMISSIVE
+      // under-prediction, and an under-prediction admits a load that OOMs.
       //
       // Deliberately ABSENT, each for its own reason:
-      // * `vramGbByTier` / `sequentialPeakGb` / `measured` — those are per-tier MEASURED peaks off
-      //   an A/B harness (see the `qwen_image` block above). Nothing has been measured, and there
-      //   is no tier axis to key them on.
-      // * `quantize` and any tier key — the Candle provider declares `supported_quants: []` and
-      //   refuses an on-the-fly quantize with a typed Unsupported at load. bf16 is the whole
-      //   surface off-Mac, which is why the routing catalog leaves `candle_quant` false and
-      //   `qwen_image_2_1_offers_no_candle_quant_tier` asserts no tier key appears here. The MLX
-      //   provider's [Q4, Q8] is NOT merged in: the two backends' quant surfaces are separate
-      //   declarations, not one per-model list.
+      // * `vramGbByTier` / `sequentialPeakGb` / `measured` — per-tier MEASURED peaks off an A/B
+      //   harness (see the `qwen_image` block above). Nothing has been measured. The epic's
+      //   terminal measurement story fills these; when it does, its rows win ahead of the derived
+      //   floors above and those floors become the fallback they were always meant to be.
+      // * any `quantize` key — `candle.quantize` is not a manifest key at all. The Candle tier
+      //   surface is the routing catalog's `ModelCaps::candle_quant` column, which sc-24112 flips
+      //   to true because the Candle provider now declares `supported_quants: [Q4, Q8]`. That is a
+      //   SEPARATE declaration from the MLX one, read separately; the two are not merged into a
+      //   per-model-id list, which is what
+      //   `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them` pins.
       // * `supportsSequentialOffload` / `memoryStrategyCapabilities` / `memoryStrategyContract` —
       //   the contract block is GENERATED from `config/engine-capabilities/capabilities.candle.json`
       //   by scripts/generate-manifest-memory-declarations.mjs, and that dump can only be produced
@@ -3362,11 +3573,12 @@
       //   would be an unsourced claim. The route reports the consumer fallback until the epic's
       //   terminal pin bump re-dumps the file.
       "candle": {
-        "minMemoryGb": 48
+        "minMemoryGb": 48,
+        "minMemoryGbByTier": { "bf16": 48, "q8": 31, "q4": 23 }
       },
       "ui": {
         "label": "Qwen Image 2.1",
-        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. One bf16 snapshot serves both backends — there is no precision tier to pick on either. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The weights are downloaded from Qwen's own repository on first use; SceneWorks does not re-host them.",
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a record of what was changed.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Qwen Image 2.1 Prompt Guide",

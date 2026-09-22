@@ -833,15 +833,26 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // generic candle txt2img lane off-Mac. Plain text-to-image only — every conditioning carrier is
     // refused by the shared `CANDLE_IMAGE_CHECKS` gate, exactly as the MLX arm refuses them.
     //
-    // All THREE candle capability columns stay false, and that is a per-backend truth rather than a
-    // "not wired yet": the candle provider declares `supported_quants: []` (it refuses an
-    // on-the-fly quantize with a typed Unsupported at load) and `supports_lora`/`supports_lokr`
-    // false. `candle_quant: false` is therefore what makes `candle_refuses_quant_tier` reject an
-    // `advanced.mlxQuantize` select off-Mac instead of routing a job the loader would refuse. The
-    // MLX provider's own [Q4, Q8] surface is NOT merged in here — there is no per-model-id quant
-    // column for the two to collapse into, which is the invariant
-    // `qwen_image_2_1_offers_no_candle_quant_tier` pins.
-    ModelCaps::new("qwen_image_2_1", true, true, false, false, false),
+    // `candle_quant` FLIPS TO TRUE at sc-24112, and the reason is a change in the ENGINE, not a
+    // wiring catch-up. At sc-24109 the candle provider declared `supported_quants: []` and refused
+    // an on-the-fly quantize with a typed Unsupported at load, so `false` was the truthful column.
+    // Inference PR #1007 ports the packed loader to candle — `AdaptLinear::linear_detect_gs` reads
+    // the same packed triples on the DiT and the Qwen3 tower that MLX does — and the provider now
+    // declares `supported_quants: [Q4, Q8]`. `advanced.mlxQuantize` off-Mac is therefore a tier
+    // SELECT into an already-packed q4/q8 snapshot, exactly as on Mac, and the loader serves it.
+    // (A DENSE snapshot plus a quantize request is still a typed refusal on candle: `spec.quantize`
+    // selects a tier here, it does not transform weights.)
+    //
+    // This is NOT a merge of the two backends' surfaces. `candle_quant` is the CANDLE column and
+    // nothing else; the MLX lane's tier surface is the manifest's own `mlx` block; there is still
+    // no per-model-id quant field for the two to collapse into. They agree today because both
+    // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
+    // is where a merge, rather than an agreement, would show up.
+    //
+    // `candle_lora` and `candle_quant_lora` stay FALSE: the provider still declares
+    // `supports_lora`/`supports_lokr` false on both lanes, so there is no adapter to apply on a
+    // packed tier or anywhere else, and a LoRA request stays the typed `CandleImageRefusal::UserLora`.
+    ModelCaps::new("qwen_image_2_1", true, true, true, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2416,6 +2427,14 @@ mod tests {
         // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
+        //
+        // sc-24112: `qwen_image_2_1`, once `candle-gen-qwen-image-2-1` gained the SAME packed load
+        // path (inference #1007 — `AdaptLinear::linear_detect_gs` on the DiT and the Qwen3 tower).
+        // Quant-only, not quant+adapter: the provider declares `supports_lora`/`supports_lokr`
+        // false, so it belongs here rather than in the combined list above. This is the identical
+        // shape as the SenseNova row directly below — an engine gaining a packed loader, and the
+        // routing half following it in the same story rather than a release later.
+        "qwen_image_2_1",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",

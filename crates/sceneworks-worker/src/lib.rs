@@ -62,6 +62,10 @@ use uuid::Uuid;
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow
 // dead_code there (the rest are MLX-only) — same pattern as `openpose_skeleton`. On a non-candle
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
+/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
+/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
+/// share, so a per-lane copy would be two declarations of one fact.
+mod admission_geometry;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

@@ -322,6 +322,29 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
         || !request.reference_asset_ids.is_empty()
 }
 
+/// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
+///
+/// Counts the plural multi-reference list, falling back to the singular carrier — the same
+/// `reference_asset_ids` / `reference_asset_id` pair every reference-capable route reads, so the
+/// count the envelope prices is the count the engine will be handed. A model with no envelope never
+/// consults this, so it costs nothing on every other route.
+fn reference_image_count(request: &ImageRequest) -> u32 {
+    let plural = request
+        .reference_asset_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .count();
+    if plural > 0 {
+        return u32::try_from(plural).unwrap_or(u32::MAX);
+    }
+    u32::from(
+        request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty()),
+    )
+}
+
 fn validate_prompt_enhancement_route(
     request: &ImageRequest,
     settings: &Settings,
@@ -441,6 +464,22 @@ pub(crate) async fn run_image_generate_job(
     }
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
+    // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
+    // The joint attention sequence a route like `qwen_image_2_1` runs over grows with the reference
+    // count as well as the target area, and no resolution menu can express that — so a request can
+    // satisfy every individual limit and still be outside what the engine can do. This refuses it
+    // with the number; it never resizes the image, drops a reference or lowers the batch. Inert for
+    // every model that declares no envelope, which is all of them but one.
+    if let Some(refusal) = crate::admission_geometry::refuse_over_envelope(
+        &request.model,
+        &request.model_manifest_entry,
+        request.width,
+        request.height,
+        reference_image_count(&request),
+        request.count,
+    ) {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
     if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
         #[cfg(any(
             target_os = "macos",

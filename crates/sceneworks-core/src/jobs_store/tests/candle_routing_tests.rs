@@ -1822,9 +1822,11 @@ fn candle_routed_image_models_have_an_installable_off_mac_download() {
     for os in ["windows", "linux", "macos"] {
         assert_eq!(
             super::primary_rows_on(qwen_2_1, os),
-            1,
-            "2.1's single upstream artifact must be installable on {os} — it is ONE bf16 snapshot \
-             serving both backends, so it carries no `platforms` scoping at all"
+            3,
+            "all THREE of 2.1's tiers must be installable on {os} — the same bf16 snapshot and the \
+             same two packed re-host tiers serve both backends, so no row carries `platforms` \
+             scoping at all (sc-24112). A tier scoped to macOS would leave a Windows/Linux user \
+             with a tier picker whose entries cannot be obtained."
         );
     }
 }
@@ -1956,59 +1958,70 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
     }
 }
 
-/// sc-24108/sc-24109: the two `qwen_image_2_1` providers declare DIFFERENT quant surfaces — the
-/// MLX provider advertises `supported_quants: [Q4, Q8]`, the Candle provider advertises
-/// `supported_quants: []` and refuses an on-the-fly quantize with a typed Unsupported at load. A
-/// per-model-id quant list would merge those two into one and offer a Windows/CUDA caller a tier
-/// the Candle route rejects the moment it loads.
+/// sc-24108/sc-24109/sc-24112: the two `qwen_image_2_1` providers declare their quant surfaces
+/// SEPARATELY, and SceneWorks must never collapse them into one per-model-id list.
 ///
-/// SceneWorks cannot merge them, and this pins the two facts that make that true:
+/// At sc-24109 the two DISAGREED — MLX `supported_quants: [Q4, Q8]`, Candle `[]` — and this test
+/// existed to stop the MLX pair leaking onto the Candle lane. Inference PR #1007 ports the packed
+/// loader to Candle (`AdaptLinear::linear_detect_gs` reads the same packed triples on the DiT and
+/// the Qwen3 tower), so the Candle provider now declares `[Q4, Q8]` too and a tier-select off-Mac
+/// is served rather than refused.
 ///
-/// 1. The quant admission column is PER BACKEND. `ModelCaps` carries `candle_quant` /
-///    `candle_quant_lora` for the Candle lane only; the MLX lane's tier surface is the manifest's
-///    own `mlx` block. There is no shared "supported quants for this model" field for the two to
-///    collapse into. As of sc-24109 the id IS `candle_routed`, so the three Candle capability
-///    columns are no longer forced false by the sc-9495 superset invariant — they are false
-///    because the Candle provider says so, which is the stronger statement this test now makes.
-/// 2. The catalog advertises NO tier at all today: one bf16 artifact with no `variant`, and no
-///    `mlx.quantize`/`candle.quantize`. So neither lane can offer q4 or q8 — not because the offer
-///    is filtered, but because there is nothing to offer.
+/// **That agreement is not a merge, and the distinction is the whole point of this test.** Nothing
+/// anywhere reads "the supported quants of `qwen_image_2_1`". `ModelCaps::candle_quant` is the
+/// Candle column and only the Candle column; the MLX lane's tier surface is the manifest's own
+/// `mlx` block; the catalog's `variant` rows are the INSTALL axis, which is a third thing again. A
+/// future revision that narrows one provider must be expressible by changing one of them, and the
+/// assertions below are written so that it is.
 ///
-/// sc-24112 ships the real tier artifacts. When it does, it must tag them per lane rather than
-/// adding `variant` rows and assuming both backends serve them — this test is where that mistake
-/// shows up, because a Candle `qwen_image_2_1` tier-select would start passing here.
+/// What has NOT changed: `spec.quantize` on Candle is a tier SELECTOR, not a transform request. A
+/// dense snapshot plus a quantize request is still a typed refusal at load on both backends — which
+/// is why the tier axis is an install-time choice of artifact, never a load-time conversion.
 #[test]
-fn qwen_image_2_1_offers_no_candle_quant_tier() {
-    // sc-24109: the model IS claimable off-Mac now — a plain text-to-image job routes to the
-    // generic candle txt2img lane. The tier surface is what stays empty, not the route.
+fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
+    // sc-24109: the model IS claimable off-Mac — a plain text-to-image job routes to the generic
+    // candle txt2img lane.
     assert!(CANDLE_ROUTED_MODELS.contains(&"qwen_image_2_1"));
     assert!(image_request_candle_eligible(
         "qwen_image_2_1",
         &object(json!({ "prompt": "a lighthouse" }))
     ));
 
-    // A tier-select is refused on the Candle lane for both bit widths the MLX provider advertises.
+    // A tier-select is now ADMITTED on the Candle lane for both bit widths the packed artefacts
+    // ship, because the candle provider serves them. Routing it away would send the job to the
+    // retired torch fallback — the exact "engine wired, router half missed" skew sc-9983 and
+    // sc-11020 each closed.
     for bits in [4, 8] {
         assert!(
-            !image_request_candle_eligible(
+            image_request_candle_eligible(
                 "qwen_image_2_1",
                 &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
             ),
-            "qwen_image_2_1 must not offer a Q{bits} tier on the candle lane — its candle provider \
-             declares supported_quants: [] and would refuse the load"
+            "qwen_image_2_1 must serve a Q{bits} tier-select on the candle lane — its candle \
+             provider declares supported_quants: [Q4, Q8] after inference #1007"
         );
     }
+    // bf16 (an explicit opt-out of quantization) is a tier too, and it must stay routable.
+    assert!(image_request_candle_eligible(
+        "qwen_image_2_1",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 0 } }))
+    ));
 
-    // The base `qwen_image` (2512) lane is untouched by any of this: it IS a candle packed-quant
-    // family and keeps its tier-select. The contrast is the point — the two ids do not share a
-    // quant surface any more than they share weights.
+    // THE ANTI-MERGE ASSERTION. The Candle admission column is per-model-and-lane, and the proof
+    // that it is not a shared "quants of this model" list is that a sibling id with the same MLX
+    // surface can still refuse a candle tier-select. `qwen_image_edit` is exactly that: an MLX edit
+    // family whose candle service is the bespoke edit lane, with `candle_quant` false.
+    assert!(!image_request_candle_eligible(
+        "qwen_image_edit",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    // And the base `qwen_image` (2512) lane is untouched by any of this. The contrast is the point —
+    // the two ids do not share a quant surface any more than they share weights.
     assert!(image_request_candle_eligible(
         "qwen_image",
         &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
     ));
 
-    // And the catalog itself advertises no tier for 2.1 on either lane: one artifact, no `variant`,
-    // no `mlx.quantize`.
     let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
         crate::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -2024,44 +2037,67 @@ fn qwen_image_2_1_offers_no_candle_quant_tier() {
         .find(|model| model["id"] == "qwen_image_2_1")
         .expect("qwen_image_2_1 is in the shipped catalog");
     let downloads = entry["downloads"].as_array().expect("downloads array");
+
+    // The INSTALL axis: exactly three tiers, each a distinct `variant`, and the two packed ones
+    // come from the SceneWorks re-host while bf16 stays the upstream snapshot (the converter
+    // refuses to emit a bf16 tier — it IS the released snapshot).
+    let tiers: Vec<(&str, &str)> = downloads
+        .iter()
+        .map(|download| {
+            (
+                download["variant"].as_str().expect("every row is a tier"),
+                download["repo"].as_str().expect("repo"),
+            )
+        })
+        .collect();
     assert_eq!(
-        downloads.len(),
-        1,
-        "2.1 ships exactly one artifact at this pin"
+        tiers,
+        vec![
+            ("bf16", "Qwen/Qwen-Image-2.1"),
+            ("q8", "SceneWorks/qwen-image-2-1-mlx"),
+            ("q4", "SceneWorks/qwen-image-2-1-mlx"),
+        ],
+        "three tiers, densest first; bf16 upstream and the packed pair from the re-host"
     );
-    assert!(
-        downloads
-            .iter()
-            .all(|download| download.get("variant").is_none()),
-        "a `variant` declares a user-selectable precision tier; 2.1 has none until sc-24112"
-    );
-    // …and that one artifact is installable OFF-MAC. "No tier on the candle route" is only a
-    // meaningful claim if the candle route can obtain weights at all: with
-    // `platforms: ["macos"]` back on this row, `retain_downloads_for_os` strips it and the
-    // assertions above stay green while a Windows/Linux user can install nothing.
-    // `candle_routed_image_models_have_an_installable_off_mac_download` is the general guard; this
-    // is the same fact stated where the tier claim is made.
+
+    // …and all three are installable OFF-MAC. "The same three tiers on both backends" is only a
+    // meaningful claim if the candle route can obtain each of them: with `platforms: ["macos"]` on
+    // any row, `retain_downloads_for_os` strips it and every assertion above stays green while a
+    // Windows/Linux user can install nothing.
     for os in ["windows", "linux"] {
         assert_eq!(
             super::primary_rows_on(entry, os),
-            1,
-            "2.1's one bf16 artifact must survive retain_downloads_for_os on {os}"
+            3,
+            "all three of 2.1's tiers must survive retain_downloads_for_os on {os}"
         );
     }
-    assert!(
-        entry["mlx"].get("quantize").is_none(),
-        "no `mlx.quantize` either — the MLX lane loads the bf16 snapshot as published"
+
+    // The MLX lane declares its DEFAULT TIER, which is a different statement from "these are the
+    // tiers": it is which one a job with no explicit `advanced.mlxQuantize` resolves to.
+    assert_eq!(
+        entry["mlx"]["quantize"],
+        json!(8),
+        "the MLX block declares the lane's default tier, not its tier set"
     );
-    // sc-24109 adds the `candle` block. It must stay tier-free in exactly the same way: no
-    // `quantize`, and none of the per-tier memory keys whose very presence advertises a tier menu.
+    // The candle lane has NO manifest tier key at all, and must not grow one: its tier surface is
+    // the routing catalog's `candle_quant` column. A `candle.quantize` here would be a second,
+    // silently-diverging declaration of the same fact.
     let candle = entry
         .get("candle")
         .expect("sc-24109 declares the off-Mac candle block");
-    for key in ["quantize", "vramGbByTier", "sequentialPeakGb", "tiers"] {
+    for key in ["quantize", "tiers"] {
         assert!(
             candle.get(key).is_none(),
-            "`candle.{key}` would advertise a precision tier the candle provider cannot serve \
-             (supported_quants: [])"
+            "`candle.{key}` would be a second declaration of the candle tier surface, which the \
+             routing catalog already owns"
+        );
+    }
+    // And still no MEASURED per-tier ladder on either lane — the derived floors ride
+    // `minMemoryGbByTier`, which carries no evidence class. (`vram_gate` pins the numbers.)
+    for key in ["vramGbByTier", "sequentialPeakGb", "measured"] {
+        assert!(
+            candle.get(key).is_none(),
+            "`candle.{key}` is a measured-evidence key and nothing about 2.1 has been measured"
         );
     }
 }

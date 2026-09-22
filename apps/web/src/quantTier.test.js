@@ -717,25 +717,26 @@ describe("defaultTierSelection — capability-aware Auto base (epic 10721 R1/R3/
 });
 
 // sc-24109 — Qwen Image 2.1 ships ONE bf16 artifact and has no precision tier on either backend:
-// the MLX provider advertises [Q4, Q8] and the Candle provider advertises [], and SceneWorks must
-// not merge those into one per-model-id list. So the picker must stay closed — including on
-// Windows, where the Candle route would refuse a tier-select at load.
+// the MLX provider advertises [Q4, Q8] and, since inference #1007, so does the Candle provider —
+// so the picker must be OPEN on both platforms. It stayed closed at sc-24109 only because the
+// catalog declared no tier at all, not because the picker was told to hide one.
 //
 // ⚠️ THE MODEL OBJECT IS DERIVED FROM THE SHIPPED MANIFEST, NOT HAND-WRITTEN. `installedTiers` /
 // `allPossibleTiers` / `shouldShowTierPicker` read only `runtimeQuantTiers`, `hasVariantMatrix` +
 // `variants`, `mlxTierStates` and `mlxTiers` — so a literal `{ id, type, installState }` object
-// asserts nothing about Qwen 2.1 at all: `{}` passes it too, and adding a `variant` row to the
-// catalog would not red it. `projectTierShapes` below therefore rebuilds those exact fields from
-// `config/manifests/builtin.models.jsonc` the way `apply_variant_fields` /
+// asserts nothing about Qwen 2.1 at all: `{}` passes it too, and removing the `variant` rows from
+// the catalog would not red it. `projectTierShapes` below therefore rebuilds those exact fields
+// from `config/manifests/builtin.models.jsonc` the way `apply_variant_fields` /
 // `model_has_variant_matrix` / `apply_mac_and_mlx_fields` do server-side, so the catalog is what is
-// under test. The "positive control" case proves the derivation is live by running it over a
+// under test. The "negative control" case proves the derivation is live by running it over a
 // mutated copy of the SAME entry.
 describe("qwen_image_2_1 tier surface", () => {
   // The three tier shapes GET /models can emit, derived from a manifest entry:
   //   * `hasVariantMatrix` / `variants` — any supported, non-co-requisite download carrying a
   //     non-empty `variant` (apps/rust-api/src/models.rs `model_has_variant_matrix`). A model with
   //     no matrix still gets a one-element `"default"` pseudo-variant, which `isSelectableTier`
-  //     rejects.
+  //     rejects. A `pendingArtifact` row is STILL a variant — the tier axis is real before the
+  //     bytes exist — but its `installState` is `"pending"` rather than `"missing"`.
   //   * `mlxTiers` / `mlxTierStates` — convert-at-install models only, gated on
   //     `mlx.requiresConversion === true` (`entry_requires_converted_artifact_here`).
   //   * `runtimeQuantTiers` — IMPORTED entries only, projected from the import provider's
@@ -747,17 +748,31 @@ describe("qwen_image_2_1 tier surface", () => {
       .map((download) => download?.variant)
       .filter((variant) => typeof variant === "string" && variant.trim() !== "");
     const hasVariantMatrix = declared.length > 0;
+    const stateFor = (download) => {
+      if (download?.pendingArtifact === true) {
+        return { installState: "pending", cacheState: "missing" };
+      }
+      return { installState: "installed", cacheState: "complete" };
+    };
     const projected = {
       id: entry.id,
       type: entry.type,
       installState: "installed",
       cacheState: "complete",
       hasVariantMatrix,
-      variants: (hasVariantMatrix ? declared : ["default"]).map((variant) => ({
-        variant,
-        installState: "installed",
-        cacheState: "complete",
-      })),
+      variants: hasVariantMatrix
+        ? primaries
+            .filter((download) => typeof download?.variant === "string" && download.variant !== "")
+            .map((download) => ({
+              variant: download.variant,
+              pendingArtifact: download.pendingArtifact === true,
+              tierDeletable:
+                download.pendingArtifact !== true &&
+                Array.isArray(download.files) &&
+                download.files.length > 0,
+              ...stateFor(download),
+            }))
+        : [{ variant: "default", installState: "installed", cacheState: "complete" }],
     };
     if (entry?.mlx?.requiresConversion === true) {
       projected.mlxTiers = declared.length > 0 ? declared : ["bf16"];
@@ -768,53 +783,100 @@ describe("qwen_image_2_1 tier surface", () => {
   const entry = manifestById.get("qwen_image_2_1");
   const qwenImage21 = projectTierShapes(entry);
 
-  it("is in the shipped catalog with one unvariant artifact and no convert-at-install tiers", () => {
-    // The facts the projection above rests on, asserted directly so a catalog change that adds a
-    // tier cannot slip through as "the projection happened to stay empty".
+  it("is in the shipped catalog with three tier artifacts and no convert-at-install tiers", () => {
+    // The facts the projection above rests on, asserted directly so a catalog change cannot slip
+    // through as "the projection happened to produce the right shape".
     expect(entry, "qwen_image_2_1 must be in builtin.models.jsonc").toBeTruthy();
     const primaries = entry.downloads.filter((download) => download?.coRequisite !== true);
-    expect(primaries).toHaveLength(1);
-    expect(primaries.every((download) => download.variant === undefined)).toBe(true);
+    expect(primaries).toHaveLength(3);
+    expect(primaries.map((download) => download.variant)).toEqual(["bf16", "q8", "q4"]);
+    // sc-24112 is a DOWNLOAD matrix, not a convert-at-install one: the tiers are fetched, never
+    // produced on the user's machine. `mlxTiers` must stay undefined or the Studio would render a
+    // convert picker for a model with nothing to convert.
     expect(entry.mlx?.requiresConversion).toBeUndefined();
-    expect(entry.mlx?.quantize).toBeUndefined();
-    expect(entry.candle?.quantize).toBeUndefined();
-    // And the projection that follows from those facts.
-    expect(qwenImage21.hasVariantMatrix).toBe(false);
     expect(qwenImage21.mlxTiers).toBeUndefined();
     expect(qwenImage21.runtimeQuantTiers).toBeUndefined();
+    // `mlx.quantize` is the lane's DEFAULT TIER, which is a different statement from the tier set.
+    expect(entry.mlx?.quantize).toBe(8);
+    expect(entry.candle?.quantize).toBeUndefined();
+    expect(qwenImage21.hasVariantMatrix).toBe(true);
   });
 
-  it("offers no selectable tier and no picker", () => {
-    expect(installedTiers(qwenImage21)).toEqual([]);
-    expect(allPossibleTiers(qwenImage21)).toEqual([]);
+  // The helper orders tiers LIGHTEST FIRST, which is the order the picker renders them in.
+  //
+  // TWO SURFACES, TWO QUESTIONS — and conflating them is the trap here. `allPossibleTiers` is the
+  // OFFER: every tier the catalog advertises, which is what the Model Manager's download panel
+  // renders with a per-tier button. `shouldShowTierPicker` is the GENERATION-time selector, and it
+  // opens only once more than one tier is actually INSTALLED — there is nothing to choose between
+  // otherwise. So while q8/q4 are pending the offer is all three and the selector is closed, and
+  // the moment the artifacts land and a second tier installs the selector opens with no further
+  // code change. The "AFTER THE UPLOAD" case below is that statement made executable.
+  it("offers all three tiers", () => {
+    expect(allPossibleTiers(qwenImage21)).toEqual(["q4", "q8", "bf16"]);
+    // Only one tier is installable today, so there is nothing to select between yet.
     expect(shouldShowTierPicker(qwenImage21)).toBe(false);
   });
 
-  it("stays closed on a Windows/CUDA host, where the candle route refuses a tier-select", () => {
-    // The host-eligibility gates only ever REMOVE candle-only tiers; they can never conjure one for
-    // a model that declares none, on either platform.
+  it("offers the same three tiers on a Windows/CUDA host", () => {
+    // Both providers declare [Q4, Q8] after inference #1007, so neither host-eligibility gate may
+    // narrow this set — and the gates can only ever REMOVE candle-only tiers, never conjure one.
+    // This is the assertion that would red if someone narrowed the picker on the Candle lane,
+    // which sc-24109's truth would have required and #1007 undid.
     for (const options of [
       { convRotEligible: true, nvfp4Eligible: true },
       { convRotEligible: false, nvfp4Eligible: false },
     ]) {
-      expect(allPossibleTiers(qwenImage21, options)).toEqual([]);
-      expect(shouldShowTierPicker(qwenImage21, options)).toBe(false);
+      expect(allPossibleTiers(qwenImage21, options)).toEqual(["q4", "q8", "bf16"]);
     }
   });
 
-  it("POSITIVE CONTROL: the derivation opens the picker the moment the catalog declares variants", () => {
-    // sc-24112 adds the real q4/q8 tier artifacts. When it does, `variant` rows land on THIS entry
-    // and the picker must start rendering — so the emptiness asserted above has to be a consequence
-    // of the catalog, not of a hand-written stub. Same entry, same projection, one injected row.
-    const withTiers = projectTierShapes({
+  it("counts only the published tier as INSTALLED while q8/q4 are pending", () => {
+    // The tier axis is real before the artifacts are; `installedTiers` reads install state, so it
+    // must show only what can actually be loaded. When the terminal story pins the revisions this
+    // becomes all three — which is what the next case asserts, from the SAME entry.
+    expect(installedTiers(qwenImage21)).toEqual(["bf16"]);
+    const pending = qwenImage21.variants.filter((variant) => variant.pendingArtifact);
+    expect(pending.map((variant) => variant.variant)).toEqual(["q8", "q4"]);
+    expect(pending.every((variant) => variant.installState === "pending")).toBe(true);
+    // A pending tier carries no per-tier delete: there is nothing on disk to reclaim.
+    expect(pending.every((variant) => variant.tierDeletable === false)).toBe(true);
+    // The published bf16 tier is the whole upstream repo (`files: []`), so IT has no per-tier
+    // delete either — deleting it is deleting the model. This is the assumption sc-24112 broke,
+    // and the API refuses a scope-less tier delete rather than wiping a shared cache.
+    const bf16 = qwenImage21.variants.find((variant) => variant.variant === "bf16");
+    expect(bf16.tierDeletable).toBe(false);
+  });
+
+  it("AFTER THE UPLOAD: all three tiers install, and q8/q4 each reclaim on their own", () => {
+    // The same entry with the pending flags dropped — i.e. exactly what the terminal story leaves
+    // behind. The picker shape must not need a second edit to catch up.
+    const published = projectTierShapes({
       ...entry,
-      downloads: [
-        { ...entry.downloads[0], variant: "q4", default: true },
-        { ...entry.downloads[0], variant: "q8" },
-      ],
+      downloads: entry.downloads.map(({ pendingArtifact, ...download }) => download),
     });
-    expect(withTiers.hasVariantMatrix).toBe(true);
-    expect(installedTiers(withTiers)).toEqual(["q4", "q8"]);
-    expect(shouldShowTierPicker(withTiers)).toBe(true);
+    expect(installedTiers(published)).toEqual(["q4", "q8", "bf16"]);
+    // …and with three installed tiers the generation-time selector opens, on both platforms.
+    expect(shouldShowTierPicker(published)).toBe(true);
+    expect(
+      shouldShowTierPicker(published, { convRotEligible: false, nvfp4Eligible: false }),
+    ).toBe(true);
+    const deletable = published.variants
+      .filter((variant) => variant.tierDeletable)
+      .map((variant) => variant.variant);
+    expect(deletable).toEqual(["q8", "q4"]);
+  });
+
+  it("NEGATIVE CONTROL: the derivation closes the picker when the catalog declares no variants", () => {
+    // The emptiness the sc-24109 revision of this suite asserted has to be a consequence of the
+    // catalog, not of a hand-written stub — so run the SAME projection over the SAME entry with
+    // the tier tags removed and watch the picker close.
+    const untiered = projectTierShapes({
+      ...entry,
+      downloads: [{ ...entry.downloads[0], variant: undefined }],
+    });
+    expect(untiered.hasVariantMatrix).toBe(false);
+    expect(installedTiers(untiered)).toEqual([]);
+    expect(allPossibleTiers(untiered)).toEqual([]);
+    expect(shouldShowTierPicker(untiered)).toBe(false);
   });
 });

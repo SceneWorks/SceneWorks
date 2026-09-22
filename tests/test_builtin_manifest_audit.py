@@ -3868,3 +3868,300 @@ def test_license_acknowledgment_schema_guard_has_teeth():
             error.validator == "additionalProperties" and key in error.message
             for error in errors
         ), f"removing {key} from the schema did not reject the entry"
+
+
+# ---------------------------------------------------------------------------------------------
+# sc-24112 — Qwen-Image 2.1 installable tiers.
+# ---------------------------------------------------------------------------------------------
+
+#: The null SHA a DECLARED-but-unpublished download row carries (sc-24112). Schema-valid 40-hex, so
+#: the manifest still type-checks, and unmistakably not a commit — the same trick git uses for "no
+#: object". Mirrors `sceneworks_core::model_artifacts::artifact_selection::PENDING_ARTIFACT_REVISION`.
+_PENDING_ARTIFACT_REVISION = "0" * 40
+
+#: Tier fidelity, lightest first. `default` must sit on the lightest INSTALLABLE tier, which is the
+#: catalog convention `qwen_image` and `qwen_image_edit_2511` already follow.
+_TIER_ORDER = ["q4", "q8", "bf16"]
+
+
+def _pending_artifact_rows(manifest: dict) -> set[tuple[str, str, str]]:
+    """`(model_id, repo, variant)` for every row flagged `pendingArtifact: true`."""
+    return {
+        (model["id"], download.get("repo", ""), download.get("variant", ""))
+        for model in manifest["models"]
+        for download in model.get("downloads", [])
+        if download.get("pendingArtifact") is True
+    }
+
+
+def _null_sha_rows(manifest: dict) -> set[tuple[str, str, str]]:
+    """`(model_id, repo, variant)` for every row carrying the null-SHA placeholder revision."""
+    return {
+        (model["id"], download.get("repo", ""), download.get("variant", ""))
+        for model in manifest["models"]
+        for download in model.get("downloads", [])
+        if download.get("revision") == _PENDING_ARTIFACT_REVISION
+    }
+
+
+def test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set():
+    """The placeholder pairing is RIGID in both directions, which is what makes publishing an
+    artifact a single edit that cannot be half-done.
+
+    * a null SHA with no `pendingArtifact` flag is a placeholder shipped as if it were offerable —
+      the download would be queued and fail to resolve, and the user would see an opaque error;
+    * a `pendingArtifact` flag with a real SHA is the flag outliving the upload — the artifact
+      exists and nothing will offer it.
+
+    So the terminal story pins the revision and drops the flag together, and this test is what says
+    so. It is not decoration: `test_the_pending_pairing_guard_catches_each_half` mutates each half
+    and asserts this rule catches it.
+    """
+    manifest = _load_builtin_models_manifest()
+    pending = _pending_artifact_rows(manifest)
+    placeholder = _null_sha_rows(manifest)
+    assert pending == placeholder, (
+        "every `pendingArtifact` row must carry the null-SHA placeholder and vice versa; "
+        f"flagged-but-pinned: {sorted(pending - placeholder)}; "
+        f"placeholder-but-not-flagged: {sorted(placeholder - pending)}"
+    )
+
+
+def test_a_pending_artifact_is_never_the_default_download():
+    """Installing the model must never queue a fetch of an artifact that does not exist.
+
+    `model_download` picks the `default: true` row (else the first), so a pending default would be
+    what a plain "Install" queues.
+    """
+    offenders = [
+        (model["id"], download.get("variant"))
+        for model in _load_builtin_models_manifest()["models"]
+        for download in model.get("downloads", [])
+        if download.get("pendingArtifact") is True and download.get("default") is True
+    ]
+    assert not offenders, (
+        f"a pending artifact may never be the default download: {offenders}"
+    )
+
+
+def test_qwen_image_2_1_defaults_to_its_lightest_installable_tier():
+    """`qwen_image_2_1` installs its LIGHTEST INSTALLABLE tier by default, so a first install is
+    the smallest download that works.
+
+    Scoped to this id rather than made a catalog-wide rule, because the catalog-wide rule is FALSE:
+    `krea_2_turbo`/`krea_2_raw` default to q8 and `instantid_realvisxl` to bf16, each deliberately.
+    Asserting it over every model would have made those three pass or fail on this story's opinion,
+    which is not this story's business.
+
+    "Installable" is the operative word. While the packed tiers are pending the default must sit on
+    bf16 — the only tier that can actually be fetched — and the moment the terminal story pins
+    their revisions and drops the flags, this test REQUIRES the default to move to q4. That is the
+    point: the rule is encoded now, so publishing the artifacts cannot quietly leave 2.1 defaulting
+    to a 30.86 GiB download forever.
+    """
+    downloads = _qwen_image_2_1_entry()["downloads"]
+    installable = [
+        download
+        for download in downloads
+        if download.get("pendingArtifact") is not True
+        and download.get("variant") in _TIER_ORDER
+    ]
+    assert installable, "at least one tier must be installable"
+    lightest = min(installable, key=lambda download: _TIER_ORDER.index(download["variant"]))
+    chosen = next((d for d in installable if d.get("default") is True), None)
+    assert chosen is not None, "some installable tier must be the default"
+    assert chosen["variant"] == lightest["variant"], (
+        f"default is {chosen['variant']}, lightest installable is {lightest['variant']}"
+    )
+    assert all(d.get("default") is not True for d in downloads if d not in installable), (
+        "a pending tier may never be the default"
+    )
+
+
+def test_the_pending_pairing_guard_catches_each_half():
+    """Mutation guard: the pairing rule is LIVE, not decoration. Each half is broken in turn and
+    the rule must catch it — otherwise the terminal story could pin a revision, forget the flag,
+    and ship a tier nothing offers."""
+    manifest = _load_builtin_models_manifest()
+    qwen = next(m for m in manifest["models"] if m["id"] == "qwen_image_2_1")
+    q8 = next(d for d in qwen["downloads"] if d.get("variant") == "q8")
+
+    # Half one: the revision is pinned, the flag is forgotten.
+    q8["revision"] = "a" * 40
+    assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
+
+    # Half two: the flag is dropped, the placeholder is forgotten.
+    q8["revision"] = _PENDING_ARTIFACT_REVISION
+    del q8["pendingArtifact"]
+    assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
+
+
+def test_qwen_image_2_1_ships_three_tiers_on_both_backends_from_pinned_bundles():
+    """sc-24112 — the tier surface, stated where a reviewer looks for it.
+
+    Three tiers, each from a reproducible bundle, none platform-scoped: the same three are
+    installable on macOS/MLX and on Windows/Linux/Candle, which is what "both backends" means for
+    a catalog whose `platforms` key would otherwise strip a row per host.
+    """
+    qwen = _qwen_image_2_1_entry()
+    downloads = qwen["downloads"]
+    assert [d.get("variant") for d in downloads] == ["bf16", "q8", "q4"], (
+        "three tiers, densest first"
+    )
+    assert all(d.get("platforms") is None for d in downloads), (
+        "a platform-scoped tier would leave a picker entry a host cannot obtain"
+    )
+    assert all(d.get("provider") == "huggingface" for d in downloads)
+
+    # bf16 is the released upstream snapshot; the packed pair is the SceneWorks re-host, one
+    # complete standalone snapshot per subdir. The converter refuses to emit a bf16 tier, which is
+    # why the dense tier alone stays upstream.
+    by_variant = {d["variant"]: d for d in downloads}
+    assert by_variant["bf16"]["repo"] == "Qwen/Qwen-Image-2.1"
+    assert by_variant["bf16"]["revision"] == "790c92633540aa0cb11d9abf19eb46d861714758"
+    assert by_variant["bf16"]["files"] == [], "the whole-repo snapshot convention"
+    for tier in ("q8", "q4"):
+        assert by_variant[tier]["repo"] == "SceneWorks/qwen-image-2-1-mlx"
+        assert by_variant[tier]["files"] == [f"{tier}/*"], (
+            "the per-tier file scope is what makes the per-tier DELETE able to reclaim this tier "
+            "on its own"
+        )
+
+    # The licence travels with EVERY tier: one model-level acknowledgment gate, one notice, one
+    # URL, and the non-commercial flag that keeps the packaging guard fatal.
+    assert qwen["requiresLicenseAcknowledgment"] is True
+    assert qwen["nonCommercial"] is True
+    assert "Qwen RESEARCH LICENSE AGREEMENT" in qwen["licenseNotice"]
+    assert qwen["licenseUrl"].startswith("https://huggingface.co/Qwen/Qwen-Image-2.1/blob/")
+    # …and the notice must no longer claim SceneWorks re-hosts nothing, because it now does.
+    assert "never redistributes these weights" not in qwen["licenseNotice"], (
+        "the q8/q4 re-host IS a §3 redistribution; the notice must say what is true of each tier"
+    )
+    assert "re-hosted by SceneWorks" in qwen["licenseNotice"]
+
+
+def test_qwen_image_2_1_tier_download_sizes_are_derived_from_the_bf16_tree():
+    """The packed tiers' `estimatedSizeBytes` are DERIVED — there is nothing on disk to sum until
+    the upload — and this recomputes the derivation rather than restating its answers.
+
+    Method (the manifest comment states it, and the engine's own `packed_bytes` is the same
+    arithmetic, so the two cannot drift): take the bf16 tree's EXACT byte total and swap the two
+    packable components from bf16 width to packed width. Everything else in the tree is byte-copied
+    and cancels — the norm scales, the dense token embedding, the untied `lm_head` and the whole
+    vision tower, the f32 VAE, and the tokenizer corpus.
+
+    *Mutation that reds this:* rounding a tier's size, or copying a 2512 `qwen_image` row.
+    """
+    group_size = 64
+    bf16_width = 2
+    dit_linear_params = 7_115_112_448
+    lm_linear_params = 6_945_767_424
+
+    def packed(params: int, bits: int) -> int:
+        return params * bits // 8 + (params // group_size) * 4
+
+    by_variant = {d["variant"]: d for d in _qwen_image_2_1_entry()["downloads"]}
+    bf16_total = by_variant["bf16"]["estimatedSizeBytes"]
+    assert bf16_total == 33_134_949_212, (
+        "the derivation is anchored on the bf16 tree's exact total; if that changes, every derived "
+        "tier size changes with it"
+    )
+    for tier, bits in (("q8", 8), ("q4", 4)):
+        expected = (
+            bf16_total
+            + (packed(dit_linear_params, bits) - dit_linear_params * bf16_width)
+            + (packed(lm_linear_params, bits) - lm_linear_params * bf16_width)
+        )
+        assert by_variant[tier]["estimatedSizeBytes"] == expected, (
+            f"{tier}: derived size must be {expected}"
+        )
+        assert by_variant[tier]["footprint"]["diskSizeBytes"] == expected, (
+            f"{tier}: the footprint's disk size is the same derived number"
+        )
+        # Nothing has been measured on either backend, so no tier may claim a memory footprint.
+        assert by_variant[tier]["footprint"]["residentMemoryBytes"] is None
+        assert by_variant[tier]["footprint"]["peakMemoryBytes"] is None
+
+    # Monotone in fidelity, which a copied or hand-typed number is the easiest way to break.
+    sizes = [by_variant[t]["estimatedSizeBytes"] for t in ("q4", "q8", "bf16")]
+    assert sizes == sorted(sizes), f"a denser tier must be larger: {sizes}"
+
+
+def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
+    """The per-tier floors the fit gates admit against, and the rule that produced them.
+
+    `ceil(derived resident peak at the 2048-square default, in GB, x 1.25)` — one rule applied
+    three times. It is validated by REPRODUCING sc-24109's independently-chosen 48 for bf16, which
+    is why bf16's column is unchanged by this story: the quantized tiers open the cards a bf16-only
+    install locked out, and loosening bf16 is not how.
+    """
+    qwen = _qwen_image_2_1_entry()
+    # Derived resident peaks (GiB) at 2048²: resident weights + the tier-independent 6.75 GiB
+    # activation transient. Stated here as the INPUT to the rule, so the rule is checked and not
+    # just its outputs.
+    peaks_gib = {"bf16": 28.61 + 6.75, "q8": 16.33 + 6.75, "q4": 9.78 + 6.75}
+    for backend in ("mlx", "candle"):
+        block = qwen[backend]
+        assert block["minMemoryGb"] == 48, (
+            f"{backend}: the scalar stays the conservative fallback for an unlisted tier (nvfp4); "
+            "an under-prediction there admits a load that OOMs"
+        )
+        by_tier = block["minMemoryGbByTier"]
+        assert set(by_tier) == {"bf16", "q8", "q4"}
+        for tier, floor in (("bf16", 48), ("q8", 31), ("q4", 23)):
+            assert by_tier[tier] == floor, f"{backend}/{tier}"
+            derived = math.ceil(peaks_gib[tier] * (1024**3) / 1e9 * 1.25)
+            assert floor == derived, (
+                f"{backend}/{tier}: {floor} must be ceil({peaks_gib[tier]} GiB in GB x 1.25) "
+                f"= {derived}"
+            )
+        assert by_tier["bf16"] == block["minMemoryGb"], (
+            f"{backend}: bf16 is UNCHANGED from sc-24109"
+        )
+    # No MEASURED ladder on either lane — these floors carry no evidence class, which is exactly
+    # why they do not ride `vramGbByTier`.
+    for key in ("vramGbByTier", "sequentialPeakGb", "measured", "calibrations"):
+        assert key not in qwen["candle"], f"candle.{key} is a measured-evidence key"
+        assert key not in qwen["mlx"], f"mlx.{key} is a measured-evidence key"
+
+
+def test_qwen_image_2_1_declares_the_admission_geometry_its_gate_consumes():
+    """The request-admission envelope, mirrored from the provider's `admission_geometry()`.
+
+    The gate (`crates/sceneworks-worker/src/admission_geometry.rs`) is declaration-driven, so a
+    missing or wrong block makes it silently inert or silently wrong rather than loud.
+    """
+    geometry = _qwen_image_2_1_entry()["admissionGeometry"]
+    assert geometry == {
+        "maxSide": 2752,
+        "maxPresetArea": 2400 * 1792,
+        "maxTargetImageTokens": 150 * 112,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 64 * 64,
+        "maxJointTokens": 58_016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8,
+    }
+    # The total is the sum of its parts, so no field can be edited in isolation.
+    assert geometry["maxJointTokens"] == (
+        256
+        + geometry["maxTargetImageTokens"]
+        + geometry["maxReferenceImages"] * geometry["tokensPerMaxReference"]
+    )
+    # The largest-AREA preset is NEITHER the widest nor the square default — the mistake the field
+    # exists to prevent.
+    assert geometry["maxPresetArea"] > 2752 * 1536
+    assert geometry["maxPresetArea"] > 2048 * 2048
+    # A legal ten-reference request at the default preset fits; refusing it would be the
+    # over-pricing failure the engine's own fix pass withdrew.
+    assert 256 + (2048 // 16) ** 2 + 10 * geometry["tokensPerMaxReference"] <= geometry[
+        "maxJointTokens"
+    ]
+
+
+def _qwen_image_2_1_entry() -> dict:
+    return next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "qwen_image_2_1"
+    )

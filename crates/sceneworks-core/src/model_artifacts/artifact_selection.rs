@@ -51,6 +51,26 @@ pub fn is_supported_model_download(download: &Value) -> bool {
             .is_some_and(|repo| !repo.is_empty())
 }
 
+/// The null SHA a DECLARED-but-unpublished download row carries as its `revision` (sc-24112).
+///
+/// Schema-valid 40-hex, so the manifest still type-checks, and unmistakably not a commit — the same
+/// trick git itself uses for "no object". It is rigidly paired with
+/// [`is_pending_artifact_download`]: the manifest audit fails closed on a null SHA without the flag
+/// AND on the flag with a real SHA, so pinning the real revision and dropping the flag is one edit
+/// that cannot be half-done.
+pub const PENDING_ARTIFACT_REVISION: &str = "0000000000000000000000000000000000000000";
+
+/// True when a download row is DECLARED but its artifact is not published yet (sc-24112).
+///
+/// A pending row is enumerated by the catalog — the tier axis and its picker are real before the
+/// bytes exist, which is what lets the memory ladder, the fit gates and the UI be built and tested
+/// against the tier that is coming — but it is never queued for download, never counted as
+/// installable, and never the `default`. Without this, a user picking the tier would queue a fetch
+/// of a revision that does not resolve and see an opaque download failure.
+pub fn is_pending_artifact_download(download: &Value) -> bool {
+    download.get("pendingArtifact").and_then(Value::as_bool) == Some(true)
+}
+
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the
 /// primary download rather than as a pick-one alternate.
 pub fn is_co_requisite_download(download: &Value) -> bool {

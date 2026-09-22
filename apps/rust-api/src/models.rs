@@ -855,6 +855,21 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
+    // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
+    // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
+    // the null SHA, so without this the job would queue a fetch that cannot resolve and the user
+    // would see an opaque download failure instead of the reason.
+    if is_pending_artifact_download(&download) {
+        return Err(ApiError::bad_request(format!(
+            "Model '{model_id}' declares the '{}' tier but its artifact is not published yet; \
+             install a different tier.",
+            download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+        )));
+    }
     // The selected `download` is always the primary/tier entry — `model_download` and
     // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
     // installed as if it were the model itself.
@@ -7089,6 +7104,18 @@ struct ModelVariantState {
     /// The raw `downloads[].footprint` object (disk size + optional measured memory), passed
     /// through verbatim for the RAM-suggestion surfaces (sc-8509/8516). `Null` when absent.
     footprint: Value,
+    /// This tier is DECLARED but its artifact is not published yet (`downloads[].pendingArtifact`,
+    /// sc-24112). The picker still lists it — the tier axis is real — but it can never be queued,
+    /// never reads `installed`, and is rendered unavailable rather than as a download button.
+    pending_artifact: bool,
+    /// Whether the PER-TIER delete can reclaim this tier on its own: true iff the row carries a
+    /// non-empty `files` scope. A whole-repo row (`files: []`) is the model, not a slice of it, and
+    /// `DELETE /models/:id/variants/:variant` refuses it with "delete the whole model instead" —
+    /// so the UI must not offer a per-tier delete for it. Before sc-24112 every variant row carried
+    /// a glob and the API's own comment assumed it always would; `qwen_image_2_1`'s bf16 tier IS
+    /// the whole upstream snapshot and broke that assumption, which is why this is now explicit
+    /// rather than inferred.
+    tier_deletable: bool,
 }
 
 // Whether `model`'s `downloads` array is a quant-matrix — i.e. at least one supported entry carries
@@ -7322,6 +7349,15 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             } else {
                 None
             };
+            // sc-24112: a DECLARED-but-unpublished tier can never be installed, whatever the cache
+            // probe above happened to find. Forcing it here rather than filtering the row out keeps
+            // the tier in the picker (the axis is real) while making every downstream
+            // "installed?"/"queue it?" answer false through the ONE field they all read.
+            let pending_artifact = is_pending_artifact_download(entry);
+            if pending_artifact {
+                installed = false;
+                cache_incomplete = false;
+            }
             ModelVariantState {
                 variant: entry
                     .get("variant")
@@ -7337,6 +7373,8 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
                 footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
+                pending_artifact,
+                tier_deletable: !pending_artifact && !files.is_empty(),
             }
         })
         .collect()
@@ -7411,7 +7449,19 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
             json!({
                 "variant": variant.variant,
                 "installed": variant.installed,
-                "installState": if variant.installed { "installed" } else { "missing" },
+                // sc-24112: a pending tier is neither installed nor installable. `"pending"` is a
+                // THIRD install state rather than `"missing"` so the web can say "not published
+                // yet" instead of offering a download button that would queue a fetch of a
+                // revision that does not resolve.
+                "installState": if variant.pending_artifact {
+                    "pending"
+                } else if variant.installed {
+                    "installed"
+                } else {
+                    "missing"
+                },
+                "pendingArtifact": variant.pending_artifact,
+                "tierDeletable": variant.tier_deletable,
                 "cacheState": if variant.cache_incomplete {
                     "incomplete"
                 } else if variant.installed {
@@ -9513,8 +9563,8 @@ pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requi
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
 pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
-    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
-    model_download_for_variant,
+    co_requisite_variant, is_pending_artifact_download, model_co_requisite_downloads,
+    model_co_requisite_downloads_for_variant, model_download_for_variant,
 };
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
@@ -11879,6 +11929,98 @@ mod variant_install_tests {
         assert!(
             !state.installed,
             "a torn-only install must not read installed via the usable-stale receipt path"
+        );
+    }
+
+    /// sc-24112 — a DECLARED-but-unpublished tier (`pendingArtifact`).
+    ///
+    /// The catalog keeps ENUMERATING it, because the tier axis has to be real before the bytes
+    /// exist: the memory ladder, both fit gates, the tier picker and the download panel are all
+    /// built and tested against the tier that is coming. What it must never be is *installable* —
+    /// its revision is the null SHA, so a queued fetch cannot resolve and the user would see an
+    /// opaque download failure instead of the reason.
+    ///
+    /// The flags below are what every downstream surface reads, so this is the one place the rule
+    /// is decided rather than re-derived per consumer.
+    #[test]
+    fn a_pending_artifact_tier_is_listed_but_never_installed() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        // Make q8 pending, exactly as the shipped `qwen_image_2_1` rows are.
+        downloads[1]["pendingArtifact"] = json!(true);
+        downloads[1]["revision"] =
+            json!(sceneworks_core::model_artifacts::artifact_selection::PENDING_ARTIFACT_REVISION);
+
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| s.variant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["q4", "q8", "bf16"],
+            "a pending tier is still ENUMERATED — the tier axis is a catalog declaration, not a \
+             statement about what is on disk"
+        );
+        let q8 = states
+            .iter()
+            .find(|state| state.variant == "q8")
+            .expect("q8 is enumerated");
+        assert!(q8.pending_artifact);
+        assert!(
+            !q8.installed && !q8.cache_incomplete,
+            "a pending tier reads neither installed nor incomplete, whatever the cache probe \
+             happened to find — there is nothing it could legitimately have found"
+        );
+        assert!(
+            !q8.tier_deletable,
+            "nothing was ever fetched, so there is nothing for the per-tier delete to reclaim"
+        );
+        // Its siblings are untouched: this is a per-row fact, not a switch that disables the matrix.
+        for variant in ["q4", "bf16"] {
+            let state = states
+                .iter()
+                .find(|state| state.variant == variant)
+                .expect("sibling tier");
+            assert!(!state.pending_artifact);
+            assert!(
+                state.tier_deletable,
+                "{variant} carries a `files` scope, so its per-tier delete can reclaim it alone"
+            );
+        }
+    }
+
+    /// The other half of `tier_deletable`: a tier with NO `files` scope.
+    ///
+    /// `DELETE /models/:id/variants/:variant` refuses it ("delete the whole model instead"),
+    /// because a whole-repo row IS the model rather than a slice of it — deleting it would wipe a
+    /// cache other tiers may share. Before sc-24112 every variant row carried a glob and the
+    /// delete handler's own comment assumed it always would; `qwen_image_2_1`'s bf16 tier is the
+    /// whole upstream snapshot and broke that assumption, so the UI needs this stated rather than
+    /// inferred — otherwise it renders a Delete button that always errors.
+    #[test]
+    fn a_whole_repo_tier_reports_that_it_cannot_be_reclaimed_alone() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+
+        let states = model_variant_states(&model, data.path());
+        let bf16 = states
+            .iter()
+            .find(|state| state.variant == "bf16")
+            .expect("bf16 is enumerated");
+        assert!(
+            !bf16.tier_deletable,
+            "a tier with no file scope cannot be deleted on its own; the API refuses it and the \
+             UI must not offer it"
+        );
+        assert!(
+            states
+                .iter()
+                .filter(|state| state.variant != "bf16")
+                .all(|state| state.tier_deletable),
+            "the scoped siblings still reclaim normally"
         );
     }
 

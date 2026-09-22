@@ -567,6 +567,45 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
+    // sc-24112 — Qwen-Image 2.1, registered on BOTH lanes with the SAME coordinates. That symmetry
+    // is the declaration, not a shortcut: after inference #1007 both providers load the same packed
+    // artefacts, declare the same `supported_quants: [Q4, Q8]` (plus the dense bf16 snapshot), and
+    // publish the same `Resident` / `StagedResidency` / `BoundedDecode` ladder off one derived
+    // memory model. A per-lane divergence here would be a claim neither engine makes.
+    //
+    // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
+    // tier either provider can serve.
+    //
+    // `TEXT_ONLY`: the entry's `capabilities` is `["text_to_image"]` and both arms refuse every
+    // conditioning carrier. Reference conditioning is sc-24110's, and this row must not advertise
+    // an edit coordinate ahead of the route that serves it.
+    //
+    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
+    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
+    // reachable at all — it is absent rather than exempted.
+    //
+    // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
+    // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
+    // declaration-owned and was never in the pre-declaration shaper, so removing the declaration
+    // must make it unreachable rather than fall back to legacy shaping.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image_edit",
