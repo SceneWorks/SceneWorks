@@ -18727,3 +18727,81 @@ button.audio-wave {
 .editor-guides-nav { display: flex; flex-wrap: wrap; gap: 8px; }
 .editor-guides-nav button { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
 .editor-guides-nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- Transparency backdrop (sc-24111) ----------
+   Every surface that can paint an RGBA asset, given one checkerboard instead of a
+   flat fill.
+
+   The problem this solves is not lost pixels — nothing on the web side drops the
+   alpha channel. It is that `.asset-tile img`, `.preview-button img`,
+   `.review-card img`, `.preview-modal img` and the queue thumbnails all declared
+   `background: var(--bg-2)`, which in the dark theme is very nearly black. A
+   natively transparent render (Qwen Image 2.1) therefore looked like a render on a
+   black background, and the user had no way to tell the two apart.
+
+   Why it is safe to apply unconditionally: every selector below except the modal is
+   `object-fit: cover` (the shared rule beside `.asset-tile img`), so the bitmap
+   covers its whole box and an opaque image hides the checkerboard completely.
+   Nothing changes for the images that are not transparent, which is why this needs
+   no per-asset alpha fact to key off. `.preview-modal img` is the one `contain`
+   surface and is handled just below by sizing the element to the bitmap instead, so
+   the checkerboard never shows up as letterbox bars.
+
+   `<video>` is deliberately NOT in the list: no video format this app plays carries
+   alpha, so a checkerboard behind one could only ever be decoration. The video rules
+   keep their flat `var(--bg-2)`.
+
+   The pattern is the app's existing convention, lifted from `.ie-canvas` (the Image
+   Editor stage, which has checkerboarded since epic 10243 and is what the sc-22461
+   color-key / SAM3 cutout previews already read against). Two 45-degree gradients
+   offset by half a tile. Kept as a variable-driven block so a 36x30 layer thumbnail
+   can use a smaller tile than a full-bleed grid tile without restating the
+   gradients. */
+.checker-backdrop,
+.asset-tile img,
+.preview-button img,
+.review-card img,
+.tray-item img,
+.reference-media img,
+.preview-modal img,
+.worker-progress-card__thumb-media,
+.ie-layer-thumb {
+  --checker-tile: 16px;
+  --checker-ink: color-mix(in srgb, var(--text) 11%, transparent);
+  background-color: var(--bg-2);
+  background-image:
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    ),
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    );
+  background-size: var(--checker-tile) var(--checker-tile);
+  background-position: 0 0, calc(var(--checker-tile) / 2) calc(var(--checker-tile) / 2);
+}
+
+/* A 36x30 layer chip and a 56px queue thumbnail get two or three tiles at 16px,
+   which reads as a diagonal stripe rather than a checker. Halve it. */
+.ie-layer-thumb,
+.worker-progress-card__thumb-cell.small .worker-progress-card__thumb-media {
+  --checker-tile: 8px;
+}
+
+/* The fullscreen preview is the only `object-fit: contain` surface in the list, and
+   contain is what would put the checkerboard in the letterbox bars of every opaque
+   image. Size the element to the bitmap instead — `width: auto` against the
+   inherited `width: 100%` — so the box IS the image and there are no bars to fill.
+   This also removes the flat `var(--bg-2)` bars that were there before. */
+.preview-modal img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
