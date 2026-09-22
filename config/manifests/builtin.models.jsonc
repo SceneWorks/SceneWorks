@@ -26682,7 +26682,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "9de6f6fc878a27f8392fd4d8fe8d281e3024fb8510ef13e05cec7ba62fb5acb5",
+              "sha256": "0c99238dde8937ef378e3c17ae0ea03831ec0bdfda9c03194d95eaa330ff8078",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26766,8 +26766,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
-                  "byteSize": 4840,
-                  "sha256": "61afd5c148777e654c6714b36fb1c7acb13d563ea7c2d4bf25c8860b04d71222"
+                  "byteSize": 8820,
+                  "sha256": "dd77e86b64373fc9b7f4af0795b2b671a0af73eb1c536a3c1960ad50eee9f325"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
@@ -26776,8 +26776,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 204219,
-                  "sha256": "972e96b1246b44f010ed17a726465aab80f190e8ee01eba298d4b662f4f21d9b"
+                  "byteSize": 204623,
+                  "sha256": "2c5607fda2b345eddc44aa78a661a89f62bf5e62d5c129aa214b2d074aa4f40e"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -26791,8 +26791,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 310327,
-                  "sha256": "e0cd7c11b021b9be43bfe387f37954c64079891ec081a359cb401093d5fa9afe"
+                  "byteSize": 310907,
+                  "sha256": "2536bc3e1e775b7f3091edd67c910c17ea3f524e54283c031f00265453c4e050"
                 },
                 {
                   "path": "package.json",
