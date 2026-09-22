@@ -2361,6 +2361,38 @@ async function pinnedLoaderGaps() {
   return (await measurabilityGapsPromise).pinned;
 }
 
+/**
+ * sc-24112: the gaps excused because the PINNED runtime does not register the provider AT ALL, so
+ * neither lane's capture adapter can have an arm for it and no change in this repository can make
+ * the cell capturable. `qwen_image_2_1` is the case: its engine lands in inference at the epic's
+ * terminal pin bump, and the checked-in engine-capability dumps — which cannot be re-taken at this
+ * pin — are where that absence is recorded.
+ *
+ * Not an allowlist, for the same reason `pinnedLoaderGaps` is not one: the excuse is re-derived
+ * from the dumps themselves, so it EMPTIES ITSELF at the pin bump. The moment the dumps carry the
+ * provider, these cells rejoin the gap set and the burndown demands the adapter arm and the plan
+ * anchors — which is exactly the sequencing this story cannot short-circuit, and deliberately does
+ * not try to: declaring plan anchors for a provider with no adapter arm reds
+ * `every declared adapter arm is a provider that lane's adapter really dispatches` instead, which
+ * is a worse kind of green.
+ */
+async function unpinnedProviderGaps() {
+  measurabilityGapsPromise ??= computeMeasurabilityGaps();
+  return (await measurabilityGapsPromise).unpinned;
+}
+
+/** Every engine id the checked-in capability dumps record for `backend`, or `null` if unreadable. */
+async function pinnedEngineIds(backend) {
+  try {
+    const dump = JSON.parse(
+      await readFile(path.join(ROOT, "config", "engine-capabilities", `capabilities.${backend}.json`), "utf8"),
+    );
+    return new Set((dump.engines ?? []).map((engine) => engine.id));
+  } catch {
+    return null;
+  }
+}
+
 /** The measurability gap set: shipped cells `--list` does not classify runnable / weights_missing. */
 async function computeMeasurabilityGaps() {
   const plan = await readPlan();
@@ -2386,7 +2418,31 @@ async function computeMeasurabilityGaps() {
   const pinned = sealed === null
     ? []
     : gaps.filter((gap) => gap.provider !== null && gap.reason === wanMlxSealGap(gap.provider, sealed));
-  return { gaps: gaps.filter((gap) => !pinned.includes(gap)), pinned, sealed };
+  // sc-24112: a provider the pinned runtime does not register on EITHER lane. Nothing in this
+  // repository can make such a cell capturable — there is no engine for a capture arm to dispatch
+  // to, and declaring a plan anchor for it only moves the failure to
+  // `every declared adapter arm is a provider that lane's adapter really dispatches`. The dumps are
+  // where that absence is recorded and they cannot be re-taken at this pin, so the excuse is
+  // re-derived rather than listed and EMPTIES ITSELF at the bump: the provider appears, these cells
+  // rejoin the gap set, and the burndown demands the adapter arm and the plan anchors together.
+  const pinnedIds = {
+    mlx: await pinnedEngineIds("mlx"),
+    candle: await pinnedEngineIds("candle"),
+  };
+  const unpinned = gaps.filter(
+    (gap) =>
+      !pinned.includes(gap) &&
+      pinnedIds.mlx !== null &&
+      pinnedIds.candle !== null &&
+      !pinnedIds.mlx.has(gap.modelId) &&
+      !pinnedIds.candle.has(gap.modelId),
+  );
+  return {
+    gaps: gaps.filter((gap) => !pinned.includes(gap) && !unpinned.includes(gap)),
+    pinned,
+    unpinned,
+    sealed,
+  };
 }
 
 function gapReport(gaps) {
@@ -4686,6 +4742,27 @@ test("every shipped tiered model is measurable", async () => {
     );
     assert.equal(gap.backend, "mlx", `${gap.key}: the loader seal is an MLX-lane fact`);
     assert.ok(!sealed.has(gap.provider), `${gap.key}: excused a cell whose loader DOES seal`);
+  }
+  // sc-24112: the second excuse, bounded the same way. A cell is excused ONLY when the pinned
+  // runtime registers its provider on NEITHER lane — so there is no engine for a capture arm to
+  // dispatch to, and no edit here can change that. The dumps are the oracle, so the excuse expires
+  // with them: at the pin bump the provider appears, these cells rejoin the gap set, and the
+  // burndown demands the adapter arm and the plan anchors the terminal measurement story owns.
+  const pinnedMlx = await pinnedEngineIds("mlx");
+  const pinnedCandle = await pinnedEngineIds("candle");
+  for (const gap of await unpinnedProviderGaps()) {
+    assert.ok(
+      !pinnedMlx.has(gap.modelId) && !pinnedCandle.has(gap.modelId),
+      `${gap.key}: excused a cell whose provider the pinned runtime DOES register`,
+    );
+    // …and it must be one of the two shapes an unregistered provider can produce: no plan anchor
+    // (nothing declares the cell), or no adapter arm (an anchor exists but nothing dispatches it).
+    // Anything else means the cell is unreachable for a DIFFERENT reason, which this excuse does
+    // not cover and must not silence.
+    assert.ok(
+      ["no_plan_anchor", "no_adapter_arm"].includes(gap.status),
+      `${gap.key}: excused with status ${gap.status}, which an unregistered provider cannot cause`,
+    );
   }
 });
 

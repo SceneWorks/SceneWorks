@@ -27318,7 +27318,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3601851b0806f09a131914ba3ceccc43256075db4a990b2a3b35d1a9c7c8d2af",
+              "sha256": "b4b5130c851fce62be94c42a208af29143b11d17847496a81d9bc8e7aabd2348",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27397,8 +27397,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 147391,
-                  "sha256": "f9412ceb14a7be09b2556a92940eb67f1227f558418b1f7dde3189006cf266de"
+                  "byteSize": 147682,
+                  "sha256": "7b3f928c6b9a80a6831be9245702b3070b49a87ce136d403cde4226f221a2294"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
@@ -27432,8 +27432,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 140012,
-                  "sha256": "9ed31c966613cea6c49cace82929b0f0f6947bb80e2cba9ffabdf8996410b32e"
+                  "byteSize": 146554,
+                  "sha256": "9f1176494e0804d44fb4165a4db0f8324185b07c31d03162fdd524835c265173"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

@@ -774,7 +774,18 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
+    Last moved: sc-24112 gives `qwen_image_2_1` a real TIER AXIS — bf16/q8/q4 `variant` rows on
+    both backends, where sc-24108/sc-24109 had one untagged artifact. `tiersFor` unions the
+    declared download variants, so the entry's tier axis goes 1 -> 3 and EVERY ONE of its ten lanes
+    multiplies by exactly 3: `resident` 4 -> 12 implemented, the other four rungs 4 -> 12 missing,
+    on each backend. Nothing else moves and no other model is touched: the multiplier is the tier
+    axis alone, the mode/overlay cross-product is unchanged (text_to_image x {none, lora}), and no
+    rung's CLASSIFICATION changes — the ladder is still unpublished on both lanes until the epic's
+    terminal pin bump re-dumps the capability files, so the new coordinates are Missing for the
+    same reason the old ones were. The per-tier memory floors this story adds ride
+    `minMemoryGbByTier`, which the matrix does not read, so they move nothing here.
+
+    Previously: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
     `candle_routed: true` + the manifest `candle` block), so the entry contributes five NEW lanes
     (`qwen_image_2_1:candle:<rung>`) and moves NOTHING else — no existing lane gained, lost or
     moved a coordinate. The Candle profile is identical to the MLX one recorded below, and for the

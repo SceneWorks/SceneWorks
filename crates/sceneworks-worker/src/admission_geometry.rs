@@ -434,7 +434,7 @@ mod tests {
         );
         let geometry = AdmissionGeometry::from_manifest(&entry).expect("a complete block parses");
         // Every axis on its own is satisfied…
-        assert!(2048u32.max(2048) <= geometry.max_side);
+        assert!(2048 <= geometry.max_side);
         assert!(2048u64 * 2048 <= geometry.max_preset_area);
         assert!(10 <= geometry.max_reference_images);
         // …and the combination is not.
