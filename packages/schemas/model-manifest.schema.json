@@ -988,6 +988,13 @@
             "description": "Restrictions the user is notified of at the acknowledgment gate (sc-17227). Plain prose restating the upstream license's own operative terms — territory, acceptable use, revenue ceiling — not a summary invented here. Rendered inside the acknowledgment box."
           },
           "nonCommercial": { "type": "boolean" },
+          "supportsAlphaOutput": {
+            "type": "boolean",
+            "x-sceneworks-contract": "binding",
+            "x-sceneworks-allow-undeclared": true,
+            "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/qwen_alpha.rs", "anchor": "pub(crate) fn engine_advertises_alpha_output" }, { "path": "apps/web/src/qwenAlpha.js", "anchor": "export function modelSupportsAlphaOutput" }],
+            "description": "The model can decode straight to FOUR channels, so a render may carry native transparency instead of being composited onto an opaque background. Backs the Image Studio / Image Editor transparency toggle: absent or false means the toggle is not offered for this model, and a request that asks for it anyway is refused by name rather than silently downgraded to RGB (sc-24113). Qwen-Image 2.1 is the first and only model to declare it — its VAE exposes a four-channel decode, and the whole SceneWorks egress path (GeneratedPixels, workflow_png, the upscale/detail alpha bypass, the editor's composite/export) already carries alpha as of sc-24111. Mirrors the engine capability `Capabilities::supports_alpha_output` (S4 RGBA contract, inference sc-24111); the matching request field is `GenerationRequest::output_channels`, an enum `Rgb | Rgba` whose default is byte-identical to every pre-S4 render. ⚠️ It is NOT a transparency mode — there is none upstream. The VAE is always four-channel; this only says the fourth channel can survive the decode instead of being composited over white, and whether it holds a cut-out is decided by the PROMPT, which is why the UI pairs the toggle with editable prompt wording. An alpha-CARRYING reference is a separate concern and travels as `Conditioning::ReferenceRgba`; flattening one to RGB is a different request, not a lossy version of the same one."
+          },
           "promptless": { "type": "boolean" },
           "structuredPrompt": { "type": "boolean" },
           "minMemoryGb": { "type": "integer", "minimum": 1 },
@@ -1092,7 +1099,28 @@
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn dimension_multiple_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "let multiple = dimension_multiple_of(model_manifest_entry)" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "requiresDimensionsMultipleOf" }],
-                "description": "Required render-dimension stride; core normalizes video geometry to this value, and Image Studio enforces it as the free Width/Height override stride for native-resolution image models (Mage-Flow)."
+                "description": "Required render-dimension stride; core normalizes video geometry to this value, and Image Studio enforces it as the free Width/Height override stride for native-resolution image models (Mage-Flow). Since sc-24113 the image ENQUEUE path enforces it too (image_dimension_error): an off-stride size used to pass every check in the app and die inside the provider, reaching the user as a failed render instead of a 400 naming the grid."
+              },
+              "minDimension": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_dimension_error(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "minDimension" }],
+                "description": "Smallest legal side for the free Width/Height override, in pixels (sc-24113). The lower half of a model's own size envelope, as distinct from `resolutions`, which is the curated preset ladder. ABSENT MEANS the API's blanket floor (HISTORICAL_MIN_IMAGE_DIMENSION, 256) still applies, so every model that declares nothing is byte-for-byte unchanged. Declaring it is what lets a model legitimately go BELOW that blanket: Qwen-Image 2.1's engine accepts 32 px per side, which the global floor refused outright with no model getting a say. Deriving this from the extremes of `resolutions` (what the web did before this key existed) gives the smallest PRESET side, not the smallest legal one — 1536 rather than 32 for 2.1."
+              },
+              "maxDimension": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_dimension_error(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "maxDimension" }],
+                "description": "Largest legal side for the free Width/Height override, in pixels (sc-24113). The upper half of `minDimension`'s envelope. ABSENT MEANS the blanket MAX_IMAGE_DIMENSION (4096) still applies. Declaring it tightens a model whose real ceiling is lower than the blanket — Qwen-Image 2.1 stops at 2752 — so an over-cap request is a 400 at enqueue rather than an engine refusal the user sees as a failed render."
+              },
+              "maxReferenceAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_max_reference_assets" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_reference_limit_error(" }],
+                "description": "Ceiling on `referenceAssetIds` — the ordered reference list. Long-standing on VIDEO models (sc-17160, where it defaults to 8 via reference_caps); sc-24113 adds an IMAGE reader with NO default, because most image models take no references at all and an absent key there must mean 'this gate has no opinion'. Enforced at enqueue by rejecting, never truncating: for Qwen-Image 2.1 (1-10 ordered references) a dropped entry is not a smaller render but a different one, since the template numbers the images (<image1> …) and block-causal attention makes each visible only to what follows, so shortening the list renumbers every reference after the cut."
               },
               "recommendedMaxDuration": {
                 "type": "number", "exclusiveMinimum": 0,

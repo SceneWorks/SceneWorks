@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:bbba996b4c6d88445f49559f6e2f08128fd9d6ddd1fe670eda37f152fd3643c9",
+    "sceneWorksRevision": "source-tree:7775dbae7e475cd6914bd711ac1ac6eb6924fe1a973b5dc6762c71d996efeea8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "46837d7387cd4027cf80fb2a79705b02abe1fbf1bb2f1598cd807c2fa1c20e4d"
+        "sha256": "7debe620d813e5d2c3ffc62430f93988a0eabba463bade785efde92391c06b9f"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -17,7 +17,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "c4633c822361aa41b3542cf5d46164c591a9b2d9bfeccdf12f353bcb28330aee"
+        "sha256": "5da1d068a1d2270166743c75429d5610ef3139a23b48bfee08eb10018ab9d3d9"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "d4ed41761fce9e240c710452ab089a69ed56cfc2b8785c52cbfd06e1c71c3bc8"
+        "sha256": "0709aebf7d606fc4f973925a6ded7d51b015dedd5d75027b8996363db4de64b1"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -137,12 +137,12 @@
       "image": 54,
       "video": 11
     },
-    "cells": 9410,
+    "cells": 9430,
     "publishedCells": 3810,
-    "elidedCells": 5600,
+    "elidedCells": 5620,
     "elidedByState": {
-      "Implemented": 1182,
-      "Missing": 4418
+      "Implemented": 1186,
+      "Missing": 4434
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -2936,6 +2936,7 @@
             "default"
           ],
           "modes": [
+            "image_to_image",
             "text_to_image"
           ],
           "overlays": [
@@ -2955,6 +2956,7 @@
             "default"
           ],
           "modes": [
+            "image_to_image",
             "text_to_image"
           ],
           "overlays": [
@@ -15671,120 +15673,120 @@
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
-      "implemented": 2,
+      "elided": 4,
+      "implemented": 4,
       "states": {
-        "Implemented": 2
+        "Implemented": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
-      "implemented": 2,
+      "elided": 4,
+      "implemented": 4,
       "states": {
-        "Implemented": 2
+        "Implemented": 4
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 2,
+      "coordinates": 4,
       "published": 0,
-      "elided": 2,
+      "elided": 4,
       "implemented": 0,
       "states": {
-        "Missing": 2
+        "Missing": 4
       }
     },
     {

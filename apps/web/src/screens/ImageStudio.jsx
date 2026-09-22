@@ -29,6 +29,16 @@ import {
   evaluateModelDimensions,
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
+// sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
+// `limits.hardMinSteps` first; the reader is model-agnostic and reading it here is what stops this
+// screen from offering a step count the enqueue gate will refuse.
+import { minStepsForModel } from "../videoModelLimits.js";
+import {
+  showTransparencyToggle,
+  transparencyPromptSuggestion,
+  TRANSPARENCY_PROMPT_HINT,
+} from "../qwenAlpha.js";
+import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
@@ -166,6 +176,9 @@ import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { readLastTier } from "../lastTierStore.js";
 import {
   PROMPT_REFINE_MODEL_ID,
+  QWEN_IMAGE_2_1_MODEL_ID,
+  QWEN_REWRITE_I2I_MODEL_ID,
+  QWEN_REWRITE_T2I_MODEL_ID,
   terminalStatuses,
   VISION_CAPTION_MODEL_ID,
   VISION_CAPTION_MODEL_REPO,
@@ -586,6 +599,15 @@ export function ImageStudio() {
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
   const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  // Transparency / RGBA output (sc-24113): on emits `advanced.transparentBackground: true`, which
+  // the worker's `qwen_alpha` adapter turns into a four-channel decode and the sc-24111 egress path
+  // writes as a genuinely transparent PNG. Sticky pref, default off; the toggle only RENDERS when
+  // the selected model advertises alpha output, so a stale `true` carried over from Qwen 2.1 to a
+  // model that cannot serve it is inert — `transparencyAdvanced` re-checks the capability against
+  // the CURRENTLY selected model at payload-build time, exactly like `bf16Precision`/`usePid`.
+  const [transparentBackground, setTransparentBackground] = useState(
+    saved.transparentBackground ?? false,
+  );
   // Generation-time quant-tier toggle (sc-8515, epic 8506): for a model with MORE THAN ONE
   // quant tier installed (sc-8508 per-variant install state), the advanced panel renders a
   // picker so the user can A/B a bf16 vs Q8 vs Q4 build. The picked tier rides
@@ -820,6 +842,34 @@ export function ImageStudio() {
   // effective model for either rendering defaults or submitting a job.
   const selectedModel = availableModels.find((item) => item.id === model);
   const selectedModelServesMode = Boolean(selectedModel);
+  // Qwen-Image 2.1's OFFICIAL prompt rewriters (sc-24113, epic 24107). Two optional, explicitly
+  // downloaded checkpoints, and WHICH ONE applies is decided by the request rather than by a
+  // picker: references attached ⇒ the editing rewriter, none ⇒ the text-to-image one. The catalog
+  // ids mirror `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`'s `Rewriter::catalog_id`.
+  const qwenRewriteReferenceIds = useMemo(() => {
+    // The SAME ordered list the Generate button will send, so the rewrite sees what the render
+    // will. `referenceAssetIds` is the plural multi-reference picker; `referenceAssetId` /
+    // `sourceAssetId` are the single-reference and edit-source flows, which the engine treats as a
+    // one-reference edit.
+    if (mode === "edit_image" && referenceAssetIds.length) return referenceAssetIds;
+    const single = mode === "edit_image" ? sourceAssetId : referenceAssetId;
+    return single ? [single] : [];
+  }, [mode, referenceAssetIds, referenceAssetId, sourceAssetId]);
+  const qwenRewriteModel = useMemo(() => {
+    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return undefined;
+    const id = qwenRewriteReferenceIds.length
+      ? QWEN_REWRITE_I2I_MODEL_ID
+      : QWEN_REWRITE_T2I_MODEL_ID;
+    return models.find((entry) => entry.id === id);
+  }, [models, selectedModel?.id, qwenRewriteReferenceIds.length]);
+  // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
+  // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
+  // install, no degraded path": with nothing installed there is no affordance at all, not a
+  // disabled button that nags.
+  const qwenRewriteAvailable =
+    Boolean(qwenRewriteModel) &&
+    qwenRewriteModel.installState !== "missing" &&
+    typeof qwenRewritePrompt === "function";
   const catalogTextEncoderOptions = selectedModel?.textEncoderOptions ?? [];
   // A replayed/saved authored id remains a real control value even if the refreshed catalog can no
   // longer advertise this surface. Keep it visible and submit it unchanged so the server rejects a
@@ -2162,6 +2212,7 @@ export function ImageStudio() {
     flashAttn,
     enhancePrompt,
     bf16Precision,
+    transparentBackground,
     usePid,
     pidTarget,
     decoder,
@@ -2415,6 +2466,8 @@ export function ImageStudio() {
       enhancePrompt,
       precisionToggle,
       bf16Precision,
+      selectedModel,
+      transparentBackground,
       showTierPicker,
       // Never send a tier that isn't installed-and-complete. The seed effect keeps `quantTier` clamped to
       // an installed tier, but gate the OUTGOING value on the selectable set as a hard belt so no state —
@@ -3160,6 +3213,20 @@ export function ImageStudio() {
               (visionCaptionReady || visionCaptionOffers.length > 0);
             const describeActive = describeAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
+            // sc-24113 — Qwen-Image 2.1's OFFICIAL rewriter, offered as its own prompt tool beside
+            // the generic refiner rather than replacing it. Three gates, and each one is an
+            // acceptance criterion rather than defensive coding:
+            //
+            //  * `qwenRewriteModel` is the catalog entry for whichever rewriter THIS request
+            //    selects — the editing one when references are attached, the text-to-image one
+            //    otherwise — resolved from the request, never from a picker.
+            //  * The tile only renders when that entry is INSTALLED. "Direct prompting works with
+            //    neither rewriter installed — no download, no prompt to install, no degraded path"
+            //    means the affordance is absent, not disabled-with-a-nag.
+            //  * Nothing auto-starts (unlike the generic refiner's tile): rewriting is a user
+            //    action all the way down, and even once it runs the result is a draft the user
+            //    edits and applies.
+            const qwenRewriteActive = qwenRewriteAvailable && promptTool === "qwenRewrite";
             return (
               <div className="prompt-tools">
                 <div className="prompt-tools-head">
@@ -3192,6 +3259,22 @@ export function ImageStudio() {
                     </span>
                     <span className="prompt-tool-desc">Rewrite what you typed for clarity &amp; detail</span>
                   </button>
+                  {qwenRewriteAvailable ? (
+                    <button
+                      type="button"
+                      className={qwenRewriteActive ? "prompt-tool active" : "prompt-tool"}
+                      aria-pressed={qwenRewriteActive}
+                      onClick={() => togglePromptTool("qwenRewrite")}
+                    >
+                      <span className="prompt-tool-title">
+                        <Icon.Wand size={15} /> Qwen rewriter
+                      </span>
+                      <span className="prompt-tool-desc">
+                        Qwen’s own rewriter — a long descriptive prompt plus an aspect-ratio
+                        suggestion you can accept or ignore
+                      </span>
+                    </button>
+                  ) : null}
                 </div>
                 {img2imgPanel}
                 {describeActive ? (
@@ -3234,6 +3317,29 @@ export function ImageStudio() {
                       refineModel={refineModel}
                       onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
                       workflow="image"
+                    />
+                  </div>
+                ) : null}
+                {qwenRewriteActive ? (
+                  <div className="prompt-tool-panel">
+                    <QwenRewritePromptControl
+                      modelId={model}
+                      onApply={setPromptFromUser}
+                      // The aspect suggestion lands on the SAME resolution control the Aspect menu
+                      // drives, and only ever with a value that menu already offers — accepting it
+                      // is indistinguishable from the user picking it by hand.
+                      onApplyResolution={setResolution}
+                      onDownloadRewriteModel={
+                        qwenRewriteModel ? () => createModelDownloadJob(qwenRewriteModel) : undefined
+                      }
+                      projectId={activeProject?.id ?? ""}
+                      prompt={prompt}
+                      // The ORDERED list the render will condition on. Same array, same order —
+                      // this is what makes the rewrite's `<imageN>` numbering refer to the pictures
+                      // the user actually attached.
+                      referenceAssetIds={qwenRewriteReferenceIds}
+                      rewriteModel={qwenRewriteModel}
+                      rewritePrompt={qwenRewritePrompt}
                     />
                   </div>
                 ) : null}
@@ -3805,8 +3911,14 @@ export function ImageStudio() {
               ) : null}
               <label>
                 Steps
+                {/* sc-24113: the floor is the MODEL's, not a hardcoded 1. `limits.hardMinSteps`
+                    already had an enqueue gate (sc-24108) but no client reader on this screen, so
+                    the form cheerfully offered `1` to a model whose engine refuses anything below
+                    2 and the user met the rule as a 400 after pressing Generate. `minStepsForModel`
+                    returns 1 for every model that declares nothing, so every other model's control
+                    is byte-identical. Mirrors VideoStudio, which has read this key since sc-19426. */}
                 <input
-                  min="1"
+                  min={String(minStepsForModel(selectedModel))}
                   max="80"
                   onChange={(event) => setStepsOverride(event.target.value)}
                   placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
@@ -3934,6 +4046,47 @@ export function ImageStudio() {
                   />
                   Full precision (bf16)
                 </label>
+              ) : null}
+              {/* sc-24113 — native transparency. Rendered only when the selected model advertises
+                  four-channel decode (`supportsAlphaOutput`), because a cut-out toggle on a model
+                  that can only emit opaque RGB is a control that always fails. Hidden rather than
+                  disabled: a control that can never apply here is noise, not information. */}
+              {showTransparencyToggle(selectedModel) ? (
+                <label
+                  className="checkline transparency-toggle"
+                  title="Keep the model's alpha channel instead of compositing the render onto white, and save the result as an RGBA PNG — so cut-outs, logos and stickers keep real transparency through editing, layering and export. The model has no transparency mode: ASK for a transparent background in the prompt, and use this to keep it."
+                >
+                  <input
+                    checked={transparentBackground}
+                    onChange={(event) => setTransparentBackground(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Transparent background (RGBA)
+                </label>
+              ) : null}
+              {/* The other half of the control, and the non-obvious one. There is no transparency
+                  MODE in this model: the toggle only keeps the alpha channel, and whether that
+                  channel holds a cut-out is decided by the PROMPT. Without this the toggle hands
+                  back a fully opaque RGBA PNG and reads as broken.
+
+                  Offered, never applied: the wording goes into the prompt the user can see and
+                  edit, on a button they press. `transparencyPromptSuggestion` returns null once the
+                  prompt already says it, so re-running never accretes the sentence. */}
+              {transparencyPromptSuggestion(prompt, transparentBackground) ? (
+                <p className="transparency-prompt-hint">
+                  This model has no transparency mode — ask for it in the prompt.{" "}
+                  <button
+                    className="hero-link"
+                    onClick={() =>
+                      setPromptFromUser(
+                        transparencyPromptSuggestion(prompt, transparentBackground),
+                      )
+                    }
+                    type="button"
+                  >
+                    Add “{TRANSPARENCY_PROMPT_HINT}”
+                  </button>
+                </p>
               ) : null}
               {showPidToggle ? (
                 <>

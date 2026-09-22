@@ -269,6 +269,11 @@ export const ADVANCED_PREFILL = {
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
+  // sc-24113. Restores the toggle, which is the whole of what SceneWorks controls: it keeps the
+  // model's alpha channel instead of compositing over white. The prompt that ASKED for a
+  // transparent background travels as the prompt, because upstream has no transparency mode — so
+  // replaying a shared cut-out restores both halves through their own rows, not this one.
+  transparentBackground: { label: "Transparent background", prefill: PREFILL_CONTROL },
   usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
   decoder: { label: "Alternate decoder", prefill: PREFILL_CONTROL },
   pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },

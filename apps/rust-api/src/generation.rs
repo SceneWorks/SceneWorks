@@ -239,6 +239,55 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets` (sc-24113).
+        //
+        // `validate_image_job` never looked at `referenceAssetIds` at all: the only image-side caps
+        // were per-family constants deep in the worker (`MAX_EDIT_REFERENCES`, Krea's 2, FLUX.2's
+        // 5), which silently TRUNCATE. For Qwen-Image 2.1 truncation is not a smaller render, it is
+        // a DIFFERENT one — the template numbers the references (`<image1>` …) and block-causal
+        // attention makes each visible only to what follows, so shortening the list renumbers every
+        // reference after the cut. The engine refuses an 11th by name at `validate`; this says so
+        // at enqueue instead, before a job exists.
+        //
+        // Counted off the DTO, not `job_payload`, for the same reason the video call site does: no
+        // preset patches the id list — it is the caller's media, verbatim. ABSENT ⇒ no cap, so every
+        // other image model is byte-for-byte unchanged.
+        if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
+            &model_id,
+            payload.reference_asset_ids.len(),
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+        // The model's declared FREE-SIZE envelope — `limits.minDimension` / `maxDimension` /
+        // `requiresDimensionsMultipleOf` (sc-24113).
+        //
+        // `validate_image_job` enforces one global 256..=4096 with no stride, which is both too
+        // narrow and too wide for a native-resolution model: Qwen-Image 2.1 renders from 32 px (far
+        // BELOW the global floor) up to 2752 (far below its ceiling), on a 32-px grid. Without this
+        // an off-grid or over-cap size passed every check in the app and died in the provider,
+        // reaching the user as a failed render rather than a 400 naming the bound.
+        //
+        // Read post-default, so the gate judges the geometry actually enqueued — including the one
+        // this function just filled in from `defaults.resolution`, which is exactly the value a
+        // bare API call renders at. ABSENT ⇒ the global bounds alone, unchanged.
+        if let (Some(width), Some(height)) = (
+            job_payload.get("width").and_then(Value::as_u64),
+            job_payload.get("height").and_then(Value::as_u64),
+        ) {
+            if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
+                if let Some(message) = sceneworks_core::video_request::image_dimension_error(
+                    &model_id,
+                    width,
+                    height,
+                    entry,
+                    crate::HISTORICAL_MIN_IMAGE_DIMENSION,
+                    crate::MAX_IMAGE_DIMENSION,
+                ) {
+                    return Err(ApiError::bad_request(message));
+                }
+            }
+        }
     }
     validate_job_lora_compatibility_with(
         &state,

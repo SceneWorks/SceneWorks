@@ -17,6 +17,16 @@ import {
   workerAdvertises,
 } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
+// sc-24113 — Qwen-Image 2.1's controls in the Simple shell. Simple exposes the model, so it gets
+// the same transparency toggle and the same rewrite affordance; what it does NOT get is a second,
+// simplified version of either, which is why both reuse the advanced modules verbatim.
+import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
+import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
+import {
+  QWEN_IMAGE_2_1_MODEL_ID,
+  QWEN_REWRITE_I2I_MODEL_ID,
+  QWEN_REWRITE_T2I_MODEL_ID,
+} from "../constants.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
@@ -57,6 +67,8 @@ export function SimpleImageStudio() {
     loras = [],
     jobs = [],
     createLoraDownloadJob,
+    createModelDownloadJob,
+    qwenRewritePrompt,
     activeProject,
   } = useAppContext();
   const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
@@ -77,6 +89,15 @@ export function SimpleImageStudio() {
   const [styleId, setStyleId] = useStudioState("image", "styleId", null);
   const [referenceAssetId, setReferenceAssetId] = useStudioState("image", "referenceAssetId", null);
   const [refineOpen, setRefineOpen] = useStudioState("image", "refineOpen", false);
+  // Transparency (sc-24113): sticky like every other Simple control, and only RENDERED for a model
+  // that advertises four-channel decode — so a value carried over from Qwen 2.1 is inert elsewhere
+  // (the payload builder re-checks the capability against the selected model).
+  const [transparentBackground, setTransparentBackground] = useStudioState(
+    "image",
+    "transparentBackground",
+    false,
+  );
+  const [qwenRewriteOpen, setQwenRewriteOpen] = useStudioState("image", "qwenRewriteOpen", false);
   const [submitting, setSubmitting] = useState(false);
 
   // Models that serve the active tab, under the same capability + Mac-gating predicate
@@ -179,6 +200,25 @@ export function SimpleImageStudio() {
   // model without it the tile stays visible (the design's 2-up tile grid) but disabled and
   // says why, rather than accepting a reference the payload would then drop.
   const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+
+  // sc-24113 — which Qwen rewriter this request selects, and whether it is installed. Selected by
+  // the REQUEST (a reference attached means the editing half) and never by a picker, exactly as in
+  // the advanced studio. Simple arms at most one reference, so the list is 0 or 1 long.
+  const qwenRewriteReferenceIds = useMemo(
+    () => (referenceAssetId ? [referenceAssetId] : []),
+    [referenceAssetId],
+  );
+  const qwenRewriteModel = useMemo(() => {
+    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
+    const id = qwenRewriteReferenceIds.length
+      ? QWEN_REWRITE_I2I_MODEL_ID
+      : QWEN_REWRITE_T2I_MODEL_ID;
+    return imageModels.find((entry) => entry.id === id) ?? null;
+  }, [imageModels, selectedModel?.id, qwenRewriteReferenceIds.length]);
+  const qwenRewriteAvailable =
+    Boolean(qwenRewriteModel) &&
+    qwenRewriteModel.installState !== "missing" &&
+    typeof qwenRewritePrompt === "function";
   const referenceUsable = mode === "edit_image" || supportsImg2img;
 
   // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
@@ -264,6 +304,11 @@ export function SimpleImageStudio() {
         // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
         editLora: editLoraInstalled ? editLora : null,
         loras: lora.serializedLoras,
+        // sc-24113 — the transparency request. `selectedModel` rides along as the capability
+        // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
+        // never leak onto a model that would refuse it.
+        selectedModel,
+        transparentBackground,
         ...tier,
       });
       if (!request) {
@@ -336,6 +381,29 @@ export function SimpleImageStudio() {
         {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
             same job; an instruction like "deblur this image" means nothing to text-to-image. */}
         {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
+        {/* sc-24113 — Qwen-Image 2.1's OFFICIAL rewriter in the Simple shell. It renders the SAME
+            advanced control rather than a simplified twin, and that is deliberate: Simple's generic
+            refine drops the review step and replaces the prompt outright, which is exactly what this
+            story forbids. The rewrite lands in an editable box with Apply / Keep original beside it
+            here too. Absent entirely unless the matching rewriter is already installed — direct
+            prompting needs neither, with no download and no prompt to install. */}
+        {qwenRewriteAvailable && qwenRewriteOpen ? (
+          <QwenRewritePromptControl
+            modelId={model}
+            onApply={setPrompt}
+            onApplyResolution={(value) => {
+              if (resolutions.includes(value)) setResolution(value);
+            }}
+            onDownloadRewriteModel={
+              qwenRewriteModel ? () => createModelDownloadJob(qwenRewriteModel) : undefined
+            }
+            projectId={activeProject?.id ?? ""}
+            prompt={prompt}
+            referenceAssetIds={qwenRewriteReferenceIds}
+            rewriteModel={qwenRewriteModel}
+            rewritePrompt={qwenRewritePrompt}
+          />
+        ) : null}
         {refineOpen ? (
           <RefinePanel
             blurb="Rewrite this prompt with richer detail using the Anubis-8B refiner."
@@ -364,6 +432,22 @@ export function SimpleImageStudio() {
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
         />
+        {qwenRewriteAvailable ? (
+          <button
+            className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
+            onClick={() => {
+              setRefineOpen(false);
+              setQwenRewriteOpen((open) => !open);
+            }}
+            type="button"
+          >
+            <span className="su-tile-head">
+              <Icon.Sparkle size={15} />
+              Qwen rewriter
+            </span>
+            <span className="su-tile-sub">Qwen's own rewriter, plus an aspect suggestion</span>
+          </button>
+        ) : null}
         <button
           className={refineOpen ? "su-tile active" : "su-tile"}
           onClick={() => {
@@ -409,6 +493,34 @@ export function SimpleImageStudio() {
           />
         </div>
         <Chips label="Variations" onChange={setVariations} options={VARIATION_OPTIONS} value={variations} />
+        {/* sc-24113 — native transparency. Simple exposes the model, so it exposes the toggle; it
+            renders only for a model that advertises four-channel decode, so the reduced surface
+            stays reduced for every other model in the catalog. */}
+        {showTransparencyToggle(selectedModel) ? (
+          <label className="su-checkline su-transparency-toggle">
+            <input
+              checked={transparentBackground}
+              onChange={(event) => setTransparentBackground(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Transparent background (RGBA)</span>
+          </label>
+        ) : null}
+        {/* The other half, and the non-obvious one: this model has no transparency MODE — the
+            toggle only keeps the alpha channel, and whether it holds a cut-out is decided by the
+            PROMPT. Offered as a button that edits the visible prompt, never applied silently; it
+            disappears once the prompt already says it. */}
+        {transparencyPromptSuggestion(prompt, transparentBackground) ? (
+          <button
+            className="su-pill-btn su-transparency-hint"
+            onClick={() =>
+              setPrompt(transparencyPromptSuggestion(prompt, transparentBackground))
+            }
+            type="button"
+          >
+            Ask for transparency in the prompt
+          </button>
+        ) : null}
         {/* Last child of the settings bar, so LoRAs read as a peer of Model / Resolution /
             Variations rather than a card of their own (sc-15370's call, applied to Simple). */}
         <SimpleLoraField

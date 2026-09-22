@@ -490,16 +490,22 @@ fn qwen_edit_reference_falls_back_but_pose_and_lycoris_route_mlx() {
     }))));
 }
 
-/// sc-24108: the MLX worker must CLAIM a plain Qwen-Image 2.1 text-to-image job, and must refuse
-/// every conditioned shape — 2.1's provider declares an empty conditioning set, so unlike base
-/// `qwen_image` there is no strict-pose tier to fall through to.
+/// sc-24113 (was sc-24108): the MLX worker must CLAIM a Qwen-Image 2.1 job in every shape the
+/// engine can actually serve — plain text-to-image AND the ordered-reference edit — and must refuse
+/// only the carriers it has no shape for.
 ///
-/// Both halves matter. 2.1 has no Candle route until sc-24109, so an over-narrow predicate would
-/// leave a job nothing can claim and it would sit "Waiting for an available worker" forever (the
-/// Anima defect, sc-10523) — which is why `image_request_mlx_eligible` is exercised through the
-/// public entry point here, not just the predicate.
+/// The original assertion was "2.1 declares no conditioning, refuse everything", which was true for
+/// exactly as long as that was. sc-24110 gave the engine `ConditioningKind::Reference` AND
+/// `MultiReference`, and upstream ships ONE pipeline where editing is the same call with 1–10
+/// ordered condition images. So references now route, and what stays refused is narrower and has
+/// its own reason per carrier (mask: no mask tensor exists; pose/control: no strict-control tier).
+///
+/// Both halves still matter for the reason the sc-24108 version gave: an over-narrow predicate
+/// leaves a job nothing can claim and it sits "Waiting for an available worker" forever (the Anima
+/// defect, sc-10523) — which is why `image_request_mlx_eligible` is exercised through the public
+/// entry point here, not just the predicate.
 #[test]
-fn qwen_image_2_1_routes_text_to_image_to_mlx_and_refuses_conditioning() {
+fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
     assert!(MLX_ROUTED_MODELS.contains(&"qwen_image_2_1"));
 
     // A bare txt2img job, an explicit mode, and the legacy mode spelling all claim.
@@ -516,19 +522,35 @@ fn qwen_image_2_1_routes_text_to_image_to_mlx_and_refuses_conditioning() {
         );
     }
 
-    // Every conditioned carrier is refused: the engine has nowhere to put it.
+    // The edit shapes claim too, through the same public entry point: the Image Editor's working
+    // image (`sourceAssetId`), the single-reference flows (`referenceAssetId`), and the ordered
+    // 1–10 list (`referenceAssetIds`) that is the real multi-reference surface.
     for payload in [
         json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
         json!({ "referenceAssetId": "ref_1" }),
         json!({ "referenceAssetIds": ["ref_1", "ref_2"] }),
-        json!({ "maskAssetId": "mask_1" }),
-        json!({ "advanced": { "poses": [{ "id": "p1" }] } }),
-        json!({ "controls": [{ "kind": "canny" }] }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"] }),
         json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
     ] {
         assert!(
+            image_request_mlx_eligible("qwen_image_2_1", &object(payload.clone())),
+            "2.1 takes ordered references since sc-24110 and must claim: {payload}"
+        );
+    }
+
+    // What is still refused, and it is a short list with a reason each: there is no mask tensor in
+    // this family at all (a mask is an ordinary extra reference the prompt names), and no
+    // strict-control tier for pose/ControlNet to reach.
+    for payload in [
+        json!({ "maskAssetId": "mask_1" }),
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+        json!({ "advanced": { "poses": [{ "id": "p1" }] } }),
+        json!({ "controls": [{ "kind": "canny" }] }),
+        json!({ "controlnets": [{ "kind": "depth" }] }),
+    ] {
+        assert!(
             !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
-            "2.1 declares no conditioning and must refuse: {payload}"
+            "2.1 has no shape for this carrier and must refuse: {payload}"
         );
     }
 

@@ -332,7 +332,18 @@ mod face_likeness_compare_jobs;
 use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
+// Qwen-Image 2.1 (sc-24113, epic 24107). Two small, pure adapters kept OUT of the 4k-line
+// `image_jobs` / `prompt_refine_jobs` bodies on purpose:
+//
+// * `qwen_alpha` is the single place the provisional RGBA-output contract is spelled, so the
+//   sc-24111 engine-side rename is a one-line change here.
+// * `qwen_prompt_rewrite` is the official prompt-rewriter adapter — which of the two PE
+//   checkpoints a request selects, the frozen system-prompt digests, and the reply parse. It
+//   loads no weights and runs no model; `prompt_refine_jobs` drives it through the existing
+//   native TextLlm lane.
 mod downloads;
+mod qwen_alpha;
+mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]

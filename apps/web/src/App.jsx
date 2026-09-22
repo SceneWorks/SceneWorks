@@ -2575,6 +2575,54 @@ export function App() {
     [token],
   );
 
+  // Qwen-Image 2.1's OFFICIAL prompt rewriting (sc-24113, epic 24107): the SAME `prompts/refine`
+  // endpoint and poll-to-completion contract as the refiner above, with `task:
+  // "qwen_image_rewrite"`. No new route and no second LLM runtime — the two PE checkpoints are
+  // Qwen3.5/3.6 (`qwen3_5`), the architecture the native TextLlm lane already loads for the
+  // optional film planner.
+  //
+  // Two differences from `refinePrompt`, both of which the caller needs:
+  //
+  //  * It resolves the WHOLE result object, not just a string. The rewriter returns an aspect-ratio
+  //    suggestion alongside the prose, and the user accepts or ignores the two independently.
+  //  * `sourceAssetIds` carries the ORDERED references. Their presence is what selects the editing
+  //    rewriter over the text-to-image one — server-side, from the request — and their order is
+  //    what the rewrite's `<imageN>` numbering refers to.
+  //
+  // The deadline matches the caption tasks rather than the 120 s rewrite: a 9B checkpoint emitting
+  // a reasoning block and a long paragraph is closer to a caption than to a one-line rewrite, and a
+  // cold load of ~19 GB of weights happens inside this window.
+  const qwenRewritePrompt = useCallback(
+    ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: {
+          prompt,
+          modelId,
+          projectId,
+          task: "qwen_image_rewrite",
+          workflow: "image",
+          sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
+        },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
+          const refinedPrompt = job.result?.refinedPrompt;
+          if (!refinedPrompt) {
+            // An empty rewrite must never reach the review panel: Apply would paste it over the
+            // user's own prompt.
+            throw new Error("The rewriter returned an empty prompt.");
+          }
+          return { refinedPrompt, rewriteSuggestion: job.result?.rewriteSuggestion ?? null };
+        },
+        signal,
+        token,
+        startError: "Could not start prompt rewriting.",
+        failureError: "Prompt rewriting failed.",
+        timeoutError: "Prompt rewriting timed out. Is the worker running?",
+      }),
+    [token],
+  );
+
   // Magic-prompt expansion (epic 4725, sc-5997): same `prompts/refine` endpoint + native
   // utility model, but `task: "magic_prompt"` swaps in Ideogram's caption system prompt and
   // returns a JSON caption string (the caller parses + validates it). Reuses the refine job's
@@ -3599,6 +3647,7 @@ export function App() {
     createVectorPromptWorkflow,
     createAudioJob,
     refinePrompt,
+    qwenRewritePrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
@@ -3744,7 +3793,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,

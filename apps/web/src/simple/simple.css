@@ -721,6 +721,28 @@
   gap: 6px;
 }
 
+/* A boolean control in the Simple settings bar (sc-24113). Simple had no checkbox pattern — every
+   control until now was a select, a chip row or a tile — so this is the first one, kept to the
+   same 34px row height as `.su-chip` so it lines up with its neighbours in the bar. */
+.su-checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.su-checkline input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--accent, currentColor);
+  cursor: pointer;
+}
+
 .su-chip {
   flex: 1;
   min-width: 0;

@@ -12686,6 +12686,73 @@ fn qwen_edit_engine_id_maps_variants() {
     assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
 }
 
+/// sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+///
+/// `DynamicImage::to_rgb8()` converts RGBA→RGB by dropping the fourth byte, and 2.1's alpha is
+/// STRAIGHT — `A=0` does NOT zero RGB — so a fully transparent pixel keeps whatever colour it was
+/// authored with. Truncating therefore fed the VAE a reference the user never saw: a transparent
+/// background arrived as whatever the encoder left behind, commonly black. This is the case that
+/// used to be silently wrong, so the fixture is deliberately the adversarial one — a transparent
+/// pixel whose hidden RGB is pure black, which truncation and compositing disagree about
+/// maximally.
+///
+/// Also pins the OPAQUE case byte-for-byte, because a composite that is not the identity on
+/// `A=255` would silently shift every existing reference in the app.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_alpha_carrying_reference_is_composited_over_white_not_truncated() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc24113-alpha-reference").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+
+    // A 2x2 RGBA reference: transparent-BLACK, half-transparent red, opaque green, opaque black.
+    // The first pixel is the adversarial one — truncation and compositing disagree maximally about
+    // it, because straight alpha leaves the hidden RGB intact.
+    let source_file = data_dir.path().join("reference.png");
+    image::RgbaImage::from_fn(2, 2, |x, y| match (x, y) {
+        (0, 0) => image::Rgba([0, 0, 0, 0]),
+        (1, 0) => image::Rgba([255, 0, 0, 128]),
+        (0, 1) => image::Rgba([0, 255, 0, 255]),
+        _ => image::Rgba([0, 0, 0, 255]),
+    })
+    .save(&source_file)
+    .unwrap();
+    let asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+
+    assert!(
+        reference_carries_alpha(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap(),
+        "the fixture genuinely carries alpha, or this test proves nothing"
+    );
+
+    let image =
+        load_reference_image(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap();
+    assert_eq!((image.width, image.height), (2, 2));
+    assert_eq!(image.pixels.len(), 2 * 2 * 3);
+
+    // A=0 over white is WHITE. Truncation would have produced [0, 0, 0] — the exact silent defect.
+    assert_eq!(&image.pixels[0..3], &[255, 255, 255]);
+    // A=128 red over white: 255*128/255 + 255*127/255 = 255 red; 0*128/255 + 255*127/255 = 127.
+    assert_eq!(&image.pixels[3..6], &[255, 127, 127]);
+    // A=255 is the identity, so every already-shipped opaque reference is byte-for-byte unchanged.
+    assert_eq!(&image.pixels[6..9], &[0, 255, 0]);
+    assert_eq!(&image.pixels[9..12], &[0, 0, 0]);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {

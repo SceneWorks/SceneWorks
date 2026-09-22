@@ -178,7 +178,11 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "f51595c3052f021b8781c726f83c0d7df3308a25e96ed5dc5357079f398d0c79";
+// Re-pinned by sc-24113: `config/download-pattern-evidence.json` was re-recorded when the catalog
+// gained the two optional Qwen-Image 2.1 prompt rewriters (106 repo@revision keys, up from 104).
+// The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
+// which is why it is pinned here rather than recomputed.
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "256ac78b96aa9efbe19d6db8d43bcafa54efedbf4a3653886b9b39487808fc93";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
