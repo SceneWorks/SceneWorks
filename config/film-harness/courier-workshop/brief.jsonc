@@ -23,7 +23,7 @@
   "id": "courier-workshop-planned",
   "version": 1,
   "title": "Courier at the Workshop",
-  "synopsis": "A courier enters a cluttered woodworking workshop carrying a small bright red parcel, sets it on the workbench and leaves. The recipient — a woman in a grey work apron — comes in, notices the parcel and opens it, and a soft warm glow lights her face.",
+  "synopsis": "A courier enters a cluttered woodworking workshop carrying a small bright red parcel, sets it on the workbench and leaves. The recipient — a man in a grey work apron — comes in, notices the parcel and opens it, and a soft warm glow lights his face.",
   "styleNotes": "Warm late-afternoon light through a dusty window, natural colour, visible sawdust in the air, film grain. Handheld only where the camera follows a person; otherwise locked off. No music until the parcel opens.",
   "targetTotalSeconds": { "min": 30.0, "max": 60.0 },
   "requiredBeats": [
@@ -54,7 +54,7 @@
     },
     {
       "id": "opening",
-      "summary": "The recipient opens the parcel and a soft warm glow from inside lights her hands and face.",
+      "summary": "The recipient opens the parcel and a soft warm glow from inside lights his hands and face.",
       "requiredRoles": ["recipient", "red_parcel"]
     }
   ],

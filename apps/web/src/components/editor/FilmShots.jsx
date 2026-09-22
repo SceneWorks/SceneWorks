@@ -3,6 +3,15 @@ import { FILM_SHOT_STATE_LABELS, filmShotState } from "./filmShotState.js";
 
 const CONDITIONING_MODES = ["text_to_video", "image_to_video", "first_last_frame", "reference_to_video"];
 const DEPENDENCY_KINDS = ["conditioning", "continuity"];
+// `CompiledRequest.insertedText[].kind` (`film_compile::InsertedTextKind`, snake_case on the wire).
+// These sentences are the COMPILER's, written around the authored prompt after any refine rewrite,
+// so the preflight shows them apart from the text the operator wrote (sc-24023/24026).
+const INSERTED_TEXT_LABELS = {
+  reference_binding: "Reference binding",
+  continuity_description: "Continuity description",
+  audio: "Audio",
+  no_speech: "No speech",
+};
 
 function asList(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -31,6 +40,11 @@ function newShot(shots) {
   return {
     id, beat: "New shot", framing: "wide", prompt: "", targetDurationSeconds: 5.1667,
     startState: "Opening state", endState: "Closing state",
+    // Required by plan schema 3 (sc-24026), and blank like `prompt` is: the draft PUT decodes into
+    // a Rust `Shot` where `audio` has no default, so omitting the key makes the draft unsaveable
+    // with an anonymous decode error instead of the shot-named finding the Audio field shows.
+    // Matches `FilmDraft::manual_one_shot`.
+    audio: "",
     conditioning: { mode: "text_to_video", referenceRoles: [] },
     continuityRoles: [], dependsOn: [],
   };
@@ -63,7 +77,13 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
   const compiledInput = useRef(null);
   const shots = draft.productionPlan.shots;
   const shot = shots[Math.min(selectedIndex, shots.length - 1)];
+  // Every approved role, image-backed or DESCRIBED-ONLY (sc-24025). These belong in
+  // `continuityRoles` — the only slot a role with no image is allowed in.
   const approvedRoles = draft.referencePack.references.filter((entry) => entry.approved).map((entry) => entry.role);
+  // The approved roles a CONDITIONING slot may name: a described-only role supplies no image, and
+  // `validate_plan_against_pack` refuses one in the keyframe slots and in `referenceRoles` alike,
+  // so offering it here would build a draft the server rejects.
+  const conditionableRoles = draft.referencePack.references.filter((entry) => entry.approved && Boolean(entry.file)).map((entry) => entry.role);
   const modes = capabilities?.modes?.length ? capabilities.modes : CONDITIONING_MODES;
   const resolutions = capabilities?.resolutions ?? [];
   const turboLoras = capabilities?.turboLoras ?? [];
@@ -185,18 +205,21 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
             <fieldset className="ve-film-inspector-fields" disabled={disabled}>
               <legend>Conditioning and continuity</legend>
               <label>Mode<select aria-label="Conditioning mode" value={shot.conditioning.mode} onChange={(event) => mutateShot((next) => { next.conditioning.mode = event.target.value; })}>{modes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></label>
-              <label>First frame role<select value={shot.conditioning.firstFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "firstFrameRole", event.target.value))}><option value="">None</option>{approvedRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
-              <label>Last frame role<select value={shot.conditioning.lastFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "lastFrameRole", event.target.value))}><option value="">None</option>{approvedRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
+              <label>First frame role<select value={shot.conditioning.firstFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "firstFrameRole", event.target.value))}><option value="">None</option>{conditionableRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
+              <label>Last frame role<select value={shot.conditioning.lastFrameRole ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "lastFrameRole", event.target.value))}><option value="">None</option>{conditionableRoles.map((role) => <option key={role}>{role}</option>)}</select></label>
               <label>Ordered reference roles<input aria-label="Reference roles" list="film-reference-role-options" value={(shot.conditioning.referenceRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.conditioning.referenceRoles = asList(event.target.value); })} /></label>
-              <datalist id="film-reference-role-options">{approvedRoles.map((role) => <option key={role} value={role} />)}</datalist>
+              <datalist id="film-reference-role-options">{conditionableRoles.map((role) => <option key={role} value={role} />)}</datalist>
               <label>Continuity chain from<select value={shot.conditioning.chainFromShotId ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.conditioning, "chainFromShotId", event.target.value))}><option value="">None</option>{shots.filter((item) => item.id !== shot.id).map((item) => <option key={item.id}>{item.id}</option>)}</select></label>
-              <label>Continuity roles<input value={(shot.continuityRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.continuityRoles = asList(event.target.value); })} /></label>
+              <label>Continuity roles<input aria-label="Continuity roles" list="film-continuity-role-options" value={(shot.continuityRoles ?? []).join(", ")} onChange={(event) => mutateShot((next) => { next.continuityRoles = asList(event.target.value); })} /></label>
+              <datalist id="film-continuity-role-options">{approvedRoles.map((role) => <option key={role} value={role} />)}</datalist>
               <Finding field="conditioning" findings={findings} shotId={shot.id} /><Finding field="continuityRoles" findings={findings} shotId={shot.id} />
               <div className="ve-film-dependencies"><strong>Dependencies</strong>{(shot.dependsOn ?? []).map((dependency, index) => <div className="ve-film-dependency" key={`${dependency.shotId}-${index}`}><select aria-label={`Dependency ${index + 1} shot`} value={dependency.shotId} onChange={(event) => mutateShot((next) => { next.dependsOn[index].shotId = event.target.value; })}><option value="">Choose shot</option>{shots.filter((item) => item.id !== shot.id).map((item) => <option key={item.id}>{item.id}</option>)}</select><select aria-label={`Dependency ${index + 1} kind`} value={dependency.kind} onChange={(event) => mutateShot((next) => { next.dependsOn[index].kind = event.target.value; })}>{DEPENDENCY_KINDS.map((kind) => <option key={kind}>{kind}</option>)}</select><input aria-label={`Dependency ${index + 1} note`} placeholder="Intent note" value={dependency.note ?? ""} onChange={(event) => mutateShot((next) => setOptional(next.dependsOn[index], "note", event.target.value))} /><button onClick={() => mutateShot((next) => { next.dependsOn.splice(index, 1); })} type="button">Remove</button></div>)}<button onClick={() => mutateShot((next) => { next.dependsOn ??= []; next.dependsOn.push({ shotId: "", kind: "continuity" }); })} type="button">Add dependency</button></div>
               <Finding field="dependsOn" findings={findings} shotId={shot.id} />
             </fieldset>
             <fieldset className="ve-film-inspector-fields" disabled={disabled}>
               <legend>Dialogue placement</legend>
+              <label className="ve-film-prompt">Audio<textarea aria-label={`Shot ${shot.id} audio`} placeholder="What this shot sounds like, or that it is silent" rows="2" value={shot.audio ?? ""} onChange={(event) => mutateShot((next) => { next.audio = event.target.value; })} /><small className="ve-film-field-help">Required. Say what this shot sounds like — diegetic sound, ambience, and music, or “No music.” unless you want some.</small><details className="ve-film-field-help-more"><summary>More about the Audio field</summary><small className="ve-film-field-help">Silence is a valid answer: write “No audio. Silence.” and that is what is dispatched. The app adds the “Audio:” label itself, so do not type it. When this shot places a dialogue clip, the harness speaks that line itself, so leave the words out of Audio; otherwise a spoken line — who speaks, the words, and the delivery — belongs in Audio.</small></details></label>
+              <Finding field="audio" findings={findings} shotId={shot.id} />
               <label>Dialogue<textarea aria-label={`Shot ${shot.id} dialogue`} rows="2" value={shot.dialogue ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "dialogue", event.target.value))} /></label>
               <label>Generated picture audio<select aria-label={`Shot ${shot.id} generated audio`} value={shot.generatedAudio ?? ""} onChange={(event) => mutateShot((next) => setOptional(next, "generatedAudio", event.target.value))}><option value="">Use film default</option><option value="mute">Mute</option><option value="include">Include</option></select></label>
               <label>Audio role<input value={shot.dialogueClip?.role ?? ""} onChange={(event) => mutateShot((next) => { next.dialogueClip ??= { role: "", offsetSeconds: 0, gain: 1, sourceInSeconds: 0 }; next.dialogueClip.role = event.target.value; })} /></label>
@@ -208,7 +231,7 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
         ) : null}
       </div>
 
-      {compiled ? <section className="ve-film-preflight" aria-label="Render preflight"><h4>Effective requests</h4>{compiled.requests.filter((request) => selectedShotIds.includes(request.shotId)).map((request) => <article key={request.shotId}><strong>{request.shotId}</strong><dl><dt>Model</dt><dd>{request.model}{request.partitionReason ? ` · ${request.partitionReason}` : ""}</dd><dt>Output</dt><dd>{request.width}×{request.height} · {request.fps} fps · {request.durationSeconds}s</dd><dt>Conditioning</dt><dd>{request.mode} · {request.referenceRoles?.join(", ") || "no reference roles"} · reference edge {request.referenceImageShortEdge ?? "model default"}</dd><dt>Sampling</dt><dd>{request.effectiveSteps ?? "model default"} steps · {request.loras?.join(", ") || "base model"} · seed {request.seed ?? "random"}</dd><dt>Prompt</dt><dd>{request.promptSource}{request.promptSource === "refined" ? " (recorded planner identity below)" : ""}</dd></dl></article>)}{compiled.planner?.executions?.length ? <div><strong>Prompt refinement identity</strong><ul>{compiled.planner.executions.map((execution, index) => <li key={`${execution.jobId ?? "execution"}-${index}`}>{execution.provider} · {execution.model} · thinking {execution.thinkingMode} · target {execution.targetVideoModelId}</li>)}</ul></div> : <p>Authored prompts; no prompt-refinement model was invoked.</p>}</section> : null}
+      {compiled ? <section className="ve-film-preflight" aria-label="Render preflight"><h4>Effective requests</h4>{compiled.requests.filter((request) => selectedShotIds.includes(request.shotId)).map((request) => <article key={request.shotId}><strong>{request.shotId}</strong><dl><dt>Model</dt><dd>{request.model}{request.partitionReason ? ` · ${request.partitionReason}` : ""}</dd><dt>Output</dt><dd>{request.width}×{request.height} · {request.fps} fps · {request.durationSeconds}s</dd><dt>Conditioning</dt><dd>{request.mode} · {request.referenceRoles?.join(", ") || "no reference roles"} · reference edge {request.referenceImageShortEdge ?? "model default"}</dd><dt>Sampling</dt><dd>{request.effectiveSteps ?? "model default"} steps · {request.loras?.join(", ") || "base model"} · seed {request.seed ?? "random"}</dd><dt>Prompt</dt><dd>{request.promptSource}{request.promptSource === "refined" ? " (recorded planner identity below)" : ""}</dd>{request.insertedText?.length ? <><dt>Added by the compiler</dt><dd><ul aria-label={`Text the compiler added to ${request.shotId}`} className="ve-film-inserted-text">{request.insertedText.map((item, index) => <li key={`${item.kind}-${index}`}><em>{INSERTED_TEXT_LABELS[item.kind] ?? item.kind}</em><span>{item.text}</span></li>)}</ul><small className="ve-film-field-help">Written around your authored prompt, after any refinement. Edit the reference descriptions, locators or the shot’s Audio field to change them.</small></dd></> : null}</dl></article>)}{compiled.planner?.executions?.length ? <div><strong>Prompt refinement identity</strong><ul>{compiled.planner.executions.map((execution, index) => <li key={`${execution.jobId ?? "execution"}-${index}`}>{execution.provider} · {execution.model} · thinking {execution.thinkingMode} · target {execution.targetVideoModelId}</li>)}</ul></div> : <p>Authored prompts; no prompt-refinement model was invoked.</p>}</section> : null}
     </section>
   );
 }

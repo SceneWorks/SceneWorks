@@ -60,8 +60,19 @@ separate choice, and the planning operation records both identities.
    synopsis, visual direction, beats, and dialogue lines. Review and edit every field. Extraction is
    a starting point, not an approval step.
 3. On the **Shots** step, add, remove, reorder, or edit shots under **Shots and render controls**. Each shot has a stable
-   ID, beat, framing, prompt, intended start and end state, duration, conditioning mode, continuity
-   roles, optional dependencies, and optional dialogue placement.
+   ID, beat, framing, prompt, **Audio**, intended start and end state, duration, conditioning mode,
+   continuity roles, optional dependencies, and optional dialogue placement.
+
+   **Audio is required on every shot.** MiniMax-H3 generates its soundtrack from the same prompt it
+   renders the picture from, so anything the prompt leaves unsaid the model invents. Say what the
+   shot sounds like — diegetic sound, ambience, music or "no music". Stating silence is a valid
+   answer: write "No audio. Silence." and that is exactly what the compiler dispatches; the text is
+   never pattern-matched. Leaving it blank is not, and surfaces as a finding naming the shot until
+   you fill it in. Do not begin the value with "Audio:" — the compiler writes that label itself.
+
+   **Speech.** When the shot places a dialogue clip, the harness speaks that line itself, so leave
+   the words out of Audio. Otherwise a spoken line — who speaks, the words, and the delivery —
+   belongs in Audio, because the model invents any speech the prompt does not describe.
 4. Choose a render regime. **Turbo (recommended)** resolves the installed adapter recipe for the
    current model, output canvas, and reference-conditioned partitions and shows its concrete adapter
    IDs and effective step count. **Full quality** explicitly clears accelerator and step overrides
@@ -97,6 +108,52 @@ To use references:
 3. Bind approved character, prop, or location roles to a shot. Bound role order is preserved in the
    compiled request. Style and plate entries can remain descriptive references but are not
    `reference_to_video` subject bindings.
+
+A role's **description** is not a note to yourself. The compiler repeats it word for word into
+every shot that names the role, so write it as a complete sentence about the subject, naming the
+subject itself: "The courier: blue jacket, carries the parcel." works; "blue jacket" alone reads as
+a fragment in the dispatched prompt. Descriptions are editable on every row. `<`, `>`, and control
+characters are refused, because text that forges a `<Picture 3>` marker would reach the engine
+looking like one.
+
+### Roles with no image
+
+A role does not need a picture. Fill in **Role name**, **Kind**, and **Description**, clear the
+selected project image and leave the locator empty, then choose **Add described role**: the button
+stays disabled until the form describes a role with no image, and the role is then stored with no
+image at all, its description the whole of it. This is how you hold a subject steady across a film you have no photograph of — the
+compiler inserts the same words in every shot that lists the role under **Continuity roles**,
+rather than letting each shot reword it.
+
+A described-only role is listed with *no image — described in text* in place of a locator, and its
+description, kind, approval, and removal work like any other row's. Leave the description blank and
+the role is refused by name: a role with no image and no words says nothing and shows nothing.
+
+Because it supplies no picture, a described-only role can never be a first-frame, last-frame, or
+ordered reference binding — those controls and the reference-role suggestions offer image-backed
+roles only. **Continuity roles** offers every approved role, described or not.
+
+### Two roles on one image
+
+One photograph can hold two subjects. Add the same image a second time under a second role name and
+the pack ends up with two roles on one file, which SceneWorks supplies to the engine once, under a
+single `<Picture N>` that both roles are bound to, and imports as one project asset.
+
+Roles that share a file each need a **Locator** saying which subject in that image they name. The
+panel marks the field required on the add form and on both rows as soon as an image is reused, and
+names the other roles using it. A locator is a noun phrase, with its article, that completes "The
+courier is …" — write "the woman on the left", not "woman on the left", because the sentence is
+assembled verbatim and no article is supplied for you. Two roles sharing a file may not declare the
+same locator, and a role with no image may not declare one at all.
+
+If either locator is missing or the two are identical, the add is refused and the reason appears
+under the field. Fill in the locator on the existing row first, then add the second role.
+
+A continuity role whose photograph a shot is **already** supplying for some other role is named by
+that picture rather than described on its own: it gets the binding sentence with its locator ("The
+recipient is the man on the right in `<Picture 1>`.") and no separate identity sentence, since the
+image is being sent either way and its description is already in that sentence. Nothing about the
+picture order or the images dispatched changes.
 
 SceneWorks copies selected image bytes into the film draft's project-owned reference pack. A run
 pins its own staged copy, so later project changes do not silently change an in-progress planning or
@@ -189,10 +246,37 @@ license acknowledgement, geometry and duration menus, adapters, and declared bud
 
 Read both parts of the result:
 
-- findings identify the shot and field that must change; and
+- findings identify the shot and field that must change, in plain words — the internal field path is
+  used to route a finding to the panel that owns it, never shown to you. A finding about the pack
+  appears under **References**, except a sound-and-dialogue finding, which appears under **Sound and
+  dialogue**; every pack finding has one of those two owners, so none is reported in a place you
+  cannot act on it. And
 - **Effective requests** show the resolved model partition, output geometry, conditioning roles,
   reference edge, adapters, effective steps, seed, prompt source, and any prompt-refinement
   provenance.
+
+**Added by the compiler** lists, per request, the sentences SceneWorks wrote into the dispatched
+prompt around your authored text, labelled by what each one is: reference bindings, continuity
+descriptions, the audio sentence, and the no-speech sentence. They are written after any refinement
+rewrite, so a refiner cannot paraphrase a `<Picture N>` the engine labels or soften a stated
+silence. You change them by editing their sources — a reference's description or locator, or the
+shot's Audio field — not by editing the prompt.
+
+**What this view does not show.** It does not show the fully composed prompt that is dispatched, and
+it does not show the refiner's rewritten text. The **Prompt** row says only where the prompt came
+from — `authored` or `refined` — and **Added by the compiler** says what was added around it. The
+composed prompt itself is in the compiled document: export it with **Export compiled plan**, or read
+`compiled.json` from a CLI run, where each request carries its `prompt`, its `authoredPrompt` and
+its `insertedText`.
+
+**Editing the references invalidates a compiled plan.** The reference pack decides the sentences
+above, so changing a description or a locator changes what every shot repeating it would dispatch. A
+compiled document is tied to the pack it was compiled against, and after a pack edit preflight
+reports that the reference pack changed since those requests were compiled. Clear it with **Use
+authored prompts**, which drops the stored compiled plan and returns the shots to the prompts you
+wrote, or re-plan to compile fresh requests against the edited pack. A comment- or whitespace-only
+difference does not do this: what the compiled document is keyed on is the pack's content, not its
+formatting.
 
 Fix every blocking finding and run preflight again. **Render selected shots** also runs preflight and
 does not dispatch when the saved selection is invalid.

@@ -21,7 +21,8 @@ use sha2::{Digest, Sha256};
 
 use crate::film_plan::{
     is_reference_partition_id, plan_lora_payload_entries, plan_loras_for_partition,
-    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferencePack, Shot,
+    shot_resolution, ModelEntries, ModelLane, PlanDiagnostic, ProductionPlan, ReferenceEntry,
+    ReferencePack, Shot, AUDIO_PROMPT_PREFIX,
 };
 use crate::minimax_h3_turbo::resolve_turbo_recipe;
 use crate::video_request::effective_reference_image_short_edge;
@@ -40,13 +41,95 @@ use crate::MAX_PROMPT_CHARS;
 /// build would default them to "none / unknown" and then be blamed as hand-edited — the same
 /// migration trap the v2 bump above exists to avoid. The remedy is the same one line:
 /// `film-harness compile`.
-pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 3;
+/// **4** (sc-24023): a reference request's prompt now LEADS with compiler-written binding sentences
+/// naming each reference's `<Picture N>`, and the inserted text is recorded separately in
+/// `insertedText`. A v3 document's prompt has no binding sentences and no `insertedText` key, so
+/// reading one under this build would default the field to empty and then blame the operator for a
+/// hand edit through [`request_differences`] — the same migration trap as the two bumps above. The
+/// remedy is the same one line: `film-harness compile`.
+/// **5** (sc-24026): EVERY request's prompt now TRAILS with the shot's `Audio:` sentence, and a
+/// request whose shot places a dialogue line trails with [`NO_SPEECH_SENTENCE`] after it. Both are
+/// recorded as further `insertedText` entries. A v4 document's prompt carries neither, so reading
+/// one under this build would compare clean-but-different against a fresh compile and blame the
+/// operator for a hand edit through [`request_differences`] — the same migration trap as the three
+/// bumps above. The remedy is the same one line: `film-harness compile`.
+/// **6** (sc-24025): every request may now carry the TEXT IDENTITY LOCK — the pack's description of
+/// each `continuityRoles` entry the shot does not bind to an image, inserted word for word and
+/// recorded as a further `insertedText` entry. It is not a reference feature: a plan whose shots
+/// bind nothing at all gains it, which is exactly the case it exists for. A v5 document's prompt
+/// carries none of it, so reading one under this build would compare clean-but-different against a
+/// fresh compile and blame the operator for a hand edit through [`request_differences`] — the same
+/// migration trap as the four bumps above. The remedy is the same one line: `film-harness compile`.
+/// **7** (sc-24029): the document records the REFERENCE PACK it was compiled against
+/// ([`CompiledPlan::reference_pack_sha256`]), and [`CompiledPlan::staleness_findings`] compares it.
+/// The pack now decides the inserted text — a description edited in the pack changes every prompt
+/// that repeats it — so a document keyed on the plan alone stayed "current" across a pack edit and
+/// then failed [`request_differences`] at preflight, blaming the operator for a hand edit they did
+/// not make. A v6 document has no such key, so it is refused BY VERSION like the five bumps above
+/// rather than compared against a default. The remedy is the same one line: `film-harness compile`.
+pub const COMPILED_PLAN_SCHEMA_VERSION: u32 = 7;
+
+/// The field [`CompiledPlan::staleness_findings`] reports a changed reference pack under.
+///
+/// Named so the one caller that must tell a PACK finding from a PLAN one — the project store's
+/// draft save, which carries a compile across its own revision bump — asks by constant rather than
+/// by a string literal it would have to keep in step (sc-24029).
+pub const COMPILED_PACK_STALENESS_FIELD: &str = "compiled.referencePackSha256";
+
+/// The Film workspace control that turns the refine rewrite off, quoted exactly as the checkbox
+/// labels it (`apps/web/src/components/editor/FilmPlanning.jsx`).
+///
+/// A refusal that can only be acted on from the CLI is no remedy to somebody working in the
+/// workspace (sc-24029): the refined-prompt refusals below surface through the planning operation,
+/// where `--no-refine` names a flag that person never types. The label is a CONSTANT, and a test
+/// asserts the JSX still contains this exact string, so the message and the control it points at
+/// cannot drift apart silently — renaming the checkbox fails that test rather than leaving the
+/// refusal quietly naming a control nobody can find.
+pub const REFINE_PROMPTS_CONTROL_LABEL: &str =
+    "Run model-specific prompt refinement when compiling shots";
+
+/// The sentence appended when the harness itself puts a voice on this shot (sc-24026).
+///
+/// MiniMax-H3 scores a soundtrack from the prompt, speech included, and a shot whose dialogue bus
+/// already carries a line would otherwise come back with a second voice over ours — two people
+/// saying different things at once, which no downstream check can detect and no mix can undo.
+/// FIXED wording, chosen once: it is compiler-owned text, so it must read the same on every shot of
+/// every plan rather than varying with whoever authored the audio sentence.
+///
+/// It constrains the SOUNDTRACK and nothing else (sc-24026). These are exactly the shots that DO
+/// have someone speaking on camera — our own line is about to play over them — so a sentence
+/// phrased as a statement about the picture ("no one speaks on camera") would tell H3 to render
+/// closed mouths under our dialogue track. The wording names the generated audio explicitly so the
+/// model reads it as a constraint on what it scores, not on what it renders.
+pub const NO_SPEECH_SENTENCE: &str =
+    "No spoken dialogue in the generated audio; no voices on the soundtrack.";
 
 /// Serialize a production plan exactly as the project store and harness persist it, then hash
 /// those bytes. Keeping this beside the compiler prevents the editor preflight and CLI harness
 /// from inventing competing definitions of a "current" compiled document.
 pub fn production_plan_sha256(plan: &ProductionPlan) -> Result<String, serde_json::Error> {
     let mut bytes = serde_json::to_vec_pretty(plan)?;
+    bytes.push(b'\n');
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// The identity of the reference PACK a compiled document was produced against (sc-24029).
+///
+/// # What is hashed, and why it is not the document's bytes
+///
+/// The PARSED pack, re-serialized canonically — exactly as [`production_plan_sha256`] treats a plan
+/// — and NOT the bytes of the file on disk, although `resume` and `replace-take` do hash the pack's
+/// bytes for their own pinning. The two paths that hold a pack hold it in different shapes: the CLI
+/// reads a JSONC DOCUMENT whose comments and spacing are an author's, while the workspace holds a
+/// typed pack inside a draft that was never a file. Hashing bytes would give the same pack two
+/// identities and stale a compiled document on a comment-only edit; hashing the parsed value gives
+/// one identity for one pack, and changes exactly when something the compiler reads changes.
+///
+/// Every field of [`ReferencePack`] is included rather than only the descriptions and locators the
+/// inserted text repeats: `approved`, `kind`, `file` and `role` each decide whether a role is bound,
+/// described or ignored, and a compiler-owned sentence follows from all of them.
+pub fn reference_pack_sha256(pack: &ReferencePack) -> Result<String, serde_json::Error> {
+    let mut bytes = serde_json::to_vec_pretty(pack)?;
     bytes.push(b'\n');
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
@@ -70,6 +153,589 @@ pub enum PromptSource {
     /// The plan's prompt after the model's own prompt refinement (the `prompt_refine` seam). The
     /// authored text is kept beside it so the rewrite is reviewable.
     Refined,
+}
+
+/// One role bound to a reference picture, with the pack entry it names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundReferenceRole<'a> {
+    pub role: String,
+    /// The pack entry for `role`, when the pack declares one. `None` only for a plan that never
+    /// passed [`crate::film_plan::validate_plan_against_pack`], which refuses an undeclared role.
+    pub entry: Option<&'a ReferenceEntry>,
+}
+
+/// One reference picture a shot dispatches: the 1-based number the engine labels it with, and the
+/// pack roles it carries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferencePicture<'a> {
+    /// The `N` in `<Picture N>`, and the 1-based position of this picture's asset in the
+    /// dispatched `referenceAssetIds`.
+    pub number: u32,
+    /// The roles bound to this picture, in the shot's own order. More than one when the shot binds
+    /// several roles that name the same pack file — one photograph of two people (sc-24024).
+    pub roles: Vec<BoundReferenceRole<'a>>,
+}
+
+impl ReferencePicture<'_> {
+    /// The role whose imported asset this picture dispatches — the first one bound to it.
+    pub fn dispatch_role(&self) -> Option<&str> {
+        self.roles.first().map(|bound| bound.role.as_str())
+    }
+}
+
+/// THE order a shot's reference images are supplied in, and therefore both the `<Picture N>` the
+/// engine labels each one with and the position that image's asset takes in the dispatched
+/// `referenceAssetIds` (sc-24023).
+///
+/// One function, called by the compiler that writes the binding sentences AND by the dispatcher
+/// that builds `referenceAssetIds`, because the two numbers are the same number: a prompt that says
+/// "the courier is the person shown in `<Picture 2>`" while the courier's asset is dispatched first
+/// binds the model to the wrong image, and nothing downstream can detect it. The MiniMax-H3 text
+/// encoder labels the supplied assets `<Picture 1>`, `<Picture 2>`, … in supply order, so the
+/// numbering is positional and there is no id to check it against.
+///
+/// AND the de-duplication (sc-24024): roles whose pack entries name the SAME `file` share one
+/// picture, numbered at the position of the first of them, because the engine labels each image it
+/// is SUPPLIED and a file supplied once is one picture however many roles point at it. A shot
+/// binding ten roles across nine files therefore sends nine images and names `<Picture 1>` …
+/// `<Picture 9>`.
+///
+/// "The same file" is the pack's `file` string compared LITERALLY. Nothing here touches the
+/// filesystem: the pack's own validator has already refused an absolute path, a `..` component and
+/// an unsafe basename, and canonicalizing would make one document mean different things on two
+/// machines. Two entries meaning one image must spell its path one way.
+///
+/// A role the pack does not declare (`entry: None`) can never share, since there is no file to
+/// share: it gets a picture of its own. Only an unvalidated plan has one —
+/// [`crate::film_plan::validate_plan_against_pack`] refuses an undeclared role.
+///
+/// A DESCRIBED-ONLY role — declared, but with no `file` (sc-24025) — produces NO picture at all,
+/// which is a different answer from the undeclared role's "a picture of its own". There is no
+/// image to supply, so numbering one would promise the engine a `<Picture N>` it is never sent and
+/// shift every later number by one; and because the reference LIMIT, the route's pre-dispatch
+/// payload gate and the dispatched `referenceAssetIds` are all built by walking this list, a role
+/// that costs no image must not appear in it. Only an unvalidated plan can bind one —
+/// `validate_plan_against_pack` refuses a described-only role in every `conditioning.*` slot — and
+/// dropping it here is what makes that refusal the only way it is ever seen.
+pub fn shot_reference_pictures<'a>(
+    reference_roles: &[String],
+    pack: &'a ReferencePack,
+) -> Vec<ReferencePicture<'a>> {
+    let mut pictures: Vec<ReferencePicture<'a>> = Vec::with_capacity(reference_roles.len());
+    let mut by_file: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for role in reference_roles {
+        let entry = pack.references.iter().find(|entry| &entry.role == role);
+        if entry.is_some_and(crate::film_plan::ReferenceEntry::is_described_only) {
+            continue;
+        }
+        let bound = BoundReferenceRole {
+            role: role.clone(),
+            entry,
+        };
+        let shared = entry
+            .and_then(crate::film_plan::ReferenceEntry::file)
+            .and_then(|file| by_file.get(file).copied());
+        match shared {
+            Some(index) => pictures[index].roles.push(bound),
+            None => {
+                if let Some(file) = entry.and_then(crate::film_plan::ReferenceEntry::file) {
+                    by_file.insert(file, pictures.len());
+                }
+                pictures.push(ReferencePicture {
+                    number: u32::try_from(pictures.len() + 1).unwrap_or(u32::MAX),
+                    roles: vec![bound],
+                });
+            }
+        }
+    }
+    pictures
+}
+
+/// A kind of text the COMPILER writes into a prompt, recorded so a reviewer can see exactly what
+/// was added and why (sc-24023).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InsertedTextKind {
+    /// One sentence per bound reference role, giving that reference a job in the prompt by naming
+    /// the `<Picture N>` the engine will label its image with.
+    ReferenceBinding,
+    /// THE TEXT IDENTITY LOCK (sc-24025): the pack's own description of every `continuityRoles`
+    /// entry this shot does NOT bind to an image, repeated word for word.
+    ///
+    /// Reference images are OPTIONAL in this harness, and a subject no picture conditions on is
+    /// held together by nothing but the words used for it. Left to an author or a planner, the
+    /// courier is re-worded in every shot and MiniMax-H3 duly renders a different courier; the
+    /// compiler instead says the same thing every time, from the one place the pack states it.
+    ContinuityDescription,
+    /// `Audio: <the shot's own sentence>` — what this shot should sound like (sc-24026).
+    Audio,
+    /// [`NO_SPEECH_SENTENCE`], on a shot whose dialogue bus the harness already fills (sc-24026).
+    NoSpeech,
+}
+
+/// Where in the prompt a kind of inserted text sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertedTextPlacement {
+    /// Ahead of the authored or refined prompt.
+    Leading,
+    /// After it.
+    Trailing,
+}
+
+impl InsertedTextKind {
+    /// The first kind in prompt order; [`Self::all`] walks from here.
+    pub const FIRST: Self = Self::ReferenceBinding;
+
+    /// The kind after `self` in prompt order, or `None` at the end (sc-24029).
+    ///
+    /// THE one place the order is written down, and the reason it cannot go stale: this `match`
+    /// has no wildcard arm, so adding a variant to the enum stops the crate compiling HERE, at the
+    /// list itself. A hand-kept `&[Self; N]` could not do that — a new kind would simply be absent
+    /// from it, and would then drop silently out of the over-length attribution, whose test walks
+    /// the same list and so could never notice.
+    ///
+    /// Linking a new kind into the chain is still the author's job; what is mechanical is being
+    /// made to look at this function. The sum-to-total assertion on the over-length refusal is the
+    /// second half of the guard: a kind that reaches a prompt without being reachable from
+    /// [`Self::FIRST`] leaves the per-kind counts short of the characters actually inserted.
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::ReferenceBinding => Some(Self::ContinuityDescription),
+            Self::ContinuityDescription => Some(Self::Audio),
+            Self::Audio => Some(Self::NoSpeech),
+            Self::NoSpeech => None,
+        }
+    }
+
+    /// Every kind, in prompt order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::FIRST), |kind| kind.next())
+    }
+
+    /// What this kind of inserted text is CALLED when a finding has to name it to an operator.
+    ///
+    /// Plain words rather than the variant name, because these appear in refusals a person acts
+    /// on: the thing to go and shorten, or the thing that no longer matches.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReferenceBinding => "reference binding sentences",
+            Self::ContinuityDescription => {
+                "identity text (the pack's description of each continuityRoles entry this shot \
+                 does not bind to an image, written in word for word)"
+            }
+            Self::Audio => "the shot's audio sentence",
+            Self::NoSpeech => "the no-spoken-dialogue sentence",
+        }
+    }
+
+    /// Where this kind sits, and the ONE place that is decided.
+    ///
+    /// Reference bindings LEAD because the engine presents the reference media before the text: the
+    /// binding a picture needs should be the first thing said about it. The audio sentences TRAIL
+    /// because they describe a different track from everything before them — a prompt that opens on
+    /// sound reads as a film about sound — and because the no-speech sentence only makes sense once
+    /// the soundtrack has been described.
+    /// The identity lock LEADS too, immediately after the bindings, for the same reason they do:
+    /// both say what the shot is OF, and the two together are one block describing every subject
+    /// in the film — the bound ones by picture, the rest by description — read before the prompt
+    /// that puts those subjects in motion.
+    pub fn placement(self) -> InsertedTextPlacement {
+        match self {
+            Self::ReferenceBinding | Self::ContinuityDescription => InsertedTextPlacement::Leading,
+            Self::Audio | Self::NoSpeech => InsertedTextPlacement::Trailing,
+        }
+    }
+}
+
+/// Text the compiler wrote into [`CompiledRequest::prompt`], kept beside the authored prompt so the
+/// document says exactly what was added rather than only that the prompt differs (sc-24023).
+///
+/// Each insertion sits where its kind's [`InsertedTextKind::placement`] puts it, in the order of
+/// this list. Inserted text is written AFTER the model's own refine rewrite, so the refiner can
+/// never paraphrase a `<Picture N>` into something the engine does not label, nor soften "No audio.
+/// Silence." into a suggestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertedText {
+    pub kind: InsertedTextKind,
+    pub text: String,
+}
+
+/// The noun a binding sentence calls a bound reference, by its pack kind.
+///
+/// Only [`crate::film_plan::BINDABLE_REFERENCE_KINDS`] reach a `conditioning.referenceRoles` slot —
+/// `validate_plan_against_pack` refuses the other two — so the fallback is for a role the pack does
+/// not declare at all, which no validated plan has.
+fn bound_reference_noun(kind: &str) -> &'static str {
+    match kind {
+        "character" => "person",
+        "prop" => "object",
+        "location" => "place",
+        _ => "subject",
+    }
+}
+
+/// `red_parcel` -> `red parcel`: the role as a prompt reads it.
+fn role_phrase(role: &str) -> String {
+    role.replace(['_', '-'], " ")
+}
+
+/// A pack-authored description as compiler-owned text may repeat it: every `\r`, `\n`, `\t` and run
+/// of spaces collapsed to a single space, and the ends trimmed (sc-24023).
+///
+/// THE one place a description is normalized, because every kind of inserted text repeats one — the
+/// reference binding sentences here and the shot's own `audio` sentence ([`audio_text`], sc-24026)
+/// — and a description that carried a newline or a control run would otherwise land raw in the
+/// dispatched prompt inside the one field [`CompiledPlan::conformance_findings`] treats as the
+/// compiler's own authored text and therefore never re-reads.
+///
+/// WHITESPACE only. `<`, `>` and genuine control characters are refused at the document boundary:
+/// a pack entry's `description` by [`crate::film_plan::reference_pack_findings`] and a shot's
+/// `audio` by `validate_shot_structure`, both through the shared `inserted_prose_findings` helper
+/// — because text that forges `<Picture 3>` is an authoring mistake to name rather than something
+/// to silently rewrite.
+pub fn normalized_description(description: &str) -> String {
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A pack description as ONE sentence of a prompt, or `None` when the pack says nothing.
+///
+/// THE one rule for repeating a description, shared by the two places that repeat one (sc-24025):
+/// the binding sentence a bound reference gets ([`reference_binding_text`], sc-24023) and the
+/// identity lock an unbound continuity role gets ([`continuity_description_text`]). One helper
+/// because the two must read identically — the same courier described the same way whether this
+/// shot happens to bind her plate — and two copies of "normalize, then add a period" would drift.
+///
+/// It adds NOTHING but a closing `.` to text that does not already end a sentence. In particular
+/// it never prefixes the role name: the pack's descriptions are written as complete sentences
+/// naming their own subject ("The courier: blue jacket, carries the parcel."), so prefixing would
+/// produce "The courier: The courier: …". That contract is stated on
+/// [`crate::film_plan::ReferenceEntry::description`], which is where an author reads it.
+///
+/// WHITESPACE is normalized first ([`normalized_description`]): the sentence is one line of a
+/// prompt, and a description carrying a newline or a tab run would otherwise land raw in the
+/// dispatched text (sc-24023).
+///
+/// "Already ends a sentence" is [`ends_sentence`] and nothing else (sc-24029). This function and
+/// the trailing-insertion join are the only two places the compiler decides whether to supply a
+/// missing `.`, and a second, narrower rule here put a stray period after every description that
+/// ended in `…`, `."` or `.)` — all of which are finished sentences.
+fn description_sentence(description: &str) -> Option<String> {
+    let mut text = normalized_description(description);
+    if text.is_empty() {
+        return None;
+    }
+    if !ends_sentence(&text) {
+        text.push('.');
+    }
+    Some(text)
+}
+
+/// THE SHARED-FILE RULE for continuity roles (sc-24025), and the ONE place it is applied: a
+/// continuity role the shot does not list in `referenceRoles`, but whose `file` is the file of a
+/// picture this shot IS binding, is added to that picture as a bound role — and therefore gets a
+/// BINDING sentence with its locator instead of an identity sentence.
+///
+/// The case is a photograph of two people where the shot binds one of them. The other subject's
+/// image is already supplied inside that `<Picture N>`, so an identity sentence would describe
+/// somebody visibly present in a supplied picture without tying them to it — the second-subject
+/// ambiguity the locator exists to remove, reintroduced. Tying it to the picture says the one
+/// thing the prompt is missing: which of the two people in `<Picture 1>` the recipient is.
+///
+/// It never gets BOTH, because the binding sentence already repeats the pack's description and a
+/// description stated twice is emphasis a prompt model acts on. Adding the role here is what makes
+/// [`continuity_description_text`] skip it: that function asks the pictures it is given.
+///
+/// TEXT ONLY. The role is appended to an EXISTING picture, so nothing here changes
+/// [`shot_reference_pictures`]' order or numbering, and nothing changes the dispatched
+/// `referenceAssetIds`: those are built from each picture's [`ReferencePicture::dispatch_role`],
+/// which is the FIRST role on it and therefore always one the shot listed. The image was already
+/// being sent; this only names its second subject.
+///
+/// APPROVED roles only, the rule every other insertion follows, and appended AFTER the listed
+/// roles so a picture's binding sentences read in the order the shot asked for them.
+fn pictures_with_shared_continuity<'a>(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'a>],
+    pack: &'a ReferencePack,
+) -> Vec<ReferencePicture<'a>> {
+    let mut augmented = pictures.to_vec();
+    for role in &shot.continuity_roles {
+        if augmented
+            .iter()
+            .flat_map(|picture| picture.roles.iter())
+            .any(|bound| &bound.role == role)
+        {
+            continue;
+        }
+        let Some(entry) = pack
+            .references
+            .iter()
+            .find(|entry| &entry.role == role && entry.approved)
+        else {
+            continue;
+        };
+        // A DESCRIBED-ONLY role has no file and can share none: it falls through to the lock.
+        let Some(file) = entry.file() else {
+            continue;
+        };
+        let Some(picture) = augmented.iter_mut().find(|picture| {
+            picture
+                .roles
+                .first()
+                .and_then(|bound| bound.entry)
+                .and_then(crate::film_plan::ReferenceEntry::file)
+                == Some(file)
+        }) else {
+            continue;
+        };
+        picture.roles.push(BoundReferenceRole {
+            role: role.clone(),
+            entry: Some(entry),
+        });
+    }
+    augmented
+}
+
+/// THE TEXT IDENTITY LOCK for one shot (sc-24025): the pack's description of every
+/// `continuityRoles` entry this shot does not bind to an image, in the shot's own role order.
+///
+/// "Does not bind to an image" is asked of the shot's RESOLVED pictures and its keyframe slots,
+/// not of the role's kind or of the plan's declared model, because that is the question that
+/// matters: a role whose picture is actually being supplied already has its description in its
+/// binding sentence, and saying it twice is the one thing this must not do. Everything else
+/// qualifies — a described-only role on any shot, and an image-backed role on a shot that resolved
+/// to the base checkpoint or simply did not bind it. Role KIND is irrelevant: a style and a plate
+/// drift exactly as a character does when nobody repeats the words.
+///
+/// UNAPPROVED roles contribute nothing, which is the rule the binding sentences already follow —
+/// `validate_plan_against_pack` refuses an unapproved role in a conditioning slot, so no binding
+/// sentence has ever described one. `approved` defaults to TRUE, so an unapproved entry is an
+/// explicit "do not use this", and text shapes the render exactly as conditioning does.
+///
+/// An empty description contributes nothing and is not an error here: an image-backed role that
+/// says nothing still shows its picture. A DESCRIBED-only role cannot reach this state — the pack
+/// validator refuses one with no description, because it would be a role that is nothing at all.
+///
+/// A role SHARING a bound picture's file gets no identity sentence either, and it is
+/// [`pictures_with_shared_continuity`] that says so rather than a rule here: it has already added
+/// the role to that picture, so the `pictures` this reads report it bound. Its image is being
+/// supplied, so it is named by picture with its locator — see that function for why.
+fn continuity_description_text(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'_>],
+    pack: &ReferencePack,
+) -> Option<InsertedText> {
+    let image_bound = |role: &str| {
+        pictures
+            .iter()
+            .flat_map(|picture| picture.roles.iter())
+            .any(|bound| bound.role == role)
+            || [
+                shot.conditioning.first_frame_role.as_deref(),
+                shot.conditioning.last_frame_role.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|frame| frame == role)
+    };
+    // ONE sentence per SUBJECT, at its first mention. `continuityRoles` is a free list and nothing
+    // refuses a role written into it twice, but a subject described twice is the compiler
+    // contradicting its own purpose: the lock exists to say one fixed thing about each subject, and
+    // repetition is emphasis a prompt model acts on.
+    let mut described: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let sentences: Vec<String> = shot
+        .continuity_roles
+        .iter()
+        .filter(|role| !image_bound(role))
+        .filter_map(|role| {
+            pack.references
+                .iter()
+                .find(|entry| entry.role == *role && entry.approved)
+        })
+        .filter(|entry| described.insert(entry.role.as_str()))
+        .filter_map(|entry| description_sentence(&entry.description))
+        .collect();
+    (!sentences.is_empty()).then(|| InsertedText {
+        kind: InsertedTextKind::ContinuityDescription,
+        text: sentences.join(" "),
+    })
+}
+
+/// The binding sentences for one shot: one per bound role, in picture order, each naming the
+/// `<Picture N>` that role's image will be labelled with and repeating the pack's own description
+/// of it verbatim (sc-24023).
+///
+/// Plain declarative sentences and nothing else — no emphasis, no imperatives, no restating of the
+/// shot. The prompt guide's rule is that a reference needs a job ("the woman from `<Picture 1>`");
+/// this is that job, stated once per reference.
+///
+/// "Bound role" is every role on the picture, which since sc-24025 includes a `continuityRoles`
+/// entry whose file this shot is already supplying for some other role
+/// ([`pictures_with_shared_continuity`]) — a second subject inside a picture that is being sent is
+/// named here, by picture and locator, rather than described on its own by the identity lock.
+/// It gets a binding sentence and no identity sentence; the picture's own number and its
+/// dispatched asset are untouched.
+fn reference_binding_text(pictures: &[ReferencePicture<'_>]) -> Option<InsertedText> {
+    let mut sentences: Vec<String> = Vec::new();
+    for picture in pictures {
+        for bound in &picture.roles {
+            // With a LOCATOR the sentence says WHICH subject in that picture this role is
+            // (sc-24024) — "The courier is the woman on the left in <Picture 1>." — which is the
+            // only thing that makes one photograph of two people bindable as two roles, since both
+            // are bound to the same `<Picture N>`. Without one it keeps the wording a reference
+            // with an image to itself has always had. The locator's whitespace is normalized like
+            // every other pack-authored phrase the compiler repeats.
+            let locator = bound
+                .entry
+                .and_then(crate::film_plan::ReferenceEntry::locator)
+                .map(normalized_description)
+                .filter(|locator| !locator.is_empty());
+            let kind = bound.entry.map_or("", |entry| entry.kind.as_str());
+            let mut sentence = match locator {
+                Some(locator) => format!(
+                    "The {} is {locator} in <Picture {}>.",
+                    role_phrase(&bound.role),
+                    picture.number
+                ),
+                None => format!(
+                    "The {} is the {} shown in <Picture {}>.",
+                    role_phrase(&bound.role),
+                    bound_reference_noun(kind),
+                    picture.number
+                ),
+            };
+            // The pack's description is the author's own words about that image, so it is repeated
+            // rather than paraphrased into the sentence above.
+            if let Some(description) = bound
+                .entry
+                .and_then(|entry| description_sentence(&entry.description))
+            {
+                sentence.push(' ');
+                sentence.push_str(&description);
+            }
+            sentences.push(sentence);
+        }
+    }
+    (!sentences.is_empty()).then(|| InsertedText {
+        kind: InsertedTextKind::ReferenceBinding,
+        text: sentences.join(" "),
+    })
+}
+
+/// The shot's audio sentence as the prompt states it (sc-24026): `Audio: ` and the author's own
+/// words, whitespace-normalized exactly as a pack description is and otherwise verbatim.
+///
+/// The content is NEVER inspected. "No audio. Silence." is a complete answer, and a compiler that
+/// tried to tell silence from sound would have to guess at prose — the plan already refused a shot
+/// that said nothing, which is the only question worth asking here.
+fn audio_text(shot: &Shot) -> Option<InsertedText> {
+    let audio = normalized_description(&shot.audio);
+    (!audio.is_empty()).then(|| InsertedText {
+        kind: InsertedTextKind::Audio,
+        text: format!("{AUDIO_PROMPT_PREFIX} {audio}"),
+    })
+}
+
+/// [`NO_SPEECH_SENTENCE`], on a shot that PLACES a dialogue line (sc-24026).
+///
+/// Keyed on [`Shot::dialogue_clip`], which is the placement: `dialogue` beside it is intent prose
+/// the run never plays, while a clip names a pack `sound` entry of kind `dialogue` that
+/// `ensure_sound` either imports from disk or synthesizes and then imports. Pre-recorded or spoken,
+/// both put OUR voice on the dialogue bus, so both are the reason not to let H3 add a second one. A
+/// shot with no clip gets nothing: it has no voice to double.
+fn no_speech_text(shot: &Shot) -> Option<InsertedText> {
+    shot.dialogue_clip.as_ref().map(|_| InsertedText {
+        kind: InsertedTextKind::NoSpeech,
+        text: NO_SPEECH_SENTENCE.to_owned(),
+    })
+}
+
+/// Everything the compiler writes into a shot's prompt, in the order the prompt reads it.
+///
+/// The one place an insertion kind is produced: a later kind of compiler-owned text is another
+/// entry pushed here, and needs no change to the placement, the record or the conformance check.
+fn inserted_text_for_shot<'a>(
+    shot: &Shot,
+    pictures: &[ReferencePicture<'a>],
+    pack: &'a ReferencePack,
+) -> Vec<InsertedText> {
+    let pictures = pictures_with_shared_continuity(shot, pictures, pack);
+    reference_binding_text(&pictures)
+        .into_iter()
+        .chain(continuity_description_text(shot, &pictures, pack))
+        .chain(audio_text(shot))
+        .chain(no_speech_text(shot))
+        .collect()
+}
+
+/// Does `text` already end a sentence? (sc-24026)
+///
+/// A trailing insertion is appended after text nobody guaranteed was punctuated — an authored
+/// prompt, a refiner rewrite, or the author's own `audio` sentence — and a bare space between them
+/// produces a run-on the model reads as one clause: `...a courier enters Audio: Room tone`. The
+/// answer is the last non-whitespace character, accepting a closing quote or bracket that itself
+/// closes a punctuated sentence (`"...he said." )`).
+fn ends_sentence(text: &str) -> bool {
+    let mut chars = text.trim_end().chars().rev();
+    let Some(last) = chars.next() else {
+        // Nothing to join to: the caller writes no separator before the first piece anyway.
+        return true;
+    };
+    let terminal = |value: char| matches!(value, '.' | '!' | '?' | '…');
+    terminal(last)
+        || (matches!(last, '"' | '\'' | ')' | ']' | '»' | '”' | '’')
+            && chars.next().is_some_and(terminal))
+}
+
+/// Push the separator between the text composed so far and the next trailing insertion: a sentence
+/// boundary, supplying the missing `.` when the composed text does not already end one (sc-24026).
+fn push_sentence_break(composed: &mut String) {
+    if composed.trim_end().is_empty() {
+        // Nothing precedes this piece, so there is no boundary to draw and no leading space to add.
+        return;
+    }
+    if !ends_sentence(composed) {
+        composed.push('.');
+    }
+    composed.push(' ');
+}
+
+/// The prompt the engine receives: the leading insertions, in order, then the refined or authored
+/// prompt, then the trailing ones.
+///
+/// Trailing pieces are joined by a SENTENCE boundary rather than a bare space, because neither the
+/// authored prompt, the refiner's rewrite nor the author's `audio` text is guaranteed to end in
+/// terminal punctuation and the compiler's own sentences must not be swallowed into whatever
+/// precedes them (sc-24026).
+///
+/// The prompt is trimmed at BOTH ends (sc-24029). A leading insertion already ends in a single
+/// space, so an authored prompt that opens with whitespace — which nothing refuses, and which a
+/// text area produces readily — used to be joined to the bindings by two. Trimming both ends is
+/// also what makes the composition reversible: `CompiledPlan::conformance_findings` recovers the
+/// middle of a dispatched prompt by stripping the expected prefix and suffix, and it can only do
+/// that if the compiler's own join added nothing it cannot predict.
+fn apply_inserted_text(prompt: &str, inserted: &[InsertedText]) -> String {
+    if inserted.is_empty() {
+        return prompt.trim().to_owned();
+    }
+    let mut composed = String::new();
+    for piece in inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Leading)
+    {
+        composed.push_str(piece.text.trim());
+        composed.push(' ');
+    }
+    composed.push_str(prompt.trim());
+    for piece in inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Trailing)
+    {
+        push_sentence_break(&mut composed);
+        composed.push_str(piece.text.trim());
+    }
+    composed
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,13 +801,20 @@ pub struct CompiledRequest {
     /// prompt: [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
     #[serde(default)]
     pub partition_reason: String,
-    /// The prompt the engine will receive.
+    /// The prompt the engine will receive: [`Self::inserted_text`], in order, around the authored
+    /// or refined text — bindings leading it, the audio sentences trailing it.
     pub prompt: String,
     pub prompt_source: PromptSource,
     /// The plan's own prompt, kept when `prompt` was refined so the rewrite can be reviewed and
     /// reverted by editing the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authored_prompt: Option<String>,
+    /// What the COMPILER wrote into `prompt`, per kind, separately from the authored text
+    /// (sc-24023). A reviewer reads this to see exactly what was added without diffing two
+    /// paragraphs, and it is DERIVED like every other field but the prompt itself:
+    /// [`CompiledPlan::conformance_findings`] refuses a hand-edited one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inserted_text: Vec<InsertedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
     pub duration_seconds: f64,
@@ -176,6 +849,23 @@ pub struct CompiledPlan {
     pub plan_sha256: String,
     pub reference_pack_id: String,
     pub reference_pack_version: u32,
+    /// [`reference_pack_sha256`] of the pack these requests were compiled against (sc-24029).
+    ///
+    /// The pack is an INPUT to the prompt, not only to the conditioning: every reference binding
+    /// sentence and every identity-lock sentence is written out of a pack entry's own description
+    /// and locator. Editing a pack description is a first-class workspace action, so without this
+    /// key a compiled document survived the edit marked current and was then refused by
+    /// [`request_differences`] — the wrong cause, naming a derived field instead of the pack.
+    ///
+    /// It hashes the PARSED pack, so the CLI's JSONC document and the workspace's typed pack agree
+    /// on one value and a comment- or whitespace-only edit of the document does not stale a
+    /// compile. See [`reference_pack_sha256`] for why that rather than the file's bytes.
+    ///
+    /// `#[serde(default)]` so a v6 document still DECODES and is then refused by
+    /// [`COMPILED_PLAN_SCHEMA_VERSION`], which is the refusal that names the remedy — the pattern
+    /// every earlier field addition follows.
+    #[serde(default)]
+    pub reference_pack_sha256: String,
     pub compiled_at: String,
     pub model: CompiledModel,
     pub requests: Vec<CompiledRequest>,
@@ -325,7 +1015,7 @@ pub fn compile_plan(
     };
     let mut requests = Vec::with_capacity(plan.shots.len());
     for shot in &plan.shots {
-        match compile_shot(plan, shot, inputs, fps) {
+        match compile_shot(plan, shot, pack, inputs, fps) {
             Ok(request) => requests.push(request),
             Err(mut shot_findings) => findings.append(&mut shot_findings),
         }
@@ -333,6 +1023,12 @@ pub fn compile_plan(
     if !findings.is_empty() {
         return Err(findings);
     }
+    let reference_pack_sha256 = reference_pack_sha256(pack).map_err(|error| {
+        vec![PlanDiagnostic::plan(
+            "referencePack",
+            format!("this reference pack cannot be serialized to identify it: {error}"),
+        )]
+    })?;
     Ok(CompiledPlan {
         schema_version: COMPILED_PLAN_SCHEMA_VERSION,
         plan_id: plan.id.clone(),
@@ -340,6 +1036,7 @@ pub fn compile_plan(
         plan_sha256: inputs.plan_sha256.to_owned(),
         reference_pack_id: pack.id.clone(),
         reference_pack_version: pack.version,
+        reference_pack_sha256,
         compiled_at: inputs.compiled_at.to_owned(),
         model: CompiledModel {
             id: plan.model.id.clone(),
@@ -355,6 +1052,7 @@ pub fn compile_plan(
 fn compile_shot(
     plan: &ProductionPlan,
     shot: &Shot,
+    pack: &ReferencePack,
     inputs: &CompileInputs<'_>,
     fps: u32,
 ) -> Result<CompiledRequest, Vec<PlanDiagnostic>> {
@@ -392,8 +1090,40 @@ fn compile_shot(
                     "prompt",
                     format!(
                         "the refined prompt is {length} characters, outside the 1-{MAX_PROMPT_CHARS} \
-                         the video route accepts; re-run the refinement or compile with --no-refine \
-                         (the authored prompt is not silently substituted)"
+                         the video route accepts; re-run the refinement, or compile without prompt \
+                         refinement — `--no-refine` from the CLI, or untick \
+                         {REFINE_PROMPTS_CONTROL_LABEL:?} in the Film workspace (the authored \
+                         prompt is not silently substituted)"
+                    ),
+                )]);
+            }
+            // THE REFINER MAY NOT WRITE AN ENGINE LABEL (sc-24029). The rewrite is produced by a
+            // language model that is handed the model's own prompt guide, and that guide teaches
+            // `<Picture N>` as the way to give a reference a job — so the text most likely to come
+            // back carrying a label is exactly this text. The worker's marker filter deliberately
+            // KEEPS `<Picture N>`, and nothing downstream reads the dispatched prompt back against
+            // the pictures the shot actually supplies, so a label survives here into a binding to
+            // an image this request never sends.
+            //
+            // Refused rather than stripped: a rewrite that named a picture is a rewrite built
+            // around one, and deleting the label would leave the sentence that depends on it. The
+            // AUTHORED branch below is deliberately NOT scanned — a person who types `<Picture 1>`
+            // into a plan means it, which is the same line `film_planner::anchoring_findings`
+            // draws between a draft and a hand-authored document.
+            if crate::film_plan::engine_label_at(trimmed).is_some() {
+                return Err(vec![PlanDiagnostic::shot(
+                    &shot.id,
+                    "prompt",
+                    format!(
+                        "the refined prompt for {} contains {}, a label this film's renderer \
+                         assigns itself: the compiler writes every such label after the rewrite, \
+                         numbered from this shot's referenceRoles, so one written here names a \
+                         picture the request never supplies. Re-run the refinement, or compile \
+                         without prompt refinement — `--no-refine` from the CLI, or untick \
+                         {REFINE_PROMPTS_CONTROL_LABEL:?} in the Film workspace (the refined \
+                         prompt is not silently edited)",
+                        shot.id,
+                        crate::film_plan::quoted_engine_label(trimmed),
                     ),
                 )]);
             }
@@ -405,6 +1135,50 @@ fn compile_shot(
         }
         None => (shot.prompt.clone(), PromptSource::Authored, None),
     };
+    // THE INSERTION STEP (sc-24023). It runs HERE — after the refine rewrite has already been
+    // chosen above — because the refiner is a language model: text handed to it comes back
+    // paraphrased, and a paraphrased `<Picture 2>` is a binding to an image the engine never
+    // labelled that way. Writing it afterwards makes the compiler, not the model, the author of
+    // every word the engine reads that the plan did not write.
+    let inserted_text = inserted_text_for_shot(
+        shot,
+        &shot_reference_pictures(&shot.conditioning.reference_roles, pack),
+        pack,
+    );
+    let prompt = apply_inserted_text(&prompt, &inserted_text);
+    let length = prompt.chars().count();
+    if length > MAX_PROMPT_CHARS {
+        // What the COMPILER contributed, per kind, so the refusal points at the text the author
+        // has to go and shorten rather than at the total. EVERY kind is counted (sc-24029): the
+        // audio and no-speech sentences trail every request since sc-24026, so a message that
+        // reported only the two leading kinds could account for a few hundred characters of an
+        // over-length prompt and leave the rest of the compiler's own text unexplained. The
+        // identity text is named at length because it is the one an author is least likely to
+        // suspect: it appears on shots that bind nothing at all, and it is written from a pack
+        // description that shot never mentions (sc-24025).
+        let inserted_chars = |kind: InsertedTextKind| -> usize {
+            inserted_text
+                .iter()
+                .filter(|piece| piece.kind == kind)
+                .map(|piece| piece.text.chars().count())
+                .sum()
+        };
+        let contributions = InsertedTextKind::all()
+            .map(|kind| format!("{} as {}", inserted_chars(kind), kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(vec![PlanDiagnostic::shot(
+            &shot.id,
+            "prompt",
+            format!(
+                "this shot's prompt is {length} characters once the compiler's own sentences lead \
+                 and trail it, outside the 1-{MAX_PROMPT_CHARS} the video route accepts; shorten \
+                 the shot's prompt, its audio sentence, or the pack descriptions the compiler \
+                 repeats. Of those characters the compiler wrote {contributions} (nothing is \
+                 silently truncated)"
+            ),
+        )]);
+    }
     // A reference-only knob reaches a reference-only request (sc-23402). The plan declares it once
     // on the family; the shots that resolve to the base partition encode no reference, so the field
     // is not written onto them and never reaches their job body or their attempt record.
@@ -457,6 +1231,7 @@ fn compile_shot(
         prompt,
         prompt_source,
         authored_prompt: authored,
+        inserted_text,
         negative_prompt: shot.negative_prompt.clone(),
         duration_seconds: shot.target_duration_seconds,
         fps,
@@ -483,6 +1258,11 @@ pub struct DispatchContext<'a> {
     /// controller that died between the POST and the record write finds its OWN job instead of
     /// enqueuing a second render for the same attempt (sc-22711). `None` leaves it out.
     pub idempotency_key: Option<&'a str>,
+    /// The approved pack the roles below were imported from. Dispatch reads it for ONE thing: the
+    /// reference order ([`shot_reference_pictures`]), so the position an asset takes in
+    /// `referenceAssetIds` is decided by the same function that numbered the `<Picture N>` in the
+    /// prompt (sc-24023).
+    pub pack: &'a ReferencePack,
     /// Reference role -> imported asset id.
     pub role_assets: &'a BTreeMap<String, String>,
 }
@@ -514,8 +1294,14 @@ impl CompiledRequest {
 
     /// Resolve this request's reference roles against the imported assets. A role with no asset is
     /// a finding — the run never dispatches a keyframe shot with its keyframe quietly missing.
+    ///
+    /// The reference list is built by walking [`shot_reference_pictures`] — the same function the
+    /// compiler numbered this request's `<Picture N>` with — so the position of an asset here and
+    /// the number in the prompt are one decision rather than two that agree by coincidence
+    /// (sc-24023).
     pub fn resolve_conditioning(
         &self,
+        pack: &ReferencePack,
         role_assets: &BTreeMap<String, String>,
     ) -> Result<ResolvedConditioning, Vec<PlanDiagnostic>> {
         let mut findings = Vec::new();
@@ -540,9 +1326,10 @@ impl CompiledRequest {
             .last_frame_role
             .as_deref()
             .and_then(|role| resolve("conditioning.lastFrameRole", role));
-        let references: Vec<String> = self
-            .reference_roles
+        let pictures = shot_reference_pictures(&self.reference_roles, pack);
+        let references: Vec<String> = pictures
             .iter()
+            .filter_map(|picture| picture.dispatch_role())
             .filter_map(|role| resolve("conditioning.referenceRoles", role))
             .collect();
         if findings.is_empty() {
@@ -559,7 +1346,7 @@ impl CompiledRequest {
     /// The `POST /api/v1/video/jobs` body for one attempt. The single place a video job body is
     /// built, for the generated and the hand-authored path alike.
     pub fn to_job_body(&self, context: &DispatchContext<'_>) -> Result<Value, Vec<PlanDiagnostic>> {
-        let assets = self.resolve_conditioning(context.role_assets)?;
+        let assets = self.resolve_conditioning(context.pack, context.role_assets)?;
         Ok(self.to_job_body_with(context, &assets))
     }
 
@@ -683,13 +1470,22 @@ impl CompiledPlan {
             .find(|request| request.shot_id == shot_id)
     }
 
-    /// Findings that make these requests unusable for `plan`: a different plan, a different
-    /// version, an edit since the compile, or a shot the compile does not cover. This is what keeps
-    /// a hand-edited plan from being dispatched with stale prompts.
+    /// Findings that make these requests unusable for `plan` and `pack`: a different plan, a
+    /// different version, an edit to either document since the compile, or a shot the compile does
+    /// not cover. This is what keeps a hand-edited plan from being dispatched with stale prompts.
+    ///
+    /// The PACK is judged here as well as the plan (sc-24029) because it is an input to the prompt:
+    /// the binding sentences and the identity lock are written out of pack descriptions and
+    /// locators, so editing a pack description changes what every request that repeats it would
+    /// say. Editing one in the workspace is a first-class action, and before this the draft's
+    /// compiled document stayed marked current across it — the edit then surfaced at preflight as
+    /// a difference in a derived field, naming `insertedText` rather than the pack the operator
+    /// had just changed.
     pub fn staleness_findings(
         &self,
         plan: &ProductionPlan,
         plan_sha256: &str,
+        pack: &ReferencePack,
     ) -> Vec<PlanDiagnostic> {
         let mut findings = Vec::new();
         if self.schema_version != COMPILED_PLAN_SCHEMA_VERSION {
@@ -725,6 +1521,20 @@ impl CompiledPlan {
                 ),
             ));
         }
+        match reference_pack_sha256(pack) {
+            Ok(pack_sha256) if pack_sha256 != self.reference_pack_sha256 => {
+                findings.push(PlanDiagnostic::plan(
+                    COMPILED_PACK_STALENESS_FIELD,
+                    "the reference pack changed since these requests were compiled; recompile, or \
+                     use authored prompts",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => findings.push(PlanDiagnostic::plan(
+                "referencePack",
+                format!("this reference pack cannot be serialized to identify it: {error}"),
+            )),
+        }
         for shot in &plan.shots {
             if self.request(&shot.id).is_none() {
                 findings.push(PlanDiagnostic::shot(
@@ -748,13 +1558,28 @@ impl CompiledPlan {
     /// that has none would otherwise reach the route unjudged, because the document validators only
     /// ever read the plan.
     ///
-    /// Only `prompt`, `promptSource` and `authoredPrompt` may differ from a fresh compile: those
-    /// three ARE the compile's output (the model's own rewrite), and everything else is a
+    /// Only `promptSource` and the REFINED MIDDLE of `prompt` may differ from a fresh compile:
+    /// that middle is the compile's output (the model's own rewrite), and everything else is a
     /// transcription of the plan. The expected request is produced by the compiler itself rather
     /// than by a second list of rules, so the two cannot drift.
+    ///
+    /// `authoredPrompt` is NOT in that exemption either (sc-24029), although it sits beside the
+    /// fields that are: it is a plain copy of `Shot::prompt`, so a fresh compile reproduces it and
+    /// a hand-edited one misreports what the refiner was given. [`prompt_differences`] checks it.
+    ///
+    /// `insertedText` is NOT in that exemption (sc-24023): the compiler's own sentences are derived
+    /// from the plan and the pack, a fresh compile reproduces them exactly, and a hand-edited
+    /// `<Picture N>` would bind the model to the wrong image with nothing downstream able to tell.
+    ///
+    /// Neither is the prompt those sentences were composed INTO (sc-24029). `insertedText` is a
+    /// record of what was written, not of where it ended up, and `prompt` is the field that becomes
+    /// the job body: a document with pristine `insertedText` and a `prompt` with its bindings
+    /// deleted or its picture labels swapped used to pass. [`prompt_differences`] asks the question
+    /// that closes it — see there for how a refined prompt is checked without a second rewrite.
     pub fn conformance_findings(
         &self,
         plan: &ProductionPlan,
+        pack: &ReferencePack,
         entries: &ModelEntries<'_>,
         lane: ModelLane,
     ) -> Vec<PlanDiagnostic> {
@@ -821,8 +1646,11 @@ impl CompiledPlan {
             let Some(request) = self.request(&shot.id) else {
                 continue;
             };
-            match compile_shot(plan, shot, &inputs, fps) {
-                Ok(expected) => findings.extend(request_differences(request, &expected)),
+            match compile_shot(plan, shot, pack, &inputs, fps) {
+                Ok(expected) => {
+                    findings.extend(request_differences(request, &expected));
+                    findings.extend(prompt_differences(request, &expected, &shot.prompt));
+                }
                 Err(mut shot_findings) => findings.append(&mut shot_findings),
             }
         }
@@ -830,8 +1658,162 @@ impl CompiledPlan {
     }
 }
 
+/// The DISPATCHED prompt, judged against what the compiler would compose (sc-24029).
+///
+/// [`request_differences`] exempts `prompt` because the refine rewrite genuinely is the compile's
+/// own output and no second compile reproduces it. That exemption was total, so it also exempted
+/// everything the compiler wrote AROUND the rewrite: a `compiled.json` whose `insertedText` was
+/// pristine but whose `prompt` had a binding sentence deleted, two `<Picture N>` labels swapped or
+/// the trailing `Audio:` sentence removed passed conformance and was dispatched, while the doc
+/// comment on [`CompiledPlan::conformance_findings`] promised the opposite.
+///
+/// What is checkable differs by source, so the two are asked different questions:
+///
+/// * AUTHORED — the whole prompt is derived from the plan and the pack, so a fresh compile
+///   reproduces it exactly and equality is the whole check.
+/// * REFINED — only the middle is the model's. The compiler's own contribution is recovered by
+///   stripping the expected leading prefix and trailing suffix from the dispatched text and then
+///   RECOMPOSING: a middle is accepted only if putting the expected insertions back around it
+///   reproduces the dispatched prompt character for character. That is what makes the recovery
+///   exact rather than approximate — in particular it settles the one thing the composition loses,
+///   the sentence-boundary `.` [`apply_inserted_text`] supplies before the first trailing piece
+///   when the middle does not end one, without having to guess whose period it is.
+///
+/// The recovered middle is then held to the rule the refine branch of [`compile_shot`] applies at
+/// compile time: it may not contain an engine label. A document read back from disk never went
+/// through that branch, so this is where a label hand-written into the middle of a refined prompt
+/// is caught.
+///
+/// # `authoredPrompt` (sc-24029)
+///
+/// Checked here too, because it is NOT the compile's output despite sitting beside the two fields
+/// that are. [`compile_shot`] writes `Some(shot.prompt)` on a refined request and `None` on an
+/// authored one — a plain copy of the plan either way — so a fresh compile reproduces it exactly
+/// and a hand-edited one is as much a lie as a hand-edited `mode`. It is what a reviewer diffs the
+/// rewrite against and what an operator reverts to by editing the plan, so a document claiming the
+/// model was handed words it never saw is precisely the thing this document exists to prevent.
+///
+/// `shot_prompt` is passed in rather than read off `expected`: [`CompiledPlan::conformance_findings`]
+/// compiles `expected` with an EMPTY refined map, so its `authored_prompt` is always `None` and
+/// comparing against it would exempt the field on exactly the requests that carry one. It is
+/// compared UNTRIMMED, byte for byte against `Shot::prompt`, because that is what `compile_shot`
+/// stores — trimming here would fail a legitimately compiled document whose plan prompt has
+/// surrounding whitespace.
+fn prompt_differences(
+    actual: &CompiledRequest,
+    expected: &CompiledRequest,
+    shot_prompt: &str,
+) -> Vec<PlanDiagnostic> {
+    let tampered = |detail: &str| {
+        vec![PlanDiagnostic::shot(
+            &expected.shot_id,
+            "compiled.prompt",
+            format!(
+                "the prompt {} would dispatch is not the prompt the compiler composed ({detail}); \
+                 re-run `film-harness compile`",
+                expected.shot_id
+            ),
+        )]
+    };
+    let authored_differs = |expected_authored: Option<&str>| {
+        (actual.authored_prompt.as_deref() != expected_authored).then(|| {
+            vec![PlanDiagnostic::shot(
+                &expected.shot_id,
+                "compiled.authoredPrompt",
+                format!(
+                    "the authoredPrompt recorded for {} is not the prompt the plan holds, so this \
+                     document misreports what the refiner was given; re-run `film-harness compile`",
+                    expected.shot_id
+                ),
+            )]
+        })
+    };
+    match actual.prompt_source {
+        PromptSource::Authored => {
+            // Nothing was rewritten, so there is no authored text to keep BESIDE the prompt: the
+            // prompt is it. A value here claims a rewrite this request did not have.
+            if let Some(findings) = authored_differs(None) {
+                return findings;
+            }
+            if actual.prompt == expected.prompt {
+                Vec::new()
+            } else {
+                tampered(
+                    "this request states its prompt is the plan's own, so compiling the plan \
+                          now must reproduce it exactly, and it does not",
+                )
+            }
+        }
+        PromptSource::Refined => {
+            if let Some(findings) = authored_differs(Some(shot_prompt)) {
+                return findings;
+            }
+            match recovered_middle(&actual.prompt, &expected.inserted_text) {
+                None => tampered(
+                    "the compiler's own leading and trailing sentences are not around the refined \
+                     text where it wrote them",
+                ),
+                Some(middle) => {
+                    if let Some(label) = crate::film_plan::engine_label_at(&middle)
+                        .is_some()
+                        .then(|| crate::film_plan::quoted_engine_label(&middle))
+                    {
+                        tampered(&format!(
+                            "the refined text inside it contains {label}, a label this film's \
+                             renderer assigns itself and the compiler writes"
+                        ))
+                    } else {
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The text [`apply_inserted_text`] was given, recovered from what it produced, or `None` when
+/// `prompt` is not something it could have produced from `inserted` (sc-24029).
+///
+/// Every part of the composition is fixed by `inserted` except ONE character: the `.` supplied
+/// before the first trailing piece when the middle does not already end a sentence. That `.` is
+/// deliberately left ON the recovered middle rather than guessed at — whether it was the author's
+/// or the compiler's is exactly what the composition loses, and both readings compose back to the
+/// same prompt — so a refined text WITH terminal punctuation and one WITHOUT recover alike.
+///
+/// The split is then accepted only if recomposing reproduces `prompt` character for character. It
+/// is that check, not the stripping, that makes this exact: a prompt whose bindings were deleted,
+/// whose labels were swapped or whose trailing sentence was removed fails it.
+fn recovered_middle(prompt: &str, inserted: &[InsertedText]) -> Option<String> {
+    let leading: String = inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Leading)
+        .map(|piece| format!("{} ", piece.text.trim()))
+        .collect();
+    let body = prompt.strip_prefix(&leading)?;
+    // The trailing composition, minus the one separator period that depends on the middle. Every
+    // later separator is decided by the piece before it, which is the compiler's own text.
+    let mut fixed = String::new();
+    for (index, piece) in inserted
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Trailing)
+        .enumerate()
+    {
+        if index > 0 && !ends_sentence(&fixed) {
+            fixed.push('.');
+        }
+        fixed.push(' ');
+        fixed.push_str(piece.text.trim());
+    }
+    let middle = body.strip_suffix(&fixed)?;
+    (apply_inserted_text(middle, inserted) == prompt).then(|| middle.to_owned())
+}
+
 /// Every field of `actual` that a fresh compile would have written differently, except the three
-/// the compile itself produces (`prompt`, `promptSource`, `authoredPrompt`).
+/// whose comparison belongs to [`prompt_differences`]: `prompt`, `promptSource` and
+/// `authoredPrompt`. Only the first two are genuinely exempt from reproduction — the refined
+/// middle of the prompt is the model's own rewrite, and `promptSource` says which kind of request
+/// this is. `authoredPrompt` IS reproduced, but only against the plan's shot, which this function
+/// is not given (sc-24029).
 ///
 /// `expected` is destructured exhaustively on purpose: a field added to [`CompiledRequest`] fails
 /// to compile here until it is either compared or deliberately exempted, so the guarantee this
@@ -851,9 +1833,11 @@ fn request_differences(
         effective_steps,
         turbo_scheduler_shift,
         partition_reason,
+        // The three `prompt_differences` owns; see this function's doc comment for why.
         prompt: _,
         prompt_source: _,
         authored_prompt: _,
+        inserted_text,
         negative_prompt,
         duration_seconds,
         fps,
@@ -909,6 +1893,11 @@ fn request_differences(
         "compiled.turboSchedulerShift",
         format!("{:?}", actual.turbo_scheduler_shift),
         format!("{turbo_scheduler_shift:?}"),
+    );
+    differ(
+        "compiled.insertedText",
+        rendered_inserted_text(&actual.inserted_text),
+        rendered_inserted_text(inserted_text),
     );
     differ("compiled.beat", quoted(&actual.beat), quoted(beat));
     differ("compiled.mode", quoted(&actual.mode), quoted(mode));
@@ -969,14 +1958,32 @@ fn quoted(value: &str) -> String {
     format!("{value:?}")
 }
 
+/// The compiler's inserted text as a finding may state it: each piece named by its kind, with the
+/// text it holds (sc-24029).
+///
+/// A plain reading rather than `{:?}` on the `Vec<InsertedText>`. The difference reaches an
+/// operator — the film workspace renders it when a preflight refuses — and a Rust struct dump
+/// (`[InsertedText { kind: ReferenceBinding, text: "…" }]`) is the compiler's private notation, not
+/// a description of what changed in a prompt.
+fn rendered_inserted_text(inserted: &[InsertedText]) -> String {
+    if inserted.is_empty() {
+        return "no inserted text".to_owned();
+    }
+    inserted
+        .iter()
+        .map(|piece| format!("{}: {}", piece.kind.label(), piece.text))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::film_plan::{parse_plan, parse_reference_pack};
+    use crate::film_plan::{parse_plan, parse_reference_pack, PLAN_SCHEMA_VERSION};
 
     fn plan_text() -> String {
         serde_json::to_string(&json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 2,
             "title": "Courier",
@@ -985,13 +1992,13 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "seed": 7, "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["courier"]
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": {
                         "mode": "image_to_video",
                         "firstFrameRole": "workshop_plate",
@@ -1007,7 +2014,7 @@ mod tests {
     fn pack() -> ReferencePack {
         parse_reference_pack(
             &json!({
-                "schemaVersion": 1,
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
                 "id": "courier-refs",
                 "version": 3,
                 "references": [
@@ -1043,6 +2050,12 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap()
+    }
+
+    /// The fixture pack, borrowed for a [`DispatchContext`]'s lifetime.
+    fn pack_ref() -> &'static ReferencePack {
+        static PACK: std::sync::OnceLock<ReferencePack> = std::sync::OnceLock::new();
+        PACK.get_or_init(pack)
     }
 
     fn role_assets() -> BTreeMap<String, String> {
@@ -1081,7 +2094,10 @@ mod tests {
         assert_eq!(compiled.reference_pack_version, 3);
         assert_eq!(compiled.model.fps, 24);
         let first = compiled.request("SH010").unwrap();
-        assert_eq!(first.prompt, "a courier enters");
+        assert_eq!(
+            first.prompt,
+            "a courier enters. Audio: Room tone, no music."
+        );
         assert_eq!(first.prompt_source, PromptSource::Authored);
         assert_eq!(first.authored_prompt, None);
         assert_eq!((first.width, first.height), (576, 320));
@@ -1118,6 +2134,7 @@ mod tests {
                         attempt,
                         tier: Some("q4"),
                         idempotency_key: None,
+                        pack: pack_ref(),
                         role_assets: &assets,
                     };
                     request.to_job_body(&context).unwrap()["seed"]
@@ -1135,6 +2152,7 @@ mod tests {
                 attempt,
                 tier: Some("q4"),
                 idempotency_key: None,
+                pack: pack_ref(),
                 role_assets: &assets,
             };
             compiled
@@ -1186,6 +2204,7 @@ mod tests {
             attempt: 3,
             tier: Some("q4"),
             idempotency_key: None,
+            pack: pack_ref(),
             role_assets: &assets,
         };
         let body = unseeded
@@ -1209,6 +2228,7 @@ mod tests {
             attempt: 1,
             tier: Some("q4"),
             idempotency_key: Some("run_abc:SH010:a1"),
+            pack: pack_ref(),
             role_assets: &assets,
         };
         let body = compiled
@@ -1218,7 +2238,10 @@ mod tests {
             .unwrap();
         assert_eq!(body["projectId"], "proj_1");
         assert_eq!(body["mode"], "text_to_video");
-        assert_eq!(body["prompt"], "a courier enters");
+        assert_eq!(
+            body["prompt"],
+            "a courier enters. Audio: Room tone, no music."
+        );
         assert_eq!(body["duration"], 5.1667);
         assert_eq!(body["fps"], 24);
         assert_eq!(body["width"], 576);
@@ -1271,6 +2294,7 @@ mod tests {
         // missing keyframe.
         let empty = BTreeMap::new();
         let context = DispatchContext {
+            pack: pack_ref(),
             role_assets: &empty,
             ..context
         };
@@ -1299,7 +2323,7 @@ mod tests {
         assert_eq!(first.prompt_source, PromptSource::Refined);
         assert_eq!(
             first.prompt,
-            "integrated_multimodal_description: a courier enters a warm workshop"
+            "integrated_multimodal_description: a courier enters a warm workshop. Audio: Room tone, no music."
         );
         assert_eq!(first.authored_prompt.as_deref(), Some("a courier enters"));
         // The untouched shot still compiles its authored prompt.
@@ -1317,6 +2341,7 @@ mod tests {
                 attempt: 1,
                 tier: None,
                 idempotency_key: None,
+                pack: pack_ref(),
                 role_assets: &assets,
             })
             .unwrap();
@@ -1345,6 +2370,12 @@ mod tests {
             assert_eq!(findings.len(), 1, "{findings:?}");
             assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
             assert!(findings[0].message.contains("the video route accepts"));
+            // The remedy reaches somebody working in the WORKSPACE, who never types a CLI flag:
+            // this refusal names the checkbox by the same constant its sibling label refusal does.
+            assert!(
+                findings[0].message.contains(REFINE_PROMPTS_CONTROL_LABEL),
+                "{findings:?}"
+            );
         }
     }
 
@@ -1353,9 +2384,9 @@ mod tests {
         let plan = parse_plan(&plan_text()).unwrap();
         let compiled = compiled(BTreeMap::new());
         assert!(compiled
-            .staleness_findings(&plan, "abc123def456")
+            .staleness_findings(&plan, "abc123def456", &pack())
             .is_empty());
-        let findings = compiled.staleness_findings(&plan, "999999999999");
+        let findings = compiled.staleness_findings(&plan, "999999999999", &pack());
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings[0]
@@ -1368,13 +2399,13 @@ mod tests {
         compiled
             .requests
             .retain(|request| request.shot_id != "SH020");
-        let findings = compiled.staleness_findings(&plan, "abc123def456");
+        let findings = compiled.staleness_findings(&plan, "abc123def456", &pack());
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].shot_id.as_deref(), Some("SH020"));
 
         compiled.plan_id = "other".to_owned();
         assert!(compiled
-            .staleness_findings(&plan, "abc123def456")
+            .staleness_findings(&plan, "abc123def456", &pack())
             .iter()
             .any(|finding| finding.field == "compiled.planId"));
     }
@@ -1404,7 +2435,7 @@ mod tests {
         assert_eq!(round_tripped.schema_version, 1);
         assert!(round_tripped.requests[0].partition_reason.is_empty());
 
-        let findings = round_tripped.staleness_findings(&plan, "abc123def456");
+        let findings = round_tripped.staleness_findings(&plan, "abc123def456", &pack());
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].field, "compiled.schemaVersion", "{findings:?}");
         assert!(
@@ -1424,10 +2455,12 @@ mod tests {
         // by version rather than left to fall through to conformance.
         let mut current = round_tripped;
         current.schema_version = COMPILED_PLAN_SCHEMA_VERSION;
-        assert!(current.staleness_findings(&plan, "abc123def456").is_empty());
+        assert!(current
+            .staleness_findings(&plan, "abc123def456", &pack())
+            .is_empty());
         assert!(
             current
-                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
                 .iter()
                 .any(|finding| finding.field == "compiled.partitionReason"),
             "without the bump a v1 document lands here instead"
@@ -1441,7 +2474,7 @@ mod tests {
         let entries = ModelEntries::single("minimax_h3", &entry);
         let clean = compiled(BTreeMap::new());
         assert!(clean
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .is_empty());
         // The compile's own output is exempt: a refined prompt is why the document exists.
         let refined = compiled(
@@ -1450,7 +2483,7 @@ mod tests {
                 .collect(),
         );
         assert!(refined
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .is_empty());
 
         // Every other field is a transcription of the plan, and an edit to one is named.
@@ -1523,7 +2556,7 @@ mod tests {
         for (field, edit, expected) in cases {
             let mut tampered = clean.clone();
             edit(&mut tampered.requests[0]);
-            let findings = tampered.conformance_findings(&plan, &entries, ModelLane::Mlx);
+            let findings = tampered.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
             assert_eq!(findings.len(), 1, "{field}: {findings:?}");
             assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"), "{field}");
             assert_eq!(findings[0].field, field, "{findings:?}");
@@ -1539,7 +2572,7 @@ mod tests {
         tampered.model.tier = Some("q8".to_owned());
         tampered.model.fps = 30;
         let fields: Vec<String> = tampered
-            .conformance_findings(&plan, &entries, ModelLane::Candle)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Candle)
             .into_iter()
             .map(|finding| finding.field)
             .collect();
@@ -1555,14 +2588,14 @@ mod tests {
         let mut short = clean;
         short.requests.retain(|request| request.shot_id != "SH020");
         assert!(short
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .is_empty());
     }
 
     /// A mixed plan: SH010 binds two reference roles, SH020 binds none (sc-23402, AC1).
     fn mixed_plan_text() -> String {
         serde_json::to_string(&json!({
-            "schemaVersion": 1,
+            "schemaVersion": PLAN_SCHEMA_VERSION,
             "id": "courier-workshop",
             "version": 2,
             "title": "Courier",
@@ -1571,7 +2604,7 @@ mod tests {
             "shots": [
                 {
                     "id": "SH010", "beat": "enter", "framing": "wide", "prompt": "a courier enters",
-                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside",
+                    "targetDurationSeconds": 5.1667, "startState": "empty", "endState": "courier inside", "audio": "Room tone, no music.",
                     "conditioning": {
                         "mode": "reference_to_video",
                         // Both BINDABLE kinds (character, prop): a `plate` is refused in this
@@ -1582,7 +2615,7 @@ mod tests {
                 },
                 {
                     "id": "SH020", "beat": "place", "framing": "medium", "prompt": "places the parcel",
-                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table",
+                    "targetDurationSeconds": 5.875, "startState": "courier inside", "endState": "parcel on table", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "text_to_video" },
                     "continuityRoles": ["courier", "red_parcel"]
                 }
@@ -1628,6 +2661,7 @@ mod tests {
             attempt: 1,
             tier: Some("q4"),
             idempotency_key: Some("run_abc:SH010:a1"),
+            pack: pack_ref(),
             role_assets: assets,
         }
     }
@@ -1804,7 +2838,7 @@ mod tests {
             let mut tampered = clean.clone();
             edit(&mut tampered.requests[0]);
             let fields: Vec<String> = tampered
-                .conformance_findings(&plan, &entries, ModelLane::Mlx)
+                .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
                 .into_iter()
                 .map(|finding| finding.field)
                 .collect();
@@ -1851,12 +2885,12 @@ mod tests {
             Some(("minimax_h3_ref", &reference)),
         );
         assert!(compiled
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .is_empty());
         let mut tampered = compiled.clone();
         tampered.requests[0].reference_image_short_edge = Some(1024);
         let fields: Vec<String> = tampered
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .into_iter()
             .map(|finding| finding.field)
             .collect();
@@ -1978,6 +3012,7 @@ mod tests {
             attempt: 1,
             tier: Some("q4"),
             idempotency_key: Some("run_abc:SH010:a1"),
+            pack: pack_ref(),
             role_assets: &assets,
         };
         let body = referenced.to_job_body(&context).unwrap();
@@ -1999,12 +3034,12 @@ mod tests {
         // is clean — and a document whose reference shot was re-pointed at the base checkpoint is
         // not.
         assert!(compiled
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .is_empty());
         let mut tampered = compiled.clone();
         tampered.requests[0].model = "minimax_h3".to_owned();
         let fields: Vec<String> = tampered
-            .conformance_findings(&plan, &entries, ModelLane::Mlx)
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
             .into_iter()
             .map(|finding| finding.field)
             .collect();
@@ -2038,6 +3073,942 @@ mod tests {
         );
     }
 
+    /// The mixed plan's `role_assets`, borrowed for a [`DispatchContext`]'s lifetime.
+    fn mixed_entries<'a>(
+        base: &'a JsonObject<String, Value>,
+        reference: &'a JsonObject<String, Value>,
+    ) -> ModelEntries<'a> {
+        ModelEntries::with_reference_partition(
+            "minimax_h3",
+            base,
+            Some(("minimax_h3_ref", reference)),
+        )
+    }
+
+    /// sc-24023, E2. A reference shot's prompt LEADS with one binding sentence per bound role, and
+    /// the `<Picture N>` each sentence names is the 1-based position that role's asset takes in the
+    /// dispatched `referenceAssetIds` — both read off [`shot_reference_pictures`], which is why
+    /// they cannot disagree. A shot that resolved to the base checkpoint says nothing about
+    /// pictures, because it sends none.
+    ///
+    /// The numbering is positional and unverifiable downstream: the MiniMax-H3 text encoder labels
+    /// the assets it is handed `<Picture 1>`, `<Picture 2>`, … in supply order, so a prompt that
+    /// binds the courier to `<Picture 2>` while the courier's asset is dispatched first renders a
+    /// confidently wrong film with nothing to flag.
+    #[test]
+    fn a_reference_shots_prompt_leads_with_a_binding_sentence_numbered_as_the_asset_is_dispatched()
+    {
+        let compiled = mixed_compiled_with_short_edge(None);
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+
+        // The FIRST insertion is the binding kind, holding one sentence per bound role in picture
+        // order. The audio sentence sc-24026 appends trails it and is asserted in its own tests.
+        assert_eq!(referenced.inserted_text.len(), 2, "{referenced:?}");
+        assert_eq!(
+            referenced.inserted_text[0].kind,
+            InsertedTextKind::ReferenceBinding
+        );
+        assert_eq!(
+            referenced.inserted_text[0].text,
+            "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
+             <Picture 2>."
+        );
+        // It LEADS: the engine presents the pictures before the text, so the binding is the first
+        // thing the prompt says, and the authored text survives verbatim behind it.
+        assert_eq!(
+            referenced.prompt,
+            "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
+             <Picture 2>. a courier enters. Audio: Room tone, no music."
+        );
+        assert!(
+            referenced
+                .prompt
+                .starts_with(&referenced.inserted_text[0].text),
+            "{}",
+            referenced.prompt
+        );
+
+        // THE criterion: N == the 1-based position in the dispatched list. Read out of the job body
+        // this compiled request builds rather than recomputed here, so the assertion is against the
+        // shipped list builder. This is the COMPILED REQUEST's body, not the harness's own dispatch:
+        // the harness resolves through the same `resolve_conditioning` and posts `to_job_body_with`,
+        // and the end-to-end assertion in `apps/rust-api/src/tests/film_harness.rs` is what pins the
+        // agreement on the body a real run actually sent.
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+        let body = referenced.to_job_body(&context).expect("SH010 body");
+        let dispatched: Vec<String> = body["referenceAssetIds"]
+            .as_array()
+            .expect("a reference request dispatches its assets")
+            .iter()
+            .map(|id| id.as_str().expect("asset ids are strings").to_owned())
+            .collect();
+        assert_eq!(dispatched, vec!["asset_courier", "asset_parcel"]);
+        for (index, role) in referenced.reference_roles.iter().enumerate() {
+            let number = index + 1;
+            assert!(
+                referenced.inserted_text[0]
+                    .text
+                    .contains(&format!("{} is the", role_phrase(role))),
+                "{role} is never named: {}",
+                referenced.inserted_text[0].text
+            );
+            let sentence_at = referenced.inserted_text[0]
+                .text
+                .find(&format!("{} is the", role_phrase(role)))
+                .expect("the role is named");
+            let picture_at = referenced.inserted_text[0].text[sentence_at..]
+                .find(&format!("<Picture {number}>"))
+                .map(|at| at + sentence_at);
+            assert!(
+                picture_at.is_some(),
+                "{role} must be bound to <Picture {number}>, the position its asset takes in \
+                 {dispatched:?}: {}",
+                referenced.inserted_text[0].text
+            );
+            assert_eq!(
+                dispatched[index],
+                *assets.get(role).expect("every role imported"),
+                "{role} is dispatched at position {number}"
+            );
+        }
+
+        // The base partition sends no pictures, so it claims no BINDING — its only insertion is the
+        // audio sentence every shot carries (sc-24026), and the plan's own words are untouched.
+        assert!(
+            plain
+                .inserted_text
+                .iter()
+                .all(|piece| piece.kind != InsertedTextKind::ReferenceBinding),
+            "{plain:?}"
+        );
+        assert_eq!(
+            plain.prompt,
+            "places the parcel. Audio: Room tone, no music."
+        );
+        let body = plain.to_job_body(&context).expect("SH020 body");
+        assert!(body.get("referenceAssetIds").is_none(), "{body}");
+        assert!(
+            !body["prompt"]
+                .as_str()
+                .expect("a prompt is dispatched")
+                .contains("<Picture"),
+            "{body}"
+        );
+
+        // The document round-trips with the new field and nothing unknown.
+        let text = serde_json::to_string(&compiled).unwrap();
+        let back: CompiledPlan = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, compiled);
+        let document: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            document["requests"][0]["insertedText"][0]["kind"],
+            json!("reference_binding")
+        );
+        // A shot that binds nothing records no binding — only the audio sentence every shot
+        // carries since sc-24026, so the two kinds stay distinguishable in the document.
+        assert_eq!(
+            document["requests"][1]["insertedText"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{}", document["requests"][1]))
+                .iter()
+                .map(|piece| piece["kind"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("audio")]
+        );
+    }
+
+    /// sc-24023, E5. The binding sentences are written AFTER the refine rewrite, so the refiner
+    /// cannot paraphrase a `<Picture N>` into a label the engine never applies — and the record
+    /// keeps the three texts apart: the plan's, the model's rewrite, and the compiler's own.
+    #[test]
+    fn the_binding_sentences_are_written_after_the_refine_rewrite_and_recorded_apart_from_it() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["advanced"] = json!({ "referenceImageShortEdge": 1536 });
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let refined: BTreeMap<String, String> = [(
+            "SH010".to_owned(),
+            "integrated_multimodal_description: a courier steps into a warm workshop".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &refined,
+            },
+        )
+        .expect("the refined mixed plan compiles");
+        let referenced = compiled.request("SH010").unwrap();
+        assert_eq!(referenced.prompt_source, PromptSource::Refined);
+        // The rewrite is carried through UNTOUCHED, behind the bindings and ahead of the audio.
+        assert_eq!(
+            referenced.prompt,
+            "The courier is the person shown in <Picture 1>. The red parcel is the object shown in \
+             <Picture 2>. integrated_multimodal_description: a courier steps into a warm workshop. \
+             Audio: Room tone, no music."
+        );
+        // The authored prompt is the PLAN's, with no compiler text in it: the insertion happened
+        // after the rewrite, not before it, so neither recorded text has been polluted.
+        assert_eq!(
+            referenced.authored_prompt.as_deref(),
+            Some("a courier enters")
+        );
+        assert!(
+            !referenced
+                .authored_prompt
+                .as_deref()
+                .unwrap()
+                .contains("<Picture"),
+            "the authored prompt must stay the plan's own words"
+        );
+        assert_eq!(
+            referenced
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio]
+        );
+        for piece in &referenced.inserted_text {
+            assert!(
+                !piece.text.contains("courier steps into"),
+                "the inserted text is the compiler's alone: {}",
+                piece.text
+            );
+        }
+    }
+
+    /// sc-24026. EVERY shot's prompt ends with its own `Audio:` sentence — base partition and
+    /// reference partition alike — written after the refine rewrite and recorded apart from it.
+    #[test]
+    fn every_shots_prompt_ends_with_its_audio_sentence_on_both_partitions() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["audio"] = json!("A door latch clicking.   Room tone.\nNo music.");
+        document["shots"][1]["audio"] = json!("No audio. Silence.");
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        // Refined, so the insertion is provably AFTER the rewrite on both shots rather than
+        // something the authored text could have carried.
+        let refined: BTreeMap<String, String> = plan
+            .shots
+            .iter()
+            .map(|shot| (shot.id.clone(), format!("rewritten {}", shot.id)))
+            .collect();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &refined,
+            },
+        )
+        .expect("the mixed plan compiles");
+
+        // Two DIFFERENT partitions, so this is not one lane asserted twice.
+        let models: Vec<&str> = compiled
+            .requests
+            .iter()
+            .map(|request| request.model.as_str())
+            .collect();
+        assert!(
+            models.contains(&"minimax_h3") && models.contains(&"minimax_h3_ref"),
+            "{models:?}"
+        );
+
+        for request in &compiled.requests {
+            let shot = plan
+                .shots
+                .iter()
+                .find(|shot| shot.id == request.shot_id)
+                .unwrap();
+            let audio = request
+                .inserted_text
+                .iter()
+                .find(|piece| piece.kind == InsertedTextKind::Audio)
+                .unwrap_or_else(|| panic!("{} records its audio text", request.shot_id));
+            // Whitespace-normalized exactly as a pack description is, and otherwise the author's
+            // own words: the runs of spaces and the newline above are collapsed, nothing else.
+            assert_eq!(
+                audio.text,
+                format!("Audio: {}", normalized_description(&shot.audio)),
+                "{}",
+                request.shot_id
+            );
+            assert!(
+                request.prompt.ends_with(&audio.text),
+                "{}: {}",
+                request.shot_id,
+                request.prompt
+            );
+            // The rewrite is still in there, ahead of it — the insertion ran after the refiner.
+            assert!(
+                request.prompt.contains(&format!("rewritten {}", shot.id)),
+                "{}: {}",
+                request.shot_id,
+                request.prompt
+            );
+            assert!(
+                !request
+                    .authored_prompt
+                    .as_deref()
+                    .unwrap()
+                    .contains("Audio:"),
+                "{}: the authored prompt stays the plan's own words",
+                request.shot_id
+            );
+        }
+        assert_eq!(compiled.requests.len(), plan.shots.len());
+    }
+
+    /// sc-24026. A trailing insertion follows text nobody guaranteed was punctuated — an authored
+    /// prompt, a refiner rewrite, or the author's own `audio` sentence. Joined by a bare space it
+    /// reads as one clause (`...a courier enters Audio: Room tone`), so the compiler supplies the
+    /// missing `.` — exactly one, and only when one is missing.
+    #[test]
+    fn an_unpunctuated_prompt_is_joined_to_its_audio_sentence_by_exactly_one_sentence_break() {
+        // Each case: the prompt, the audio sentence, and the exact tail the dispatched text must
+        // have. Shot 0 of the mixed plan takes no reference bindings' worth of rewriting here —
+        // only the trailing join is under test.
+        for (prompt, audio, expected_tail) in [
+            // No terminal punctuation at all: the compiler writes the boundary.
+            (
+                "a courier enters",
+                "Room tone, no music.",
+                "a courier enters. Audio: Room tone, no music.",
+            ),
+            // Already a sentence: nothing is added, and there is no ".." anywhere.
+            (
+                "a courier enters.",
+                "Room tone, no music.",
+                "a courier enters. Audio: Room tone, no music.",
+            ),
+            // The other terminals, and trailing whitespace, count as ended too.
+            (
+                "does he knock?",
+                "Room tone.",
+                "does he knock? Audio: Room tone.",
+            ),
+            ("he knocks!  ", "Room tone.", "he knocks! Audio: Room tone."),
+            (
+                "he trails off…",
+                "Room tone.",
+                "he trails off… Audio: Room tone.",
+            ),
+            // A closing quote or bracket that itself closes a punctuated sentence.
+            (
+                "she says \"open it.\"",
+                "Room tone.",
+                "she says \"open it.\" Audio: Room tone.",
+            ),
+            ("(he waits.)", "Room tone.", "(he waits.) Audio: Room tone."),
+            // A closing quote with NO punctuation inside it is still unfinished.
+            (
+                "she says \"open it\"",
+                "Room tone.",
+                "she says \"open it\". Audio: Room tone.",
+            ),
+        ] {
+            let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+            document["shots"][0]["prompt"] = json!(prompt);
+            document["shots"][0]["audio"] = json!(audio);
+            let plan = parse_plan(&document.to_string()).unwrap();
+            let base = entry();
+            let reference = reference_entry();
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &mixed_entries(&base, &reference),
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &BTreeMap::new(),
+                },
+            )
+            .expect("the mixed plan compiles");
+            let request = compiled.request(&plan.shots[0].id).unwrap();
+            assert!(
+                request.prompt.ends_with(expected_tail),
+                "{prompt:?} + {audio:?}\n  wanted tail: {expected_tail:?}\n  got:         {:?}",
+                request.prompt
+            );
+            // Exactly ONE `. ` joins the prompt to the label — never a doubled period and never a
+            // bare space.
+            assert!(
+                !request.prompt.contains(".. Audio:") && !request.prompt.contains("  Audio:"),
+                "{:?}",
+                request.prompt
+            );
+            let before_label = &request.prompt[..request.prompt.find("Audio:").unwrap()];
+            assert!(
+                before_label.ends_with(". ")
+                    || before_label.ends_with("? ")
+                    || before_label.ends_with("! ")
+                    || before_label.ends_with("… ")
+                    || before_label.ends_with("\" ")
+                    || before_label.ends_with(") "),
+                "the label is preceded by a finished sentence and one space: {before_label:?}"
+            );
+        }
+    }
+
+    /// The same boundary rule applies to the AUTHOR's audio text before the fixed no-speech
+    /// sentence, which is the other place compiler-owned text follows prose it did not write
+    /// (sc-24026).
+    #[test]
+    fn an_unpunctuated_audio_sentence_is_joined_to_the_no_speech_sentence_by_a_sentence_break() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["prompt"] = json!("a courier enters");
+        document["shots"][0]["audio"] = json!("room tone and a low hum");
+        document["shots"][0]["dialogueClip"] =
+            json!({ "role": "courier_line", "offsetSeconds": 0.5 });
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles");
+        let request = compiled.request(&plan.shots[0].id).unwrap();
+        assert!(
+            request.prompt.ends_with(&format!(
+                "a courier enters. Audio: room tone and a low hum. {NO_SPEECH_SENTENCE}"
+            )),
+            "{:?}",
+            request.prompt
+        );
+        // The recorded insertion is still the author's own words: the boundary is composition, not
+        // a rewrite of what `insertedText` says was added.
+        assert_eq!(
+            request
+                .inserted_text
+                .iter()
+                .find(|piece| piece.kind == InsertedTextKind::Audio)
+                .unwrap()
+                .text,
+            "Audio: room tone and a low hum"
+        );
+    }
+
+    /// sc-24026. The no-speech sentence constrains the SOUNDTRACK. These are exactly the shots with
+    /// someone speaking on camera, so wording it as a statement about the picture would tell H3 to
+    /// render closed mouths under our own dialogue track.
+    #[test]
+    fn the_no_speech_sentence_constrains_the_soundtrack_and_never_the_picture() {
+        assert_eq!(
+            NO_SPEECH_SENTENCE,
+            "No spoken dialogue in the generated audio; no voices on the soundtrack."
+        );
+        let lowered = NO_SPEECH_SENTENCE.to_ascii_lowercase();
+        for picture_word in ["on camera", "mouth", "lips", "silently", "no one speaks"] {
+            assert!(
+                !lowered.contains(picture_word),
+                "the sentence must not direct the picture: {picture_word:?}"
+            );
+        }
+        assert!(lowered.contains("generated audio") && lowered.contains("soundtrack"));
+    }
+
+    /// sc-24026. The no-speech sentence is keyed on a PLACED dialogue line — `dialogueClip`, which
+    /// is what puts our own voice on the dialogue bus — and on nothing else. Intent prose in
+    /// `dialogue` is not a placement and gets no sentence.
+    #[test]
+    fn only_a_shot_that_places_a_dialogue_line_gets_the_no_speech_sentence() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        // Shot 0 SPEAKS a placed line; shot 1 only declares the intent prose beside it.
+        document["shots"][0]["dialogueClip"] =
+            json!({ "role": "courier_line", "offsetSeconds": 0.5 });
+        document["shots"][1]["dialogue"] = json!("Recipient: \"Huh.\"");
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the mixed plan compiles");
+
+        let placed = compiled.request(&plan.shots[0].id).unwrap();
+        assert!(
+            placed.prompt.ends_with(NO_SPEECH_SENTENCE),
+            "{}: {}",
+            placed.shot_id,
+            placed.prompt
+        );
+        // After the audio sentence, not instead of it, and recorded as its own kind.
+        assert_eq!(
+            placed
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .filter(|kind| *kind != InsertedTextKind::ReferenceBinding)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::Audio, InsertedTextKind::NoSpeech]
+        );
+        assert!(
+            placed
+                .prompt
+                .contains(&format!("Audio: {} ", plan.shots[0].audio.trim()))
+                || placed.prompt.contains(&format!(
+                    "Audio: {} {NO_SPEECH_SENTENCE}",
+                    normalized_description(&plan.shots[0].audio)
+                )),
+            "{}",
+            placed.prompt
+        );
+
+        let unplaced = compiled.request(&plan.shots[1].id).unwrap();
+        assert!(
+            !unplaced.prompt.contains(NO_SPEECH_SENTENCE),
+            "a shot with only dialogue INTENT places no voice, so it silences none: {}",
+            unplaced.prompt
+        );
+        assert!(unplaced
+            .inserted_text
+            .iter()
+            .all(|piece| piece.kind != InsertedTextKind::NoSpeech));
+    }
+
+    /// The sentence a role gets is built from its pack entry: the KIND chooses the noun, and the
+    /// author's own DESCRIPTION is repeated verbatim rather than paraphrased.
+    #[test]
+    fn the_pack_kind_chooses_the_noun_and_the_description_is_repeated_verbatim() {
+        let described = parse_reference_pack(
+            &json!({
+                "schemaVersion": 1,
+                "id": "described",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/a.png",
+                      "description": "Blue jacket, carries the parcel." },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/b.png",
+                      "description": "Small bright red cardboard parcel" },
+                    { "role": "workshop_location", "kind": "location", "file": "references/c.png",
+                      "description": "Cluttered woodworking workshop, door camera-left." }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["conditioning"]["referenceRoles"] =
+            json!(["courier", "red_parcel", "workshop_location"]);
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &described,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("compiles");
+        assert_eq!(
+            compiled.request("SH010").unwrap().inserted_text[0].text,
+            "The courier is the person shown in <Picture 1>. Blue jacket, carries the parcel. \
+             The red parcel is the object shown in <Picture 2>. Small bright red cardboard parcel. \
+             The workshop location is the place shown in <Picture 3>. Cluttered woodworking \
+             workshop, door camera-left."
+        );
+    }
+
+    /// sc-24023. A description's WHITESPACE is normalized before it is appended: the binding
+    /// sentence is one line of a dispatched prompt, and a pack description that wrapped over several
+    /// lines would otherwise put a raw newline and tab run into the prompt — inside `insertedText`,
+    /// the one field `conformance_findings` reads as the compiler's own authored text and therefore
+    /// never checks. Only the joined whole was ever trimmed, never each description.
+    #[test]
+    fn a_multi_line_description_is_collapsed_to_one_line_before_it_reaches_the_prompt() {
+        let wrapped = parse_reference_pack(
+            &json!({
+                "schemaVersion": 1,
+                "id": "wrapped",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/a.png",
+                      "description": "  Blue jacket,\r\n\tcarries   the parcel.  " },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/b.png",
+                      "description": "Small\nred parcel" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["conditioning"]["referenceRoles"] = json!(["courier", "red_parcel"]);
+        let plan = parse_plan(&document.to_string()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &wrapped,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("compiles");
+        let request = compiled.request("SH010").unwrap();
+        assert_eq!(
+            request.inserted_text[0].text,
+            "The courier is the person shown in <Picture 1>. Blue jacket, carries the parcel. \
+             The red parcel is the object shown in <Picture 2>. Small red parcel."
+        );
+        // And the prompt the engine receives carries no control run either.
+        assert!(
+            !request.prompt.contains(['\n', '\r', '\t']),
+            "{:?}",
+            request.prompt
+        );
+    }
+
+    /// The compiler's own sentences are a DERIVED field: a hand-edited `insertedText` — the one
+    /// edit that could repoint a binding at the wrong picture without changing anything else the
+    /// document declares — is refused by name, exactly like a swapped model or duration.
+    #[test]
+    fn a_hand_edited_inserted_text_is_refused_like_every_other_derived_field() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        let clean = mixed_compiled_with_short_edge(None);
+        assert!(clean
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+            .is_empty());
+
+        let mut tampered = clean.clone();
+        tampered.requests[0].inserted_text[0].text =
+            "The courier is the person shown in <Picture 2>.".to_owned();
+        let findings = tampered.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].field, "compiled.insertedText", "{findings:?}");
+        assert_eq!(findings[0].shot_id.as_deref(), Some("SH010"));
+
+        // Deleting the insertion entirely is the same refusal: an unbound reference prompt is not
+        // what compiling this plan produces.
+        let mut emptied = clean;
+        emptied.requests[0].inserted_text.clear();
+        let fields: Vec<String> = emptied
+            .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+            .into_iter()
+            .map(|finding| finding.field)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["compiled.insertedText".to_owned()],
+            "{fields:?}"
+        );
+    }
+
+    /// sc-24023, E6. A `compiled.json` written by the PREVIOUS schema version is refused BY
+    /// VERSION, not blamed on the operator as a hand edit — the same rule the v2 and v3 bumps
+    /// established. Such a document has no `insertedText` key and a prompt with no binding
+    /// sentences, which conformance would otherwise report as tampering.
+    #[test]
+    fn a_previous_version_compiled_document_is_refused_by_schema_version_not_as_tampered() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+
+        // The BUMP itself. 3 is the version a `compiled.json` written before this story carries,
+        // and its requests have no `insertedText` and no binding sentences; leaving the constant
+        // at 3 would let such a document pass `staleness_findings` and then be blamed at
+        // conformance for a hand edit it never made. The number is named, not derived, because it
+        // is the specific document on disk that has to be refused — leave the constant at 3 and
+        // this document stops producing a finding at all.
+        let mut v3 = mixed_compiled_with_short_edge(None);
+        v3.schema_version = 3;
+        for request in &mut v3.requests {
+            request.inserted_text.clear();
+        }
+        let findings = v3.staleness_findings(&plan, "abc", &pack());
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].field, "compiled.schemaVersion", "{findings:?}");
+
+        // Exactly what the previous version on disk deserializes to: the old number, and the key
+        // absent.
+        let mut previous = mixed_compiled_with_short_edge(None);
+        previous.schema_version = COMPILED_PLAN_SCHEMA_VERSION - 1;
+        for request in &mut previous.requests {
+            request.inserted_text.clear();
+        }
+        let round_tripped: CompiledPlan =
+            serde_json::from_value(serde_json::to_value(&previous).unwrap()).unwrap();
+        assert!(round_tripped.requests[0].inserted_text.is_empty());
+
+        let findings = round_tripped.staleness_findings(&plan, "abc", &pack());
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].field, "compiled.schemaVersion", "{findings:?}");
+        assert!(
+            findings[0].message.contains(&format!(
+                "schema version {}",
+                COMPILED_PLAN_SCHEMA_VERSION - 1
+            )) && findings[0].message.contains("film-harness compile"),
+            "the refusal must name the version AND the remedy: {findings:?}"
+        );
+
+        // And this is the finding the bump replaced: at the CURRENT version the same missing
+        // insertion is (correctly) a tampering report.
+        let mut current = round_tripped;
+        current.schema_version = COMPILED_PLAN_SCHEMA_VERSION;
+        assert!(current.staleness_findings(&plan, "abc", &pack()).is_empty());
+        assert!(
+            current
+                .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+                .iter()
+                .any(|finding| finding.field == "compiled.insertedText"),
+            "without the bump a previous-version document lands here instead"
+        );
+    }
+
+    /// A prompt that no longer fits once the bindings lead it is a FINDING naming the shot, not a
+    /// silently truncated prompt — the same rule an unusable refinement already obeys.
+    #[test]
+    fn a_prompt_that_no_longer_fits_once_the_bindings_lead_it_is_refused() {
+        let long = parse_reference_pack(
+            &json!({
+                "schemaVersion": 1,
+                "id": "long",
+                "version": 1,
+                "references": [
+                    { "role": "courier", "kind": "character", "file": "references/a.png",
+                      "description": "x".repeat(MAX_PROMPT_CHARS) },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/b.png" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let findings = compile_plan(
+            &plan,
+            &long,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect_err("refuses");
+        // BOTH shots, for two different reasons, and the message says which is which (sc-24025):
+        // SH010 BINDS the courier, so the over-long description arrives in its binding sentence;
+        // SH020 binds nothing at all and merely lists the courier in `continuityRoles`, so the
+        // same description arrives as identity text. The second is the case an author cannot
+        // otherwise account for — a reference-free shot refused over a reference's description —
+        // so the refusal names the identity text and attributes the characters to it.
+        let by_shot: BTreeMap<&str, &PlanDiagnostic> = findings
+            .iter()
+            .map(|finding| (finding.shot_id.as_deref().unwrap_or_default(), finding))
+            .collect();
+        assert_eq!(by_shot.len(), findings.len(), "one per shot: {findings:?}");
+        for shot_id in ["SH010", "SH020"] {
+            let finding = by_shot
+                .get(shot_id)
+                .unwrap_or_else(|| panic!("{shot_id} is refused: {findings:?}"));
+            assert_eq!(finding.field, "prompt");
+            assert!(
+                finding.message.contains("the compiler's own sentences")
+                    && finding.message.contains("the video route accepts")
+                    && finding.message.contains("identity text"),
+                "{finding:?}"
+            );
+        }
+        // The attribution is per shot and truthful, asserted as SHAPE rather than as a character
+        // count this test would have to recompute: the bound shot's long text is binding sentence
+        // and none of it is identity text; the unbound shot's is the exact reverse.
+        assert!(
+            by_shot["SH010"].message.contains("0 as identity text")
+                && !by_shot["SH010"]
+                    .message
+                    .contains("wrote 0 as reference binding"),
+            "SH010 binds the courier, so its characters are binding sentence: {:?}",
+            by_shot["SH010"].message
+        );
+        assert!(
+            by_shot["SH020"]
+                .message
+                .contains("wrote 0 as reference binding")
+                && !by_shot["SH020"].message.contains("0 as identity text"),
+            "SH020 binds nothing, so all of its inserted characters are identity text: {:?}",
+            by_shot["SH020"].message
+        );
+        // EVERY kind is accounted for, not only the two leading ones (sc-24029). Both fixture
+        // shots trail with an `Audio:` sentence, so a message that stopped at the bindings and the
+        // identity text left real inserted characters out of its own breakdown — the author is
+        // told the prompt is too long and then handed an incomplete account of who made it so.
+        // Asserted as SHAPE: every kind's label appears with a count beside it, and the audio
+        // sentence's count is positive because these shots have one.
+        for finding in by_shot.values() {
+            for kind in InsertedTextKind::all() {
+                assert!(
+                    finding.message.contains(kind.label()),
+                    "{} is unaccounted for in {:?}",
+                    kind.label(),
+                    finding.message
+                );
+            }
+            assert!(
+                !finding
+                    .message
+                    .contains(&format!("0 as {}", InsertedTextKind::Audio.label())),
+                "both fixture shots carry an audio sentence, so its count cannot be zero: {:?}",
+                finding.message
+            );
+            // And the one kind neither shot has reads as zero rather than being omitted.
+            assert!(
+                finding
+                    .message
+                    .contains(&format!("0 as {}", InsertedTextKind::NoSpeech.label())),
+                "neither fixture shot places a dialogue clip: {:?}",
+                finding.message
+            );
+        }
+
+        // THE ATTRIBUTION IS COMPLETE (sc-24029): the per-kind counts sum to every character the
+        // compiler actually inserted. This is the half of the guard that `InsertedTextKind::next`
+        // cannot give — that function makes adding a variant a compile error at the list, but a
+        // variant added and not LINKED into the chain would still be unreachable from `all()`, and
+        // a test that walked `all()` to build its own expectation could never see the gap. Summing
+        // against the inserted text itself can: a kind that reaches a prompt without being walked
+        // leaves the message short of the characters it is explaining.
+        for shot in &plan.shots {
+            let inserted = inserted_text_for_shot(
+                shot,
+                &shot_reference_pictures(&shot.conditioning.reference_roles, &long),
+                &long,
+            );
+            let total: usize = inserted
+                .iter()
+                .map(|piece| piece.text.chars().count())
+                .sum();
+            let attributed = attributed_counts(&by_shot[shot.id.as_str()].message);
+            assert_eq!(
+                attributed.iter().sum::<usize>(),
+                total,
+                "{}: the counts {attributed:?} must account for every inserted character: {:?}",
+                shot.id,
+                by_shot[shot.id.as_str()].message
+            );
+        }
+    }
+
+    /// The per-kind character counts an over-length refusal states, read back out of the message.
+    ///
+    /// Parsed rather than recomputed, because the point is what the OPERATOR is shown: a count the
+    /// message never printed is a count that explains nothing. Each contribution is written
+    /// `"<n> as <label>"`, and no other `" as "` occurs in the sentence.
+    fn attributed_counts(message: &str) -> Vec<usize> {
+        let mut counts = Vec::new();
+        let mut rest = message;
+        while let Some(index) = rest.find(" as ") {
+            let digits: String = rest[..index]
+                .chars()
+                .rev()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            if let Ok(value) = digits.parse::<usize>() {
+                counts.push(value);
+            }
+            rest = &rest[index + " as ".len()..];
+        }
+        counts
+    }
+
+    /// sc-24029. Walking the successor chain reaches every kind the enum declares, so a variant
+    /// added with a `next()` arm but never linked in is caught here rather than by its silent
+    /// absence from a refusal.
+    ///
+    /// Asserted as REACHABILITY, not as a count: the list is checked by naming each kind, so the
+    /// test says which one is missing rather than that a number changed.
+    #[test]
+    fn every_inserted_text_kind_is_reachable_from_the_first_one() {
+        let walked: Vec<InsertedTextKind> = InsertedTextKind::all().collect();
+        for kind in [
+            InsertedTextKind::ReferenceBinding,
+            InsertedTextKind::ContinuityDescription,
+            InsertedTextKind::Audio,
+            InsertedTextKind::NoSpeech,
+        ] {
+            assert!(
+                walked.contains(&kind),
+                "{kind:?} is unreachable from InsertedTextKind::FIRST: {walked:?}"
+            );
+        }
+        // The walk terminates and visits nothing twice, so `all()` can be iterated safely.
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in &walked {
+            assert!(
+                seen.insert(format!("{kind:?}")),
+                "{kind:?} is visited twice"
+            );
+        }
+        assert_eq!(walked.len(), seen.len());
+    }
+
+    /// sc-24029. The refined-prompt refusal names the WORKSPACE remedy as well as the CLI flag,
+    /// and the control it names still exists under that exact label.
+    ///
+    /// The refusal reaches workspace operators through the planning operation, where `--no-refine`
+    /// is a flag they never type. Pinning the JSX text is what stops the two drifting: renaming
+    /// the checkbox fails here instead of leaving the message pointing at nothing.
+    #[test]
+    fn the_refine_control_label_matches_the_film_workspace_checkbox() {
+        let jsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/web/src/components/editor/FilmPlanning.jsx");
+        let source = std::fs::read_to_string(&jsx)
+            .unwrap_or_else(|error| panic!("{} is readable: {error}", jsx.display()));
+        assert!(
+            source.contains(REFINE_PROMPTS_CONTROL_LABEL),
+            "the Film workspace no longer labels the refinement checkbox \
+             {REFINE_PROMPTS_CONTROL_LABEL:?}; update REFINE_PROMPTS_CONTROL_LABEL and the \
+             refusal that quotes it"
+        );
+    }
+
     #[test]
     fn tier_maps_to_the_shared_mlx_quantize_convention() {
         assert_eq!(mlx_quantize_for_tier("q4"), json!(4));
@@ -2052,5 +4023,993 @@ mod tests {
         persisted.push(b'\n');
         let expected = format!("{:x}", Sha256::digest(&persisted));
         assert_eq!(production_plan_sha256(&plan).unwrap(), expected);
+    }
+
+    /// A shot off the fixture plan, for the tests whose subject is the insertions rather than the
+    /// shot. It has an ordinary `audio` sentence and no placed dialogue clip, so
+    /// [`inserted_text_for_shot`] returns the bindings and one audio piece (sc-24026).
+    fn fixture_shot() -> Shot {
+        parse_plan(&mixed_plan_text())
+            .expect("the fixture plan parses")
+            .shots[0]
+            .clone()
+    }
+
+    /// The fixture pack with the courier and the recipient on ONE plate, each with a locator — a
+    /// photograph of two people (sc-24024). `third` is a role with a plate of its own, so the
+    /// numbering below is exercised against a picture that follows a shared one.
+    fn shared_plate_pack() -> ReferencePack {
+        parse_reference_pack(
+            &json!({
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "pair-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character", "file": "references/pair.png",
+                        "locator": "the woman on the left",
+                        "description": "Blue jacket."
+                    },
+                    {
+                        "role": "recipient", "kind": "character", "file": "references/pair.png",
+                        "locator": "  the man\non the  right  "
+                    },
+                    { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// Roles naming the same pack file are ONE picture, numbered at the first of them, and the
+    /// next role's own file is the NEXT number — not the next role's index (sc-24024).
+    #[test]
+    fn roles_that_share_a_file_share_one_picture_and_do_not_consume_its_number() {
+        let pack = shared_plate_pack();
+        let roles = [
+            "courier".to_owned(),
+            "recipient".to_owned(),
+            "red_parcel".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&roles, &pack);
+
+        assert_eq!(pictures.len(), 2, "two files, two pictures: {pictures:?}");
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(
+            pictures[0]
+                .roles
+                .iter()
+                .map(|bound| bound.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["courier", "recipient"],
+            "both roles on the shared plate ride one picture, in the shot's order"
+        );
+        assert_eq!(
+            pictures[1].number, 2,
+            "the third role is the SECOND picture"
+        );
+        assert_eq!(pictures[1].dispatch_role(), Some("red_parcel"));
+        assert_eq!(
+            pictures[0].dispatch_role(),
+            Some("courier"),
+            "one file is dispatched once, under the first role that named it"
+        );
+
+        // A role bound TWICE to the same file through the same entry cannot appear twice either:
+        // the reversed order proves the number follows the first occurrence, not the pack's order.
+        let reversed = [
+            "red_parcel".to_owned(),
+            "recipient".to_owned(),
+            "courier".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&reversed, &pack);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].dispatch_role(), Some("red_parcel"));
+        assert_eq!(pictures[1].number, 2);
+        assert_eq!(pictures[1].dispatch_role(), Some("recipient"));
+    }
+
+    /// Each sharing role's binding sentence carries ITS OWN locator against the shared
+    /// `<Picture N>`, whitespace-normalized like every other pack phrase the compiler repeats; a
+    /// role with a plate to itself keeps the wording it had before locators existed (sc-24024).
+    #[test]
+    fn a_locator_replaces_the_bare_noun_in_that_roles_binding_sentence() {
+        let pack = shared_plate_pack();
+        let roles = [
+            "courier".to_owned(),
+            "recipient".to_owned(),
+            "red_parcel".to_owned(),
+        ];
+        // A real shot, because since sc-24026 the insertions for a shot are the bindings AND its
+        // audio sentence. The bindings are what this test is about, so they are selected by kind
+        // rather than by position.
+        let shot = fixture_shot();
+        let inserted =
+            inserted_text_for_shot(&shot, &shot_reference_pictures(&roles, &pack), &pack);
+        assert_eq!(
+            inserted.iter().map(|piece| piece.kind).collect::<Vec<_>>(),
+            vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio],
+            "{inserted:?}"
+        );
+        let text = inserted[0].text.as_str();
+
+        assert!(
+            text.contains("The courier is the woman on the left in <Picture 1>. Blue jacket."),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("The recipient is the man on the right in <Picture 1>."),
+            "a locator's whitespace is normalized before it reaches the prompt: {text:?}"
+        );
+        assert!(
+            text.contains("The red parcel is the object shown in <Picture 2>."),
+            "a role with its own file keeps the unlocated wording: {text:?}"
+        );
+        assert!(!text.contains("<Picture 3>"), "{text:?}");
+
+        // A shot may bind only ONE of the two roles on the shared plate. The image still shows two
+        // people, so the locator is still what says which one the courier is — it is read off the
+        // bound ENTRY, never off the group of roles this shot happens to bind (sc-24024).
+        let alone = inserted_text_for_shot(
+            &shot,
+            &shot_reference_pictures(&["courier".to_owned()], &shared_plate_pack()),
+            &shared_plate_pack(),
+        );
+        assert_eq!(
+            alone[0].kind,
+            InsertedTextKind::ReferenceBinding,
+            "{alone:?}"
+        );
+        assert!(
+            alone[0]
+                .text
+                .contains("The courier is the woman on the left in <Picture 1>."),
+            "the locator survives a shot that binds neither of its co-subjects: {:?}",
+            alone[0].text
+        );
+    }
+
+    /// THE SHARED-FILE RULE (sc-24025). A continuity role the shot does not list, but whose file
+    /// is the file of a picture it IS binding, is named BY PICTURE — its image is already inside
+    /// that `<Picture N>`, and describing it on its own would put a second subject in the prompt
+    /// with nothing tying it to the picture it is visibly in.
+    ///
+    /// Everything about the dispatch stays as it was: one file is one picture, numbered once, and
+    /// one asset is sent.
+    #[test]
+    fn a_continuity_role_sharing_a_bound_picture_is_bound_to_it_and_never_described_twice() {
+        let mut pack = shared_plate_pack();
+        // The shipped fixture leaves the recipient silent; give it words, so "described twice"
+        // is a state this test could actually observe.
+        pack.references[1].description = "Grey work apron.".to_owned();
+
+        // Through the real compiler, so the prompt asserted below is the prompt a run dispatches.
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["conditioning"] =
+            json!({ "mode": "reference_to_video", "referenceRoles": ["courier"] });
+        document["shots"][0]["continuityRoles"] = json!(["recipient"]);
+        let plan = parse_plan(&document.to_string()).expect("the edited plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack,
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("the plan compiles against the shared plate pack");
+        let request = compiled.request("SH010").expect("SH010 compiled");
+
+        assert_eq!(
+            request
+                .inserted_text
+                .iter()
+                .map(|piece| piece.kind)
+                .collect::<Vec<_>>(),
+            vec![InsertedTextKind::ReferenceBinding, InsertedTextKind::Audio],
+            "the sharer is BOUND, so there is no identity text at all: {request:?}"
+        );
+        assert_eq!(
+            request.inserted_text[0].text,
+            "The courier is the woman on the left in <Picture 1>. Blue jacket. The recipient is \
+             the man on the right in <Picture 1>. Grey work apron.",
+            "two binding sentences on ONE picture number, the listed role's first"
+        );
+        assert!(
+            !request.inserted_text[0].text.contains("<Picture 2>"),
+            "the shared file is one picture: {:?}",
+            request.inserted_text[0].text
+        );
+        assert_eq!(
+            request.prompt.matches("Grey work apron.").count(),
+            1,
+            "a description is never stated twice: {:?}",
+            request.prompt
+        );
+
+        // The dispatch is untouched: one picture, numbered 1, one asset, sent under the role the
+        // shot actually listed.
+        let pictures = shot_reference_pictures(&request.reference_roles, &pack);
+        assert_eq!(pictures.len(), 1, "{pictures:?}");
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(pictures[0].dispatch_role(), Some("courier"));
+        let role_assets = BTreeMap::from([
+            ("courier".to_owned(), "asset_courier".to_owned()),
+            ("recipient".to_owned(), "asset_recipient".to_owned()),
+        ]);
+        let resolved = request
+            .resolve_conditioning(&pack, &role_assets)
+            .expect("the bound role was imported");
+        assert_eq!(
+            resolved.reference_asset_ids,
+            vec!["asset_courier".to_owned()],
+            "the image was already being sent; the rule adds no asset"
+        );
+    }
+
+    /// The other half of the rule: with NEITHER sharer bound there is no picture to tie the role
+    /// to, so it falls back to the identity lock — a description and no `<Picture N>` at all.
+    #[test]
+    fn a_sharer_on_a_shot_that_binds_neither_is_described_with_no_picture_label() {
+        let mut pack = shared_plate_pack();
+        pack.references[1].description = "Grey work apron.".to_owned();
+
+        let mut shot = fixture_shot();
+        shot.conditioning.mode = "text_to_video".to_owned();
+        shot.conditioning.reference_roles = Vec::new();
+        shot.conditioning.first_frame_role = None;
+        shot.conditioning.last_frame_role = None;
+        shot.continuity_roles = vec!["recipient".to_owned()];
+
+        let inserted = inserted_text_for_shot(&shot, &[], &pack);
+        assert_eq!(
+            inserted.iter().map(|piece| piece.kind).collect::<Vec<_>>(),
+            vec![
+                InsertedTextKind::ContinuityDescription,
+                InsertedTextKind::Audio
+            ],
+            "nothing is bound, so the lock is the only thing holding this subject: {inserted:?}"
+        );
+        assert_eq!(inserted[0].text, "Grey work apron.");
+        assert!(
+            !inserted[0].text.contains("<Picture"),
+            "no image is supplied, so no picture may be named: {:?}",
+            inserted[0].text
+        );
+    }
+
+    /// A pack mixing an image-backed role, a DESCRIBED-ONLY one, an unapproved described-only one
+    /// and a described-only role with a keyframe plate — everything the identity lock has to tell
+    /// apart (sc-24025).
+    fn described_pack() -> ReferencePack {
+        parse_reference_pack(
+            &json!({
+                "schemaVersion": crate::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
+                "id": "described-refs",
+                "version": 1,
+                "references": [
+                    {
+                        "role": "courier", "kind": "character",
+                        "file": "references/courier.png",
+                        "description": "The courier: blue jacket."
+                    },
+                    // No file: words alone.
+                    {
+                        "role": "red_parcel", "kind": "prop",
+                        "description": "  The parcel: small,\n  bright red.  "
+                    },
+                    // A kind that may never be BOUND, to prove the lock does not care about kind.
+                    { "role": "house_style", "kind": "style", "description": "Warm light." },
+                    // Approved-false: the author's explicit "do not use this".
+                    {
+                        "role": "draft_look", "kind": "style", "approved": false,
+                        "description": "Not approved."
+                    },
+                    // Declared, but says nothing: an image-backed role may.
+                    { "role": "workshop_plate", "kind": "plate", "file": "references/plate.png" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// The identity text of one shot, or `None` when the compiler wrote none.
+    fn identity_text(shot: &Shot, pack: &ReferencePack) -> Option<String> {
+        inserted_text_for_shot(
+            shot,
+            &shot_reference_pictures(&shot.conditioning.reference_roles, pack),
+            pack,
+        )
+        .into_iter()
+        .find(|piece| piece.kind == InsertedTextKind::ContinuityDescription)
+        .map(|piece| piece.text)
+    }
+
+    /// THE LOCK (sc-24025). A continuity role the shot does NOT bind is described in the prompt,
+    /// word for word from the pack; one it DOES bind is not, because its binding sentence already
+    /// carries the same description and saying it twice is the one thing this must not do.
+    ///
+    /// Driven through the mixed fixture, whose two shots are exactly the two cases: SH010 binds
+    /// the courier it lists in `continuityRoles`, SH020 binds nothing at all.
+    #[test]
+    fn an_unbound_continuity_role_is_described_and_a_bound_one_is_not_described_twice() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let courier = "The courier: blue jacket.";
+
+        // SH010 BINDS the courier and lists it in continuityRoles: the binding sentence describes
+        // it, and the lock adds nothing.
+        let bound = &plan.shots[0];
+        assert_eq!(bound.continuity_roles, ["courier"]);
+        assert!(
+            bound
+                .conditioning
+                .reference_roles
+                .contains(&"courier".to_owned()),
+            "this shot must BIND the role it lists, or the test proves nothing"
+        );
+        assert_eq!(
+            identity_text(bound, &pack),
+            None,
+            "a bound role already has its description in its binding sentence"
+        );
+        let pictures = shot_reference_pictures(&bound.conditioning.reference_roles, &pack);
+        let bindings = reference_binding_text(&pictures).expect("the shot binds a role");
+        assert_eq!(
+            bindings.text.matches(courier).count(),
+            1,
+            "exactly once, in the binding sentence: {:?}",
+            bindings.text
+        );
+
+        // SH020 binds NOTHING and lists two roles: both are described, in the shot's own order.
+        let unbound = &plan.shots[1];
+        assert_eq!(unbound.continuity_roles, ["courier", "red_parcel"]);
+        assert!(unbound.conditioning.reference_roles.is_empty());
+        let text = identity_text(unbound, &pack).expect("an unbound continuity role is described");
+        assert_eq!(
+            text, "The courier: blue jacket. The parcel: small, bright red.",
+            "the pack's own words, whitespace normalized, in continuityRoles order"
+        );
+    }
+
+    /// What the lock leaves out, and why — each of these is a role that would otherwise be
+    /// described (sc-24025).
+    #[test]
+    fn a_keyframe_an_unapproved_and_a_silent_role_contribute_no_identity_text() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let mut shot = plan.shots[1].clone();
+
+        // A role placed as a KEYFRAME is image-bound just as a reference is: its frame is supplied.
+        shot.continuity_roles = vec!["workshop_plate".to_owned(), "house_style".to_owned()];
+        shot.conditioning.mode = "image_to_video".to_owned();
+        shot.conditioning.first_frame_role = Some("workshop_plate".to_owned());
+        assert_eq!(
+            identity_text(&shot, &pack).as_deref(),
+            Some("Warm light."),
+            "the keyframe role is supplied as a picture; the style role is not and is a `style`, \
+             which the lock describes like any other kind"
+        );
+
+        // UNAPPROVED: `approved` defaults to true, so false is the author's explicit "do not use
+        // this" — and prompt text shapes a render exactly as conditioning does.
+        shot.conditioning.first_frame_role = None;
+        shot.conditioning.mode = "text_to_video".to_owned();
+        shot.continuity_roles = vec!["draft_look".to_owned()];
+        assert_eq!(identity_text(&shot, &pack), None);
+
+        // SILENT: an image-backed role that describes itself with nothing contributes nothing, and
+        // is not an error — it still shows its picture wherever it is bound.
+        shot.continuity_roles = vec!["workshop_plate".to_owned()];
+        assert_eq!(identity_text(&shot, &pack), None);
+    }
+
+    /// The lock is BYTE-IDENTICAL across shots: identical input, identical text, which is the
+    /// entire point of moving the wording from the author to the compiler (sc-24025).
+    #[test]
+    fn the_same_role_yields_byte_identical_text_in_every_shot_that_names_it() {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let pack = described_pack();
+        let mut first = plan.shots[1].clone();
+        first.continuity_roles = vec!["red_parcel".to_owned()];
+        let mut second = plan.shots[1].clone();
+        second.id = "SH030".to_owned();
+        // A different prompt, a different beat, a different audio sentence: everything about the
+        // shot differs except the role it locks.
+        second.prompt = "a wholly different shot of the same parcel".to_owned();
+        second.beat = "reveal".to_owned();
+        second.audio = "Distant traffic.".to_owned();
+        second.continuity_roles = vec!["red_parcel".to_owned()];
+
+        let text = identity_text(&first, &pack).expect("the role is described");
+        assert_eq!(
+            identity_text(&second, &pack).as_deref(),
+            Some(text.as_str())
+        );
+        assert_eq!(text, "The parcel: small, bright red.");
+
+        // And a role written into `continuityRoles` TWICE is still described once. Nothing refuses
+        // the duplicate, and the lock exists to say one fixed thing about each subject — saying it
+        // twice is emphasis a prompt model acts on.
+        let mut doubled = first.clone();
+        doubled.continuity_roles = vec!["red_parcel".to_owned(), "red_parcel".to_owned()];
+        assert_eq!(
+            identity_text(&doubled, &pack).as_deref(),
+            Some(text.as_str())
+        );
+    }
+
+    /// A described-only role supplies no image, so it is numbered as none: it must never create a
+    /// `<Picture N>`, because the engine is only ever sent the pictures that exist and a phantom
+    /// one shifts every later number (sc-24025).
+    ///
+    /// Only an unvalidated plan can reach this — `validate_plan_against_pack` refuses a
+    /// described-only role in every conditioning slot — which is why the compiler is asked
+    /// directly here rather than through a plan.
+    #[test]
+    fn a_described_only_role_is_never_numbered_as_a_picture() {
+        let pack = described_pack();
+        let roles = [
+            "red_parcel".to_owned(),
+            "courier".to_owned(),
+            "house_style".to_owned(),
+        ];
+        let pictures = shot_reference_pictures(&roles, &pack);
+        assert_eq!(
+            pictures.len(),
+            1,
+            "only the image-backed role is a picture: {pictures:?}"
+        );
+        assert_eq!(pictures[0].number, 1);
+        assert_eq!(pictures[0].dispatch_role(), Some("courier"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-24029 — the feature-end review's findings
+    // -----------------------------------------------------------------------------------------
+
+    /// The mixed fixture compiled with `refined` standing in for the refiner's answers.
+    fn compile_mixed_with(
+        refined: &BTreeMap<String, String>,
+    ) -> Result<CompiledPlan, Vec<PlanDiagnostic>> {
+        let plan = parse_plan(&mixed_plan_text()).expect("the fixture plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: refined,
+            },
+        )
+    }
+
+    fn refined_for(shot_id: &str, text: &str) -> BTreeMap<String, String> {
+        [(shot_id.to_owned(), text.to_owned())]
+            .into_iter()
+            .collect()
+    }
+
+    /// sc-24029, E5/E2. The REFINER may not write an engine label into the text the compiler then
+    /// builds a prompt around.
+    ///
+    /// The refiner is handed the model's own prompt guide, which teaches `<Picture N>` as the way
+    /// to give a reference a job, and the worker's marker filter deliberately KEEPS such a label —
+    /// so a rewrite carrying one reaches the engine as a binding to an image numbered by nothing.
+    /// The spelling here is the awkward one on purpose: `< picture 2>` is what the scan exists to
+    /// catch and what a `contains("<Picture")` test would miss.
+    #[test]
+    fn a_refined_prompt_carrying_an_engine_label_is_refused_and_names_the_shot() {
+        let findings = compile_mixed_with(&refined_for(
+            "SH010",
+            "the courier from < picture 2> crosses the room",
+        ))
+        .expect_err("a refined prompt naming a picture the compiler numbers is refused");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(
+            findings[0].shot_id.as_deref(),
+            Some("SH010"),
+            "{findings:?}"
+        );
+        assert_eq!(findings[0].field, "prompt", "{findings:?}");
+        assert!(
+            findings[0].message.contains("< picture 2>")
+                && findings[0].message.contains("SH010")
+                && findings[0].message.contains("--no-refine"),
+            "the refusal names the shot, the label and the CLI remedy: {findings:?}"
+        );
+        // BOTH remedies (sc-24029). This refusal reaches workspace operators through the planning
+        // operation, and `--no-refine` is a flag that person never types; the control they DO have
+        // is named, quoted as the checkbox labels it.
+        assert!(
+            findings[0].message.contains(REFINE_PROMPTS_CONTROL_LABEL)
+                && findings[0].message.contains("untick")
+                && findings[0].message.contains("Film workspace"),
+            "the refusal names the workspace remedy too: {findings:?}"
+        );
+    }
+
+    /// sc-24029, E5. The AUTHORED branch stays unscanned: a person who types `<Picture 1>` into a
+    /// plan's prompt is writing against an engine whose grammar that is, with the references in
+    /// front of them, and `compile` must not refuse them for it. This is the same line
+    /// `film_planner::anchoring_findings` draws between a planner DRAFT and a hand-authored
+    /// document — pinned here because the refusal above sits in the very next branch.
+    #[test]
+    fn a_hand_authored_prompt_may_name_a_picture_itself() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["prompt"] =
+            json!("the courier from <Picture 1> crosses toward <Picture 2>");
+        let plan = parse_plan(&document.to_string()).expect("the plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        let compiled = compile_plan(
+            &plan,
+            &pack(),
+            &CompileInputs {
+                entries: &mixed_entries(&base, &reference),
+                lane: "mlx",
+                plan_sha256: "abc",
+                compiled_at: "now",
+                refined_prompts: &BTreeMap::new(),
+            },
+        )
+        .expect("a hand-authored label is the author's own and compiles");
+        assert!(
+            compiled
+                .request("SH010")
+                .unwrap()
+                .prompt
+                .contains("<Picture 1>"),
+            "the authored label reaches the prompt as written"
+        );
+    }
+
+    /// sc-24029, E1/E4. `description_sentence` has ONE rule for "already ends a sentence", shared
+    /// with the trailing-insertion join: a description closing on `.)`, `."` or `…` is finished,
+    /// and adding a second period to it puts a stray `.` into every prompt that repeats it.
+    #[test]
+    fn a_description_that_already_closes_a_sentence_gains_no_second_period() {
+        for finished in [
+            "The bench sits under the window (door camera-left.)",
+            "The courier trails off\u{2026}",
+            "She said \"put it on the bench.\"",
+            "Small bright red parcel!",
+        ] {
+            assert_eq!(
+                description_sentence(finished).as_deref(),
+                Some(finished),
+                "{finished:?} already ends a sentence"
+            );
+        }
+        // And the rule still SUPPLIES one where it is missing.
+        assert_eq!(
+            description_sentence("Small bright red parcel").as_deref(),
+            Some("Small bright red parcel."),
+        );
+    }
+
+    /// sc-24029, E1/E4. A leading insertion already ends in one space, so an authored prompt that
+    /// opens with whitespace — which nothing refuses — used to be joined to the bindings by two.
+    #[test]
+    fn a_prompt_with_leading_whitespace_is_joined_by_one_space() {
+        let shot = fixture_shot();
+        let inserted = inserted_text_for_shot(
+            &shot,
+            &shot_reference_pictures(&shot.conditioning.reference_roles, &pack()),
+            &pack(),
+        );
+        assert!(
+            inserted
+                .iter()
+                .any(|piece| piece.kind == InsertedTextKind::ReferenceBinding),
+            "the fixture shot binds references, so something leads its prompt"
+        );
+        let composed = apply_inserted_text("   a courier enters   ", &inserted);
+        assert!(
+            !composed.contains("  "),
+            "no run of two spaces survives the join: {composed:?}"
+        );
+        assert_eq!(
+            composed,
+            apply_inserted_text("a courier enters", &inserted),
+            "the surrounding whitespace changes nothing about the dispatched prompt"
+        );
+        // With nothing inserted at all the prompt is still trimmed, which is what makes the
+        // composition reversible for `prompt_differences`.
+        assert_eq!(apply_inserted_text("  hello  ", &[]), "hello");
+    }
+
+    /// sc-24029, E2/E5. A hand-edited `prompt` is refused even when `insertedText` is pristine.
+    ///
+    /// `insertedText` records what the compiler WROTE, not where it ended up, and `prompt` is the
+    /// field that becomes the job body. Each mutation below leaves `insertedText` untouched and
+    /// changes only the dispatched text, in both prompt-source modes.
+    #[test]
+    fn a_hand_edited_dispatched_prompt_is_refused_in_both_prompt_source_modes() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+
+        // The refined document is produced by a STUB refiner rather than assembled by hand, so
+        // what is under test is what a real compile writes.
+        let refined_source = compile_mixed_with(&refined_for(
+            "SH010",
+            "a courier crosses the cluttered room",
+        ))
+        .expect("a clean rewrite compiles");
+
+        for (label, mut document) in [
+            ("authored", compile_mixed_with(&BTreeMap::new()).unwrap()),
+            ("refined", refined_source.clone()),
+        ] {
+            let original = document.request("SH010").unwrap().prompt.clone();
+            assert!(
+                original.contains("<Picture 1>") && original.contains("<Picture 2>"),
+                "{label}: the fixture shot binds two references: {original:?}"
+            );
+
+            let mutations = [
+                // The bindings deleted: the labels the engine applies are still supplied, but
+                // nothing in the text says what they are for.
+                (
+                    "bindings removed",
+                    original
+                        .split_once("<Picture 2>")
+                        .map(|(_, rest)| rest.trim_start().to_owned())
+                        .expect("the binding block leads the prompt"),
+                ),
+                // The two labels SWAPPED: every sentence is the compiler's own, and the request
+                // now binds the courier to the parcel's image and the parcel to the courier's.
+                (
+                    "picture labels swapped",
+                    original
+                        .replace("<Picture 1>", "\u{0}")
+                        .replace("<Picture 2>", "<Picture 1>")
+                        .replace('\u{0}', "<Picture 2>"),
+                ),
+                // The trailing audio sentence removed: H3 scores a soundtrack from the prompt, so
+                // this is a different ask with an identical `insertedText`.
+                (
+                    "trailing audio removed",
+                    original
+                        .split_once(AUDIO_PROMPT_PREFIX)
+                        .map(|(head, _)| head.trim_end().to_owned())
+                        .expect("the audio sentence trails the prompt"),
+                ),
+            ];
+
+            for (mutation, tampered) in mutations {
+                assert_ne!(tampered, original, "{label}/{mutation} changes the prompt");
+                let request = document
+                    .requests
+                    .iter_mut()
+                    .find(|request| request.shot_id == "SH010")
+                    .unwrap();
+                let pristine = request.inserted_text.clone();
+                request.prompt = tampered;
+                let findings =
+                    document.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+                assert!(
+                    findings
+                        .iter()
+                        .any(|finding| finding.field == "compiled.prompt"
+                            && finding.shot_id.as_deref() == Some("SH010")
+                            && finding
+                                .message
+                                .contains("is not the prompt the compiler composed")
+                            && finding.message.contains("film-harness compile")),
+                    "{label}/{mutation} must be refused with the shot, the cause and the remedy: \
+                     {findings:?}"
+                );
+                assert!(
+                    !findings
+                        .iter()
+                        .any(|finding| finding.field == "compiled.insertedText"),
+                    "{label}/{mutation}: `insertedText` is untouched, so it must not be blamed: \
+                     {findings:?}"
+                );
+                // Restore for the next mutation.
+                let request = document
+                    .requests
+                    .iter_mut()
+                    .find(|request| request.shot_id == "SH010")
+                    .unwrap();
+                request.prompt = original.clone();
+                assert_eq!(request.inserted_text, pristine);
+            }
+
+            assert!(
+                document
+                    .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+                    .is_empty(),
+                "{label}: the restored document conforms"
+            );
+
+            // `authoredPrompt` IS reproduced (sc-24029), although it sits beside the two fields
+            // that genuinely are the compile's output. It is a plain copy of the plan's shot, and
+            // a hand-edited one makes the document misreport what the refiner was handed — which
+            // is exactly what a reviewer diffs the rewrite against. One mutation per mode: the
+            // refined request carries the plan's prompt and must keep it; the authored request
+            // carries NONE and must not acquire one.
+            let request = document
+                .requests
+                .iter_mut()
+                .find(|request| request.shot_id == "SH010")
+                .unwrap();
+            let pristine_authored = request.authored_prompt.clone();
+            let planned = plan.shots[0].prompt.clone();
+            match label {
+                "authored" => assert_eq!(
+                    pristine_authored, None,
+                    "an authored request keeps no second copy of the prompt"
+                ),
+                _ => assert_eq!(
+                    pristine_authored.as_deref(),
+                    Some(planned.as_str()),
+                    "a refined request records the plan's own prompt verbatim"
+                ),
+            }
+            request.authored_prompt = match label {
+                // A value where the compiler wrote none: this request claims a rewrite it never had.
+                "authored" => Some("a prompt the plan never held".to_owned()),
+                // The recorded "before" replaced, so the rewrite reads as a smaller edit than it was.
+                _ => Some(format!("{planned} and then some words nobody planned")),
+            };
+            let findings = document.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.field == "compiled.authoredPrompt"
+                        && finding.shot_id.as_deref() == Some("SH010")
+                        && finding.message.contains("is not the prompt the plan holds")
+                        && finding.message.contains("film-harness compile")),
+                "{label}/authoredPrompt edited must be refused: {findings:?}"
+            );
+
+            // And restoring it is enough to conform again — the check is about THIS field, and a
+            // legitimately compiled document never trips it in either mode.
+            let request = document
+                .requests
+                .iter_mut()
+                .find(|request| request.shot_id == "SH010")
+                .unwrap();
+            request.authored_prompt = pristine_authored;
+            assert!(
+                document
+                    .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+                    .is_empty(),
+                "{label}: the restored document conforms"
+            );
+        }
+    }
+
+    /// sc-24029. A plan prompt with surrounding whitespace still compiles to a document that
+    /// conforms: `compile_shot` stores `authoredPrompt` UNTRIMMED, so the check compares it
+    /// untrimmed too. Trimming on either side alone would refuse the compiler's own output.
+    #[test]
+    fn an_authored_prompt_with_surrounding_whitespace_round_trips_in_both_modes() {
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["shots"][0]["prompt"] = json!("  a courier enters, unevenly spaced  ");
+        let plan = parse_plan(&document.to_string()).expect("the plan parses");
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        for refined in [
+            BTreeMap::new(),
+            refined_for("SH010", "a courier crosses the cluttered room"),
+        ] {
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &entries,
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &refined,
+                },
+            )
+            .expect("the plan compiles");
+            let round_tripped: CompiledPlan =
+                serde_json::from_str(&serde_json::to_string(&compiled).unwrap()).unwrap();
+            let request = round_tripped.request("SH010").unwrap();
+            if request.prompt_source == PromptSource::Refined {
+                assert_eq!(
+                    request.authored_prompt.as_deref(),
+                    Some("  a courier enters, unevenly spaced  "),
+                    "the plan's prompt is recorded exactly as the plan holds it"
+                );
+            }
+            let findings =
+                round_tripped.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(
+                findings.is_empty(),
+                "the compiler's own output must conform: {findings:?}"
+            );
+        }
+    }
+
+    /// sc-24029, E2. An untouched REFINED document survives serialization and conforms — the
+    /// round trip the check above would silently pass by refusing everything.
+    ///
+    /// Both punctuation cases are exercised because the recovery has to settle the one character
+    /// the composition loses: `apply_inserted_text` supplies a `.` before the first trailing piece
+    /// when the middle does not already end a sentence, so a rewrite WITHOUT terminal punctuation
+    /// and one WITH it produce prompts that differ by a period the compiler wrote.
+    #[test]
+    fn an_untouched_refined_document_round_trips_and_conforms() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        for rewrite in [
+            "a courier crosses the cluttered room", // no terminal punctuation
+            "a courier crosses the cluttered room.", // terminal punctuation
+            "a courier crosses the cluttered room!",
+            "she says \"leave it on the bench.\"",
+        ] {
+            let compiled = compile_mixed_with(&refined_for("SH010", rewrite))
+                .unwrap_or_else(|findings| panic!("{rewrite:?} compiles: {findings:?}"));
+            let round_tripped: CompiledPlan =
+                serde_json::from_str(&serde_json::to_string(&compiled).unwrap()).unwrap();
+            assert_eq!(
+                round_tripped.request("SH010").unwrap().prompt_source,
+                PromptSource::Refined
+            );
+            let findings =
+                round_tripped.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(
+                findings.is_empty(),
+                "{rewrite:?} is the compiler's own output and must conform: {findings:?}"
+            );
+            // The recovery is EXACT, not merely accepting: it hands back the rewrite the compiler
+            // was given (up to the terminal `.` the composition itself supplies).
+            let request = round_tripped.request("SH010").unwrap();
+            let middle = recovered_middle(&request.prompt, &request.inserted_text)
+                .unwrap_or_else(|| panic!("{rewrite:?} is recoverable"));
+            assert!(
+                middle == rewrite || middle == format!("{rewrite}."),
+                "{rewrite:?} recovered as {middle:?}"
+            );
+        }
+    }
+
+    /// sc-24029, E2. A label hand-written into the REFINED middle of a dispatched prompt is
+    /// refused. The compile-time guard never saw this document — it was read back from disk — so
+    /// this is the only place it is caught.
+    #[test]
+    fn an_engine_label_edited_into_a_refined_middle_is_refused() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        let mut compiled =
+            compile_mixed_with(&refined_for("SH010", "a courier crosses the room")).unwrap();
+        let request = compiled
+            .requests
+            .iter_mut()
+            .find(|request| request.shot_id == "SH010")
+            .unwrap();
+        request.prompt = request.prompt.replace(
+            "a courier crosses the room",
+            "the courier from <Picture 2> crosses",
+        );
+        let findings = compiled.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.field == "compiled.prompt"
+                    && finding.message.contains("<Picture 2>")
+                    && finding.message.contains("assigns itself")),
+            "{findings:?}"
+        );
+    }
+
+    /// sc-24029, E5/E7. A compiled document is stale once the PACK changes, and the refusal names
+    /// the pack rather than a derived field.
+    #[test]
+    fn editing_a_pack_description_stales_a_compiled_document() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let compiled = compile_mixed_with(&BTreeMap::new()).unwrap();
+        assert!(
+            compiled
+                .staleness_findings(&plan, "abc", &pack())
+                .is_empty(),
+            "the pack it was compiled from is current"
+        );
+
+        let mut edited = pack();
+        edited
+            .references
+            .iter_mut()
+            .find(|entry| entry.role == "courier")
+            .unwrap()
+            .description = "The courier: blue quilted jacket.".to_owned();
+        let findings = compiled.staleness_findings(&plan, "abc", &edited);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(
+            findings[0].field, "compiled.referencePackSha256",
+            "{findings:?}"
+        );
+        assert_eq!(
+            findings[0].message,
+            "the reference pack changed since these requests were compiled; recompile, or use \
+             authored prompts",
+            "{findings:?}"
+        );
+    }
+
+    /// sc-24029, E5/E7. The identity is the PARSED pack, so the CLI's JSONC document and the
+    /// workspace's typed draft agree — and a comment- or whitespace-only edit of the document is
+    /// not a pack change.
+    #[test]
+    fn the_pack_identity_ignores_comments_and_document_whitespace() {
+        let commented = parse_reference_pack(
+            r#"{
+                // The same pack, with an author's notes in it.
+                "schemaVersion": 2,
+                "id": "courier-refs",
+                "version": 3,
+                "references": [
+                    /* the courier */
+                    { "role": "courier",        "kind": "character", "file": "references/courier.png" },
+                    { "role": "red_parcel",     "kind": "prop",      "file": "references/red_parcel.png" },
+                    { "role": "workshop_plate", "kind": "plate",     "file": "references/plate.png" }
+                ]
+            }"#,
+        )
+        .expect("the commented document parses");
+        assert_eq!(
+            reference_pack_sha256(&commented).unwrap(),
+            reference_pack_sha256(&pack()).unwrap(),
+            "comments and spacing are the document's, not the pack's"
+        );
+    }
+
+    /// sc-24029, E5/E7. The `insertedText` difference reaches an operator, so it is rendered as
+    /// per-kind plain text rather than a `Vec<InsertedText>` struct dump.
+    #[test]
+    fn an_inserted_text_difference_reads_as_plain_text_not_a_debug_dump() {
+        let plan = parse_plan(&mixed_plan_text()).unwrap();
+        let base = entry();
+        let reference = reference_entry();
+        let entries = mixed_entries(&base, &reference);
+        let mut compiled = compile_mixed_with(&BTreeMap::new()).unwrap();
+        let request = compiled
+            .requests
+            .iter_mut()
+            .find(|request| request.shot_id == "SH010")
+            .unwrap();
+        request
+            .inserted_text
+            .retain(|piece| piece.kind != InsertedTextKind::Audio);
+        let findings = compiled.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+        let finding = findings
+            .iter()
+            .find(|finding| finding.field == "compiled.insertedText")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(
+            !finding.message.contains("InsertedText {") && !finding.message.contains("kind:"),
+            "no Rust struct notation reaches an operator: {:?}",
+            finding.message
+        );
+        assert!(
+            finding.message.contains(InsertedTextKind::Audio.label()),
+            "the missing piece is named by what it IS: {:?}",
+            finding.message
+        );
     }
 }
