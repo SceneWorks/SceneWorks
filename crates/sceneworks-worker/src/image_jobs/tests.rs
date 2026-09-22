@@ -20837,21 +20837,39 @@ mod preview_stream_tests {
     /// story needs — a step reaches the consumer, and a cancel STOPS the batch instead of
     /// completing it — are pinned here, on the real loop, with no weights and no GPU.
     ///
-    /// The discriminator is the second image: a carrier that ignored its producer's `None` would
-    /// emit a second `Image` event and the batch would finish normally, which is precisely the
-    /// "cancel did nothing but the job still says completed" failure this guards.
+    /// ⚠️ THIS CARRIER IS ID-AGNOSTIC. `drive_gen_items` never sees a model id, so nothing below
+    /// mentions `qwen_image_2_1` and nothing below could: the id-specific binding — that 2.1 lands
+    /// on the route whose producer IS this carrier — is proven separately by
+    /// `qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp` and
+    /// `every_scheduler_routed_candle_image_has_a_native_worker_route`. What this test owns is the
+    /// carrier's own behaviour, which those two cannot reach. The batch is sized 4 because that is
+    /// a real advertised `limits.count` bucket for 2.1, not because the loop knows it.
+    ///
+    /// THE DISCRIMINATOR IS "STOPS", NOT "SKIPS". An earlier two-item version of this test asserted
+    /// only that the last item produced no events, which `break` and `continue` satisfy equally:
+    /// changing `break` to `continue` at the `else` arm of `drive_gen_items` left it — and the whole
+    /// worker suite — green, while the batch would actually go on invoking the producer (and, on the
+    /// real lane, go on driving the GPU) for every remaining image after the user cancelled.
+    ///
+    /// So the assertion is made on INVOCATION, not on output: `invoked` records the indices the
+    /// producer was actually called with. A loop that breaks calls it for 0 and 1 and stops; a loop
+    /// that skips calls it for 0, 1, 2 and 3. Only the first is a cancel.
     #[test]
     fn cancelling_a_candle_batch_stops_it_after_reporting_progress() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(16);
+        use std::cell::RefCell;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
         let cancel = gen_core::CancelFlag::new();
         let observed = cancel.clone();
+        let invoked: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 
-        // A two-image `qwen_image_2_1` batch (count: 2). Image 0 reports a step and completes;
-        // the flag trips before image 1, which the producer observes and answers `None`.
+        // A four-image batch. Image 0 reports a step and completes, and trips the flag on its way
+        // out; image 1 observes it and answers `None`, which must END the batch.
         drive_gen_items(
             tx,
-            [0_usize, 1_usize],
+            [0_usize, 1, 2, 3],
             |index, _item, _preview, progress| {
+                invoked.borrow_mut().push(index);
                 if observed.is_cancelled() {
                     return Ok(None);
                 }
@@ -20864,6 +20882,15 @@ mod preview_stream_tests {
             },
         )
         .expect("a cancelled batch is not an error — it stops early and reports what it produced");
+
+        assert_eq!(
+            *invoked.borrow(),
+            vec![0, 1],
+            "the producer must be invoked for image 0 and for the image that observes the cancel, \
+             and then NOT AT ALL — an invocation for index 2 means the loop skipped the cancelled \
+             item instead of stopping, so the user's cancel merely dropped one image while the \
+             batch kept running"
+        );
 
         match rx.try_recv().expect("image 0 reports its first step") {
             GenEvent::Step {
@@ -20881,8 +20908,8 @@ mod preview_stream_tests {
         }
         assert!(
             rx.try_recv().is_err(),
-            "the cancelled second image must produce NO further events — not a step, and above all \
-             not an Image the consumer would persist and count toward a completed generation set"
+            "images 1, 2 and 3 must produce NO further events — not a step, and above all not an \
+             Image the consumer would persist and count toward a completed generation set"
         );
     }
 

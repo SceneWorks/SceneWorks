@@ -5920,6 +5920,77 @@ mod tests {
         assert_eq!(predicted_peak_gb(&obj(json!({})), "q4"), None);
     }
 
+    /// sc-24109 — adding `candle.minMemoryGb` to `qwen_image_2_1` ARMS this gate for that model,
+    /// and this is where that consequence is stated as an assertion rather than left in prose.
+    ///
+    /// Before the candle block existed, `predicted_peak_gb` returned `None` for the id and the fit
+    /// gate was skipped ENTIRELY — a too-small card learned it was too small by OOMing mid-load.
+    /// With the block, every tier key resolves to the DERIVED 48 GB floor (there is no
+    /// `vramGbByTier`, because nothing has been measured), so the gate now REFUSES the load
+    /// pre-flight on any card whose free VRAM is below it. That deliberately includes a 32 GB
+    /// RTX 5090 and a 40 GB A100: the bf16 snapshot alone is 30.86 GiB of weights, which cannot sit
+    /// resident with its 2048-square activation transient on either. A pre-load refusal that names
+    /// the number is the intended behaviour; a reactive OOM is not.
+    ///
+    /// q8/q4 tiers with genuinely lower floors arrive with sc-24112's SceneWorks half. When they
+    /// do, they land as `vramGbByTier` rows and the FIRST branch of `predicted_peak_gb` starts
+    /// winning for them — which is exactly what the `48.0` here stops being true of, so this test
+    /// is where that transition has to be acknowledged.
+    #[test]
+    fn qwen_image_2_1_resolves_its_candle_peak_from_the_derived_min_memory_floor() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        let entry = obj(manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .clone());
+
+        // No measured row exists, so EVERY tier key lands on the derived floor — including the one
+        // tier the model actually ships.
+        for tier in ["bf16", "q8", "q4", NVFP4_TIER] {
+            assert_eq!(
+                predicted_peak_gb(&entry, tier),
+                Some(48.0),
+                "{tier} must resolve from candle.minMemoryGb; a measured vramGbByTier row would \
+                 win instead, and 2.1 has none"
+            );
+        }
+        assert!(
+            entry["candle"].get("vramGbByTier").is_none(),
+            "48 GB is a DERIVED floor from the snapshot's 30.86 GiB of tensor bytes, not a \
+             measurement — a vramGbByTier row here would be an unmeasured claim"
+        );
+
+        // The armed consequence, spelled as the decision the gate actually returns: cards below the
+        // floor are refused before the load, cards above it are admitted.
+        let needed = predicted_peak_gb(&entry, "bf16");
+        for (free_gb, admitted) in [(32.0, false), (40.0, false), (48.0, true), (96.0, true)] {
+            let budget = VramBudget {
+                total_gb: free_gb,
+                free_gb,
+            };
+            assert_eq!(
+                matches!(fit_decision(needed, Some(budget)), FitDecision::Fits),
+                admitted,
+                "a {free_gb} GB card must {} the bf16 install",
+                if admitted {
+                    "be admitted for"
+                } else {
+                    "be refused"
+                }
+            );
+        }
+    }
+
     #[test]
     fn adapter_bytes_change_resident_and_sequential_fit_boundaries() {
         let manifest = obj(json!({

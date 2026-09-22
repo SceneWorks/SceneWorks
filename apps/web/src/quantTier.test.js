@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GENERATION_QUALITY,
@@ -19,6 +23,17 @@ import {
   INT8_CONVROT_TIER,
   NVFP4_TIER,
 } from "./quantTier.js";
+
+// The SHIPPED catalog, parsed from the exact bytes the product embeds (same loader shape as
+// imageAxesParity.test.js). Used by the sc-24109 suite at the bottom so its model object is derived
+// from `builtin.models.jsonc` rather than hand-written.
+const MANIFEST_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../config/manifests/builtin.models.jsonc",
+);
+const manifestById = new Map(
+  JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")).models.map((model) => [model.id, model]),
+);
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
 // files are present (installState "installed"); every other declared tier reports "missing".
@@ -703,19 +718,71 @@ describe("defaultTierSelection — capability-aware Auto base (epic 10721 R1/R3/
 
 // sc-24109 — Qwen Image 2.1 ships ONE bf16 artifact and has no precision tier on either backend:
 // the MLX provider advertises [Q4, Q8] and the Candle provider advertises [], and SceneWorks must
-// not merge those into one per-model-id list. The catalog projection of the entry therefore carries
-// none of the three tier shapes this module reads, and the picker must stay closed — including on
+// not merge those into one per-model-id list. So the picker must stay closed — including on
 // Windows, where the Candle route would refuse a tier-select at load.
+//
+// ⚠️ THE MODEL OBJECT IS DERIVED FROM THE SHIPPED MANIFEST, NOT HAND-WRITTEN. `installedTiers` /
+// `allPossibleTiers` / `shouldShowTierPicker` read only `runtimeQuantTiers`, `hasVariantMatrix` +
+// `variants`, `mlxTierStates` and `mlxTiers` — so a literal `{ id, type, installState }` object
+// asserts nothing about Qwen 2.1 at all: `{}` passes it too, and adding a `variant` row to the
+// catalog would not red it. `projectTierShapes` below therefore rebuilds those exact fields from
+// `config/manifests/builtin.models.jsonc` the way `apply_variant_fields` /
+// `model_has_variant_matrix` / `apply_mac_and_mlx_fields` do server-side, so the catalog is what is
+// under test. The "positive control" case proves the derivation is live by running it over a
+// mutated copy of the SAME entry.
 describe("qwen_image_2_1 tier surface", () => {
-  // Exactly what GET /models projects for the entry: one download with no `variant` (so no
-  // `hasVariantMatrix`/`variants`), no `mlx.requiresConversion` (so no `mlxTiers`/`mlxTierStates`),
-  // and a builtin id (so no imported-provider `runtimeQuantTiers`).
-  const qwenImage21 = {
-    id: "qwen_image_2_1",
-    type: "image",
-    installState: "installed",
-    cacheState: "complete",
-  };
+  // The three tier shapes GET /models can emit, derived from a manifest entry:
+  //   * `hasVariantMatrix` / `variants` — any supported, non-co-requisite download carrying a
+  //     non-empty `variant` (apps/rust-api/src/models.rs `model_has_variant_matrix`). A model with
+  //     no matrix still gets a one-element `"default"` pseudo-variant, which `isSelectableTier`
+  //     rejects.
+  //   * `mlxTiers` / `mlxTierStates` — convert-at-install models only, gated on
+  //     `mlx.requiresConversion === true` (`entry_requires_converted_artifact_here`).
+  //   * `runtimeQuantTiers` — IMPORTED entries only, projected from the import provider's
+  //     descriptor. A builtin id never carries it.
+  function projectTierShapes(entry) {
+    const downloads = Array.isArray(entry.downloads) ? entry.downloads : [];
+    const primaries = downloads.filter((download) => download?.coRequisite !== true);
+    const declared = primaries
+      .map((download) => download?.variant)
+      .filter((variant) => typeof variant === "string" && variant.trim() !== "");
+    const hasVariantMatrix = declared.length > 0;
+    const projected = {
+      id: entry.id,
+      type: entry.type,
+      installState: "installed",
+      cacheState: "complete",
+      hasVariantMatrix,
+      variants: (hasVariantMatrix ? declared : ["default"]).map((variant) => ({
+        variant,
+        installState: "installed",
+        cacheState: "complete",
+      })),
+    };
+    if (entry?.mlx?.requiresConversion === true) {
+      projected.mlxTiers = declared.length > 0 ? declared : ["bf16"];
+    }
+    return projected;
+  }
+
+  const entry = manifestById.get("qwen_image_2_1");
+  const qwenImage21 = projectTierShapes(entry);
+
+  it("is in the shipped catalog with one unvariant artifact and no convert-at-install tiers", () => {
+    // The facts the projection above rests on, asserted directly so a catalog change that adds a
+    // tier cannot slip through as "the projection happened to stay empty".
+    expect(entry, "qwen_image_2_1 must be in builtin.models.jsonc").toBeTruthy();
+    const primaries = entry.downloads.filter((download) => download?.coRequisite !== true);
+    expect(primaries).toHaveLength(1);
+    expect(primaries.every((download) => download.variant === undefined)).toBe(true);
+    expect(entry.mlx?.requiresConversion).toBeUndefined();
+    expect(entry.mlx?.quantize).toBeUndefined();
+    expect(entry.candle?.quantize).toBeUndefined();
+    // And the projection that follows from those facts.
+    expect(qwenImage21.hasVariantMatrix).toBe(false);
+    expect(qwenImage21.mlxTiers).toBeUndefined();
+    expect(qwenImage21.runtimeQuantTiers).toBeUndefined();
+  });
 
   it("offers no selectable tier and no picker", () => {
     expect(installedTiers(qwenImage21)).toEqual([]);
@@ -733,5 +800,21 @@ describe("qwen_image_2_1 tier surface", () => {
       expect(allPossibleTiers(qwenImage21, options)).toEqual([]);
       expect(shouldShowTierPicker(qwenImage21, options)).toBe(false);
     }
+  });
+
+  it("POSITIVE CONTROL: the derivation opens the picker the moment the catalog declares variants", () => {
+    // sc-24112 adds the real q4/q8 tier artifacts. When it does, `variant` rows land on THIS entry
+    // and the picker must start rendering — so the emptiness asserted above has to be a consequence
+    // of the catalog, not of a hand-written stub. Same entry, same projection, one injected row.
+    const withTiers = projectTierShapes({
+      ...entry,
+      downloads: [
+        { ...entry.downloads[0], variant: "q4", default: true },
+        { ...entry.downloads[0], variant: "q8" },
+      ],
+    });
+    expect(withTiers.hasVariantMatrix).toBe(true);
+    expect(installedTiers(withTiers)).toEqual(["q4", "q8"]);
+    expect(shouldShowTierPicker(withTiers)).toBe(true);
   });
 });
