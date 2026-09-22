@@ -278,6 +278,63 @@ pub(super) fn has_nonempty_string_array(payload: &Map<String, Value>, key: &str)
         })
 }
 
+/// The ORDERED condition-image asset ids a Qwen-Image 2.1 request carries, or `None` when a carrier
+/// is malformed (fail closed, never "not supplied").
+///
+/// Ordering is SEMANTIC for this engine, not bookkeeping: upstream numbers the images in the prompt
+/// template (`<image1>…`), the size fallback reads the LAST one, and attention is block-causal so a
+/// reference is visible only to what follows it. Swapping two entries is a DIFFERENT request. The
+/// order is therefore fixed here, once, and both backends plus the worker's payload builder read it
+/// from this one function:
+///
+///   1. `sourceAssetId` — the primary image an Image-Editor edit is about;
+///   2. `maskAssetId` — an ORDINARY reference, immediately after the source it belongs to. 2.1 has
+///      no mask tensor and performs no inpainting (S3 contract); the engine's own refusal text tells
+///      the caller to "pass the mask as an ordinary extra reference and name it in the prompt (\"use
+///      the second image as the mask\")", and second is exactly where this puts it. An annotation
+///      the user drew INTO the picture is not a mask at all — it arrives as the source itself;
+///   3. every `referenceAssetIds` entry, in submitted order;
+///   4. the singular `referenceAssetId` (Character-Studio shape).
+///
+/// The count is NOT bounded here. The ceiling lives in `limits.maxReferenceAssets` and is enforced
+/// once, at enqueue, by `video_request::image_reference_limit_error` — one manifest key, one gate,
+/// so the routing layer cannot hold a second opinion about what "too many" means. A stored job that
+/// somehow carries more is refused by the worker's resolver with the engine's own wording, which is
+/// a loud failure rather than a job nothing can claim (the sc-10523 defect).
+pub fn qwen_image_2_1_reference_ids(payload: &Map<String, Value>) -> Option<Vec<String>> {
+    fn scalar<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
+        match payload.get(key) {
+            None | Some(Value::Null) => Some(None),
+            Some(Value::String(value)) => Some(Some(value.trim()).filter(|id| !id.is_empty())),
+            Some(_) => None,
+        }
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    for key in ["sourceAssetId", "maskAssetId"] {
+        if let Some(id) = scalar(payload, key)? {
+            ids.push(id.to_owned());
+        }
+    }
+    match payload.get("referenceAssetIds") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(values)) => {
+            for value in values {
+                let id = value.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                ids.push(id.to_owned());
+            }
+        }
+        Some(_) => return None,
+    }
+    if let Some(id) = scalar(payload, "referenceAssetId")? {
+        ids.push(id.to_owned());
+    }
+    Some(ids)
+}
+
 /// Validate the mutually-exclusive image-reference carriers used by native conditioned-image
 /// routes and return the selected reference count. Missing, null, blank strings, and an empty plural
 /// array are absent. A malformed plural array, blank/non-string plural member, an oversized plural

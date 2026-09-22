@@ -218,11 +218,13 @@ const seededFallbackModels = [
     id: "qwen_image_2_1",
     name: "Qwen Image 2.1",
     type: "image",
-    // sc-24113 adds `image_to_image`. Upstream ships ONE pipeline: text-to-image is that pipeline
-    // with no condition images, and editing / multi-reference / local editing are the SAME call
-    // with 1-10 ORDERED condition images. `image_inpaint` is deliberately absent — there is no mask
-    // tensor in this family, so a mask is just another reference the prompt names.
-    capabilities: ["text_to_image", "image_to_image"],
+    // Upstream ships ONE pipeline: text-to-image is that pipeline with no condition images, and
+    // editing / multi-reference / local editing are the SAME call with 1-10 ORDERED condition
+    // images. `image_to_image` (sc-24113) is the single-reference face of that call and
+    // `edit_image` (sc-24110) the ordered-set face the Image Editor drives; both are declared
+    // because both are the same engine call. `image_inpaint` is deliberately absent — there is no
+    // mask tensor in this family, so a mask is just another ordered reference the prompt names.
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
     // ⚠️ PROVISIONAL KEY (sc-24113) — see `apps/web/src/qwenAlpha.js`. The engine-side RGBA output
     // contract is being defined concurrently by inference sc-24111, so this flag and the request
     // field it implies are spelled in exactly three places and a rename is one line in each.

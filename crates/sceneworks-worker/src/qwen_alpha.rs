@@ -243,11 +243,15 @@ pub(crate) fn output_channels_request_fragment(channels: u8) -> BTreeMap<&'stati
 /// alpha channel is an ordinary reference, and an opaque alpha channel is still alpha as far as the
 /// carrier is concerned — `A=255` is byte-identical through the RGBA path, so classifying by
 /// CHANNELS rather than by content keeps the choice total and cheap.
-// Unused at this pin and deliberately kept: `qwen_image_2_1` has no worker-side edit route until
-// the terminal pin bump (its engine declares no conditioning at the pinned revision), so there is
-// no call site to make the choice at yet. The DECISION and its name are the part that must not be
-// re-derived under time pressure when that route lands.
-#[allow(dead_code)]
+// sc-24110 gave this its call site: `image_jobs::build_qwen_image_2_1_conditioning` classifies
+// every resolved reference through this function, so the two halves of the story cannot drift on
+// what an alpha-carrying reference becomes. The `ReferenceRgba` ARM still cannot be CONSTRUCTED —
+// the variant is not in the pinned `gen_core` — so that is what the builder refuses on, by name,
+// rather than flattening; see `qwen_image_2_1_rgba_reference_is_pending_the_pin`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn reference_conditioning_kind(has_alpha: bool) -> &'static str {
     if has_alpha {
         CONDITIONING_REFERENCE_RGBA

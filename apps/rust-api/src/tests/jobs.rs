@@ -11970,8 +11970,23 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     .await;
     let project_id = project["id"].as_str().expect("project id");
 
-    let refs =
-        |count: usize| -> Vec<String> { (1..=count).map(|index| format!("ref_{index}")).collect() };
+    // Eleven REAL raster assets. sc-24110 added a per-entry half to this gate — each ordered
+    // reference must actually be a raster image the project owns — so the ids here have to exist
+    // for the COUNT and ORDER assertions below to be reading what they claim to read rather than
+    // tripping the per-entry check first.
+    let mut uploaded: Vec<String> = Vec::new();
+    for index in 0..11 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        uploaded.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let refs = |count: usize| -> Vec<String> { uploaded[..count].to_vec() };
 
     // TEN references: admitted, and — the load-bearing half — the list arrives in the SAME ORDER it
     // was sent. Order is semantic for this family: the template numbers the images (<image1> …) and
@@ -12003,7 +12018,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
 
     // ... and swapping two of them is a DIFFERENT payload, not a normalized-away one. This is the
     // assertion that would catch a future "sort or de-dupe the references" change.
-    let swapped = json!(["ref_2", "ref_1", "ref_3"]);
+    let swapped = json!([uploaded[1], uploaded[0], uploaded[2]]);
     let (status, body) = request(
         app.clone(),
         "POST",
@@ -12021,7 +12036,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     assert_eq!(body["payload"]["referenceAssetIds"], swapped);
     assert_ne!(
         body["payload"]["referenceAssetIds"],
-        json!(["ref_1", "ref_2", "ref_3"]),
+        json!([uploaded[0], uploaded[1], uploaded[2]]),
         "reordering the references must change the request"
     );
 
@@ -12262,6 +12277,267 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
             .is_none(),
         "an opaque render must put nothing new on the wire: {body}"
     );
+}
+
+/// sc-24110 — the parts of the ordered-conditioning contract the count gate above cannot see.
+///
+/// `image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits` owns the CEILING
+/// and the ORDER; both read `limits.maxReferenceAssets`, which stays the single source of truth for
+/// the number. What it cannot express is everything else the ordered list can be wrong about, and
+/// each of these was a render failure or a silently different render before:
+///
+///   * the cap is over the FLATTENED list. The engine receives ONE list, and on this model
+///     `sourceAssetId` and `maskAssetId` are entries in it — a mask is an ordinary reference the
+///     prompt names, not a mask tensor. Counting `referenceAssetIds` alone would admit
+///     `source + mask + 9` as "nine references" and hand the worker eleven images.
+///   * a conditioned mode with NOTHING to condition on. The conditioned modes ARE the conditioning
+///     call; falling back to text-to-image would render something the caller did not ask for.
+///   * a per-reference `strength`. Upstream's condition images have no strength at all, and the
+///     engine refuses anything but unset-or-1.0 — after the weights are loaded.
+///   * an entry that is not a raster image this project owns. The worker would fail the job at
+///     decode time, by which point a job exists and a GPU has been claimed.
+#[tokio::test]
+async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unbounded_image",
+              "name": "Unbounded",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8, "resolution": "1024x1024" },
+              "limits": {},
+              "ui": { "label": "Unbounded" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": { "hardMinSteps": 2, "maxReferenceAssets": 10 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Ordered Conditioning" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let mut assets: Vec<String> = Vec::new();
+    for index in 0..10 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assets.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let post = |body: Value| {
+        let app = app.clone();
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    // ── The cap is over the FLATTENED list: source + mask + 9 is ELEVEN images, not nine.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[..9]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "source + mask + 9 references is eleven images in ONE ordered list: {body}"
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("up to 10"),
+        "{body}"
+    );
+
+    // …and the same three carriers at TEN are admitted, so the count is a count and not a
+    // blanket refusal of the mask/source carriers.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[..8]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "source + mask + 8 is exactly ten: {body}"
+    );
+    assert_eq!(
+        body["payload"]["maskAssetId"], assets[1],
+        "the mask travels as an ordinary ordered reference — it is NOT stripped"
+    );
+
+    // ── ZERO references on a conditioned mode.
+    for mode in ["edit_image", "character_image"] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": mode,
+            "prompt": "compose these"
+        }))
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{mode} with nothing to condition on must be refused: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1"),
+            "names the model: {detail}"
+        );
+        assert!(detail.contains("supplies none"), "{detail}");
+    }
+
+    // ── STRENGTH, refused in the ENGINE's terms. 1.0 IS full weight and is admitted.
+    for (advanced, admitted) in [
+        (json!({ "strength": 0.5 }), false),
+        (json!({ "referenceStrength": 0.8 }), false),
+        (json!({ "strength": 1.0 }), true),
+    ] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "compose these",
+            "referenceAssetIds": [assets[0]],
+            "advanced": advanced
+        }))
+        .await;
+        if admitted {
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "a strength of exactly 1.0 is what full weight spells: {body}"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{advanced} must be refused: {body}"
+            );
+            let detail = body["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.contains("full weight") && detail.contains("no strength"),
+                "the refusal must carry the engine's reason: {detail}"
+            );
+        }
+    }
+
+    // ── PER-ENTRY existence and format, naming the ORDINAL — on a route where position is
+    // semantic, "reference 2" is something the caller can act on where a bare id is not.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "not-an-asset"]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference 2"),
+        "names the ordinal, not just the id: {body}"
+    );
+
+    // ── A malformed carrier fails CLOSED rather than reading as "not supplied".
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "  "]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // ── Every one of these is armed by the SAME declaration as the cap, so a model that declares
+    // nothing pays none of it — not the refusals, and not the asset reads.
+    for body in [
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these"
+        }),
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these", "referenceAssetIds": ["not-an-asset"],
+            "advanced": { "strength": 0.5 }
+        }),
+    ] {
+        let (status, response) = post(body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a model declaring no cap is byte-for-byte unchanged: {body} -> {response}"
+        );
+    }
+
+    // ── And plain text-to-image on the capped model is not this gate's business either.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "prompt": "a lighthouse"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 /// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,

@@ -694,6 +694,11 @@ enum CandleImageRoute {
     /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
     /// source-first ordered multi-reference conditioning rather than the plain T2I request shape.
     MageEdit,
+    /// Qwen-Image 2.1 reference / local editing (sc-24110). `qwen_image_2_1` is ALSO a candle
+    /// txt2img id, so a conditioned request must divert here first or the generic arm would render
+    /// it as plain text-to-image and silently drop every reference. Uses the same generic registry
+    /// stream once the ordered conditioning list is resolved.
+    QwenImage21Edit,
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
     /// the required `krea2_identity_edit` LoRA (epic 10871).
     KreaEdit,
@@ -1097,9 +1102,9 @@ impl CandleImageRoute {
                 flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
             }
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
-            CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
-                candle_adapter_label(&request.model)
-            }
+            CandleImageRoute::MageEdit
+            | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
     }
 }
@@ -1201,6 +1206,12 @@ fn resolve_candle_image_route_with_prepared_availability(
             .is_some_and(|id| !id.trim().is_empty())
     {
         Some(CandleImageRoute::MageEdit)
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110), named by the resolver for the same
+        // reason Mage Edit is: the id is a candle txt2img id, so a conditioned request that fell
+        // through would be rendered as plain T2I with every reference silently dropped. The core
+        // router's `CandleImageLane::QwenImage21Edit` claims exactly these shapes.
+        Some(CandleImageRoute::QwenImage21Edit)
     } else if request.model == "kolors"
         && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
             || (non_empty(&request.reference_asset_id)
@@ -8003,6 +8014,203 @@ fn is_mage_edit_model(model: &str) -> bool {
     )
 }
 
+/// One resolved Qwen-Image 2.1 condition image, with the alpha plane it arrived with (sc-24110).
+///
+/// The plane travels BESIDE the engine image rather than inside it because `gen_core::Image` is a
+/// flat 3-channel buffer — the same reason sc-24111 carries it beside the render on the way out.
+/// Which of the two conditioning kinds an entry becomes is decided from `alpha` alone, so the
+/// classification is a property of the ASSET, never of its ordinal position.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct QwenImage21Reference {
+    pub(crate) image: Image,
+    /// `Some` iff the source asset carried an alpha channel. An RGBA reference is a DIFFERENT
+    /// request from the same picture flattened over white (S4 contract), so this is never dropped
+    /// silently — see [`build_qwen_image_2_1_conditioning`].
+    pub(crate) alpha: Option<image::GrayImage>,
+}
+
+/// Is this the model whose edit route is ONE ordered conditioning list (sc-24110)?
+///
+/// Deliberately a single id rather than a family predicate: the 2512-weights `qwen_image_edit*` ids
+/// are a different engine, a different latent space and a different edit contract, and they keep
+/// the `ImageRoute::QwenEdit` / `CandleImageRoute::QwenEdit` lanes they have always had.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
+    request.model == "qwen_image_2_1"
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+}
+
+/// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
+/// them. The worker-side twin of `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`, over
+/// the parsed [`ImageRequest`] instead of the raw payload — and pinned against it by
+/// `qwen_image_2_1_worker_and_router_agree_on_the_reference_order`, because a disagreement between
+/// the two would mean the API validated one list and the worker rendered another.
+///
+/// Order: `sourceAssetId`, then `maskAssetId` (an ORDINARY reference — 2.1 has no mask tensor),
+/// then `referenceAssetIds` in submitted order, then the singular `referenceAssetId`.
+///
+/// **No `.take(N)`.** Every other edit lane silently truncates an over-long set; here the API
+/// refuses it with a 400 that names the cap, so a list that reaches the worker is already inside
+/// 1..=10 and truncating would only hide a routing defect.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !is_qwen_image_2_1_edit(request) {
+        return Vec::new();
+    }
+    let scalar = |value: &Option<String>| -> Option<String> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    let mut ids = Vec::with_capacity(2 + request.reference_asset_ids.len());
+    ids.extend(scalar(&request.source_asset_id));
+    ids.extend(scalar(&request.mask_asset_id));
+    ids.extend(request.reference_asset_ids.iter().cloned());
+    ids.extend(scalar(&request.reference_asset_id));
+    ids
+}
+
+/// Resolve those ids into fitted engine images, each with the alpha plane its asset carried.
+///
+/// Every reference is fitted to the request geometry the same way the other registry editors fit
+/// theirs; the engine then does its own 1024-px vision/VAE fit per reference (S3 contract), so this
+/// fit is about the SceneWorks lane's geometry contract, not about the engine's preprocessing.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_qwen_image_2_1_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<QwenImage21Reference>> {
+    let ids = qwen_image_2_1_reference_ids(request);
+    // The ceiling comes from the job's own resolved manifest entry — the SAME `limits` key the
+    // enqueue gate read — so the worker cannot hold a second opinion about what "too many" means,
+    // and a manifest edit moves both. Absent means no cap, exactly as it does at enqueue.
+    if let Some(cap) = sceneworks_core::video_request::image_max_reference_assets(
+        &request.model_manifest_entry,
+    ) {
+        if ids.len() > cap {
+            // Unreachable through the API, which refuses this at enqueue. Stated anyway because the
+            // worker is also driven directly by tests and by jobs stored before the gate existed,
+            // and because the alternative every sibling lane chose — a silent `.take(N)` — renders
+            // a DIFFERENT request than the one asked for and reports success.
+            return Err(WorkerError::InvalidPayload(format!(
+                "qwen_image_2_1: {} reference images were supplied; upstream composes at most {cap}",
+                ids.len()
+            )));
+        }
+    }
+    let mut references = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let source =
+            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        // sc-24111's lane, reused verbatim: the same asset, read through the same
+        // `safe_project_path` confinement, for its alpha plane alone.
+        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?;
+        references.push(QwenImage21Reference {
+            image: fit_engine_image(source, request.width, request.height, &request.fit_mode)?,
+            alpha,
+        });
+    }
+    Ok(references)
+}
+
+/// The ONE ordered conditioning list a Qwen-Image 2.1 edit sends, built from the resolved
+/// references (sc-24110).
+///
+/// * No references → empty (the text-to-image call).
+/// * All-RGB → exactly what every other registry editor sends: one `Conditioning::Reference` for a
+///   single image, one `Conditioning::MultiReference` for many. Both kinds flatten into the same
+///   ordered list engine-side, so the single case stays byte-identical to the one-reference path.
+/// * **Never `Conditioning::Mask`.** The engine does not declare that kind and refuses it by name;
+///   a mask asset is an ordinary ordered reference (see [`qwen_image_2_1_reference_ids`]).
+/// * Strength is always `None` — upstream's condition images have no strength, and the engine
+///   refuses anything but an unset-or-1.0 value.
+///
+/// An alpha-carrying reference is `Conditioning::ReferenceRgba`, which **does not exist in the
+/// pinned `gen_core`** — it arrives with inference PR #1009 (S4 contract). See
+/// [`qwen_image_2_1_rgba_reference_is_pending_the_pin`] for the placeholder that deletes itself the
+/// moment it does. Until then this refuses, loudly and by name: flattening the alpha away would
+/// send a DIFFERENT request than the one the user composed, and that silent substitution is exactly
+/// what the S4 contract forbids.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_qwen_image_2_1_conditioning(
+    references: &[QwenImage21Reference],
+) -> WorkerResult<Vec<Conditioning>> {
+    // The per-entry classification is `qwen_alpha::reference_conditioning_kind` (sc-24113), so both
+    // halves of the epic name the carrier the same way and a rename is one line. What it returns
+    // for an alpha-carrying entry is `ReferenceRgba`, a variant the PINNED `gen_core` does not
+    // have — so that answer is a refusal here rather than a construction.
+    //
+    // Note the interaction with #2916's `load_reference_image`, which now composites alpha over
+    // white instead of truncating it: that composite is right for every engine that takes RGB, and
+    // WRONG for 2.1's VAE, which wants all four channels (S4). It never reaches the VAE on this
+    // route, because an alpha-carrying reference is refused below before any conditioning is built.
+    if let Some(slot) = references.iter().position(|entry| entry.alpha.is_some()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "qwen_image_2_1: reference {} carries an alpha channel, so it belongs in a \
+             Conditioning::{} — a carrier the pinned inference build does not have yet (it arrives \
+             with the engine's RGBA story). Flatten the image over a background yourself if that is \
+             the render you want; this route will not substitute one silently, because the VAE \
+             encodes all four channels and a flattened reference is a DIFFERENT request.",
+            slot + 1,
+            crate::qwen_alpha::reference_conditioning_kind(true)
+        )));
+    }
+    debug_assert!(
+        references
+            .iter()
+            .all(|entry| crate::qwen_alpha::reference_conditioning_kind(entry.alpha.is_some())
+                == "Reference"),
+        "every surviving reference must classify as a plain Reference"
+    );
+    let images: Vec<Image> = references
+        .iter()
+        .map(|entry| entry.image.clone())
+        .collect::<Vec<_>>();
+    Ok(build_reference_conditioning(&images))
+}
+
+/// The ordered condition images a Qwen-Image 2.1 edit contributes to the generic lane's
+/// `edit_refs` slot — resolved, validated, and in request order.
+///
+/// [`build_qwen_image_2_1_conditioning`] is run here, on the REAL references, and its answer
+/// discarded: the generic lane rebuilds the identical list from these images through
+/// `build_lane_conditioning` (pinned by
+/// `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`), so what this call is for is
+/// its REFUSALS — the alpha-carrying reference that has no pinned conditioning kind. Running it
+/// here means that refusal happens before any weights are loaded, next to the asset reads that
+/// produced it, rather than as a render failure.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_qwen_image_2_1_edit_images(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let references = resolve_qwen_image_2_1_edit(request, settings, project_path)?;
+    build_qwen_image_2_1_conditioning(&references)?;
+    Ok(references.into_iter().map(|entry| entry.image).collect())
+}
+
 /// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
 /// `referenceAssetIds`, else the single `sourceAssetId` — [`boogu_edit_reference_ids`]), each fit to the
 /// output W×H (so it satisfies the engine's multiple-of-16 guard and aligns to the target aspect).
@@ -8834,6 +9042,12 @@ async fn generate_stream(
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
         resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
+        // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
+        // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
+        // and the ordering + the never-a-Mask guarantee live in the resolver.
+        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
     } else {
         Vec::new()
     };
@@ -11259,6 +11473,11 @@ async fn generate_candle_stream(
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
         resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
+        // because the Candle port registers the same engine id and declares the same
+        // `Reference` + `MultiReference` conditioning. One request contract, two backends.
+        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
     } else if is_sensenova_candle_model(&request.model)
         && matches!(request.mode.as_str(), "edit_image" | "character_image")
     {

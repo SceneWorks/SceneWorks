@@ -9090,6 +9090,299 @@ fn mage_edit_request_shape_reaches_each_registered_engine() {
     }
 }
 
+/// sc-24110 — the ORDER of the Qwen-Image 2.1 conditioning list, worker side.
+///
+/// Not cosmetic and not bookkeeping: upstream numbers the images in the prompt template
+/// (`<image1>…`), reads the LAST one for its size fallback, and attends block-causally, so a
+/// reference is visible only to what follows it. Swapping two entries is a DIFFERENT render. The
+/// ids below are deliberately anti-lexical so a sort would fail.
+///
+/// Un-gated from `cfg(target_os = "macos")` on purpose — the resolver compiles and runs on the
+/// candle lane too (`cfg(any(macos, backend-candle))`), and the Mage twin above being Mac-only is
+/// the reason its ordering contract is unexercised off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "sourceAssetId": "source",
+            "maskAssetId": "mask",
+            "referenceAssetIds": ["reference-b", "reference-a"]
+        }))),
+        vec![
+            "source".to_owned(),
+            "mask".to_owned(),
+            "reference-b".to_owned(),
+            "reference-a".to_owned(),
+        ],
+        "source, then the mask as an ORDINARY second reference, then the submitted order"
+    );
+
+    // Swapping two submitted references changes the list. This is the property the API's
+    // order-preservation test and the payload-builder test below both rest on.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "referenceAssetIds": ["reference-a", "reference-b"]
+        }))),
+        vec!["reference-a".to_owned(), "reference-b".to_owned()]
+    );
+
+    // Character Studio's singular carrier lands last, and a text-to-image request carries nothing.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "character_image",
+            "referenceAssetId": "subject"
+        }))),
+        vec!["subject".to_owned()]
+    );
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "source" }),
+        json!({ "projectId": "p", "model": "qwen_image_edit_2511", "mode": "edit_image", "sourceAssetId": "s" }),
+    ] {
+        assert!(
+            qwen_image_2_1_reference_ids(&request(payload.clone())).is_empty(),
+            "only a 2.1 CONDITIONED request carries this list: {payload}"
+        );
+    }
+}
+
+/// The worker's ordering and the router's MUST be the same list (sc-24110).
+///
+/// Two functions read the same carriers: `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`
+/// over the raw payload (which is what the scheduler gates on and what the API validates and counts
+/// against the cap), and `image_jobs::qwen_image_2_1_reference_ids` over the parsed `ImageRequest`
+/// (which is what actually gets rendered). If they disagreed, the API would validate one ordered
+/// list and the worker would render another — an 11th reference could be admitted, or the images
+/// could arrive numbered differently than the prompt says. Neither is visible from either side
+/// alone, so it is pinned from outside both.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image", "sourceAssetId": "src" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "src", "maskAssetId": "mask",
+            "referenceAssetIds": ["ref-b", "ref-a"]
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "referenceAssetIds": ["ref-a", "ref-b"], "referenceAssetId": "single"
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "character_image",
+            "referenceAssetId": "subject"
+        }),
+        // Blank and whitespace-only carriers are "not supplied" on both sides.
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "   ", "referenceAssetIds": ["ref-a"]
+        }),
+    ] {
+        let map = payload.as_object().expect("payload object").clone();
+        let router = sceneworks_core::jobs_store::qwen_image_2_1_reference_ids(&map)
+            .expect("these payloads are all well-formed");
+        let worker = qwen_image_2_1_reference_ids(&request(payload.clone()));
+        assert_eq!(
+            worker, router,
+            "the worker renders a different ordered list than the router validated: {payload}"
+        );
+    }
+}
+
+/// The conditioning list itself: RGB references become `Reference` (one) / `MultiReference` (many),
+/// in order, and **never** a `Conditioning::Mask` — the engine does not declare that kind and
+/// refuses it by name, telling the caller to send the mask as an ordinary extra reference instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_conditioning_is_ordered_references_and_never_a_mask() {
+    let image = |seed: i64| gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: stub_rgb8(8, 8, seed),
+    };
+    let rgb = |seed: i64| QwenImage21Reference {
+        image: image(seed),
+        alpha: None,
+    };
+
+    assert!(build_qwen_image_2_1_conditioning(&[])
+        .expect("no references is the text-to-image call")
+        .is_empty());
+
+    // One reference stays a `Reference`, byte-identical to every other single-reference lane.
+    match build_qwen_image_2_1_conditioning(&[rgb(1)])
+        .expect("one RGB reference")
+        .as_slice()
+    {
+        [gen_core::Conditioning::Reference { image, strength }] => {
+            assert_eq!(image.pixels, stub_rgb8(8, 8, 1));
+            assert!(
+                strength.is_none(),
+                "upstream's condition images have no strength — the engine refuses anything but \
+                 unset-or-1.0, so the worker must never invent one"
+            );
+        }
+        other => panic!("expected a single Reference, got {other:?}"),
+    }
+
+    // Many become ONE `MultiReference` whose images are in request order.
+    let many: Vec<QwenImage21Reference> = (1..=10).map(rgb).collect();
+    match build_qwen_image_2_1_conditioning(&many)
+        .expect("ten RGB references")
+        .as_slice()
+    {
+        [gen_core::Conditioning::MultiReference { images }] => {
+            assert_eq!(images.len(), 10);
+            for (index, image) in images.iter().enumerate() {
+                assert_eq!(
+                    image.pixels,
+                    stub_rgb8(8, 8, index as i64 + 1),
+                    "reference {} is out of order — the prompt template numbers these",
+                    index + 1
+                );
+            }
+        }
+        other => panic!("expected one ordered MultiReference, got {other:?}"),
+    }
+
+    // The whole point of the story: a mask reaches the engine as an ordered REFERENCE. The
+    // conditioning list this lane produces never contains a `Mask`, for any input.
+    for count in [1usize, 2, 10] {
+        let references: Vec<QwenImage21Reference> = (0..count).map(|i| rgb(i as i64)).collect();
+        assert!(
+            !build_qwen_image_2_1_conditioning(&references)
+                .expect("RGB references")
+                .iter()
+                .any(|conditioning| matches!(conditioning, gen_core::Conditioning::Mask { .. })),
+            "{count} references produced a Conditioning::Mask, which this engine refuses by name"
+        );
+    }
+}
+
+/// The generic lane must send EXACTLY what the dedicated builder says it sends.
+///
+/// `resolve_qwen_image_2_1_edit_images` hands the generic lane a `Vec<Image>` which
+/// `build_lane_conditioning` then turns into the conditioning list — so the dedicated builder would
+/// be decorative if the two ever disagreed. This is what makes it honest to state the contract in
+/// one place and wire the other.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder() {
+    for count in [1usize, 2, 10] {
+        let references: Vec<QwenImage21Reference> = (0..count)
+            .map(|i| QwenImage21Reference {
+                image: gen_core::Image {
+                    width: 8,
+                    height: 8,
+                    pixels: stub_rgb8(8, 8, i as i64),
+                },
+                alpha: None,
+            })
+            .collect();
+        let images: Vec<gen_core::Image> =
+            references.iter().map(|entry| entry.image.clone()).collect();
+        assert_eq!(
+            format!(
+                "{:?}",
+                build_qwen_image_2_1_conditioning(&references).expect("RGB references")
+            ),
+            format!("{:?}", build_lane_conditioning(None, &images, None)),
+            "{count} references: the generic lane and the dedicated builder disagree"
+        );
+    }
+}
+
+/// PENDING_PIN placeholder (sc-24110) — RGBA reference conditioning.
+///
+/// `Conditioning::ReferenceRgba` does not exist in ANY inference revision available to this branch:
+/// it arrives with the engine's RGBA story (S4 contract), which is not on the epic's feature branch
+/// yet. So an alpha-carrying reference has no conditioning kind to become, and the worker refuses
+/// it by name rather than flattening it over a background — flattening is explicitly a DIFFERENT
+/// request, and substituting one silently is what the contract forbids.
+///
+/// **Not a standing bypass.** The assertion below states that the pinned `gen_core` does NOT expose
+/// the kind. The moment a pin bump carries it, this test goes RED and the only way to make it green
+/// is to delete it and give `build_qwen_image_2_1_conditioning` its `ReferenceRgba` arm — which is
+/// what re-arms the real contract. The steady state is that this test does not exist.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_rgba_reference_is_pending_the_pin() {
+    let kinds = format!("{:?}", gen_core::ConditioningKind::Reference);
+    assert!(
+        !format!("{kinds:?}").contains("ReferenceRgba"),
+        "sanity: this probe is about the ENUM, not this value"
+    );
+    // The real statement: nothing in the pinned crate names the variant. `ConditioningKind` is a
+    // plain C-like enum, so its `Debug` output over every kind the descriptor can advertise is a
+    // faithful census of what the pin exposes.
+    let advertised: Vec<String> = crate::engines::MODEL_TABLE
+        .iter()
+        .filter_map(|row| crate::engines::mlx_model(row.sceneworks_id))
+        .flat_map(|model| model.descriptor.capabilities.conditioning.clone())
+        .map(|kind| format!("{kind:?}"))
+        .collect();
+    assert!(
+        !advertised.iter().any(|kind| kind == "ReferenceRgba"),
+        "a pinned engine now advertises ReferenceRgba — the pin bump landed. DELETE this test and \
+         give `build_qwen_image_2_1_conditioning` its RGBA arm (S4: the VAE encode takes all four \
+         channels, the vision tower gets the image composited over white, and an RGB reference is \
+         the A=255 case)."
+    );
+
+    // Until then the refusal is the behavior, and it names the slot so the caller can find it.
+    let alpha_at_slot_2 = vec![
+        QwenImage21Reference {
+            image: gen_core::Image {
+                width: 8,
+                height: 8,
+                pixels: stub_rgb8(8, 8, 1),
+            },
+            alpha: None,
+        },
+        QwenImage21Reference {
+            image: gen_core::Image {
+                width: 8,
+                height: 8,
+                pixels: stub_rgb8(8, 8, 2),
+            },
+            alpha: Some(image::GrayImage::new(8, 8)),
+        },
+    ];
+    let error = build_qwen_image_2_1_conditioning(&alpha_at_slot_2)
+        .expect_err("an alpha-carrying reference has no pinned conditioning kind")
+        .to_string();
+    assert!(error.contains("reference 2"), "{error}");
+    assert!(error.contains("alpha"), "{error}");
+    assert!(
+        error.contains("ReferenceRgba"),
+        "the refusal must name the carrier the reference belongs in: {error}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn boogu_build_reference_conditioning_single_vs_multi() {
@@ -20341,6 +20634,11 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "QwenEdit",
         "ZimageEdit",
         "MageEdit",
+        // Qwen-Image 2.1 reference / local editing (sc-24110): the ordered condition images are
+        // consumed by the SAME base — its own Qwen3-VL vision tower and VAE — with no second
+        // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
+        // admission gate. Structurally the SenseNova case, not the ControlNet case.
+        "QwenImage21Edit",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic

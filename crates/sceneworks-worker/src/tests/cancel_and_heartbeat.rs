@@ -181,6 +181,92 @@ async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_termina
     );
 }
 
+/// sc-24110 — the same acknowledgement on the EDIT route, on both lanes.
+///
+/// Worth stating separately from the text-to-image sibling above rather than trusting that the
+/// carrier is shape-agnostic. An edit request costs far more per step than a t2i one (ten
+/// references are ~41k prefix tokens re-encoded EVERY step, with no KV cache), so it is precisely
+/// the shape a user is most likely to cancel and the one where freeing the worker row early would
+/// hurt most — the next queued job would claim a GPU still grinding through a 10-reference prefix.
+///
+/// Both modes the edit route serves are exercised, because `ImagePlan` and the acknowledgement
+/// payload are built from the request and a mode that failed to carry the model or the batch total
+/// would renumber the gallery mid-cancel.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally_on_both_lanes() {
+    for (backend, mode, payload) in [
+        (
+            "mlx",
+            "edit_image",
+            serde_json::json!({
+                "projectId": "project_1",
+                "model": "qwen_image_2_1",
+                "mode": "edit_image",
+                "prompt": "put the subject on a beach",
+                "sourceAssetId": "src_1",
+                "referenceAssetIds": ["ref_1", "ref_2"],
+                "count": 2
+            }),
+        ),
+        (
+            "candle",
+            "character_image",
+            serde_json::json!({
+                "projectId": "project_1",
+                "model": "qwen_image_2_1",
+                "mode": "character_image",
+                "prompt": "the same person, three-quarter view",
+                "referenceAssetId": "ref_1",
+                "count": 2
+            }),
+        ),
+    ] {
+        let (base_url, posts) = spawn_progress_capture_stub().await;
+        let mut settings = test_settings(base_url.clone(), None);
+        settings.api_url = base_url;
+        let api = ApiClient::new(&settings);
+        let cancel = gen_core::CancelFlag::new();
+
+        let request = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().expect("payload object"),
+        );
+        let plan = crate::image_jobs::ImagePlan::with_count(&request, 2, None);
+
+        crate::image_jobs::begin_image_cancel(&api, "job-1", &cancel, &plan, &[], backend).await;
+
+        assert!(
+            cancel.is_cancelled(),
+            "{backend}/{mode}: the engine cancel flag must be tripped so the denoise stops"
+        );
+        let posts = posts.lock().expect("posts lock");
+        assert_eq!(posts.len(), 1, "{backend}/{mode}: one acknowledgement");
+        assert_eq!(
+            posts[0]["status"], "running",
+            "{backend}/{mode}: the acknowledgement must stay NON-terminal — freeing the worker row \
+             here would hand the GPU to the next job while a 10-reference prefix is still encoding"
+        );
+        assert!(
+            posts[0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Cancelling"),
+            "{backend}/{mode}: the message should read as Cancelling…"
+        );
+        assert_eq!(
+            posts[0]["result"]["model"], "qwen_image_2_1",
+            "{backend}/{mode}: the streamed result keeps naming the model"
+        );
+        assert_eq!(
+            posts[0]["result"]["expectedCount"], 2,
+            "{backend}/{mode}: and the batch total"
+        );
+    }
+}
+
 /// sc-5516 — the training sibling of the above: `begin_training_cancel` trips the
 /// flag and acknowledges with a NON-terminal `running` update; the terminal
 /// `Canceled` is posted by `consume_training_events` after training stops. Compiled on the macOS MLX

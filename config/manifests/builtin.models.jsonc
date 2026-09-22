@@ -3191,13 +3191,23 @@
       "family": "qwen-image-2-1",
       "type": "image",
       "adapter": "qwen_image_2_1",
-      // sc-24113 adds `image_to_image`. Upstream ships ONE pipeline: text-to-image is that pipeline
-      // called with no condition images, and editing / multi-reference / local editing are the SAME
-      // call with 1-10 ORDERED condition images (S3 edit contract). There is no mask tensor, no
-      // strength and no inpaint mode, so `image_inpaint` is deliberately NOT declared — an
-      // annotation is drawn INTO a reference, and a "separate mask" is just another reference the
-      // prompt names.
-      "capabilities": ["text_to_image", "image_to_image"],
+      // Upstream ships ONE pipeline: text-to-image is that pipeline called with no condition
+      // images, and editing / multi-reference / local editing are the SAME call with 1-10 ORDERED
+      // condition images (S3 edit contract). There is no second checkpoint and no second request
+      // shape.
+      //
+      // `image_to_image` (sc-24113) is the single-reference face of that call, and `edit_image`
+      // (sc-24110) is the ordered-set face the Image Editor drives; both are the same engine call,
+      // so both are declared rather than one being made to stand in for the other.
+      //
+      // `image_inpaint` is deliberately NOT declared: there is no mask tensor, no strength and no
+      // inpaint mode. An annotation is drawn INTO a reference, and a "separate mask" is just
+      // another ordered reference the prompt names.
+      //
+      // `character_image` is not declared either — the reference route would serve it, but
+      // Character Studio's contract (a named subject carried across renders) is a separate product
+      // surface neither story wires.
+      "capabilities": ["text_to_image", "image_to_image", "edit_image"],
       // True-CFG family: the engine takes a real negative branch and a `true_cfg` scale that only
       // engages once a negative prompt is present. Both axes are therefore TRUE, which is what an
       // absent `image` block already means (sc-15299 polarity), so nothing is declared here.
@@ -3329,6 +3339,14 @@
         // with the count named, rather than as a silent truncation in the worker — and truncation is
         // not a smaller render here but a different one, because the template numbers the images
         // (`<image1>` ...) and block-causal attention makes each visible only to what follows.
+        //
+        // ONE key, three consumers (sc-24110): the enqueue gate in `create_image_job`, the routing
+        // predicate that decides which worker may claim the job, and the worker's own resolver.
+        // The count is over the FLATTENED ordered list — `sourceAssetId`, `maskAssetId` and every
+        // `referenceAssetIds` entry together — because that is the single list the engine receives,
+        // so a per-carrier reading would admit eleven images as "nine references". On the IMAGE
+        // lane an ABSENT key means NO cap (the video lane reads the same key as "8 when absent");
+        // both readings are stated where they are read.
         "maxReferenceAssets": 10,
         // The engine refuses `steps < 2` outright (S1 contract: DEFAULT_STEPS 40, steps >= 2), and
         // 2 is the smallest schedule with an intermediate sigma — one evaluation is a single Euler
@@ -27106,7 +27124,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3601851b0806f09a131914ba3ceccc43256075db4a990b2a3b35d1a9c7c8d2af",
+              "sha256": "a01f09635ee6efcf8c065d75a29684382830335217d9881e70de77b55bb3f3ce",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27140,8 +27158,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 127564,
-                  "sha256": "d51dae7e2de7bf5766d5afae4efab6d79db4a9e692b478f5f34242b9de314653"
+                  "byteSize": 133400,
+                  "sha256": "e96eece131539c575f3dbeda9bc96f0b3f4ffa4db5cac4edb1e8c57748c26c5c"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -27220,8 +27238,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 140012,
-                  "sha256": "9ed31c966613cea6c49cace82929b0f0f6947bb80e2cba9ffabdf8996410b32e"
+                  "byteSize": 139473,
+                  "sha256": "bb47da8722fa90897281780fb633ab26c81c58128ca3d90b86471e4315739450"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
