@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "0b084cbf46b5b4f4f561305ef116268b57eecf7f";
+pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "826c1082114754890fd790140ccee4dde97a2f5d";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -676,6 +676,7 @@ async fn generate_vision_json(
     let blocking_cancel = cancel.clone();
     let spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
+        projector_source: None,
         quantize: None,
     };
     let requirements = ModelRequirements::default().with_constraint(Constraint::Json);

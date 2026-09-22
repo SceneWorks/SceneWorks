@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:058220542fec6b687e4da8b495c6161308904dcc35c692e2a652c532043c65d8",
+    "sceneWorksRevision": "source-tree:f409104b9eaf67c011d8181836db90102c547adce09379d3c36bd8f4c2047cf8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6e829d70e8c5d44dafc7c3a09bebd6232b1e77ea762336969a3adf99c1468652"
+        "sha256": "92380de9104cd7de2a6b5bffe203ac633ece47b321c80fe8880be90827d3e60f"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "4e30a94f9f76297541b3c014bb887364032e396fa4b5810e19db1a3135362e8a"
+        "sha256": "5663605cc19329b692585f0df31b6e835a054eb4efd20b841ebf17df0f5abb1b"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -165,8 +165,8 @@
     "anchors": 247,
     "analyticOnlyCells": 96,
     "anchoredCells": 3810,
-    "staleAnchors": 243,
-    "attestedAnchors": 4,
+    "staleAnchors": 247,
+    "attestedAnchors": 0,
     "fullModels": 0
   },
   "models": [
@@ -6071,7 +6071,7 @@
         "fps": null
       },
       "source": "docs/generated/krea-candle-five-rung-sc-11045.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": {
         "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
         "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -8923,7 +8923,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": {
         "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
         "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -8949,7 +8949,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": {
         "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
         "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -8975,7 +8975,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": {
         "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
         "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -98344,7 +98344,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100154,7 +100154,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100222,7 +100222,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100290,7 +100290,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100367,7 +100367,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100450,7 +100450,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100523,7 +100523,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100598,7 +100598,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100669,7 +100669,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -100740,7 +100740,7 @@
         "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
         "tier": "q4",
         "source": "config/memory-anchors.json#krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227410,7 +227410,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227476,7 +227476,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227554,7 +227554,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227609,7 +227609,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227664,7 +227664,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227734,7 +227734,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227800,7 +227800,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227878,7 +227878,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227933,7 +227933,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -227988,7 +227988,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -228058,7 +228058,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -228124,7 +228124,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -228202,7 +228202,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -228257,7 +228257,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -228312,7 +228312,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229330,7 +229330,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229396,7 +229396,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229474,7 +229474,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229529,7 +229529,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229590,7 +229590,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229660,7 +229660,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229726,7 +229726,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229804,7 +229804,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229859,7 +229859,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229920,7 +229920,7 @@
         "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
         "tier": "bf16",
         "source": "config/memory-anchors.json#z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -229990,7 +229990,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230056,7 +230056,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230134,7 +230134,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230189,7 +230189,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230250,7 +230250,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230320,7 +230320,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230386,7 +230386,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230464,7 +230464,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230519,7 +230519,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230580,7 +230580,7 @@
         "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
         "tier": "q4",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230650,7 +230650,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230716,7 +230716,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230794,7 +230794,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230849,7 +230849,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230910,7 +230910,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -230980,7 +230980,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -231046,7 +231046,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -231124,7 +231124,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -231179,7 +231179,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
@@ -231240,7 +231240,7 @@
         "id": "z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
         "tier": "q8",
         "source": "config/memory-anchors.json#z_image_turbo:candle:q8:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-8cda4f70f78dd33f5330",
-        "current": true,
+        "current": false,
         "currencyAttestation": {
           "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
           "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",

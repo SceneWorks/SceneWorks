@@ -685,6 +685,9 @@ fn native_starvector_request(
             temperature: request.sampling.temperature,
             top_p: request.sampling.top_p,
             top_k,
+            // `VectorSampling` exposes no presence penalty, so keep core-llm's disabled value
+            // rather than inventing a knob this request shape cannot carry.
+            presence_penalty: 0.0,
             repetition_penalty: request.sampling.repetition_penalty,
             repetition_context,
         },
