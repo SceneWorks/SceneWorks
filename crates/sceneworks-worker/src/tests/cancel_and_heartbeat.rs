@@ -116,6 +116,71 @@ async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+/// sc-24109 — the IMAGE sibling of the two cancel-acknowledgement tests around it, exercised on
+/// the lane Qwen-Image 2.1 renders on off-Mac (`backend = "candle"`).
+///
+/// `begin_image_cancel` is what `consume_gen_events` calls the moment it observes a user cancel or
+/// a shutdown, for every image family on both backends. It must do two things and exactly two: trip
+/// the engine flag so the in-flight denoise actually stops, and acknowledge NON-terminally so the
+/// worker row is not freed while the GPU is still busy. The terminal `canceled` is posted by
+/// `consume_gen_events` after the blocking task joins, which is what makes "Cancelling…" honest.
+///
+/// The discriminator is `status`: a `canceled` here would free the worker row and let the next
+/// queued job claim the GPU underneath a denoise that is still running.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_terminally() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+
+    let request = sceneworks_core::image_request::ImageRequest::from_payload(
+        serde_json::json!({
+            "projectId": "project_1",
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 2
+        })
+        .as_object()
+        .expect("payload object"),
+    );
+    let plan = crate::image_jobs::ImagePlan::with_count(&request, 2, None);
+
+    crate::image_jobs::begin_image_cancel(&api, "job-1", &cancel, &plan, &[], "candle").await;
+
+    assert!(
+        cancel.is_cancelled(),
+        "begin_image_cancel must trip the engine cancel flag so the denoise stops"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(posts.len(), 1, "exactly one acknowledgement update is posted");
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the image cancel acknowledgement must stay NON-terminal — the terminal canceled is \
+         deferred until the blocking generation actually stops"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
+    );
+    assert_eq!(
+        posts[0]["result"]["model"], "qwen_image_2_1",
+        "the streamed result must keep naming the model being cancelled"
+    );
+    assert_eq!(
+        posts[0]["result"]["expectedCount"], 2,
+        "and the batch total, so the gallery does not renumber mid-cancel"
+    );
+}
+
 /// sc-5516 — the training sibling of the above: `begin_training_cancel` trips the
 /// flag and acknowledges with a NON-terminal `running` update; the terminal
 /// `Canceled` is posted by `consume_training_events` after training stops. Compiled on the macOS MLX

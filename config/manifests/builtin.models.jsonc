@@ -3175,13 +3175,17 @@
       // control tier is shared with this entry — in particular, none of 2512's measured memory
       // rows apply here and none are copied (epic requirement E5).
       //
-      // Native MLX only at this pin (inference `mlx-gen-qwen-image-2-1`, engine id
-      // `qwen_image_2_1`). The Candle port is sc-24109; until it lands the routing catalog row
-      // carries `candle_routed: false`, so an off-Mac worker never claims the job and the user
-      // gets the routing lane's own "no Mac worker" reason rather than a half-wired refusal.
-      // Q4/Q8 exist in the engine but the tier turnkey + bundles are sc-24112 — this entry ships
-      // the bf16 upstream snapshot and nothing else, so there is no `quantize` key and no tier
-      // matrix to resolve.
+      // Native on BOTH backends under one engine id `qwen_image_2_1`: MLX on Apple Silicon
+      // (inference `mlx-gen-qwen-image-2-1`, sc-24108) and Candle/CUDA off-Mac
+      // (`candle-gen-qwen-image-2-1`, sc-24109). The routing catalog carries `mlx_routed: true` +
+      // `candle_routed: true`, so the SAME request — seven presets, ÷32 stride, 40 steps, seed,
+      // negative prompt, true-CFG guidance, count — is claimable on whichever worker the host has.
+      //
+      // The tier surface is NOT shared between them and must never be merged: the MLX provider
+      // advertises `supported_quants: [Q4, Q8]`, the Candle provider advertises `[]`. Neither can
+      // offer a tier today regardless, because the tier turnkey + bundles are sc-24112 — this
+      // entry ships the bf16 upstream snapshot and nothing else, so there is no `quantize` key on
+      // either lane and no tier matrix to resolve.
       "id": "qwen_image_2_1",
       "name": "Qwen Image 2.1",
       "family": "qwen-image-2-1",
@@ -3215,12 +3219,18 @@
         // cannot serve — and would make the catalog claim an MLX-only `precisionTier/bf16` cell
         // that the cross-backend parity register would then have to carry as an approved
         // exception. sc-24112 adds the real Q4/Q8 tier artifacts and the `variant` tags with them.
+        //
+        // NO `platforms` KEY either, as of sc-24109. The MLX-only slice restricted this artifact to
+        // `["macos"]` so a Windows/Linux install could not download 31 GB of weights nothing on
+        // that host could load. The native Candle/CUDA port registers the SAME engine id off-Mac
+        // from the SAME upstream diffusers tree, so the restriction is now the thing that would
+        // lie: `retain_downloads_for_os` would strip the only artifact and the Models screen would
+        // show an un-installable model on every non-Mac host.
         {
           "provider": "huggingface",
           "repo": "Qwen/Qwen-Image-2.1",
           "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
           "files": [],
-          "platforms": ["macos"],
           "estimatedSizeBytes": 33134949212,
           "footprint": { "diskSizeBytes": 33134949212, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -3294,6 +3304,35 @@
       // without gating a 64 GB Mac. It is NOT a measured peak and must not be cited as one; the
       // real numbers come from the epic-end campaign, and 2512's rows are a different model.
       "mlx": {
+        "minMemoryGb": 48
+      },
+      // sc-24109 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same upstream snapshot,
+      // same seven presets and same true-CFG request contract; only the tensor backend differs.
+      //
+      // `minMemoryGb` 48 is the VRAM twin of the `mlx` floor above and is DERIVED the same way,
+      // from the pinned snapshot's own 30.86 GiB of tensor bytes (DiT 13.25 + Qwen3-VL tower 16.33
+      // + VAE 1.26), all of which the native path holds resident together, plus room for the
+      // 2048-square activation transient. It is NOT a measurement and must never be cited as one —
+      // there has been no CUDA render of 2.1 on any host.
+      //
+      // Deliberately ABSENT, each for its own reason:
+      // * `vramGbByTier` / `sequentialPeakGb` / `measured` — those are per-tier MEASURED peaks off
+      //   an A/B harness (see the `qwen_image` block above). Nothing has been measured, and there
+      //   is no tier axis to key them on.
+      // * `quantize` and any tier key — the Candle provider declares `supported_quants: []` and
+      //   refuses an on-the-fly quantize with a typed Unsupported at load. bf16 is the whole
+      //   surface off-Mac, which is why the routing catalog leaves `candle_quant` false and
+      //   `qwen_image_2_1_offers_no_candle_quant_tier` asserts no tier key appears here. The MLX
+      //   provider's [Q4, Q8] is NOT merged in: the two backends' quant surfaces are separate
+      //   declarations, not one per-model list.
+      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` / `memoryStrategyContract` —
+      //   the contract block is GENERATED from `config/engine-capabilities/capabilities.candle.json`
+      //   by scripts/generate-manifest-memory-declarations.mjs, and that dump can only be produced
+      //   on a Linux/Windows lane at a pin that carries the provider. This branch pins inference
+      //   0b084cbf, which does not, so there is nothing to generate from and a hand-written block
+      //   would be an unsourced claim. The route reports the consumer fallback until the epic's
+      //   terminal pin bump re-dumps the file.
+      "candle": {
         "minMemoryGb": 48
       },
       "ui": {

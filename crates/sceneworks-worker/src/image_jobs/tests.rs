@@ -10566,15 +10566,40 @@ fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
         &[("bernini_image", CandleImageRoute::Bernini)];
     const BESPOKE_BUILTIN_MODELS: &[&str] = &["bernini_image"];
 
+    // Candle-routed ids whose provider crate the CURRENTLY PINNED `runtime-cuda` composition does
+    // not link yet, because it arrives with this epic's terminal pin bump. The SceneWorks half of
+    // Qwen-Image 2.1 (sc-24108 MLX / sc-24109 Candle) lands on the epic branch BEFORE the one pin
+    // bump FEATURE_DEVELOPMENT invariant 5 allows, so for the length of the epic the route exists
+    // and the engine does not. This is the candle twin of `PENDING_PIN_ENGINE_IDS` in
+    // `gpu_and_manifest.rs`.
+    //
+    // NOT a standing bypass. The assertion right below flips the statement around and requires the
+    // id to genuinely FAIL to resolve, so the moment the pin carries `candle-gen-qwen-image-2-1`
+    // this test goes red and the id must be deleted from this list — which is what re-arms the
+    // real parity check for it. The steady state is an empty slice.
+    const PENDING_PIN_CANDLE_MODELS: &[&str] = &["qwen_image_2_1"];
+
     let mut settings = Settings::from_env();
     settings.backend_candle_enabled = true;
 
     let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
+    for &pending in PENDING_PIN_CANDLE_MODELS {
+        assert!(
+            scheduler_models.contains(&pending),
+            "{pending} is listed as pending-pin but is no longer candle-routed — drop the entry",
+        );
+        assert!(
+            !scheduler_models_without_native_candle_generator(&[pending], BESPOKE_BUILTIN_MODELS)
+                .is_empty(),
+            "{pending} now resolves to a linked Candle image generator — the pin bump landed, so \
+             remove it from PENDING_PIN_CANDLE_MODELS and let the parity check cover it",
+        );
+    }
+
+    let mut exempt: Vec<&str> = BESPOKE_BUILTIN_MODELS.to_vec();
+    exempt.extend_from_slice(PENDING_PIN_CANDLE_MODELS);
     assert_eq!(
-        scheduler_models_without_native_candle_generator(
-            scheduler_models,
-            BESPOKE_BUILTIN_MODELS,
-        ),
+        scheduler_models_without_native_candle_generator(scheduler_models, &exempt),
         Vec::<&str>::new(),
         "every generic scheduler-routed id must resolve through MODEL_TABLE to a linked Candle image \
          generator; route membership alone is not proof that the worker can render it",
@@ -10624,6 +10649,55 @@ fn scheduler_only_unregistered_model_fails_native_generator_parity() {
             &["bernini_image"],
         ),
         vec!["synthetic_scheduler_only_model"],
+    );
+}
+
+/// sc-24109: the SceneWorks half of the native Candle/CUDA Qwen-Image 2.1 port.
+///
+/// Two facts, both of which are how a wired-but-wrong lane shows up at runtime rather than in a
+/// load error:
+///
+/// 1. The id takes the GENERIC txt2img route. 2.1 declares an empty conditioning set on both
+///    backends, so it must never be drawn into one of the bespoke conditioned lanes (`QwenEdit`,
+///    `QwenControl`) that the 2512 ids own — those load a different engine entirely, and the
+///    2.1 snapshot shares no weights with them.
+/// 2. It stamps its OWN adapter. The default arm of `candle_adapter_label` is `candle_sdxl`, so a
+///    missing arm does not fail — it silently labels every 2.1 asset as an SDXL render, and the
+///    recipe can no longer say which weights produced the image.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse", "count": 1 }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse",
+            "width": 2752, "height": 1536, "steps": 40, "seed": 7, "count": 2,
+            "negativePrompt": "watermark", "advanced": { "guidanceScale": 4.0 }
+        }),
+    ] {
+        let request = request(payload.clone());
+        assert_eq!(
+            resolve_candle_image_route(&request, &settings),
+            Some(CandleImageRoute::CandleTxt2Img),
+            "2.1 has no conditioned candle lane — it renders on the generic txt2img route: {payload}"
+        );
+        assert_eq!(
+            CandleImageRoute::CandleTxt2Img.adapter_label(&request),
+            "candle_qwen_2_1",
+            "2.1 must not inherit the 2512 label or fall through to the candle_sdxl default"
+        );
+    }
+
+    // The 2512 id keeps its own stamp — the two are different weights, so they are different
+    // adapters, and this is the contrast that a shared arm would erase.
+    assert_eq!(
+        CandleImageRoute::CandleTxt2Img.adapter_label(&request(json!({
+            "projectId": "p", "model": "qwen_image", "prompt": "p", "count": 1
+        }))),
+        "candle_qwen",
     );
 }
 
@@ -20752,6 +20826,64 @@ mod preview_stream_tests {
             }
         }
         assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+
+    /// sc-24109: progress and cancellation on the lane Qwen-Image 2.1 renders on off-Mac.
+    ///
+    /// `qwen_image_2_1` has no bespoke route — `resolve_candle_image_route` sends it to
+    /// `CandleImageRoute::CandleTxt2Img`, whose producer is exactly this `drive_gen_items` carrier
+    /// (see `every_scheduler_routed_candle_image_has_a_native_worker_route` and
+    /// `qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp`). So the two facts the
+    /// story needs — a step reaches the consumer, and a cancel STOPS the batch instead of
+    /// completing it — are pinned here, on the real loop, with no weights and no GPU.
+    ///
+    /// The discriminator is the second image: a carrier that ignored its producer's `None` would
+    /// emit a second `Image` event and the batch would finish normally, which is precisely the
+    /// "cancel did nothing but the job still says completed" failure this guards.
+    #[test]
+    fn cancelling_a_candle_batch_stops_it_after_reporting_progress() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(16);
+        let cancel = gen_core::CancelFlag::new();
+        let observed = cancel.clone();
+
+        // A two-image `qwen_image_2_1` batch (count: 2). Image 0 reports a step and completes;
+        // the flag trips before image 1, which the producer observes and answers `None`.
+        drive_gen_items(
+            tx,
+            [0_usize, 1_usize],
+            |index, _item, _preview, progress| {
+                if observed.is_cancelled() {
+                    return Ok(None);
+                }
+                progress(Progress::Step {
+                    current: 1,
+                    total: 40,
+                });
+                cancel.cancel();
+                Ok(Some((70_i64 + index as i64, 1, 1, vec![0_u8; 3])))
+            },
+        )
+        .expect("a cancelled batch is not an error — it stops early and reports what it produced");
+
+        match rx.try_recv().expect("image 0 reports its first step") {
+            GenEvent::Step {
+                index,
+                current,
+                total,
+            } => {
+                assert_eq!((index, current, total), (0, 1, 40));
+            }
+            other => panic!("expected a step event, got {}", gen_event_name(&other)),
+        }
+        match rx.try_recv().expect("image 0 completes") {
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            other => panic!("expected an image event, got {}", gen_event_name(&other)),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the cancelled second image must produce NO further events — not a step, and above all \
+             not an Image the consumer would persist and count toward a completed generation set"
+        );
     }
 
     fn gen_event_name(event: &GenEvent) -> &'static str {

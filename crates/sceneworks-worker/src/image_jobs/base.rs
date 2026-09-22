@@ -9295,6 +9295,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
             "candle_flux2"
         }
         "qwen_image" => "candle_qwen",
+        // Qwen-Image 2.1 (sc-24109) is its OWN engine, not a newer build of the row above: a
+        // different snapshot on a different latent space with a different text tower. It must
+        // stamp its own adapter or a replayed asset cannot say which weights produced it — the
+        // same reason `contracts::GenerationAdapter::QwenImage21` exists on the MLX side.
+        "qwen_image_2_1" => "candle_qwen_2_1",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",

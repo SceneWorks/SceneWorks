@@ -824,12 +824,24 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
     // which flipped krea/ideogram/boogu but not qwen). User LoRA/LoKr applies on the packed tiers.
     ModelCaps::new("qwen_image", true, true, false, false, true),
-    // Qwen-Image 2.1 (sc-24108, epic 24107): a SEPARATE model from the 2512-weights `qwen_image`
-    // row above — different snapshot, different latent space, different licence. MLX-only at this
-    // pin: the native Candle port is sc-24109, so `candle_routed` stays false and an off-Mac
-    // worker never claims the job (the sc-9495 superset invariant then forces the three candle
-    // capability columns false too). bf16 only until the tier turnkey lands in sc-24112.
-    ModelCaps::new("qwen_image_2_1", true, false, false, false, false),
+    // Qwen-Image 2.1 (sc-24108 MLX / sc-24109 Candle, epic 24107): a SEPARATE model from the
+    // 2512-weights `qwen_image` row above — different snapshot, different latent space, different
+    // licence, and NOT a shared quant surface with it.
+    //
+    // `candle_routed` (sc-24109): the native Candle/CUDA port registers the SAME engine id
+    // `qwen_image_2_1`, so the one request contract that routes to MLX on a Mac routes to the
+    // generic candle txt2img lane off-Mac. Plain text-to-image only — every conditioning carrier is
+    // refused by the shared `CANDLE_IMAGE_CHECKS` gate, exactly as the MLX arm refuses them.
+    //
+    // All THREE candle capability columns stay false, and that is a per-backend truth rather than a
+    // "not wired yet": the candle provider declares `supported_quants: []` (it refuses an
+    // on-the-fly quantize with a typed Unsupported at load) and `supports_lora`/`supports_lokr`
+    // false. `candle_quant: false` is therefore what makes `candle_refuses_quant_tier` reject an
+    // `advanced.mlxQuantize` select off-Mac instead of routing a job the loader would refuse. The
+    // MLX provider's own [Q4, Q8] surface is NOT merged in here — there is no per-model-id quant
+    // column for the two to collapse into, which is the invariant
+    // `qwen_image_2_1_offers_no_candle_quant_tier` pins.
+    ModelCaps::new("qwen_image_2_1", true, true, false, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2304,6 +2316,9 @@ mod tests {
         "flux2_klein_9b_true_v2",
         "flux2_dev",
         "qwen_image",
+        // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
+        // 2512 row it shares nothing with.
+        "qwen_image_2_1",
         "lens",
         "lens_turbo",
         // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.

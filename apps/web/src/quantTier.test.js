@@ -700,3 +700,38 @@ describe("defaultTierSelection — capability-aware Auto base (epic 10721 R1/R3/
     expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "q4" })).toBe("q8");
   });
 });
+
+// sc-24109 — Qwen Image 2.1 ships ONE bf16 artifact and has no precision tier on either backend:
+// the MLX provider advertises [Q4, Q8] and the Candle provider advertises [], and SceneWorks must
+// not merge those into one per-model-id list. The catalog projection of the entry therefore carries
+// none of the three tier shapes this module reads, and the picker must stay closed — including on
+// Windows, where the Candle route would refuse a tier-select at load.
+describe("qwen_image_2_1 tier surface", () => {
+  // Exactly what GET /models projects for the entry: one download with no `variant` (so no
+  // `hasVariantMatrix`/`variants`), no `mlx.requiresConversion` (so no `mlxTiers`/`mlxTierStates`),
+  // and a builtin id (so no imported-provider `runtimeQuantTiers`).
+  const qwenImage21 = {
+    id: "qwen_image_2_1",
+    type: "image",
+    installState: "installed",
+    cacheState: "complete",
+  };
+
+  it("offers no selectable tier and no picker", () => {
+    expect(installedTiers(qwenImage21)).toEqual([]);
+    expect(allPossibleTiers(qwenImage21)).toEqual([]);
+    expect(shouldShowTierPicker(qwenImage21)).toBe(false);
+  });
+
+  it("stays closed on a Windows/CUDA host, where the candle route refuses a tier-select", () => {
+    // The host-eligibility gates only ever REMOVE candle-only tiers; they can never conjure one for
+    // a model that declares none, on either platform.
+    for (const options of [
+      { convRotEligible: true, nvfp4Eligible: true },
+      { convRotEligible: false, nvfp4Eligible: false },
+    ]) {
+      expect(allPossibleTiers(qwenImage21, options)).toEqual([]);
+      expect(shouldShowTierPicker(qwenImage21, options)).toBe(false);
+    }
+  });
+});

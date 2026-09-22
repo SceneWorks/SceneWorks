@@ -3149,7 +3149,7 @@ pub(crate) fn backend_label(gpu_id: &str) -> &str {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn begin_image_cancel(
+pub(crate) async fn begin_image_cancel(
     api: &ApiClient,
     job_id: &str,
     cancel: &CancelFlag,
