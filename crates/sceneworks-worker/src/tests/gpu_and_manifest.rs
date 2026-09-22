@@ -3115,3 +3115,42 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
         );
     }
 }
+
+
+/// sc-24109 — the INPUTS the candle VRAM fit gate reads for `qwen_image_2_1`, pinned on a lane that
+/// can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
+/// `qwen_image_2_1_resolves_its_candle_peak_from_the_derived_min_memory_floor` first executes on the
+/// windows-candle CI lane).
+///
+/// The consequence this guards is not a rounding error, it is a product decision: with NO `candle`
+/// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, every
+/// tier resolves to this floor and the gate REFUSES the load pre-flight below it. 48 GB refuses a
+/// 32 GB RTX 5090 and a 40 GB A100 for the bf16 install — correctly, since the snapshot alone is
+/// 30.86 GiB of weights — so the number must not drift silently in either direction.
+#[test]
+fn qwen_image_2_1_declares_the_derived_candle_vram_floor_and_no_measured_row() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let candle = entry
+        .get("candle")
+        .expect("sc-24109 declares the off-Mac candle block; without it the fit gate is SKIPPED");
+
+    assert_eq!(
+        candle["minMemoryGb"], 48,
+        "the derived floor the candle fit gate admits against (snapshot tensor bytes 30.86 GiB + \
+         the 2048-square activation transient). Changing it changes which cards are refused"
+    );
+    assert!(
+        candle.get("vramGbByTier").is_none(),
+        "a measured per-tier row would WIN over minMemoryGb in predicted_peak_gb; nothing has been \
+         measured for 2.1 on CUDA, so declaring one would be an unmeasured claim"
+    );
+    assert_eq!(
+        entry["mlx"]["minMemoryGb"], 48,
+        "the unified-memory twin, derived from the same tensor bytes — the two floors are the same \
+         number because they are the same derivation, not because either was copied"
+    );
+}

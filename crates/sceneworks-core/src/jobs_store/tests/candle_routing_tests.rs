@@ -1770,6 +1770,65 @@ fn qwen_image_quant_and_lora_stay_on_candle() {
     ));
 }
 
+/// sc-24109 — the IMAGE twin of `candle_video_routed_models_have_an_installable_off_mac_download`
+/// (sc-19558), which had no image counterpart at all.
+///
+/// Same defect class, unguarded on the larger of the two catalogs: the routing table decides which
+/// lane serves a request, the manifest decides what a user can obtain, and flipping `candle_routed`
+/// for a model whose every download row is `platforms: ["macos"]` routes the job to a lane that
+/// cannot fetch a single byte. `retain_downloads_for_os` strips those rows off-Mac, so the Windows
+/// or Linux user sees a model they can select and a download that installs nothing.
+///
+/// That is precisely the shape of THIS story's load-bearing manifest edit — dropping
+/// `platforms: ["macos"]` from `qwen_image_2_1`'s only artifact — and before this test nothing
+/// asserted it: re-adding the key left every suite green.
+///
+/// REACH: both sides are constructed here, not retyped. `CANDLE_ROUTED_MODELS` is the real derived
+/// constant from `IMAGE_MODEL_CAPS`, and `builtin_models()` parses the shipped manifest bytes, so a
+/// column flip on one side and a `platforms` edit on the other both reach this assertion.
+#[test]
+fn candle_routed_image_models_have_an_installable_off_mac_download() {
+    // Candle-routed image ids with NO catalog entry at all. EMPTY today, and asserted to be exact
+    // below: an entry-less candle-routed image model is not an exemption from this guard, it is a
+    // model nothing can install on any platform.
+    const NO_CATALOG_ENTRY: &[&str] = &[];
+
+    let models = super::builtin_models();
+    let entry = |id: &str| models.iter().find(|model| model["id"].as_str() == Some(id));
+
+    let mut without_entry: Vec<&str> = Vec::new();
+    for id in CANDLE_ROUTED_MODELS {
+        let Some(model) = entry(id) else {
+            without_entry.push(id);
+            continue;
+        };
+        for os in ["windows", "linux"] {
+            assert!(
+                super::primary_rows_on(model, os) > 0,
+                "{id} is candle-routed for images but has no primary download row installable on \
+                 {os} — flipping a candle column without an off-Mac artifact routes the job to a \
+                 lane that cannot obtain weights (sc-19558's image twin, sc-24109)"
+            );
+        }
+    }
+    assert_eq!(
+        without_entry, NO_CATALOG_ENTRY,
+        "the set of candle-routed image models with no catalog entry changed"
+    );
+
+    // Spelled out for this story's own id, because it is the one whose artifact was macOS-scoped
+    // until this change and the one a reviewer will come back to.
+    let qwen_2_1 = entry("qwen_image_2_1").expect("qwen_image_2_1 is in the builtin catalog");
+    for os in ["windows", "linux", "macos"] {
+        assert_eq!(
+            super::primary_rows_on(qwen_2_1, os),
+            1,
+            "2.1's single upstream artifact must be installable on {os} — it is ONE bf16 snapshot \
+             serving both backends, so it carries no `platforms` scoping at all"
+        );
+    }
+}
+
 /// sc-24109: the SAME request contract that routes to MLX on a Mac must route to the Candle/CUDA
 /// lane off-Mac. The Candle port registers the same engine id (`qwen_image_2_1`) with the same
 /// seven presets, the same ÷32 stride, the same 40-step default, the same seed/count axis and the
@@ -1784,8 +1843,12 @@ fn qwen_image_quant_and_lora_stay_on_candle() {
 fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
     assert!(CANDLE_ROUTED_MODELS.contains(&"qwen_image_2_1"));
 
-    // Every shape the Image Studio can produce for this model — the seven presets' extremes, the
-    // engine's own step default, an explicit seed, a batch count, and the true-CFG pair.
+    // The routing VERDICT over the shapes the Image Studio produces. Stated narrowly on purpose:
+    // `image_request_candle_eligible` reads `mode` and the conditioning carriers and NOTHING else,
+    // so the geometry/steps/seed/count/guidance fields below are carried to prove they do not
+    // perturb the verdict — they are not themselves validated here. The contract's own numbers are
+    // asserted against the manifest at the bottom of this test, which is where a drift in them
+    // would actually show up.
     for payload in [
         json!({ "prompt": "a lighthouse" }),
         json!({ "prompt": "p", "mode": "text_to_image" }),
@@ -1828,14 +1891,69 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // An adapter IS a candle routing refusal — and that is not a drift from the MLX arm, which
-    // lets it through on purpose so the engine can answer with a typed Unsupported. Off-Mac the
-    // job would otherwise be claimed by a lane whose `candle_lora` column is false; the MLX worker
-    // on the same queue still claims it, so no job is left unclaimable.
+    // An adapter is handled DIFFERENTLY per backend, and both answers are deliberate:
+    //   * off-Mac the candle lane REFUSES it (`CandleImageRefusal::UserLora`), because the id's
+    //     `candle_lora` column is false — the provider declares `supports_lora`/`supports_lokr`
+    //     false, so the refusal names the missing adapter slot;
+    //   * on a Mac the MLX arm lets it through on purpose, so the engine answers with a typed
+    //     `Unsupported` instead of the job sitting unclaimable.
+    // On a Windows/Linux-only install there is no MLX worker to fall through to, so the candle
+    // refusal IS the terminal answer — which is why it has to carry the adapter-slot reason rather
+    // than a generic one.
     assert!(!image_request_candle_eligible(
         "qwen_image_2_1",
         &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
     ));
+    assert_eq!(
+        candle_image_first_refusal(
+            "qwen_image_2_1",
+            &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
+        ),
+        Some(CandleImageRefusal::UserLora),
+    );
+
+    // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
+    // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`
+    // block may override any of them — a per-backend override is exactly how "the same request
+    // contract" would quietly stop being the same.
+    let models = super::builtin_models();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let limits = &entry["limits"];
+    assert_eq!(
+        limits["resolutions"],
+        json!([
+            "2048x2048",
+            "2400x1792",
+            "1792x2400",
+            "2528x1696",
+            "1696x2528",
+            "2752x1536",
+            "1536x2752"
+        ]),
+        "the seven upstream presets, in the engine's own order"
+    );
+    assert_eq!(
+        limits["hardMinSteps"],
+        json!(2),
+        "the engine refuses steps < 2"
+    );
+    assert_eq!(entry["defaults"]["steps"], json!(40), "DEFAULT_STEPS");
+    for backend in ["mlx", "candle"] {
+        let block = &entry[backend];
+        assert!(
+            block.is_object(),
+            "{backend} block must exist — both lanes are native for this id"
+        );
+        for key in ["limits", "defaults", "resolutions", "hardMinSteps", "steps"] {
+            assert!(
+                block.get(key).is_none(),
+                "`{backend}.{key}` would fork the request contract per backend; 2.1 has ONE"
+            );
+        }
+    }
 }
 
 /// sc-24108/sc-24109: the two `qwen_image_2_1` providers declare DIFFERENT quant surfaces — the
@@ -1917,6 +2035,19 @@ fn qwen_image_2_1_offers_no_candle_quant_tier() {
             .all(|download| download.get("variant").is_none()),
         "a `variant` declares a user-selectable precision tier; 2.1 has none until sc-24112"
     );
+    // …and that one artifact is installable OFF-MAC. "No tier on the candle route" is only a
+    // meaningful claim if the candle route can obtain weights at all: with
+    // `platforms: ["macos"]` back on this row, `retain_downloads_for_os` strips it and the
+    // assertions above stay green while a Windows/Linux user can install nothing.
+    // `candle_routed_image_models_have_an_installable_off_mac_download` is the general guard; this
+    // is the same fact stated where the tier claim is made.
+    for os in ["windows", "linux"] {
+        assert_eq!(
+            super::primary_rows_on(entry, os),
+            1,
+            "2.1's one bf16 artifact must survive retain_downloads_for_os on {os}"
+        );
+    }
     assert!(
         entry["mlx"].get("quantize").is_none(),
         "no `mlx.quantize` either — the MLX lane loads the bf16 snapshot as published"

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:99dcb62c418c8dabb12b2cdee2dcc354923032b2c157a5b414f95f05142f8cf7",
+    "sceneWorksRevision": "source-tree:bbba996b4c6d88445f49559f6e2f08128fd9d6ddd1fe670eda37f152fd3643c9",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "f7a237eac944ba66e6c54498479f94b7e9ea4f7b5340bc7f5236968e70835b7f"
+        "sha256": "d4ed41761fce9e240c710452ab089a69ed56cfc2b8785c52cbfd06e1c71c3bc8"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -85,7 +85,7 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "20ded62ddc9b20a6d31a35cbe36c8de2978f7208cba5eb798107e17dfa929d28"
+        "sha256": "fd2fa960f4840535dd15ab38d31704eb1fa8a052e3c0eb1766756f606fc8c84d"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",

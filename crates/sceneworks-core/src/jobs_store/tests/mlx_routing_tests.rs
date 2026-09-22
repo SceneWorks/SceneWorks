@@ -1842,31 +1842,12 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
     // entry-less candle model cannot join it by accident.
     const NO_CATALOG_ENTRY: &[&str] = &["mochi_1"];
 
-    // Primary (non-co-requisite) download rows that survive `retain_downloads_for_os` for `os`: a
-    // row with no `platforms` is platform-agnostic and always applies.
-    fn primary_rows_on(model: &Value, os: &str) -> usize {
-        model["downloads"]
-            .as_array()
-            .map(|downloads| {
-                downloads
-                    .iter()
-                    .filter(|download| download["coRequisite"].as_bool() != Some(true))
-                    .filter(|download| match download["platforms"].as_array() {
-                        Some(platforms) => platforms.iter().any(|value| value.as_str() == Some(os)),
-                        None => true,
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    }
+    // `primary_rows_on` + `builtin_models` moved to the parent test module (sc-24109) so the image
+    // twin `candle_routed_image_models_have_an_installable_off_mac_download` asks this exact
+    // question of the exact same bytes, rather than growing a second private copy of the parse.
+    use super::{builtin_models, primary_rows_on};
 
-    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
-        "../../../../../config/manifests/builtin.models.jsonc"
-    )))
-    .expect("builtin.models.jsonc parses");
-    let models = manifest["models"]
-        .as_array()
-        .expect("builtin.models.jsonc has a models array");
+    let models = builtin_models();
     let entry = |id: &str| models.iter().find(|model| model["id"].as_str() == Some(id));
 
     let mut without_entry: Vec<&str> = Vec::new();

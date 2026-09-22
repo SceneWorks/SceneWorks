@@ -3324,6 +3324,20 @@
       // sc-24109 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same upstream snapshot,
       // same seven presets and same true-CFG request contract; only the tensor backend differs.
       //
+      // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` is
+      // `x-sceneworks-contract: binding` and is read by crates/sceneworks-worker/src/vram_gate.rs
+      // (`predicted_peak_gb`). With NO `candle` block the fit gate is skipped ENTIRELY and a
+      // too-small card discovers it is too small by OOMing mid-load; with one — and with no
+      // `vramGbByTier` row to win ahead of it — EVERY tier key resolves to this floor and the gate
+      // REFUSES the load before it starts on any card with less free VRAM. At 48 that deliberately
+      // includes a 32 GB RTX 5090 and a 40 GB A100 for this bf16 install: the snapshot alone is
+      // 30.86 GiB of weights, which cannot sit resident with a 2048-square activation transient on
+      // either. A refusal that names the number is the intended behaviour; a reactive OOM is not.
+      // sc-24112's SceneWorks half adds q8/q4 tiers with genuinely lower floors, which is what
+      // makes those cards usable — not loosening this number.
+      // Asserted by `qwen_image_2_1_resolves_its_candle_peak_from_the_derived_min_memory_floor`
+      // (vram_gate, candle lane) and `qwen_image_2_1_declares_the_derived_candle_vram_floor_and_no_measured_row`.
+      //
       // `minMemoryGb` 48 is the VRAM twin of the `mlx` floor above and is DERIVED the same way,
       // from the pinned snapshot's own 30.86 GiB of tensor bytes (DiT 13.25 + Qwen3-VL tower 16.33
       // + VAE 1.26), all of which the native path holds resident together, plus room for the
