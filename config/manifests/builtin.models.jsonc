@@ -26682,7 +26682,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "008c3c7f4afb652cc15407cb14665c89971ee4da234c37fb3b0394bfb8b1d9ca",
+              "sha256": "39f759f9a149980b5f8a5986a9d98c54ced8c7730dcb45f2c655fabab0209461",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26702,12 +26702,12 @@
                 {
                   "path": "Cargo.lock",
                   "byteSize": 250777,
-                  "sha256": "e4382bf9bc9dc984de8a926b576f506984393b67315fe0cd57ffb5ee4a7c14cf"
+                  "sha256": "3a27821ead11d82a03ac17e80f32c001289130b1fa34c2a31a275d5d51612f5d"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "c0d9028df6531261c76154c156b3f3f19c9ef9ac2deba623ed3b3751baba3119"
+                  "sha256": "5572df182a63f181da1891061ae69a6f8638155f37dbfaff2a2dc3e66ef731d2"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -26732,7 +26732,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8876,
-                  "sha256": "dcc03ed690c7691a4d1d66b7b5161283fec002433747c4b8353d6c32c1eca723"
+                  "sha256": "d5550e8dc55becaaeb44afe2b014dc207aed877e961b03b7e078acdfe87916b3"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -26776,13 +26776,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 211372,
-                  "sha256": "0295c5b910d7baa2be7b75584262b6bc9df6bfad1d92f66a43e863925c3d037b"
+                  "byteSize": 212070,
+                  "sha256": "b222938b956469e55ae0c590193bfdac1b53d46bfbcdd1defcb6fcf2f539b6ec"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
-                  "byteSize": 20479,
-                  "sha256": "400d40eee9d547a36b3d47cbee012a7fccdbb6d28d82fcbaa1ef6248904f0a83"
+                  "byteSize": 20515,
+                  "sha256": "5985fbd86d6f8a41d5d6f22f3faf8b16af871ff2ac7a64544bafee79e8c98ba9"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_admission.rs",
@@ -26791,8 +26791,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 310907,
-                  "sha256": "2536bc3e1e775b7f3091edd67c910c17ea3f524e54283c031f00265453c4e050"
+                  "byteSize": 311124,
+                  "sha256": "da33dadf316918eed582abdfbab98f4c613ac9836c36e92abb9073af4f03ae62"
                 },
                 {
                   "path": "package.json",
