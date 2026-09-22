@@ -1356,6 +1356,17 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "Authored caption-upsampling opt-in — changes the prompt the model sees.",
     ),
     allow(
+        "transparentBackground",
+        AdvancedShape::Scalar,
+        "Authored transparency (sc-24113): the model decodes four channels and the render carries a \
+         real alpha channel instead of being composited onto white. WHAT TO MAKE, not what this \
+         machine can afford — a cut-out is the picture the author asked for, and replaying their \
+         recipe onto an opaque render would silently produce a different image. It is not a memory \
+         accommodation and names nothing local (no id, path or preset). Emitted only for a model \
+         that advertises `supportsAlphaOutput`; a replay onto a model that does not is refused by \
+         name at the worker rather than downgraded.",
+    ),
+    allow(
         "usePid",
         AdvancedShape::Scalar,
         "Authored decoder choice: PiD changes the produced image, and is the output's \

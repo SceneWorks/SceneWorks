@@ -349,15 +349,36 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if !matches!(
         payload.get("mode").and_then(Value::as_str),
-        None | Some("image_generation" | "text_to_image")
+        None | Some("image_generation" | "text_to_image" | "edit_image" | "character_image")
     ) {
         return false;
     }
 
-    !(has_nonempty_or_malformed_string(payload, "sourceAssetId")
-        || has_nonempty_or_malformed_string(payload, "referenceAssetId")
-        || has_nonempty_or_malformed_string(payload, "maskAssetId")
-        || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+    // `character_image` joins the mode list with `edit_image` (sc-24113). It is not a fourth engine
+    // shape — character mode resolves a look into an ordinary `referenceAssetId` before the request
+    // gets here, so to the engine it is a one-reference edit. Leaving it out would refuse a request
+    // the engine can serve, and `classify_image_gap` would then explain the refusal in terms of
+    // mask/pose carriers the request does not even have.
+    //
+    // sc-24113 admits the REFERENCE carriers this function used to refuse, because sc-24110 gave
+    // the engine the conditioning to serve them: `qwen_image_2_1` now declares
+    // ConditioningKind::Reference AND MultiReference, and upstream's ONE pipeline treats editing as
+    // the same call with 1-10 ordered condition images. So `sourceAssetId` (the Image Editor's
+    // working image), `referenceAssetId` (the single-reference flows) and the plural
+    // `referenceAssetIds` are all legitimate shapes that route here.
+    //
+    // What stays refused, and each for its own reason rather than as leftovers:
+    //
+    // * `maskAssetId` — `Mask` is DELIBERATELY not declared by either backend. 2.1 has no mask
+    //   tensor, no strength and no pixel preservation; an annotation is drawn INTO a reference and
+    //   a "separate mask" is an ordinary extra reference the prompt names. Routing a masked request
+    //   here would send the engine a carrier it refuses by name at `validate`.
+    // * `controls` / `controlnets` / `advanced.poses` — there is no strict-control tier for this
+    //   family at all (unlike base `qwen_image`, which has the Fun-Controlnet-Union lane to fall
+    //   through to), so a control carrier has nothing to reach.
+    //
+    // `loras` is still deliberately NOT inspected — see the note above about sc-10523.
+    !(has_nonempty_or_malformed_string(payload, "maskAssetId")
         || has_nonempty_array(payload, "controls")
         || has_nonempty_array(payload, "controlnets")
         || has_nonempty_nested_array(payload, "advanced", "poses"))

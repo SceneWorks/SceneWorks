@@ -7626,16 +7626,73 @@ pub(crate) fn load_reference_image(
     // than a bare join — matching the media-jobs reads and keeping a poisoned
     // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
     let path = crate::safe_project_path(project_path, rel)?;
-    let decoded = crate::image_decode::decode_image_any(&path)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
-        })?
-        .to_rgb8();
+    let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
+        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+    })?;
+    // sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+    //
+    // `DynamicImage::to_rgb8()` converts RGBA→RGB by DROPPING the fourth byte, which is exactly
+    // what the S4 RGBA contract says a flattening consumer must not do: 2.1's alpha is STRAIGHT
+    // (un-premultiplied) and `A=0` does NOT zero RGB, so a fully transparent pixel keeps whatever
+    // colour it was authored with. Truncating therefore turns a transparent background into
+    // whatever garbage the encoder happened to leave in the RGB planes — commonly black — and
+    // hands the VAE a reference the user never saw. Compositing matches the engine's own
+    // `RgbaImage::to_rgb_over_white()`, so the two agree on what a flattened reference looks like.
+    //
+    // ⚠️ Flattening AT ALL is the pin's limitation, not the desired behaviour. Under the S4
+    // contract an alpha-carrying reference travels as `Conditioning::ReferenceRgba` with all four
+    // channels reaching the VAE — a flattened reference is a DIFFERENT request, and it is the case
+    // transparent-layer editing depends on. `gen_core::RgbaImage` and that carrier do not exist at
+    // the revision this branch pins, so the worker composites and RECORDS the carrier it would have
+    // used (`qwen_alpha::reference_conditioning_kind`); the terminal pin bump replaces this
+    // function's tail with the four-channel path.
+    let carries_alpha = decoded.color().has_alpha();
+    let rgb = if carries_alpha {
+        let rgba = decoded.to_rgba8();
+        let (width, height) = (rgba.width(), rgba.height());
+        image::RgbImage::from_fn(width, height, |x, y| {
+            let [r, g, b, a] = rgba.get_pixel(x, y).0;
+            let over_white = |channel: u8| {
+                // Straight alpha over an opaque white backdrop, rounded half-up:
+                //   out = channel * a/255 + 255 * (1 - a/255)
+                let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
+                ((blended + 127) / 255) as u8
+            };
+            image::Rgb([over_white(r), over_white(g), over_white(b)])
+        })
+    } else {
+        decoded.to_rgb8()
+    };
     Ok(Image {
-        width: decoded.width(),
-        height: decoded.height(),
-        pixels: decoded.into_raw(),
+        width: rgb.width(),
+        height: rgb.height(),
+        pixels: rgb.into_raw(),
     })
+}
+
+/// Whether the asset [`load_reference_image`] would load carries its own alpha channel (sc-24113).
+///
+/// The input to [`crate::qwen_alpha::reference_conditioning_kind`]: an alpha-carrying reference
+/// belongs in `Conditioning::ReferenceRgba`, an ordinary one in `Conditioning::Reference`. Read
+/// from the DECODED image's colour type rather than guessed from the file extension — a PNG with
+/// no alpha channel is an ordinary reference.
+///
+/// Unused at this pin for the same reason [`crate::qwen_alpha::reference_conditioning_kind`] is:
+/// `qwen_image_2_1` has no worker-side edit route until the terminal pin bump, so nothing asks the
+/// question yet. Kept because the ANSWER — read the decoded colour type, not the extension — is the
+/// part that would otherwise be re-derived wrongly when that route lands.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(dead_code)]
+pub(crate) fn reference_carries_alpha(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<bool> {
+    Ok(load_reference_alpha(data_dir, project_id, asset_id, project_path)?.is_some())
 }
 
 /// The alpha plane of the same asset [`load_reference_image`] loads, or `None` when it has none

@@ -9,6 +9,8 @@ import { appConfirm } from "../appConfirm.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
+// sc-24113 — the per-model ordered-reference ceiling. See `imageReferenceLimits.js`.
+import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import {
   SOURCE_WORKFLOW_ABSENT,
   SOURCE_WORKFLOW_PENDING,
@@ -1498,11 +1500,28 @@ export function ImageEditor() {
   // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
   // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
   const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
+  // How many references THIS model takes (sc-24113). The cap used to be one module constant applied
+  // to every multi-reference model in the catalog — `MAX_EDIT_REFERENCES = 4`, mirroring the
+  // worker's FLUX.2 activation budget. Qwen-Image 2.1 takes ten, so the ceiling became a per-model
+  // reading of `limits.maxReferenceAssets`, the key the video lane has declared since sc-17160.
+  //
+  // `MAX_EDIT_REFERENCES` remains the fallback rather than being replaced, so every model that
+  // declares nothing keeps exactly the cap it had and nothing about FLUX.2 / SenseNova / Krea moves.
+  const maxEditReferences = maxReferencesForModel(selectedEditModel, MAX_EDIT_REFERENCES);
   // Drop any attached references when the model can't use them (switched away from a multiReference
   // model), so a stale selection never rides a job that would ignore it.
   useEffect(() => {
     if (!multiRefCapable && refAssetIds.length) setRefAssetIds([]);
   }, [multiRefCapable, refAssetIds.length]);
+  // ... and TRIM rather than drop when the new model simply takes fewer. Switching from Qwen 2.1
+  // (10) to FLUX.2 (4) with six attached must not silently send six to a model that would truncate
+  // them: the rail shows what will actually be sent. Trimming from the END keeps the ordering the
+  // user built, which is the half that carries meaning.
+  useEffect(() => {
+    if (multiRefCapable && refAssetIds.length > maxEditReferences - 1) {
+      setRefAssetIds((prev) => prev.slice(0, maxEditReferences - 1));
+    }
+  }, [multiRefCapable, maxEditReferences, refAssetIds.length]);
 
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
@@ -3023,7 +3042,12 @@ export function ImageEditor() {
           // Multi-reference edit (sc-6107): lead with the working scratch image, then the user's
           // references. Only for a multiReference model with at least one attached reference.
           referenceAssetIds:
-            multiRefCapable && refAssetIds.length ? editReferenceIds(scratch.id, refAssetIds) : null,
+            multiRefCapable && refAssetIds.length
+              // sc-24113: cap at the MODEL's ceiling, not the module constant. The working scratch
+              // image occupies the first slot, so the list is (1 + attached) and both halves are
+              // bounded by the same per-model number.
+              ? editReferenceIds(scratch.id, refAssetIds, maxEditReferences)
+              : null,
           model: editModel,
           prompt,
           seed: editSeed,
@@ -3408,6 +3432,7 @@ export function ImageEditor() {
     FitModeControl,
     MAX_BOX_PALETTE,
     MAX_EDIT_REFERENCES,
+    maxEditReferences,
     StudioUpdateBadge,
     StudioUpdateNotice,
     UPSCALE_ENGINE_DESC,
@@ -4331,7 +4356,7 @@ export function ImageEditor() {
           onAdd={(ids) => {
             setRefPickerOpen(false);
             setRefAssetIds((prev) =>
-              Array.from(new Set([...prev, ...ids])).slice(0, MAX_EDIT_REFERENCES - 1),
+              Array.from(new Set([...prev, ...ids])).slice(0, maxEditReferences - 1),
             );
           }}
           onClose={() => setRefPickerOpen(false)}
@@ -4342,7 +4367,7 @@ export function ImageEditor() {
             const ids = imported.map((asset) => asset.id);
             if (ids.length) {
               setRefAssetIds((prev) =>
-                Array.from(new Set([...prev, ...ids])).slice(0, MAX_EDIT_REFERENCES - 1),
+                Array.from(new Set([...prev, ...ids])).slice(0, maxEditReferences - 1),
               );
             }
             if (failureCount > 0) {

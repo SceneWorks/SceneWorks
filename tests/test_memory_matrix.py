@@ -812,6 +812,13 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     axis). Matrix totals moved with it: cells 9265 -> 9390, publishedCells 2178 -> 2216,
     anchoredCells 1935 -> 1973 (the 38 newly published cells are the flux_dev/flux_schnell candle
     bf16 anchors binding).
+
+    sc-24113 moves exactly the ten `qwen_image_2_1` lanes (5 rungs x 2 backends), each DOUBLING:
+    declaring `image_to_image` on that model gives it a second mode, and a mode is a coordinate
+    axis. `[0,0,2]` -> `[0,0,4]` on every rung but `resident`, and `[2,0,0]` -> `[4,0,0]` there.
+    No other lane moved, and no rung changed STATE — the model gained coordinates, not an
+    implementation. That is the shape to check when re-pinning: a lane outside qwen_image_2_1
+    moving here would be a real regression, not a re-pin.
     """
     matrix = load_matrix()
     census = {}

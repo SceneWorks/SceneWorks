@@ -6,6 +6,23 @@ use super::*;
 /// ceiling client-side — this is the authoritative server-side guard.
 pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
 
+/// The `task` discriminator for Qwen-Image 2.1's official prompt rewriting (sc-24113, epic 24107).
+///
+/// Spelled here as well as in `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs` because the two
+/// crates share no dependency in this direction; `the_rewrite_task_name_matches_the_worker` pins
+/// them together.
+pub(crate) const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
+
+/// Maximum reference images on a Qwen-Image 2.1 rewrite request.
+///
+/// TEN, not [`MAX_MOOD_BOARD_IMAGES`], and the difference is not a loosened guard but a different
+/// contract. A mood board is a synthesis whose cost the 6 bounds; a rewrite must be shown EXACTLY
+/// the ordered list the render will condition on (S3 edit contract: 1–10), or its `ratio_follow`
+/// ("<image2>") names a different picture than the one the user attached. The engine and the image
+/// enqueue path both cap at 10, so this is the same number stated at the third seam rather than a
+/// new one.
+pub(crate) const MAX_QWEN_REWRITE_IMAGES: usize = 10;
+
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
 /// model's prompt guide. The job runs through a native TextLlm provider, and the client reads the refined
@@ -24,6 +41,12 @@ pub(crate) async fn create_prompt_refine_job(
     // text prompt: they carry a project `sourceAssetId` instead. Resolve that to the worker's confined
     // on-disk `imagePath` and forward the vision model's repo; the prompt requirement is waived.
     let is_vision_task = task == Some("image_caption") || task == Some("image_describe");
+    // Qwen-Image 2.1's rewrite (sc-24113) reads reference images too, but is NOT a vision task: it
+    // is driven by the user's TEXT and merely accepts pictures. The prompt stays required, and zero
+    // references is not an error — it is the legitimate text-to-image case, and it is what selects
+    // the T2I rewriter over the editing one in the worker.
+    let is_qwen_rewrite = task == Some(QWEN_IMAGE_REWRITE_TASK);
+    let carries_reference_images = is_vision_task || is_qwen_rewrite;
 
     let prompt = payload.prompt.trim();
     if prompt.is_empty() && !is_vision_task {
@@ -35,7 +58,7 @@ pub(crate) async fn create_prompt_refine_job(
         job_payload.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
     }
 
-    if is_vision_task {
+    if carries_reference_images {
         // A "mood board" (epic 8588, sc-8595) sends several references in `sourceAssetIds`; the worker
         // synthesizes ONE prompt/caption from the aesthetic they share. When that plural list is non-empty
         // it takes precedence over the single `sourceAssetId`; otherwise the single id is the sole
@@ -59,7 +82,10 @@ pub(crate) async fn create_prompt_refine_job(
                 plural
             }
         };
-        if asset_ids.is_empty() {
+        // A VISION task has nothing to look at without a reference. A rewrite with none is the
+        // text-to-image case and proceeds — so this requirement, and everything below it that needs
+        // a project to resolve asset ids against, is skipped when the list is legitimately empty.
+        if asset_ids.is_empty() && is_vision_task {
             return Err(ApiError::bad_request(
                 "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
             ));
@@ -67,36 +93,57 @@ pub(crate) async fn create_prompt_refine_job(
         // Bound the board: each reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so N
         // references cost ~N MP of vision attention + context. Cap it so a runaway list cannot exhaust
         // memory. The UI enforces the same ceiling; this is the server-side guard.
-        if asset_ids.len() > MAX_MOOD_BOARD_IMAGES {
-            return Err(ApiError::bad_request(format!(
-                "A mood board accepts at most {MAX_MOOD_BOARD_IMAGES} reference images"
-            )));
-        }
-        let project_id = payload
-            .project_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::bad_request("projectId is required for a reference-image task")
-            })?;
-        let mut image_paths = Vec::with_capacity(asset_ids.len());
-        for asset_id in &asset_ids {
-            image_paths
-                .push(resolve_image_caption_path(state.clone(), project_id, asset_id).await?);
-        }
-        // A single reference keeps the scalar `imagePath` (byte-identical to the pre-mood-board path);
-        // multiple references ride the `imagePaths` array the worker prefers.
-        if image_paths.len() == 1 {
-            job_payload.insert(
-                "imagePath".to_owned(),
-                Value::String(image_paths.into_iter().next().unwrap()),
-            );
+        //
+        // The rewrite's ceiling is 10 rather than 6, and for a different reason — see
+        // `MAX_QWEN_REWRITE_IMAGES`: it must be shown exactly the ordered list the render will use.
+        let (cap, cap_message) = if is_qwen_rewrite {
+            (
+                MAX_QWEN_REWRITE_IMAGES,
+                format!(
+                    "Qwen Image 2.1 prompt rewriting accepts at most {MAX_QWEN_REWRITE_IMAGES} \
+                     reference images — the same ordered list the render takes"
+                ),
+            )
         } else {
-            job_payload.insert(
-                "imagePaths".to_owned(),
-                Value::Array(image_paths.into_iter().map(Value::String).collect()),
-            );
+            (
+                MAX_MOOD_BOARD_IMAGES,
+                format!("A mood board accepts at most {MAX_MOOD_BOARD_IMAGES} reference images"),
+            )
+        };
+        if asset_ids.len() > cap {
+            return Err(ApiError::bad_request(cap_message));
+        }
+        if !asset_ids.is_empty() {
+            let project_id = payload
+                .project_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ApiError::bad_request("projectId is required for a reference-image task")
+                })?;
+            let mut image_paths = Vec::with_capacity(asset_ids.len());
+            for asset_id in &asset_ids {
+                image_paths
+                    .push(resolve_image_caption_path(state.clone(), project_id, asset_id).await?);
+            }
+            // A single reference keeps the scalar `imagePath` (byte-identical to the pre-mood-board path);
+            // multiple references ride the `imagePaths` array the worker prefers.
+            if image_paths.len() == 1 && !is_qwen_rewrite {
+                job_payload.insert(
+                    "imagePath".to_owned(),
+                    Value::String(image_paths.into_iter().next().unwrap()),
+                );
+            } else {
+                // sc-24113: a rewrite ALWAYS uses the plural key, even for one reference. The worker's
+                // `<imageN>` numbering is positional, and a scalar `imagePath` has no position — keeping
+                // the array shape is what makes "reference 1" mean the same thing at one reference and
+                // at ten.
+                job_payload.insert(
+                    "imagePaths".to_owned(),
+                    Value::Array(image_paths.into_iter().map(Value::String).collect()),
+                );
+            }
         }
         // The vision model is named by its HF repo string; the worker resolves it by repo (like the
         // refiner), so it must be carried verbatim rather than as a catalog id.
@@ -217,4 +264,36 @@ async fn resolve_image_caption_path(
     let path =
         resolve_project_confined_asset_path(state, project_id, asset_id, &project_path).await?;
     Ok(path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rewrite task name is spelled in THREE places — here, in the worker's
+    /// `qwen_prompt_rewrite::REWRITE_TASK`, and in the web client's `qwenRewritePrompt` body — and
+    /// the three crates share no dependency that would make a rename propagate.
+    ///
+    /// A mismatch is silent and total: `RefineTask::from_payload` falls through to the generic
+    /// `Rewrite` for any unknown discriminator, so the job would quietly run the Anubis refiner
+    /// under the generic rewrite rules instead of Qwen's frozen template, return prose where the
+    /// client expects a suggestion object, and surface only as a parse failure with no clue why.
+    ///
+    /// This pins the API's half against the literal the worker classifies on. The web half is
+    /// pinned by the end-to-end route tests in `crate::tests::jobs`, which POST the same string the
+    /// client does.
+    #[test]
+    fn the_rewrite_task_name_matches_the_worker() {
+        assert_eq!(QWEN_IMAGE_REWRITE_TASK, "qwen_image_rewrite");
+    }
+
+    /// The rewrite's reference ceiling is the RENDER's ceiling, and deliberately not the mood
+    /// board's. Asserting both together is what stops a future "unify the caps" cleanup from
+    /// silently cutting what the rewriter is allowed to see — at which point its `<imageN>`
+    /// numbering would stop matching the references the render conditions on.
+    #[test]
+    fn the_rewrite_ceiling_is_the_renders_not_the_mood_boards() {
+        assert_eq!(MAX_QWEN_REWRITE_IMAGES, 10);
+        assert_eq!(MAX_MOOD_BOARD_IMAGES, 6);
+    }
 }

@@ -1,5 +1,6 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
+import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -38,6 +39,11 @@ export function buildImageJobAdvanced(state) {
     // Caption upsampling (sc-6135).
     promptEnhance,
     enhancePrompt,
+    // Transparency / RGBA output (sc-24113). `selectedModel` is the CAPABILITY source: the
+    // fragment is re-derived against the currently selected model, so a sticky `true` carried over
+    // from an alpha-capable model can never leak onto one that would refuse it.
+    selectedModel,
+    transparentBackground,
     // Boogu precision (sc-6568) + quant-tier A/B (sc-8515).
     precisionToggle,
     bf16Precision,
@@ -157,6 +163,21 @@ export function buildImageJobAdvanced(state) {
     // makes that invariant load-bearing so a future manifest change can never emit both
     // mlxQuantize spreads for one model (the tier picker below would win the object-spread
     // race, but we never render/emit both).
+    // Transparency (sc-24113). Emits `transparentBackground: true` ONLY for a genuine request on
+    // an alpha-capable model; an opaque render puts nothing new on the wire, so every existing
+    // lane's payload stays byte-identical.
+    //
+    // Written as a literal-key ternary rather than as `...transparencyAdvanced(...)` because the
+    // `every_advanced_key_the_studio_can_emit_is_classified` coverage lint (workflow_share.rs)
+    // reads this object's keys STATICALLY: a spread of a call expression hides every key it
+    // contributes, so the knob would silently stop being classified — and a knob this lint cannot
+    // see is a knob that can silently stop travelling. `qwenAlpha.js` still owns the CAPABILITY
+    // predicate, which is the half that must not drift; `transparentBackground` is a stable
+    // SceneWorks request axis (not one of the provisional engine-side names), so spelling it here
+    // costs nothing.
+    ...(transparentBackground && modelSupportsAlphaOutput(selectedModel)
+      ? { transparentBackground: true }
+      : {}),
     ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
     // Quant-tier A/B (sc-8515) + on-disk tier fidelity (sc-12090): send the resolved tier's
     // mlxQuantize (bf16→0, q8→8, q4→4) whenever the tier state maps to a known quant value —

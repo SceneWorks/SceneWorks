@@ -739,6 +739,147 @@ pub fn hard_min_steps(model_manifest_entry: &JsonObject) -> Option<u32> {
         .and_then(|floor| u32::try_from(floor).ok())
 }
 
+/// `limits.maxReferenceAssets` on an IMAGE model — the ordered reference list's ceiling — or
+/// `None` for **no declared cap** (sc-24113, epic 24107).
+///
+/// The image sibling of [`reference_limit_error`], and deliberately NOT that function: the video
+/// one judges three lists with video field names and, crucially, DEFAULTS `images` to 8. A default
+/// is right there (every video model really does take references) and wrong here — most image
+/// models take none at all, and an absent key on the image lane must mean "this gate has no
+/// opinion", so every already-shipped image model is byte-for-byte unchanged. The per-family
+/// refusals that exist today (the worker's `MAX_EDIT_REFERENCES`, Krea's 2, FLUX.2's 5) keep
+/// working exactly as they do; this only adds an enqueue-time 400 for a model that declares a
+/// number, so the user hears about it before a job is created rather than after one fails.
+///
+/// Qwen-Image 2.1 is the first image model to declare one: its edit path takes 1–10 ORDERED
+/// references (S3 edit contract) and the engine refuses an 11th by name at `validate`.
+pub fn image_max_reference_assets(model_manifest_entry: &JsonObject) -> Option<usize> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("maxReferenceAssets"))
+        .and_then(Value::as_u64)
+        .and_then(|cap| usize::try_from(cap).ok())
+}
+
+/// Reject an image request that supplies more references than the model declares, or `None`.
+///
+/// Reject, never truncate. Dropping the 11th reference would change the render — and for this
+/// family it would change it twice over, because the ordered list is semantic: the template numbers
+/// the images (`<image1>` …) and block-causal attention makes each one visible only to what follows,
+/// so silently shortening the list re-numbers every reference after the cut.
+pub fn image_reference_limit_error(
+    model: &str,
+    references: usize,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let cap = image_max_reference_assets(model_manifest_entry)?;
+    (references > cap).then(|| {
+        if cap == 0 {
+            format!(
+                "{model} takes no reference images, but this request supplies {references}. \
+                 Remove referenceAssetIds, or choose a model that conditions on references."
+            )
+        } else {
+            format!(
+                "{model} takes up to {cap} reference images, but this request supplies \
+                 {references}. Reduce referenceAssetIds to {cap} or fewer."
+            )
+        }
+    })
+}
+
+/// A model's declared free-size envelope for IMAGE generation (sc-24113): the inclusive
+/// `[limits.minDimension, limits.maxDimension]` range and the `limits.requiresDimensionsMultipleOf`
+/// grid, each `None` when the model declares nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImageDimensionEnvelope {
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+    pub multiple: Option<u32>,
+}
+
+/// Read the declared envelope off a manifest entry.
+///
+/// Every field is independently optional, and an absent one means the global API bounds still
+/// decide that edge. That is what keeps this safe to run on EVERY image enqueue: a model declaring
+/// nothing gets exactly the 256..=4096 it always had.
+///
+/// Values that could not be satisfied are dropped rather than enforced, the same typo'd-manifest
+/// tolerance [`hard_min_steps`] takes: a zero/negative/fractional bound or a `multiple` of 0 or 1
+/// is not a constraint, so it falls back to "undeclared" instead of bricking the model.
+pub fn image_dimension_envelope(model_manifest_entry: &JsonObject) -> ImageDimensionEnvelope {
+    let Some(limits) = model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+    else {
+        return ImageDimensionEnvelope::default();
+    };
+    let read = |key: &str, floor: u64| {
+        limits
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|value| *value >= floor)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    ImageDimensionEnvelope {
+        min: read("minDimension", 1),
+        max: read("maxDimension", 1),
+        multiple: read("requiresDimensionsMultipleOf", 2),
+    }
+}
+
+/// Reject an image request whose geometry falls outside the model's declared envelope, or `None`.
+///
+/// Reject, never coerce. Image dimensions have always COERCED silently in this codebase (the video
+/// path floors to a grid, the worker refits), and that is precisely why a wrong size reached the
+/// engine unnoticed for so long — sc-12400 named the same failure for `defaults.resolution`. A user
+/// who typed 2800 into the free Width box gets told 2752 is the ceiling; they do not get a 2752
+/// render they did not ask for.
+///
+/// `fallback_min` / `fallback_max` are the caller's own blanket bounds, applied to any axis the
+/// model does not declare. They are parameters rather than constants here because this crate has no
+/// business knowing the API's envelope — and because passing them explicitly is what lets a
+/// DECLARING model legitimately go BELOW the blanket floor (2.1 renders from 32 px, where the
+/// API-wide floor is 256) without that floor being lowered for every model that declares nothing.
+pub fn image_dimension_error(
+    model: &str,
+    width: u32,
+    height: u32,
+    model_manifest_entry: &JsonObject,
+    fallback_min: u32,
+    fallback_max: u32,
+) -> Option<String> {
+    let envelope = image_dimension_envelope(model_manifest_entry);
+    let min = envelope.min.unwrap_or(fallback_min);
+    let max = envelope.max.unwrap_or(fallback_max);
+    for (value, axis) in [(width, "width"), (height, "height")] {
+        if value < min {
+            return Some(format!(
+                "{model} renders no smaller than {min} px per side; this request asks for a \
+                 {axis} of {value}."
+            ));
+        }
+        if value > max {
+            return Some(format!(
+                "{model} renders no larger than {max} px per side; this request asks for a \
+                 {axis} of {value}."
+            ));
+        }
+        if let Some(multiple) = envelope.multiple {
+            if !value.is_multiple_of(multiple) {
+                return Some(format!(
+                    "{model} renders on a {multiple}-pixel grid; this request's {axis} of {value} \
+                     is not a multiple of {multiple}. The nearest are {} and {}.",
+                    value - value % multiple,
+                    value - value % multiple + multiple
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// `limits.steps` — the discrete set of denoise step counts a model advertises — or `None` for
 /// **no menu**, meaning any count the model's other bounds allow.
 ///
@@ -2050,6 +2191,178 @@ mod tests {
     fn steps_menu_message(entry: &JsonObject, steps: u32) -> String {
         steps_limit_error("some_distilled", steps, entry)
             .unwrap_or_else(|| panic!("{steps} steps must be refused by the declared menu"))
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Image request limits (sc-24113, epic 24107) — the readers Qwen-Image 2.1's control surface
+    // needs, each of which must be INERT for a model that declares nothing.
+    // ----------------------------------------------------------------------------------------
+
+    /// The `limits` block Qwen-Image 2.1 ships, transcribed from the manifest. Kept as a literal
+    /// rather than read out of `builtin.models.jsonc` so a failure here says which VALUE moved,
+    /// while the manifest-audit tests own the "the file still says this" half.
+    fn qwen_image_2_1_limits() -> JsonObject {
+        payload(json!({
+            "limits": {
+                "resolutions": [
+                    "2048x2048", "2400x1792", "1792x2400", "2528x1696",
+                    "1696x2528", "2752x1536", "1536x2752"
+                ],
+                "count": [1, 2, 4, 8],
+                "minDimension": 32,
+                "maxDimension": 2752,
+                "requiresDimensionsMultipleOf": 32,
+                "maxReferenceAssets": 10,
+                "hardMinSteps": 2,
+                "samplers": ["default"],
+                "schedulers": ["default"]
+            }
+        }))
+    }
+
+    #[test]
+    fn an_image_model_that_declares_no_limits_is_untouched_by_the_new_gates() {
+        // The whole safety argument for running these on EVERY image enqueue. A model with no
+        // `limits` block at all, and one with a `limits` block that names none of these keys, must
+        // both behave exactly as they did before the readers existed.
+        for entry in [payload(json!({})), payload(json!({ "limits": {} }))] {
+            assert_eq!(image_max_reference_assets(&entry), None);
+            assert_eq!(image_reference_limit_error("m", 99, &entry), None);
+            assert_eq!(
+                image_dimension_envelope(&entry),
+                ImageDimensionEnvelope::default()
+            );
+            // With nothing declared, the caller's blanket bounds decide — and they decide exactly
+            // as the old global check did.
+            assert_eq!(
+                image_dimension_error("m", 1024, 1024, &entry, 256, 4096),
+                None
+            );
+            assert!(image_dimension_error("m", 255, 1024, &entry, 256, 4096).is_some());
+            assert!(image_dimension_error("m", 1024, 4097, &entry, 256, 4096).is_some());
+            // ... including an off-grid size, which nobody declared a grid for.
+            assert_eq!(
+                image_dimension_error("m", 1023, 777, &entry, 256, 4096),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn the_declared_envelope_lets_a_model_render_below_the_blanket_floor() {
+        // 32 px is BELOW the API's historical 256 floor. Declaring it is the only thing that
+        // admits it, which is why the floor became a per-model fallback rather than a constant.
+        let entry = qwen_image_2_1_limits();
+        assert_eq!(
+            image_dimension_envelope(&entry),
+            ImageDimensionEnvelope {
+                min: Some(32),
+                max: Some(2752),
+                multiple: Some(32),
+            }
+        );
+        assert_eq!(
+            image_dimension_error("qwen_image_2_1", 32, 32, &entry, 256, 4096),
+            None
+        );
+        // ... and the declared ceiling binds well below the blanket 4096.
+        let message = image_dimension_error("qwen_image_2_1", 2784, 2048, &entry, 256, 4096)
+            .expect("2784 is past the declared 2752 ceiling");
+        assert!(message.contains("2752"), "{message}");
+        assert!(message.contains("width"), "{message}");
+        // The smallest legal size is refused one step below.
+        let message = image_dimension_error("qwen_image_2_1", 2048, 16, &entry, 256, 4096)
+            .expect("16 is below the declared 32 floor");
+        assert!(message.contains("32"), "{message}");
+        assert!(message.contains("height"), "{message}");
+    }
+
+    #[test]
+    fn an_off_grid_size_is_refused_with_the_two_legal_neighbours_named() {
+        // An off-stride size used to pass every check in the app and die inside the provider. The
+        // message has to be actionable, which means naming where to go rather than only what is
+        // wrong: 2050 sits between 2048 and 2080.
+        let entry = qwen_image_2_1_limits();
+        let message = image_dimension_error("qwen_image_2_1", 2050, 2048, &entry, 256, 4096)
+            .expect("2050 is not a multiple of 32");
+        assert!(message.contains("32-pixel grid"), "{message}");
+        assert!(message.contains("2048"), "{message}");
+        assert!(message.contains("2080"), "{message}");
+        // Every shipped preset is on the grid and inside the envelope, which is the claim the
+        // Aspect menu depends on.
+        for preset in [
+            (2048, 2048),
+            (2400, 1792),
+            (1792, 2400),
+            (2528, 1696),
+            (1696, 2528),
+            (2752, 1536),
+            (1536, 2752),
+        ] {
+            assert_eq!(
+                image_dimension_error("qwen_image_2_1", preset.0, preset.1, &entry, 256, 4096),
+                None,
+                "{preset:?} is a shipped preset and must be legal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_eleventh_reference_is_refused_by_count_rather_than_truncated() {
+        // Truncation is not a smaller render for this family: the template numbers the images and
+        // block-causal attention makes each visible only to what follows, so dropping one
+        // renumbers the rest. Ten is legal, eleven is a refusal that names both numbers.
+        let entry = qwen_image_2_1_limits();
+        assert_eq!(image_max_reference_assets(&entry), Some(10));
+        for count in 0..=10 {
+            assert_eq!(
+                image_reference_limit_error("qwen_image_2_1", count, &entry),
+                None,
+                "{count} references are within the declared cap"
+            );
+        }
+        let message = image_reference_limit_error("qwen_image_2_1", 11, &entry)
+            .expect("an 11th reference must be refused");
+        assert!(message.contains("up to 10"), "{message}");
+        assert!(message.contains("11"), "{message}");
+        assert!(message.contains("referenceAssetIds"), "{message}");
+    }
+
+    #[test]
+    fn a_declared_cap_of_zero_says_this_model_takes_none() {
+        // Distinct from an ABSENT key, which means "no opinion". A model that declares 0 is saying
+        // something, and the message has to be different or the user is told to "reduce to 0".
+        let entry = payload(json!({ "limits": { "maxReferenceAssets": 0 } }));
+        assert_eq!(image_max_reference_assets(&entry), Some(0));
+        let message = image_reference_limit_error("plain_model", 1, &entry).expect("refused");
+        assert!(message.contains("takes no reference images"), "{message}");
+        assert_eq!(image_reference_limit_error("plain_model", 0, &entry), None);
+    }
+
+    #[test]
+    fn an_unsatisfiable_declared_bound_falls_back_to_undeclared_rather_than_bricking_the_model() {
+        // The same typo'd-manifest tolerance `hard_min_steps` takes. A zero/negative/fractional
+        // bound, or a grid of 0 or 1, is not a constraint anyone could act on — and enforcing one
+        // would make the model un-renderable rather than merely un-constrained.
+        for bad in [
+            json!({ "limits": { "minDimension": 0, "maxDimension": 0, "requiresDimensionsMultipleOf": 0 } }),
+            json!({ "limits": { "minDimension": -8, "maxDimension": -8, "requiresDimensionsMultipleOf": 1 } }),
+            json!({ "limits": { "minDimension": 32.5, "maxDimension": 2752.0, "requiresDimensionsMultipleOf": 32.0 } }),
+            json!({ "limits": { "minDimension": "32", "maxDimension": "2752", "requiresDimensionsMultipleOf": "32" } }),
+        ] {
+            let entry = payload(bad.clone());
+            assert_eq!(
+                image_dimension_envelope(&entry),
+                ImageDimensionEnvelope::default(),
+                "{bad}"
+            );
+        }
+        // A `multiple` of 1 in particular is a no-op grid, not a grid that rejects everything.
+        let entry = payload(json!({ "limits": { "requiresDimensionsMultipleOf": 1 } }));
+        assert_eq!(
+            image_dimension_error("m", 1023, 777, &entry, 256, 4096),
+            None
+        );
     }
 
     #[test]

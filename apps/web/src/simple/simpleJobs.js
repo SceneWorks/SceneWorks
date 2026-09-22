@@ -211,6 +211,11 @@ export function buildSimpleImageRequest({
   loras: selectedLoras = [],
   quantTier = "",
   tierExplicit = false,
+  // sc-24113 — transparency, and the model it is judged against. Simple exposes the model, so it
+  // exposes the toggle; the CAPABILITY check happens in `buildImageJobRequest` -> `transparencyAdvanced`,
+  // the one place either shell decides whether the request field is emitted.
+  selectedModel = null,
+  transparentBackground = false,
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
@@ -257,6 +262,8 @@ export function buildSimpleImageRequest({
     styleId: styleId || null,
     quantTier,
     tierExplicit,
+    selectedModel,
+    transparentBackground,
   });
 }
 

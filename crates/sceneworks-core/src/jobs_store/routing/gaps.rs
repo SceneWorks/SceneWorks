@@ -1081,13 +1081,20 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "base Qwen-Image reference / edit_image conditioning is not available in the native flow on Mac unless it is the strict-pose ControlNet tier.",
             Some("epic 3401"),
         ),
-        // sc-24108: 2.1 is text-to-image ONLY at this pin — the provider declares an empty
-        // conditioning set, so unlike base `qwen_image` there is not even a strict-pose tier to
-        // fall through to. Edit conditioning is the separate sc-24110 work.
+        // sc-24113 narrows the sc-24108 arm. It said "text-to-image only", which was true for
+        // exactly as long as the provider declared an empty conditioning set; sc-24110 gave it
+        // Reference AND MultiReference, so references and the editor's working image now route
+        // normally and only the carriers 2.1 genuinely has no shape for land here.
+        //
+        // The message names the WORKAROUND rather than just the refusal, because for this family
+        // there is a real one and it is not obvious: 2.1 has no mask tensor at all, so a mask is
+        // expressed as an ordinary extra reference the prompt names, and a local edit is an
+        // annotation drawn into the reference itself (which the Image Editor's paint tools already
+        // produce). Sending the user to a different model would be the wrong advice.
         "qwen_image_2_1" => UnsupportedReason::new(
             Some(model),
-            "reference / edit / pose conditioning",
-            "Qwen Image 2.1 is text-to-image only in this release — it accepts no reference, source, mask or pose conditioning. Use Qwen Image Edit for a reference-conditioned render.",
+            "mask / pose / strict-control conditioning",
+            "Qwen Image 2.1 takes up to 10 ordered reference images, but no mask, pose or ControlNet input — it has no mask tensor and no strict-control tier. To constrain an edit, draw the marking into the reference image itself, or attach the mask as another reference and name it in the prompt (\"use the second image as a mask\").",
             Some("epic 24107"),
         ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(

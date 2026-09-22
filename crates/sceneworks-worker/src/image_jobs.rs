@@ -2713,6 +2713,29 @@ pub(crate) fn write_image_asset(
             .as_ref(),
         );
     }
+    // sc-24113 — the transparency request, resolved and recorded at the one funnel every generated
+    // image passes through.
+    //
+    // Two things happen here and they are deliberately separate:
+    //
+    //  1. RESOLVE + REFUSE. `resolve_output_channels` turns the user's toggle into a channel count,
+    //     and refuses by name when the model cannot emit alpha at all. Doing it at the funnel means
+    //     no lane can add a transparency path that skips the check.
+    //  2. ROUND-TRIP. The resolved count is stamped into `raw_settings`, so the workflow PNG and the
+    //     recipe carry what was ASKED FOR — which is what makes a re-run reproduce a cut-out rather
+    //     than quietly re-rendering it opaque.
+    //
+    // The count is NOT compared against the buffer the engine returned. At this pin it could not
+    // be: SceneWorks pins an inference revision that predates the 2.1 provider, so a transparency
+    // request never reaches an engine that could honour it, and asserting equality would fail every
+    // job on a mismatch the build cannot avoid. The egress below is already channel-driven —
+    // `from_engine_buffer` types whatever arrives — so the day the pin carries the RGBA contract,
+    // four channels flow through unchanged and this stamp starts describing a render that really is
+    // transparent. See `crate::qwen_alpha` for the one-line swap that closes it.
+    let requested_channels =
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
+    crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
+
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
     let generated = GeneratedPixels::from_engine_buffer(width, height, pixels)?;

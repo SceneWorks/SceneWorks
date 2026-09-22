@@ -87,6 +87,7 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: Refine
         .unwrap_or(match task {
             RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
             RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
+            RefineTask::QwenImageRewrite => crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS,
             RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
             RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
         })
@@ -141,6 +142,15 @@ pub(crate) enum RefineTask {
     /// Selected by the `task` discriminator like the caption tasks, because a plan is a different
     /// JOB from a prompt rewrite rather than a different target model.
     FilmPlan,
+    /// Qwen-Image 2.1's OFFICIAL prompt rewriting (sc-24113, epic 24107): the user's brief or edit
+    /// instruction → one strict JSON object carrying a rewritten prompt AND an aspect-ratio
+    /// suggestion, produced by whichever of the two published PE checkpoints the request selects.
+    ///
+    /// It is a task rather than a target-model branch of [`Rewrite`](RefineTask::Rewrite) for the
+    /// same reason [`FilmPlan`](RefineTask::FilmPlan) is: it runs a DIFFERENT checkpoint with a
+    /// DIFFERENT (vendor-frozen) system prompt and returns a structured document, none of which the
+    /// generic medium-keyed rewrite rules describe. See [`crate::qwen_prompt_rewrite`].
+    QwenImageRewrite,
 }
 
 #[cfg(any(
@@ -157,6 +167,9 @@ impl RefineTask {
             t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
             t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
             t if t.eq_ignore_ascii_case("film_plan") => RefineTask::FilmPlan,
+            t if t.eq_ignore_ascii_case(crate::qwen_prompt_rewrite::REWRITE_TASK) => {
+                RefineTask::QwenImageRewrite
+            }
             _ => RefineTask::Rewrite,
         }
     }
@@ -165,6 +178,17 @@ impl RefineTask {
     /// so it requires an `imagePath`/`referencePath` and no `prompt`.
     pub(crate) fn is_vision(self) -> bool {
         matches!(self, RefineTask::ImageCaption | RefineTask::ImageDescribe)
+    }
+
+    /// Whether the task READS reference images when the payload carries them.
+    ///
+    /// A superset of [`is_vision`](RefineTask::is_vision), and the distinction is the point. A
+    /// vision task is *driven* by its images: no prompt is required and at least one image must be
+    /// present. The Qwen rewrite is driven by the user's TEXT and merely *accepts* images — the
+    /// prompt is always required, and zero references is not an error but the signal that selects
+    /// the text-to-image rewriter instead of the editing one.
+    pub(crate) fn takes_reference_images(self) -> bool {
+        self.is_vision() || matches!(self, RefineTask::QwenImageRewrite)
     }
 
     /// A caption task emits a JSON-constrained Ideogram caption (the decode is grammar-masked) and is
@@ -178,7 +202,7 @@ impl RefineTask {
     /// outermost `{ … }` instead of unwrapping surrounding quotes. The caption tasks and the film
     /// plan are; the free-text rewrite and the prose describe are not.
     pub(crate) fn emits_json(self) -> bool {
-        self.is_caption() || matches!(self, RefineTask::FilmPlan)
+        self.is_caption() || matches!(self, RefineTask::FilmPlan | RefineTask::QwenImageRewrite)
     }
 
     /// Sampling temperature: the caption tasks and the prose describe sample cool for a faithful,
@@ -190,6 +214,9 @@ impl RefineTask {
             // A plan is a structured document checked field by field, and a repair round costs a
             // whole decode: sample cooler still so field names and menu values come back exactly.
             RefineTask::FilmPlan => 0.3,
+            // NOT a SceneWorks choice: 1.0 is the temperature both PE model cards publish, and the
+            // rewriters were tuned at it. Frozen with `top_p`/`top_k` in `qwen_prompt_rewrite`.
+            RefineTask::QwenImageRewrite => crate::qwen_prompt_rewrite::REWRITE_TEMPERATURE,
         }
     }
 
@@ -200,6 +227,7 @@ impl RefineTask {
             RefineTask::ImageDescribe => "Describing image…",
             RefineTask::MagicPrompt => "Expanding to a caption…",
             RefineTask::FilmPlan => "Planning shots…",
+            RefineTask::QwenImageRewrite => "Rewriting prompt…",
             RefineTask::Rewrite => "Refining prompt…",
         }
     }
@@ -210,6 +238,9 @@ impl RefineTask {
             RefineTask::MagicPrompt | RefineTask::ImageCaption => "Caption ready.",
             RefineTask::ImageDescribe => "Description ready.",
             RefineTask::FilmPlan => "Shot plan ready.",
+            // "Ready to review", not "applied": the rewrite is a suggestion the user edits and
+            // accepts. The copy is part of the guarantee that nothing is replaced silently.
+            RefineTask::QwenImageRewrite => "Rewritten prompt ready to review.",
             RefineTask::Rewrite => "Prompt refined.",
         }
     }
@@ -1057,7 +1088,7 @@ pub(crate) async fn run_prompt_refine_job(
     // BEFORE opening it — rejecting `..` traversal and any absolute path outside the app data dir / HF
     // hub cache. The order of `imagePaths` is preserved so the model reads the board in the order the
     // user assembled it. N is bounded API-side (`MAX_MOOD_BOARD_IMAGES`).
-    let image_refs: Vec<gen_core::core_llm::ImageRef> = if task.is_vision() {
+    let image_refs: Vec<gen_core::core_llm::ImageRef> = if task.takes_reference_images() {
         let paths: Vec<String> = match payload.get("imagePaths").and_then(Value::as_array) {
             Some(items) => items
                 .iter()
@@ -1076,11 +1107,27 @@ pub(crate) async fn run_prompt_refine_job(
                 .into_iter()
                 .collect(),
         };
-        if paths.is_empty() {
+        // A VISION task has nothing to look at without an image, so an empty list is a payload
+        // error. The Qwen rewrite is different by design: zero references is the legitimate
+        // text-to-image case, and it is what selects the T2I rewriter below.
+        if paths.is_empty() && task.is_vision() {
             return Err(WorkerError::InvalidPayload(
                 "This task requires at least one non-empty `imagePath`/`imagePaths` reference image."
                     .to_owned(),
             ));
+        }
+        // The rewrite must see EXACTLY the ordered list the render will condition on, capped the
+        // same way (S3 edit contract: 1–10 ordered references). Over the cap is a refusal rather
+        // than a silent truncation: a rewrite whose `<imageN>` numbering does not match the render's
+        // references would name the wrong picture.
+        if task == RefineTask::QwenImageRewrite
+            && paths.len() > crate::qwen_prompt_rewrite::MAX_REWRITE_REFERENCES
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Qwen Image 2.1 prompt rewriting takes at most {} reference images; {} were sent.",
+                crate::qwen_prompt_rewrite::MAX_REWRITE_REFERENCES,
+                paths.len()
+            )));
         }
         let safe_paths = paths
             .iter()
@@ -1100,13 +1147,29 @@ pub(crate) async fn run_prompt_refine_job(
     // More than one reference image switches the vision instruction to mood-board SYNTHESIS (one prompt
     // capturing the shared aesthetic) rather than describing a single picture.
     let multi_reference = image_refs.len() > 1;
+    // Captured before `image_refs` is moved into the chat turn. The rewrite's `ratio_follow`
+    // ("<image2>") is only meaningful against the list it was shown, so the result block needs the
+    // count to reject an index past it.
+    let image_reference_count = image_refs.len();
+    // sc-24113: which of the two published Qwen rewriters this request selects, decided by the
+    // REQUEST — references present means the editing rewriter — and never by a user-facing picker.
+    // `None` for every other task.
+    let qwen_rewriter = (task == RefineTask::QwenImageRewrite)
+        .then(|| crate::qwen_prompt_rewrite::Rewriter::for_reference_count(image_refs.len()));
     let model = payload
         .get("model")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_REFINE_MODEL)
-        .to_owned();
+        .map(str::to_owned)
+        // A rewrite defaults to its own selected checkpoint, not to the generic Anubis refiner.
+        // An explicit `payload.model` still wins, which is how the real-weight smoke pins a local
+        // snapshot path — the same override the film planner uses.
+        .unwrap_or_else(|| {
+            qwen_rewriter
+                .map(|rewriter| rewriter.repo().to_owned())
+                .unwrap_or_else(|| DEFAULT_REFINE_MODEL.to_owned())
+        });
     // The TARGET model the refined prompt is destined for (the catalog id the studio has selected),
     // as distinct from `model` above, which is the refiner CHECKPOINT that does the rewriting. The
     // API forwards it as `modelId` for every refine request; sc-17162 is the first reader.
@@ -1129,6 +1192,11 @@ pub(crate) async fn run_prompt_refine_job(
     let temperature = task.temperature();
     let work_message = task.work_message();
     let done_message = task.done_message();
+
+    // Resolved BEFORE the message match (it used to sit after it) because one task's system prompt
+    // is not a compiled-in asset: the Qwen rewriters ship their published template inside the
+    // snapshot as `system_prompt.txt`, so building their turn needs the model directory.
+    let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
 
     // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
     // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
@@ -1154,6 +1222,30 @@ pub(crate) async fn run_prompt_refine_job(
         // sc-22713: the composed planning request IS the user turn; the embedded asset carries the
         // JSON contract. No guide/workflow assembly — a plan is not a prompt rewrite.
         RefineTask::FilmPlan => build_film_plan_messages(&original_prompt),
+        // sc-24113. The system prompt is Qwen's OWN published template, read out of the installed
+        // snapshot and verified against the frozen revision's SHA-256 — not a SceneWorks rewrite
+        // and not vendored into this repo (`qwen_prompt_rewrite`'s module docs give the licence and
+        // freshness reasons). The user turn is the brief verbatim; for an edit the ordered
+        // references ride alongside it as `Content::Image` blocks, attached below exactly as the
+        // caption tasks attach theirs.
+        RefineTask::QwenImageRewrite => {
+            let rewriter = qwen_rewriter.expect("the rewrite task always selects a rewriter");
+            // The rewriters are keyed to ONE image model. Serving a different target's request with
+            // Qwen's template would hand the user a rewrite tuned for a model they are not running.
+            if let Some(target) = target_model_id.as_deref() {
+                if target != crate::qwen_prompt_rewrite::REWRITE_TARGET_MODEL {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "The Qwen Image 2.1 prompt rewriters only apply to `{}`; this request \
+                         targets `{target}`.",
+                        crate::qwen_prompt_rewrite::REWRITE_TARGET_MODEL
+                    )));
+                }
+            }
+            (
+                crate::qwen_prompt_rewrite::load_system_prompt(&weights_dir, rewriter)?,
+                original_prompt.clone(),
+            )
+        }
         RefineTask::Rewrite => {
             let guide = payload
                 .get("guide")
@@ -1175,7 +1267,6 @@ pub(crate) async fn run_prompt_refine_job(
             )
         }
     };
-    let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
     // + UI architecture pill (mirrors the image/video paths), not the gpu-id device label.
     let backend = REFINE_BACKEND;
@@ -1295,10 +1386,23 @@ pub(crate) async fn run_prompt_refine_job(
                     messages,
                     // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
                     // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
-                    sampling: Sampling {
-                        temperature,
-                        top_p: 0.9,
-                        ..Sampling::default()
+                    //
+                    // sc-24113: the Qwen rewriters are the one task that does NOT take the house
+                    // sampler. Their model cards publish the full recipe the checkpoints were tuned
+                    // at (temperature 1.0, top_p 0.95, top_k 20), and it is frozen verbatim in
+                    // `qwen_prompt_rewrite` beside the template it belongs to.
+                    sampling: match qwen_rewriter {
+                        Some(_) => Sampling {
+                            temperature,
+                            top_p: crate::qwen_prompt_rewrite::REWRITE_TOP_P,
+                            top_k: crate::qwen_prompt_rewrite::REWRITE_TOP_K,
+                            ..Sampling::default()
+                        },
+                        None => Sampling {
+                            temperature,
+                            top_p: 0.9,
+                            ..Sampling::default()
+                        },
                     },
                     max_new_tokens,
                     seed: None,
@@ -1522,6 +1626,43 @@ pub(crate) async fn run_prompt_refine_job(
             ));
         }
     }
+    // sc-24113: a Qwen rewrite's reply is a JSON object, not the prompt. Parse it HERE so the job
+    // result carries what the UI actually needs — the rewritten prompt as plain editable text in the
+    // usual `refinedPrompt` slot, plus a separate `rewriteSuggestion` block for the aspect-ratio
+    // offer — rather than making every caller re-parse Qwen's schema. `originalPrompt` is untouched,
+    // which is the guarantee that nothing is replaced silently: the two sit side by side and the
+    // user chooses.
+    //
+    // A malformed reply is a typed engine error, not a degraded path: offering an empty or garbled
+    // "rewrite" that Apply would paste over the user's prompt is worse than failing the action.
+    let mut result_refined = refined.clone();
+    let mut rewrite_suggestion = None;
+    if let Some(rewriter) = qwen_rewriter {
+        let suggestion = crate::qwen_prompt_rewrite::parse_rewrite(&refined).map_err(|error| {
+            WorkerError::Engine(format!(
+                "The Qwen Image 2.1 prompt rewriter ({}) returned output this build cannot read: \
+                 {error}",
+                rewriter.repo()
+            ))
+        })?;
+        rewrite_suggestion = Some(crate::qwen_prompt_rewrite::suggestion_result_block(
+            &suggestion,
+            rewriter,
+            image_reference_count,
+        ));
+        result_refined = suggestion.rewritten_prompt;
+    }
+    let mut result = refine_result(
+        &original_prompt,
+        &result_refined,
+        output.thinking.as_deref(),
+        &model,
+        backend,
+        thinking_mode_name,
+    );
+    if let Some(block) = rewrite_suggestion {
+        result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
+    }
     update_job(
         api,
         &job.id,
@@ -1530,14 +1671,7 @@ pub(crate) async fn run_prompt_refine_job(
             ProgressStage::Completed,
             1.0,
             done_message,
-            Some(refine_result(
-                &original_prompt,
-                &refined,
-                output.thinking.as_deref(),
-                &model,
-                backend,
-                thinking_mode_name,
-            )),
+            Some(result),
             backend,
         ),
     )
@@ -1765,6 +1899,93 @@ mod tests {
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
+    /// sc-24113: the Qwen rewrite's reply travels the SAME cleanup the other JSON tasks take, and
+    /// then parses into an editable prompt plus an aspect suggestion.
+    ///
+    /// This is the seam the two unit-tested halves meet at, and it is the one that would break
+    /// silently: `qwen_prompt_rewrite::parse_rewrite` is tested against an isolated object, but the
+    /// model does not emit one — both PE checkpoints emit a REASONING BLOCK first, and the T2I
+    /// system prompt's own instruction ("Return one strictly valid JSON object on a single line")
+    /// is routinely wrapped in a code fence anyway. `clean_json_output` is what bridges them, so
+    /// exercising them together over a realistic raw reply is what proves the task is wired to the
+    /// right cleanup rather than to `clean_refine_output` (which would unwrap quotes and hand the
+    /// parser prose).
+    #[test]
+    fn a_raw_rewriter_reply_survives_the_reasoning_block_and_the_code_fence() {
+        use crate::qwen_prompt_rewrite::{parse_rewrite, suggested_resolution, Rewriter};
+
+        // A T2I reply as the checkpoint actually emits it.
+        let raw = "<think>\nThe user wants a wide harbour. Step 2 fixes the frame: horizontal, so \
+                   3:2 unless a wider cine framing is wanted. They said \"cinematic\", so 16:9.\n\
+                   </think>\n```json\n{\"rewritten_prompt\": \"A wide harbour at dusk, fishing \
+                   boats moored along a stone quay\", \"wh_ratio\": \"16:9\"}\n```";
+        let cleaned = clean_json_output(raw);
+        let suggestion = parse_rewrite(&cleaned).expect("the cleaned reply parses");
+        assert_eq!(
+            suggestion.rewritten_prompt,
+            "A wide harbour at dusk, fishing boats moored along a stone quay"
+        );
+        assert_eq!(suggested_resolution(&suggestion), Some("2752x1536"));
+
+        // The task classifies from the discriminator, emits JSON (so it takes the cleanup above
+        // rather than the prose one), and reads reference images when they are present.
+        let task = RefineTask::from_payload(Some("qwen_image_rewrite"));
+        assert_eq!(task, RefineTask::QwenImageRewrite);
+        assert!(task.emits_json(), "the rewrite must take the JSON cleanup");
+        assert!(task.takes_reference_images());
+        // ... but it is NOT a vision task: the prompt stays required and zero references is legal,
+        // which is the distinction that selects between the two rewriters.
+        assert!(!task.is_vision());
+        assert!(!task.is_caption());
+
+        // An I2I reply, with the edit template's third field.
+        let raw = "<think>\nPreserve the courier, replace the backdrop.\n</think>\n\
+                   {\"rewritten_prompt\": \"Replace the grey studio backdrop with a sunlit alley\", \
+                   \"wh_ratio\": \"\", \"ratio_follow\": \"<image1>\"}";
+        let suggestion = parse_rewrite(&clean_json_output(raw)).expect("the edit reply parses");
+        assert_eq!(
+            suggestion.rewritten_prompt,
+            "Replace the grey studio backdrop with a sunlit alley"
+        );
+        assert_eq!(suggested_resolution(&suggestion), None);
+
+        // The block the job result carries, assembled the way the completion arm assembles it.
+        let block =
+            crate::qwen_prompt_rewrite::suggestion_result_block(&suggestion, Rewriter::Editing, 2);
+        assert_eq!(block.get("followsReferenceIndex"), Some(&Value::from(0)));
+        assert_eq!(
+            block.get("rewriterModelId"),
+            Some(&Value::from("qwen_image_2_1_pe_i2i"))
+        );
+    }
+
+    /// The rewrite's sampling and token budget are the PUBLISHED recipe, not the house defaults.
+    ///
+    /// Asserted through `RefineTask` (not just the constants) because the wiring is what could
+    /// drift: an arm added to `temperature()` or `resolve_max_new_tokens` that fell through to the
+    /// generic rewrite would silently sample the checkpoints at 0.7/0.9 instead of 1.0/0.95/20.
+    #[test]
+    fn the_rewrite_task_carries_qwens_published_sampling_rather_than_the_house_defaults() {
+        let task = RefineTask::QwenImageRewrite;
+        assert_eq!(
+            task.temperature(),
+            crate::qwen_prompt_rewrite::REWRITE_TEMPERATURE
+        );
+        assert_ne!(task.temperature(), RefineTask::Rewrite.temperature());
+        assert_eq!(
+            resolve_max_new_tokens(&serde_json::Map::new(), task),
+            crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS
+        );
+        // An explicit override still wins, the same escape hatch every other task has.
+        let payload = serde_json::json!({ "maxNewTokens": 256 });
+        assert_eq!(
+            resolve_max_new_tokens(payload.as_object().unwrap(), task),
+            256
+        );
+        // The progress copy says "review", not "applied" — the rewrite is a suggestion.
+        assert!(task.done_message().contains("review"));
+    }
+
     #[test]
     fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
         let result = refine_result(
@@ -3712,6 +3933,116 @@ mod tests {
             cd.get("elements").map(Value::is_array).unwrap_or(false),
             "elements is an array"
         );
+    }
+
+    /// Real-weight smoke for Qwen-Image 2.1's official prompt rewriter (sc-24113, epic 24107).
+    ///
+    /// `#[ignore]` — the checkpoints are OPTIONAL downloads (~18.8 GB each) and never in CI. The
+    /// coordinator owns the run; drive it through the RSS-guarded wrapper rather than by hand:
+    ///
+    ///   REWRITER=t2i scratchpad/sc24113/rewriter_guard.sh    # cap 40 GB, detached
+    ///
+    /// or directly, with the snapshot staged:
+    ///
+    ///   PROMPT_REFINE_SNAPSHOT=~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1-PE-T2I/snapshots/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b \
+    ///     cargo test -p sceneworks-worker --lib --release -- --ignored qwen_prompt_rewrite_real_weights --nocapture
+    ///
+    /// # What this proves that the offline tests cannot
+    ///
+    /// Exactly three things, and deliberately nothing else:
+    ///
+    ///  1. `mlx-llama` really loads a `qwen3_5` 9.41B checkpoint — the hybrid linear-attention
+    ///     decoder routed through `Architecture::Qwen35` — so "the existing LLM lane runs these"
+    ///     stops being an inference from the config and becomes an observation.
+    ///  2. The INSTALLED snapshot's `system_prompt.txt` is the frozen one (the digest check inside
+    ///     `load_system_prompt`), against a real download rather than a fixture.
+    ///  3. A real reply parses: the reasoning block survives `clean_json_output`, and the object
+    ///     yields an editable prompt plus a `wh_ratio` that maps to one of the engine's presets.
+    ///
+    /// It does NOT judge rewrite QUALITY. The template, the rewriter selection, the geometry rules
+    /// and every refusal are covered offline in `crate::qwen_prompt_rewrite`'s own tests, which is
+    /// where a behaviour change should fail first.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight: needs an optional Qwen-Image-2.1-PE checkpoint staged + a Metal device"]
+    fn qwen_prompt_rewrite_real_weights() {
+        use crate::qwen_prompt_rewrite::{
+            load_system_prompt, parse_rewrite, suggested_resolution, Rewriter,
+            REWRITE_MAX_NEW_TOKENS, REWRITE_TEMPERATURE, REWRITE_TOP_K, REWRITE_TOP_P,
+        };
+        use gen_core::core_llm::{
+            LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
+        };
+
+        let weights_dir = std::path::PathBuf::from(
+            std::env::var("PROMPT_REFINE_SNAPSHOT")
+                .expect("set PROMPT_REFINE_SNAPSHOT to the staged PE snapshot directory"),
+        );
+        // Which half is staged decides which template is verified — the same request-shaped choice
+        // production makes, just read off the directory here.
+        let rewriter = if weights_dir.to_string_lossy().contains("PE-I2I") {
+            Rewriter::Editing
+        } else {
+            Rewriter::TextToImage
+        };
+        eprintln!("rewriter={:?} snapshot={}", rewriter, weights_dir.display());
+
+        // (2) The freeze, against a real download.
+        let system = load_system_prompt(&weights_dir, rewriter)
+            .expect("the staged snapshot carries the FROZEN system_prompt.txt");
+        assert!(!system.trim().is_empty());
+
+        let request = TextLlmRequest {
+            messages: vec![
+                Message::system(system),
+                Message::user("a lighthouse on a cliff at dusk".to_owned()),
+            ],
+            // Upstream's published recipe, verbatim.
+            sampling: Sampling {
+                temperature: REWRITE_TEMPERATURE,
+                top_p: REWRITE_TOP_P,
+                top_k: REWRITE_TOP_K,
+                ..Sampling::default()
+            },
+            max_new_tokens: REWRITE_MAX_NEW_TOKENS,
+            seed: None,
+            ..Default::default()
+        };
+
+        // (1) The load. A failure here IS the architecture finding.
+        let refiner = crate::inference_runtime::load_for_model_with(
+            &LoadSpec {
+                source: weights_dir.to_string_lossy().into_owned(),
+                quantize: None,
+            },
+            &ModelRequirements::from_request(&request),
+        )
+        .expect("mlx-llama loads the qwen3_5 PE checkpoint through Architecture::Qwen35");
+
+        let mut sink = |_event: StreamEvent| {};
+        let output = refiner.generate(&request, &mut sink).expect("generate");
+        eprintln!("raw reply:\n{}", output.text);
+
+        // (3) The parse, through the SAME cleanup the job uses.
+        let suggestion = parse_rewrite(&clean_json_output(&output.text))
+            .expect("the reply is the published JSON object");
+        assert!(
+            !suggestion.rewritten_prompt.trim().is_empty(),
+            "an empty rewrite would be offered to Apply and erase the user's prompt"
+        );
+        eprintln!(
+            "rewritten_prompt: {}\nwh_ratio: {:?} -> preset {:?}",
+            suggestion.rewritten_prompt,
+            suggestion.wh_ratio,
+            suggested_resolution(&suggestion)
+        );
+        if !suggestion.wh_ratio.is_empty() {
+            assert!(
+                suggested_resolution(&suggestion).is_some(),
+                "a stated ratio must map to one of the engine's seven presets, got {:?}",
+                suggestion.wh_ratio
+            );
+        }
     }
 
     #[test]

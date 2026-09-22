@@ -3206,10 +3206,29 @@
       "family": "qwen-image-2-1",
       "type": "image",
       "adapter": "qwen_image_2_1",
-      "capabilities": ["text_to_image"],
+      // sc-24113 adds `image_to_image`. Upstream ships ONE pipeline: text-to-image is that pipeline
+      // called with no condition images, and editing / multi-reference / local editing are the SAME
+      // call with 1-10 ORDERED condition images (S3 edit contract). There is no mask tensor, no
+      // strength and no inpaint mode, so `image_inpaint` is deliberately NOT declared — an
+      // annotation is drawn INTO a reference, and a "separate mask" is just another reference the
+      // prompt names.
+      "capabilities": ["text_to_image", "image_to_image"],
       // True-CFG family: the engine takes a real negative branch and a `true_cfg` scale that only
       // engages once a negative prompt is present. Both axes are therefore TRUE, which is what an
       // absent `image` block already means (sc-15299 polarity), so nothing is declared here.
+      //
+      // `supportsAlphaOutput` mirrors the engine's `Capabilities::supports_alpha_output` (S4 RGBA
+      // contract, inference sc-24111): this model can decode straight to four channels, which is
+      // what backs the Image Studio / Image Editor transparency toggle. 2.1's VAE really does
+      // (`QwenImage21Vae::decode_rgba` -> [1, 4, H, W]), the request carries
+      // `output_channels: Rgba`, and the whole SceneWorks egress path already preserves it.
+      //
+      // ⚠️ It is NOT a "transparency mode" — there is no such thing upstream. The VAE is ALWAYS
+      // four-channel; this only says the fourth channel can survive the decode instead of being
+      // composited over white. Whether it holds a cut-out is decided by the PROMPT (the model
+      // card's "the background is transparent" convention), which is why the UI pairs the toggle
+      // with editable prompt wording rather than shipping the toggle alone.
+      "supportsAlphaOutput": true,
       "downloads": [
         // The UPSTREAM diffusers snapshot, pulled directly and whole — no SceneWorks re-host.
         // `Qwen/Qwen-Image-2.1` is a public, UNGATED repo, so there is nothing a mirror would buy
@@ -3391,7 +3410,32 @@
           "2752x1536",
           "1536x2752"
         ],
-        "count": [1, 2, 4],
+        // Up to 8 in one request — the engine's own `max_count` (S1 contract). sc-24113 adds the 8
+        // rung: the earlier [1, 2, 4] was a cost preference, not the engine's ceiling, and the
+        // story's control surface is explicitly "count (max 8)".
+        "count": [1, 2, 4, 8],
+        // The FREE-SIZE envelope (sc-24113), distinct from the seven presets above. The engine's
+        // request bounds are min_size 32 / max_size 2752 on a `RangeCheckedOnGrid { multiple: 32 }`
+        // floor (S1 contract), and all three are now declared rather than inferred:
+        //
+        // * `minDimension` 32 is BELOW the API's blanket 256 floor, which is why that floor became a
+        //   per-model fallback (`HISTORICAL_MIN_IMAGE_DIMENSION`) instead of a global constant. A
+        //   model declaring nothing still gets 256.
+        // * `maxDimension` 2752 is far below the blanket 4096, so an over-cap size that used to
+        //   sail through every check in the app and die in the provider is now a 400 at enqueue.
+        // * `requiresDimensionsMultipleOf` 32 is the request grid. Deriving the range from the
+        //   preset ladder (what `modelDimensionConstraints` did before it had these keys) would have
+        //   given 1536..2752 — the extremes of the seven buckets — which is not the engine's
+        //   envelope and would have refused every legal small size.
+        "minDimension": 32,
+        "maxDimension": 2752,
+        "requiresDimensionsMultipleOf": 32,
+        // The ORDERED reference list's ceiling (sc-24113, S3 edit contract): 1-10 images, in request
+        // order, refused by name at `validate` beyond 10. Declared so the refusal happens at enqueue
+        // with the count named, rather than as a silent truncation in the worker — and truncation is
+        // not a smaller render here but a different one, because the template numbers the images
+        // (`<image1>` ...) and block-causal attention makes each visible only to what follows.
+        "maxReferenceAssets": 10,
         // The engine refuses `steps < 2` outright (S1 contract: DEFAULT_STEPS 40, steps >= 2), and
         // 2 is the smallest schedule with an intermediate sigma — one evaluation is a single Euler
         // jump from pure noise. Without this key `advanced.steps: 1` travelled all the way to the
@@ -25106,6 +25150,173 @@
       }
     },
     {
+      // Qwen-Image 2.1 OFFICIAL PROMPT REWRITER — text-to-image half (sc-24113, epic 24107).
+      //
+      // Upstream ships prompt rewriting as a SEPARATE pair of checkpoints, not as anything inside
+      // the image model: `Qwen/Qwen-Image-2.1-PE-T2I` rewrites a text-to-image brief, and its
+      // sibling `-PE-I2I` (the next entry) rewrites an EDIT instruction against the reference
+      // images. Which one applies is decided by the REQUEST — references present means edit — and
+      // never by a user-facing model picker.
+      //
+      // Both are fine-tuned Qwen3.5/3.6 (`model_type` `qwen3_5`) 9.41B VLM checkpoints, which is
+      // the SAME architecture the optional `film_planner_qwen3_6_27b` entry above already runs:
+      // they load on the existing native TextLlm lane (`adapter: "prompt-refine"` →
+      // `mlx-llama` on macOS / `candle-llama` off-Mac, through `Architecture::Qwen35` →
+      // `Qwen35Config`/`Qwen35Model`, with `Qwen35VisionModel` + DeepStack serving the I2I image
+      // turns). NOTHING new is built to run them; the worker's `prompt_refine` job takes a
+      // `qwen_image_rewrite` task and a `payload.model` override, exactly as the film planner does.
+      //
+      // `autoDownload: false` is the load-bearing half of the story's third requirement: direct
+      // prompting into Qwen-Image 2.1 must work with NEITHER rewriter installed — no download, no
+      // install prompt, no degraded path. The rewrite affordance simply does not render unless the
+      // matching checkpoint is already present, and the image model never consults it.
+      //
+      // `files` names the loader's required set rather than `[]`, for the reason the film-planner
+      // entry gives: a metadata-only revision must never advertise as usable. `system_prompt.txt`
+      // is in that set because it IS the frozen template — the worker reads the system prompt from
+      // the installed snapshot instead of vendoring a copy of Qwen-licensed Materials into this
+      // repo, and pins the expected SHA-256 of the pinned revision's file in
+      // `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs` so an upstream re-push is a loud
+      // mismatch rather than a silent behaviour change.
+      "id": "qwen_image_2_1_pe_t2i",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 32,
+      "name": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+      "family": "qwen-image-2-1-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-PE-T2I",
+          // Frozen at the first published revision (2026-09-20). The rewriter's system prompt ships
+          // INSIDE the snapshot, so the revision pin is simultaneously the template pin.
+          "revision": "f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "system_prompt.txt",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+            "LICENSE"
+          ],
+          "estimatedSizeBytes": 18839810614,
+          "footprint": { "diskSizeBytes": 18839810614, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-PE-T2I"
+      },
+      // Same credential-free licence gate the base `qwen_image_2_1` entry uses (sc-7872 shape):
+      // the repo is public and ungated, so there is no token to collect, but the weights are Qwen
+      // RESEARCH (non-commercial) and the accept must be surfaced before the download starts.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE",
+      "licenseNotice": "The Qwen-Image 2.1 prompt rewriters are governed by the Qwen RESEARCH LICENSE AGREEMENT — the same non-commercial terms as the Qwen-Image 2.1 weights themselves, and NOT SceneWorks' own AGPL-3.0 licence. §1(i) and §2(a) grant use, reproduction, distribution and modification FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means research or evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory (model-business@notice.qwencloud.com) for any commercial use. §4(b)/§4(c) forbid using \"Qwen\" as the primary name of a derivative work and require a prominent \"Built with Qwen\" notice on any model you train or improve with this one or its outputs. §3 carries the Agreement with any redistribution. This rewriter is an OPTIONAL download: Qwen-Image 2.1 generates and edits normally without it, and installing it only adds an explicit \"Rewrite prompt\" action you choose to run. SceneWorks never redistributes these weights — they are pulled from Qwen's own repository into your machine. Read the full text at the link below before downloading.",
+      "nonCommercial": true,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+        "description": "Optional official rewriter for Qwen Image 2.1 text-to-image prompts. Turns a short brief into a long descriptive prompt and suggests an aspect ratio; you edit and accept the result, and your original prompt is never replaced on its own. Qwen Image 2.1 works fully without it.",
+        "recommendedFor": ["qwen_image_2_1_prompt_rewrite"],
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-PE-T2I model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I" },
+            { "label": "Qwen-Image-2.1 prompt rewriting (GitHub)", "url": "https://github.com/QwenLM/Qwen-Image-2.1#prompt-rewriting" }
+          ]
+        }
+      }
+    },
+    {
+      // Qwen-Image 2.1 OFFICIAL PROMPT REWRITER — image-editing half (sc-24113, epic 24107).
+      //
+      // The edit twin of the entry above, and structurally identical to it: same 9.41B `qwen3_5`
+      // architecture, same native TextLlm lane, same optional-download and licence posture. It
+      // differs in exactly two ways, both of which live in the snapshot rather than here:
+      //
+      //   1. Its `system_prompt.txt` is the EDIT enhancer, and its reply carries a third field
+      //      `ratio_follow` ("<image1>" …) that is mutually exclusive with `wh_ratio` — the
+      //      output resolution either follows a named input image or takes a stated ratio.
+      //   2. It is driven with the ordered reference images attached to the user turn as vision
+      //      blocks, so the rewrite can actually see what it is editing. The worker sends the same
+      //      ordered 1–10 reference list the render will use, which is why swapping two references
+      //      changes the rewrite as well as the render.
+      //
+      // It is selected by the REQUEST, never by the user: a rewrite on a Qwen-Image 2.1 request
+      // that carries references routes here; one with no references routes to `-PE-T2I`.
+      "id": "qwen_image_2_1_pe_i2i",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 32,
+      "name": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+      "family": "qwen-image-2-1-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-PE-I2I",
+          "revision": "72927bc08afc99b7888ceb7d7d51a12db3700bbd",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "system_prompt.txt",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+            "LICENSE"
+          ],
+          "estimatedSizeBytes": 18839819638,
+          "footprint": { "diskSizeBytes": 18839819638, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-PE-I2I"
+      },
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I/blob/72927bc08afc99b7888ceb7d7d51a12db3700bbd/LICENSE",
+      "licenseNotice": "The Qwen-Image 2.1 prompt rewriters are governed by the Qwen RESEARCH LICENSE AGREEMENT — the same non-commercial terms as the Qwen-Image 2.1 weights themselves, and NOT SceneWorks' own AGPL-3.0 licence. §1(i) and §2(a) grant use, reproduction, distribution and modification FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means research or evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory (model-business@notice.qwencloud.com) for any commercial use. §4(b)/§4(c) forbid using \"Qwen\" as the primary name of a derivative work and require a prominent \"Built with Qwen\" notice on any model you train or improve with this one or its outputs. §3 carries the Agreement with any redistribution. This rewriter is an OPTIONAL download: Qwen-Image 2.1 generates and edits normally without it, and installing it only adds an explicit \"Rewrite prompt\" action you choose to run. SceneWorks never redistributes these weights — they are pulled from Qwen's own repository into your machine. Read the full text at the link below before downloading.",
+      "nonCommercial": true,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+        "description": "Optional official rewriter for Qwen Image 2.1 edit instructions. Reads your ordered reference images, rewrites the instruction, and says which reference the output resolution should follow; you edit and accept the result. Qwen Image 2.1 editing works fully without it.",
+        "recommendedFor": ["qwen_image_2_1_prompt_rewrite"],
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-PE-I2I model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I" },
+            { "label": "Qwen-Image-2.1 prompt rewriting (GitHub)", "url": "https://github.com/QwenLM/Qwen-Image-2.1#prompt-rewriting" }
+          ]
+        }
+      }
+    },
+    {
       // Dataset captioning LLM (sc-5620, the JoyCaption twin of the sc-5605 prompt_refine gap).
       // The native captioner (`caption_jobs.rs`, the `training_caption` job used by LoRA-training
       // auto-captioning) runs JoyCaption in-process — the MLX provider on macOS (sc-3556) and
@@ -27107,7 +27318,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "bd8da8f38fb8963ee02d03f40f522f76601387ddf273f791c580c3efe9501114",
+              "sha256": "3601851b0806f09a131914ba3ceccc43256075db4a990b2a3b35d1a9c7c8d2af",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27141,8 +27352,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 124616,
-                  "sha256": "46fc70f46fe05303215d0b969cd1430ae3a98a61883536dd523dd8a8d07a4460"
+                  "byteSize": 127564,
+                  "sha256": "d51dae7e2de7bf5766d5afae4efab6d79db4a9e692b478f5f34242b9de314653"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -27186,8 +27397,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 146740,
-                  "sha256": "5f51460ce6ba44991591b0c2bfc147d1df7bdfb76b42477c8fcce0075a363a5e"
+                  "byteSize": 147391,
+                  "sha256": "f9412ceb14a7be09b2556a92940eb67f1227f558418b1f7dde3189006cf266de"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/model_jobs.rs",
@@ -27196,8 +27407,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 200996,
-                  "sha256": "442c9bda398387ecbd1dd43d3cc790eb8bc31dfce1a16a8d2078db7be0e725b9"
+                  "byteSize": 219831,
+                  "sha256": "ae79a9ee280b55e92c082cc5ad26855ed62e6ff4a55a9f9e2ab118d53e8ca986"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -27221,8 +27432,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 134488,
-                  "sha256": "c523e519f4ec182cc7fe4015cda2a3255a8756f5dcd14d918baf7c7737f113e8"
+                  "byteSize": 140012,
+                  "sha256": "9ed31c966613cea6c49cace82929b0f0f6947bb80e2cba9ffabdf8996410b32e"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
