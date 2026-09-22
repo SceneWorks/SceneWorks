@@ -664,7 +664,8 @@ async fn generate_vision_json(
     image_path: PathBuf,
 ) -> WorkerResult<String> {
     use gen_core::core_llm::{
-        CancelFlag, Constraint, Content, Message, ModelRequirements, Role, Sampling, TextLlmRequest,
+        CancelFlag, Constraint, Content, Message, ModelRequirements, Role, Sampling, StreamEvent,
+        TextLlmRequest,
     };
 
     let image = tokio::task::spawn_blocking(move || {
@@ -704,8 +705,19 @@ async fn generate_vision_json(
                 cancel: blocking_cancel,
                 ..Default::default()
             };
+            // sc-24029: the KV cache grows per token here too, and this closure is the only hook
+            // interleaved with the decode — MLX's freed-buffer cache is PROCESS-GLOBAL, so the
+            // clear is not thread-scoped and will also discard buffers a concurrent image render
+            // had cached (up to once per 16 streamed token events, plus once at decode end). The
+            // terminal clear fires when this job closure returns — on the mapped output or on the
+            // error path below alike.
+            let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
             model
-                .generate(&request, &mut |_| {})
+                .generate(&request, &mut |event| {
+                    if matches!(event, StreamEvent::Token { .. }) {
+                        cache_bound.note_event();
+                    }
+                })
                 .map(|output| output.text)
                 .map_err(|error| {
                     WorkerError::Engine(format!("catalog vision inference failed: {error}"))

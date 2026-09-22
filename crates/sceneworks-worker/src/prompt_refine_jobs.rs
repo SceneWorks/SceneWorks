@@ -1353,8 +1353,19 @@ pub(crate) async fn run_prompt_refine_job(
                 // dropped (the consumer loop returned early on a POST failure / 409): trip the engine flag
                 // so generation bails instead of running unheard (sc-8804, F-003 — the swallowed
                 // closed-channel leak, preserved verbatim from the old bounded-channel behavior).
+                //
+                // The same per-token callback carries the sc-24029 MLX cache bound. MLX's freed-buffer
+                // cache is PROCESS-GLOBAL, not per-thread; this callback is used because it is the
+                // only hook interleaved with the decode itself — every other seam runs before
+                // `generate` starts or after it returns, when the cache has already peaked. Side
+                // effect of that global scope: up to once per 16 streamed token events (plus once at
+                // decode end) this also discards buffers a CONCURRENT image render had cached, which
+                // that render then re-allocates. Declared BEFORE `on_event` so it outlives the borrow
+                // and its terminal clear fires after the generate below returns or errors.
+                let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                 let mut on_event = |event: StreamEvent| {
                     if let StreamEvent::Token { index, .. } = event {
+                        cache_bound.note_event();
                         if progress_tx
                             .send((index as u32 + 1, max_new_tokens))
                             .is_err()

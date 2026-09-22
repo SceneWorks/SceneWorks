@@ -229,8 +229,24 @@ pub(crate) async fn run_training_caption_job(
                 ..Default::default()
             };
             request.prompt = request.options.custom_prompt.clone();
+            // sc-24029: JoyCaption decodes up to 4096 tokens on the same mlx-llm KV cache, which
+            // grows per token. Scoped to ONE item so each caption's terminal clear runs before the
+            // next item's decode begins. MLX's freed-buffer cache is PROCESS-GLOBAL, not per-thread,
+            // so that clear also discards buffers a concurrent image render had cached.
+            //
+            // KNOWN GAP (sc-24029): the interval bound is INERT here today. MLX JoyCaption's
+            // `caption()` (inference `crates/media/mlx-gen/mlx-gen-joycaption/src/model.rs`) emits
+            // exactly TWO `Progress::Step` events per item — `1/2` before `generate` and `2/2` after
+            // it returns — so `note_event` is called twice per item and the 16-event interval is
+            // never reached. This site therefore gets ONLY the terminal drop clear, and JoyCaption's
+            // cache growth WITHIN one item is bounded by nothing but that end-of-item clear. Closing
+            // the gap needs `mlx-gen-joycaption` to emit per-token progress from its own stream
+            // callback — an inference-side change plus a pin bump, tracked and being done separately.
+            // The wiring stays here so the bound starts working the moment that pin lands.
+            let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
             let mut on_progress = |progress: Progress| {
                 if let Progress::Step { current, total } = progress {
+                    cache_bound.note_event();
                     // Publish the latest `(index, current, total)` token count into the coalescing
                     // watch channel the loop below reads. `send` is non-blocking and latest-wins —
                     // token decode is NEVER back-pressured by API latency (the F-016 fix). A send
