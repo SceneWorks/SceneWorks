@@ -531,6 +531,30 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     // here genuinely fails to resolve, so the moment the pin carries the provider this test goes
     // RED and the id must be deleted from this list — which is what re-arms the descriptor-drift
     // assertions for it. The steady state is an empty slice.
+    //
+    // DELETING THE ROW IS NOT THE WHOLE JOB. Five things are inert while the provider is absent,
+    // and the pin bump owns all of them (sc-24108 review; the terminal story carries them):
+    //
+    //   1. this list — remove `"qwen_image_2_1"`, which re-arms the guidance / negative-prompt
+    //      descriptor-drift assertions below;
+    //   2. `crates/sceneworks-worker/src/mlx_fit_gate.rs` — add it to the staged-residency sweep in
+    //      `engine_engages_staged_residency_is_derived_from_the_registered_capability` (the S1
+    //      contract declares `supports_sequential_offload`); that test's completeness loop fails
+    //      closed the moment the engine registers, so it will demand this;
+    //   3. `config/backend-capabilities/matrix.json` — re-dump via
+    //      `cargo run -p sceneworks-core --bin dump-backend-capability-matrix`. It currently records
+    //      `text_to_image` as `mlx: false, candle: false` with empty `precisionTier` /
+    //      `guidanceMethod` axes, because those cells are derived from a descriptor that is not
+    //      there;
+    //   4. `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
+    //      — regenerate with `(cd apps/web && npm run gen:preview-support)`. The id has NO row today,
+    //      which reads as "unknown" rather than the engine's real `supports_preview: false`;
+    //   5. `config/engine-capabilities/capabilities.mlx.json` (and `runtime/`) — re-dump on the macOS
+    //      lane. A new engine id cannot appear in a dump taken at the old pin, and the file must
+    //      never be hand-authored.
+    //
+    // …and then `npm run generate:memory-matrix` + `npm run generate:memory-anchors`, because (2)
+    // and (5) move the matrix's inputs.
     const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
 
     // Every row is covered by the expectation table (no row added without a flag pair here).

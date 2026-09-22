@@ -11275,6 +11275,147 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .contains("fps must be between 1 and 60"));
 }
 
+/// sc-24108: the IMAGE half of the same gate. `limits.hardMinSteps` was video-only — its two
+/// rejection seams were `create_video_job` and the worker's video lane — so an image model with a
+/// real sampling floor had nowhere to declare it. Qwen-Image 2.1's engine refuses `steps < 2`, and
+/// without this gate `advanced.steps: 1` travelled all the way to the MLX provider and died there,
+/// which reaches the user as a failed render instead of a 400 naming the floor.
+///
+/// The fixture makes the two homes disagree the same way the video test does: one image model with
+/// no floor, one with 2. Both halves are asserted — the refusal AND the at-floor admission — so a
+/// gate that simply rejected every step count could not pass.
+#[tokio::test]
+async fn image_steps_under_the_models_hard_floor_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unfloored_image",
+              "name": "Unfloored",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unfloored", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Unfloored" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": { "hardMinSteps": 2 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Step Floor Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Under the floor: refused at enqueue, naming the model, the floor and what was asked.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1 step under Qwen Image 2.1's 2-step floor must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1"),
+        "names the model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 2 sampling steps"),
+        "states the floor: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 1."),
+        "states what was asked: {detail}"
+    );
+
+    // At the floor: admitted, and the count travels VERBATIM — the gate refuses, never rewrites.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 2 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
+    assert_eq!(body["payload"]["advanced"]["steps"], 2);
+
+    // An image model that declares NO floor is untouched: absent means no floor, so every other
+    // image model in the catalog is byte-for-byte unchanged by this gate.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unfloored_image",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model with no declared floor must still admit 1 step: {body}"
+    );
+}
+
 /// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,
 /// and — the part that makes the key worth existing — a below-floor request is REFUSED rather than
 /// raised onto the floor.

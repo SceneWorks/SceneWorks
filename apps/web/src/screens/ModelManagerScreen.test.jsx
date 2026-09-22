@@ -122,6 +122,33 @@ const LICENSE_ACK_ONLY_MODEL = {
   ui: { attribution: "Powered by MiniMax H3", description: "Joint video + audio generation." },
 };
 
+// sc-24108: the same licence shape, but INSTALLED. `licenseGateApplies` is
+// `requiresLicenseAcknowledgment && downloadOnOffer`, so once every byte is on disk the gate box
+// stops rendering — which used to take the restriction off every surface in the app with it. This
+// fixture is the regression: nothing left to download, and the terms must still be readable.
+const QWEN_2_1_LICENSE_NOTICE =
+  "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT. §1(i) and §2(a) " +
+  "grant rights FOR NON-COMMERCIAL PURPOSES ONLY, where Non-Commercial means research or " +
+  "evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi " +
+  "Laboratory.";
+const INSTALLED_LICENSED_MODEL = {
+  id: "qwen_image_2_1",
+  name: "Qwen Image 2.1",
+  type: "image",
+  family: "qwen-image-2-1",
+  installState: "installed",
+  installed: true,
+  downloadable: true,
+  updateAvailable: false,
+  requiresLicenseAcknowledgment: true,
+  nonCommercial: true,
+  licenseUrl:
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+  licenseNotice: QWEN_2_1_LICENSE_NOTICE,
+  downloads: [{ provider: "huggingface", repo: "Qwen/Qwen-Image-2.1", files: [] }],
+  ui: { description: "Qwen-Image 2.1 text-to-image target (research licence)." },
+};
+
 // The shape MiniMax-H3 ACTUALLY ships in (sc-17227): a quant matrix. A tiered model renders the
 // per-tier download panel INSTEAD of the single Download button, so proving the single-variant
 // button is blocked proves nothing about the path a real H3 user takes. Declaration is not
@@ -465,6 +492,46 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(terms.textContent).toContain("NON-TRANSFERABLE");
     expect(terms.textContent).toContain("United States of America");
     expect(terms.textContent).toContain("machine-generated");
+  });
+
+  // sc-24108: the acceptance criterion is "shown before download AND in model details". The gate
+  // above is only the first half — it is keyed on `downloadOnOffer`, so an INSTALLED model renders
+  // no gate, and before this the licence disappeared from the app entirely at that point. The
+  // persistent summary is the second half: same notice, no checkbox, nothing blocked.
+  it("keeps the licence readable on an INSTALLED model, outside the gate (sc-24108)", async () => {
+    await render([INSTALLED_LICENSED_MODEL]);
+    await selectTab(container, "Image Models");
+
+    // Precondition — the gate is genuinely gone, so this is not the gate under another name.
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+
+    const summary = container.querySelector(".model-license-summary");
+    expect(summary).toBeTruthy();
+    // The licence NAME, resolved from the bundled-licence corpus rather than invented.
+    expect(summary.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(summary.textContent).toContain("Non-commercial");
+    // A link to the full text.
+    const link = summary.querySelector("a");
+    expect(link.getAttribute("href")).toBe(INSTALLED_LICENSED_MODEL.licenseUrl);
+    // The full notice, present in the DOM but behind a DEFAULT-COLLAPSED disclosure.
+    const disclosure = summary.querySelector("details");
+    expect(disclosure).toBeTruthy();
+    expect(disclosure.open).toBe(false);
+    expect(disclosure.querySelector(".model-license-terms").textContent).toBe(
+      QWEN_2_1_LICENSE_NOTICE,
+    );
+    expect(disclosure.textContent).toContain("NON-COMMERCIAL PURPOSES ONLY");
+  });
+
+  // sc-24108: and it is a SUMMARY, not a second gate — the same several paragraphs must not print
+  // twice while the pre-download gate is still on screen.
+  it("does not duplicate the notice while the pre-download gate is showing (sc-24108)", async () => {
+    await render([{ ...INSTALLED_LICENSED_MODEL, installState: "missing", installed: false }]);
+    await selectTab(container, "Image Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    expect(container.querySelector(".model-license-summary")).toBeNull();
+    expect(container.querySelectorAll(".model-license-terms")).toHaveLength(1);
   });
 
   // sc-17227: MiniMax H3 Community License §IV.2 — "You shall prominently display 'MiniMax H3' on

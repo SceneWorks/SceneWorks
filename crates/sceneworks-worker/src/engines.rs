@@ -1871,11 +1871,17 @@ mod tests {
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
-            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a
-            // literal for the same reason the Mage arm above is — the provider keeps its
-            // `SIZE_MULTIPLE` private, so there is no const to re-export. The value is the
-            // engine's own `SIZE_MULTIPLE`; `shipped_image_geometry_is_within_the_pinned_engine_envelope`
-            // re-checks every advertised bucket against it on the lane that links the provider.
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
+            // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
+            // private, so there is no const to re-export.
+            //
+            // A literal here is only an ASSERTION, not a reading of the engine, so on its own it
+            // could not catch a pin bump that moved the real grid — the lattice test below would be
+            // comparing this literal with itself. What closes that is
+            // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
+            // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
+            // equals this value. Until the pin carries the provider that check is inert for this
+            // id, because the engine does not resolve and the guard skips it.
             "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -1912,11 +1918,17 @@ mod tests {
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
-            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a
-            // literal for the same reason the Mage arm above is — the provider keeps its
-            // `SIZE_MULTIPLE` private, so there is no const to re-export. The value is the
-            // engine's own `SIZE_MULTIPLE`; `shipped_image_geometry_is_within_the_pinned_engine_envelope`
-            // re-checks every advertised bucket against it on the lane that links the provider.
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
+            // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
+            // private, so there is no const to re-export.
+            //
+            // A literal here is only an ASSERTION, not a reading of the engine, so on its own it
+            // could not catch a pin bump that moved the real grid — the lattice test below would be
+            // comparing this literal with itself. What closes that is
+            // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
+            // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
+            // equals this value. Until the pin carries the provider that check is inert for this
+            // id, because the engine does not resolve and the guard skips it.
             "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -2031,6 +2043,33 @@ mod tests {
             // (candle) / silent refit (mlx). `None` = no exposed stride on this backend (the bespoke
             // InstantID/PuLID ids never reach here — `mlx_model` returned `None` and we `continue`d).
             let stride = pinned_image_stride(resolved.engine_id());
+            // sc-24108: tie the hand-written table to the DESCRIPTOR wherever the descriptor has an
+            // opinion. `pinned_image_stride` spells some strides as a provider const and others as
+            // a bare literal (Mage, and Qwen-Image 2.1, whose providers keep `SIZE_MULTIPLE`
+            // private), and for those the lattice test below was literal-vs-literal: it could only
+            // catch someone editing one of the two copies, never a pin bump that moved the real
+            // grid. `Capabilities::size_floor` advertises that grid weights-free
+            // (`SizeFloor::RangeCheckedOnGrid { multiple }`), so where it is advertised it is the
+            // authority and the table must agree with it.
+            //
+            // `None` = this descriptor's floor makes no grid claim (plain `RangeChecked`), so the
+            // table's value stays a SceneWorks-side assertion for that engine and is checked only
+            // by `pinned_image_stride_pins_each_engines_lattice`.
+            if let Some(advertised) = resolved
+                .descriptor
+                .capabilities
+                .size_floor
+                .explicit_size_multiple()
+            {
+                assert_eq!(
+                    stride,
+                    Some(advertised),
+                    "{id}: the PINNED engine {:?} advertises a ÷{advertised} request grid on its \
+                     `size_floor`, but `pinned_image_stride` says {stride:?}. The descriptor is \
+                     the authority — correct the table (sc-24108).",
+                    resolved.engine_id()
+                );
+            }
             for res in buckets.iter().chain(default.iter()) {
                 let (w, h) = res
                     .split_once('x')

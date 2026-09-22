@@ -7078,6 +7078,54 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* The persistent licence row (sc-24108) — the half of the licence surface that survives the
+   install, unlike `.model-gated-notice`, which is a pre-download gate and disappears with it.
+   Quiet by construction: no border, no warn tone, and the notice itself behind a collapsed
+   disclosure. It is a reference the user can come back to, not a thing to act on. Shared by the
+   Models card and the Simple model list (which passes `su-license-note`). */
+.model-license-summary,
+.su-license-note {
+  display: grid;
+  gap: 4px;
+}
+
+.model-license-summary-head,
+.su-license-note .model-license-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-license-summary-name {
+  font-weight: 600;
+}
+
+/* Not the Simple Licenses screen's badge — that one is a two-state commercial-use verdict. This is
+   a single inline marker that only ever appears on a restricted model. */
+.model-license-summary-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger-soft, rgba(220, 80, 80, 0.14));
+  color: var(--danger, #c2410c);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-license-summary-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.su-license-note {
+  padding: 0 12px 10px;
+  margin-top: -4px;
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;

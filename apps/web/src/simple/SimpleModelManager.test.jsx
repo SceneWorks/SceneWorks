@@ -656,6 +656,48 @@ describe("SimpleModelManager license gate (sc-17227)", () => {
     vi.clearAllMocks();
   });
 
+  // sc-24108: "Simple renders no licence UI" was the design for the GATE — there is no checkbox
+  // here and there never will be, because `download()` hands a gated model to the Models screen.
+  // It was never the design for the RESTRICTIONS. A research-only model sitting in the same list
+  // as Apache-2.0 ones, with nothing on the row to tell them apart, is the gap this closes: a
+  // read-only summary with the licence name, a link, and the notice behind a collapsed disclosure.
+  it("shows read-only licence terms for a restricted model, with no gate UI (sc-24108)", async () => {
+    const QWEN_2_1 = {
+      id: "qwen_image_2_1",
+      name: "Qwen Image 2.1",
+      type: "image",
+      installState: "installed",
+      downloadable: true,
+      requiresLicenseAcknowledgment: true,
+      nonCommercial: true,
+      licenseUrl: "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c9263/LICENSE",
+      licenseNotice: "Research or evaluation purposes only (§1(i), §2(a)).",
+      hasVariantMatrix: false,
+      variants: [variant("default", "installed", null, 33134949212)],
+    };
+    await render(root, { models: [QWEN_2_1] });
+
+    // Still no gate: no acknowledgment box, no gate notice. Simple takes no acceptance.
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+
+    const note = container.querySelector(".su-license-note");
+    expect(note).toBeTruthy();
+    expect(note.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(note.textContent).toContain("Non-commercial");
+    expect(note.querySelector("a").getAttribute("href")).toBe(QWEN_2_1.licenseUrl);
+    const disclosure = note.querySelector("details");
+    expect(disclosure.open).toBe(false);
+    expect(disclosure.querySelector(".model-license-terms").textContent).toBe(
+      QWEN_2_1.licenseNotice,
+    );
+  });
+
+  it("shows no licence row for a model that carries no terms", async () => {
+    await render(root, { models: [zImage()] });
+    expect(container.querySelector(".su-license-note")).toBeNull();
+  });
+
   it("does not download an unacknowledged model, and routes to the screen that can accept", async () => {
     const createModelDownloadJob = vi.fn(async () => ({ id: "job-1" }));
     await render(root, { models: [ACK_MODEL], createModelDownloadJob });
