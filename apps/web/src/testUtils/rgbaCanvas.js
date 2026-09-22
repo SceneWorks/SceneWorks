@@ -400,9 +400,25 @@ export function makeCanvas(width = 0, height = 0) {
   return canvas;
 }
 
+/**
+ * The bytes of a `Blob` or `File`, whichever way this jsdom will give them up.
+ *
+ * jsdom at the pinned version has no `Blob.prototype.arrayBuffer`, and the production exporter
+ * wraps the canvas blob in `new File([blob], ...)` — which is the point, since that File is what
+ * Save uploads and Download hands to the anchor — so a side-channel on the original blob does not
+ * survive. `FileReader` does, and it reads the real bytes of the real File.
+ */
 export async function blobBytes(blob) {
   if (typeof blob.arrayBuffer === "function") {
     return new Uint8Array(await blob.arrayBuffer());
+  }
+  if (typeof FileReader === "function") {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("could not read the blob"));
+      reader.readAsArrayBuffer(blob);
+    });
   }
   if (blob.__bytes) {
     return new Uint8Array(blob.__bytes);

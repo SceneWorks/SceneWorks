@@ -18797,10 +18797,27 @@ button.audio-wave {
 
 /* The fullscreen preview is the only `object-fit: contain` surface in the list, and
    contain is what would put the checkerboard in the letterbox bars of every opaque
-   image. Size the element to the bitmap instead — `width: auto` against the
-   inherited `width: 100%` — so the box IS the image and there are no bars to fill.
-   This also removes the flat `var(--bg-2)` bars that were there before. */
-.preview-modal img {
+   image. Size the element to the bitmap instead, so the box IS the image and there
+   are no bars to fill. This also removes the flat `var(--bg-2)` bars that were there
+   before.
+
+   Without the height clamp there would be no bars at all: `width: 100%` alone gives
+   an `<img>` its intrinsic ratio. It is `max-height: 78vh` on `.preview-modal img`
+   that clamps a PORTRAIT image's height while the width stays at 100%, and that is
+   what letterboxes. `width: auto` lets the width follow the clamped height.
+
+   The declaration this has to beat is `.preview-modal-stage img, .preview-modal-stage
+   video { width: 100% }`. Review read that selector as (0,2,1) and this rule's earlier
+   `.preview-modal img` as (0,1,1), i.e. inert; both are in fact (0,1,1) — one class,
+   one type — so the earlier form already won on document order. The selector is
+   repeated verbatim here anyway, because "same selector, later in the file" stays true
+   if either block moves, where "different selector, tied specificity, happens to be
+   further down" is something a reader has to re-derive. It also covers both modal
+   layouts (the zoom viewport's `.preview-zoom-inner img` and the side-by-side
+   `.preview-compare-pane` images are both inside the stage), and it is `img`-only so a
+   <video> still fills the stage. `transparencyBackdrop.test.js` resolves the winner
+   rather than trusting either reading. */
+.preview-modal-stage img {
   width: auto;
   max-width: 100%;
   height: auto;

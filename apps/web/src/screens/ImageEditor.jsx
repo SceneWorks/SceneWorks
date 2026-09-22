@@ -672,6 +672,49 @@ export function boundedEditorCanvasDimensions(width, height) {
   };
 }
 
+// Flatten the visible layer stack onto a fresh canvas at the document size (sc-6117). The layers'
+// images are already decoded, so this is synchronous; callers toBlob it (Save / Download / AI-op
+// source) or paint overlays on top first (the box-keyed edit). The shared composite behind every
+// editor export.
+//
+// Module-level and exported since sc-24111 so the alpha round-trip test can drive the REAL export
+// rather than a copy of it. It used to be a closure over `working`, which meant every assertion
+// about "the exported PNG still has its transparency" was an assertion about the test's own
+// reimplementation: switching this to `{ alpha: false }` or the encode below to `image/jpeg` left
+// the suite green. `documentRef` is the seam that lets a test supply a canvas that actually holds
+// pixels — jsdom's throws.
+export function compositeWorkingToCanvas(work, { documentRef = globalThis.document } = {}) {
+  const canvas = documentRef.createElement("canvas");
+  canvas.width = work.width;
+  canvas.height = work.height;
+  // No `{ alpha: false }` and no fill before the first `drawImage`: either one composites every
+  // transparent pixel onto black before the encode can see it.
+  compositeLayersToCanvas(canvas.getContext("2d"), work.layers, { visibleOnly: true });
+  return canvas;
+}
+
+// The working document as one PNG File. Behind BOTH Save (which imports it as a Library asset) and
+// Download (in its re-encoding mode), so this single `image/png` is what keeps an edited cut-out a
+// cut-out.
+export function workingToPngFile(work, filename, { documentRef = globalThis.document } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!work) {
+      reject(new Error("No working image."));
+      return;
+    }
+    const canvas = compositeWorkingToCanvas(work, { documentRef });
+    const base = (work.source.name || "image").replace(/\.[^./\\]+$/, "");
+    const name = filename || `${base}.png`;
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Could not encode the working image."));
+        return;
+      }
+      resolve(new File([blob], name, { type: "image/png" }));
+    }, "image/png");
+  });
+}
+
 export async function exportEditorFile(
   file,
   {
@@ -2671,16 +2714,11 @@ export function ImageEditor() {
     setActiveTransform(patch);
   }
 
-  // Flatten the visible layer stack onto a fresh canvas at the document size
-  // (sc-6117). The layers' images are already decoded, so this is synchronous;
-  // callers toBlob it (Save / Download / AI-op source) or paint overlays on top
-  // first (the box-keyed edit). The shared composite behind every editor export.
+  // The module-level `compositeWorkingToCanvas`, bound to the current document. Kept as a thin
+  // wrapper so the many call sites below read unchanged while the flatten itself is exported and
+  // directly testable (sc-24111).
   function compositeToCanvas(work = working) {
-    const canvas = document.createElement("canvas");
-    canvas.width = work.width;
-    canvas.height = work.height;
-    compositeLayersToCanvas(canvas.getContext("2d"), work.layers, { visibleOnly: true });
-    return canvas;
+    return compositeWorkingToCanvas(work);
   }
 
   // Rasterize the composited document + the colored boxes into one PNG File (sc-6093).
@@ -2817,25 +2855,7 @@ export function ImageEditor() {
   // Flatten the composited document to a PNG File. `filename` overrides the name
   // (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
   const workingImageToFile = useCallback(
-    (filename) => {
-      return new Promise((resolve, reject) => {
-        if (!working) {
-          reject(new Error("No working image."));
-          return;
-        }
-        const canvas = compositeToCanvas(working);
-        const base = (working.source.name || "image").replace(/\.[^./\\]+$/, "");
-        const name = filename || `${base}.png`;
-        canvas.toBlob((blob) => {
-          if (!blob) {
-            reject(new Error("Could not encode the working image."));
-            return;
-          }
-          resolve(new File([blob], name, { type: "image/png" }));
-        }, "image/png");
-      });
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (filename) => workingToPngFile(working, filename),
     [working],
   );
 

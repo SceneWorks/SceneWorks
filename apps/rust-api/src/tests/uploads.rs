@@ -490,3 +490,114 @@ async fn an_uploaded_rgb_png_is_still_stored_unchanged() {
         "an opaque upload grew an alpha channel"
     );
 }
+
+#[tokio::test]
+async fn a_transcoded_upload_keeps_its_alpha_into_the_stored_png() {
+    // The OTHER upload lane (sc-24111). PNG and WebP are natively decodable and are stored
+    // byte-for-byte, which the test above covers. Everything else — AVIF, HEIC, HEIF, TIFF, BMP,
+    // GIF — is re-encoded to PNG by `normalize_image_upload` through
+    // `media_convert::transcode_to_png`, which shells out to `sips` on macOS and `ffmpeg`
+    // elsewhere. That is a pixel re-encode by a tool this repo does not control, so "the stored
+    // asset is RGBA" is an assertion worth making rather than assuming: a transcoder that
+    // composited onto white would silently flatten a transparent import on its way into the
+    // Library.
+    //
+    // TIFF is the carrier because the workspace `image` features already include it, so the
+    // fixture is generated from the committed PNG rather than committing a second binary — and
+    // because it is unambiguously on the transcode side of `ImageKind::is_natively_supported`.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Transcoded transparent import" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+
+    let source = image::open(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("alpha")
+            .join("alpha-64.png"),
+    )
+    .expect("RGBA fixture decodes")
+    .to_rgba8();
+    let expected = alpha_histogram_of(&source);
+    let tiff_path = temp_dir.path().join("cutout.tiff");
+    source
+        .save_with_format(&tiff_path, image::ImageFormat::Tiff)
+        .expect("RGBA TIFF writes");
+    let tiff_bytes = std::fs::read(&tiff_path).expect("TIFF reads");
+
+    let boundary = "SCENEWORKS_TIFF_BOUNDARY";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"cutout.tiff\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/tiff\r\n\r\n");
+    body.extend_from_slice(&tiff_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let (status, _, response) = request_raw(
+        app,
+        "POST",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        body,
+        &[(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let asset: Value = serde_json::from_slice(&response).expect("json body parses");
+    assert_eq!(
+        asset["file"]["mimeType"], "image/png",
+        "the transcode lane stores a PNG"
+    );
+
+    let stored = project_path.join(asset["file"]["path"].as_str().expect("stored path"));
+    let decoded = image::open(&stored).expect("the transcoded asset decodes");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the transcoder flattened a transparent import on its way into the Library"
+    );
+    let actual = alpha_histogram_of(&decoded.to_rgba8());
+    // Structural rather than byte-exact: `sips` and `ffmpeg` are different programs and this is a
+    // format conversion, not a resample, so the bands and the ramp are what both must preserve.
+    assert!(
+        actual.get(&0).copied().unwrap_or(0) > 0,
+        "no fully transparent pixel survived the transcode"
+    );
+    assert!(
+        actual.get(&255).copied().unwrap_or(0) > 0,
+        "no fully opaque pixel survived the transcode"
+    );
+    assert!(
+        actual.len() >= 8,
+        "the soft edge collapsed to {} alpha values",
+        actual.len()
+    );
+    assert_eq!(
+        actual.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>(),
+        "the transcode changed which alpha values exist"
+    );
+}
+
+fn alpha_histogram_of(image: &image::RgbaImage) -> std::collections::BTreeMap<u8, usize> {
+    let mut histogram = std::collections::BTreeMap::new();
+    for pixel in image.pixels() {
+        *histogram.entry(pixel.0[3]).or_insert(0) += 1;
+    }
+    histogram
+}

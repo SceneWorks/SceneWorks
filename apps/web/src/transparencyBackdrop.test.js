@@ -1,13 +1,16 @@
 // Transparency reads as a checkerboard, not as black (sc-24111).
 //
 // jsdom applies no stylesheet and computes no background, so this cannot be a rendering test. What
-// it can be is a guard on the stylesheet itself, which is where the whole of this behaviour lives:
-// before sc-24111 every image surface declared `background: var(--bg-2)`, which in the dark theme
-// is very nearly black, so a natively transparent render was indistinguishable from a render on a
-// black background. The assertions below are deliberately about the two things that would silently
-// undo that — the checkerboard block disappearing, and a flat `background:` shorthand for one of
-// these selectors reappearing *after* it (the shorthand resets `background-image`, so ordering is
-// load-bearing, not cosmetic).
+// it can be — and what the first version of it was not — is a CASCADE test. Grepping the source
+// for the checkerboard block proves the block exists; it does not prove the block wins. A later,
+// more specific rule setting `background: var(--bg-2)` on the same element leaves every substring
+// assertion green while the browser paints a flat near-black surface, which is the entire defect
+// this story is about.
+//
+// So each surface below is described as a concrete element, every rule in BOTH shells' stylesheets
+// that would match it is collected, and the winner for `background-image` is resolved by
+// (specificity, document order) — treating a `background:` shorthand as the `background-image`
+// reset it actually is. See `testUtils/cssCascade.js`.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -15,100 +18,262 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-const stylesPath = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "./styles.css",
-);
-const styles = readFileSync(stylesPath, "utf8");
+import {
+  backgroundShorthand,
+  parseRules,
+  specificity,
+  winningDeclaration,
+} from "./testUtils/cssCascade.js";
 
-/** The byte offset of the checkerboard rule's `background-image`, for ordering assertions. */
-const checkerIndex = styles.indexOf("--checker-tile:");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const ADVANCED = path.join(here, "styles.css");
+// The Simple shell is a whole second product surface with its own result view, asset grid and
+// fullscreen preview, and it shares none of the advanced shell's class names. It is also imported
+// later (SimpleShell mounts it), so it is appended after — which is what lets the resolver catch a
+// simple.css rule that re-flattens an advanced-shell surface.
+const SIMPLE = path.join(here, "simple", "simple.css");
 
-/** The rule's selector list: everything from its first selector up to its opening brace. */
-const selectorList = styles.slice(
-  styles.indexOf(".checker-backdrop,"),
-  styles.indexOf("{", styles.indexOf(".checker-backdrop,")),
-);
+const advanced = readFileSync(ADVANCED, "utf8");
+const simple = readFileSync(SIMPLE, "utf8");
 
-/** Every surface an RGBA asset can be painted on, per the sc-24111 hop map. */
-const CHECKERED_SURFACES = [
-  ".asset-tile img", // library grid + every asset grid
-  ".review-card img", // Image Studio result view
-  ".preview-button img", // result / asset-detail preview
-  ".tray-item img",
-  ".reference-media img",
-  ".preview-modal img", // fullscreen preview
-  ".worker-progress-card__thumb-media", // queue / job-output thumbnails
-  ".ie-layer-thumb", // Image Editor layers panel
+function loadRules(extraSimpleCss = "") {
+  const first = parseRules(advanced, { source: "styles.css" });
+  const second = parseRules(simple + extraSimpleCss, {
+    source: "simple.css",
+    startOrder: first.nextOrder,
+  });
+  return [...first.rules, ...second.rules];
+}
+
+const RULES = loadRules();
+
+/** Two 45-degree gradients offset by half a tile — the app's checkerboard, from `.ie-canvas`. */
+const isCheckerboard = (value) =>
+  (value.match(/linear-gradient\(\s*45deg/g) ?? []).length === 2;
+
+/**
+ * Every surface an RGBA asset can be painted on, described as the element it actually is.
+ *
+ * `ancestorClasses` is what makes the resolver able to decide whether a rule like
+ * `.preview-modal-stage img` competes for this element — which is the question a grep cannot ask.
+ */
+const SURFACES = [
+  {
+    name: "library / asset grid tile",
+    shell: "advanced",
+    element: { tag: "img", classes: [], ancestorClasses: ["asset-grid", "asset-tile"] },
+  },
+  {
+    name: "Image Studio result card",
+    shell: "advanced",
+    element: { tag: "img", classes: [], ancestorClasses: ["review-grid", "review-card"] },
+  },
+  {
+    name: "asset detail preview",
+    shell: "advanced",
+    element: { tag: "img", classes: [], ancestorClasses: ["asset-detail", "preview-button"] },
+  },
+  {
+    name: "tray item",
+    shell: "advanced",
+    element: { tag: "img", classes: [], ancestorClasses: ["tray-item"] },
+  },
+  {
+    name: "reference tile",
+    shell: "advanced",
+    element: { tag: "img", classes: [], ancestorClasses: ["reference-card", "reference-media"] },
+  },
+  {
+    name: "fullscreen preview",
+    shell: "advanced",
+    element: {
+      tag: "img",
+      classes: [],
+      ancestorClasses: [
+        "preview-modal",
+        "preview-modal-stage",
+        "preview-zoom-viewport",
+        "preview-zoom-inner",
+      ],
+    },
+  },
+  {
+    name: "queue / job-output thumbnail",
+    shell: "advanced",
+    element: {
+      tag: "img",
+      classes: ["worker-progress-card__thumb-media"],
+      ancestorClasses: ["worker-progress-card", "worker-progress-card__thumb-cell"],
+    },
+  },
+  {
+    name: "Image Editor layer thumbnail",
+    shell: "advanced",
+    element: {
+      tag: "img",
+      classes: ["ie-layer-thumb"],
+      ancestorClasses: ["ie-layers", "ie-layer", "ie-layer-row"],
+    },
+  },
+  {
+    name: "Simple shell result",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-results-grid", "su-result"] },
+  },
+  {
+    name: "Simple shell asset grid",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-asset-grid", "su-asset"] },
+  },
+  {
+    name: "Simple shell fullscreen preview",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-preview-stage"] },
+  },
+  {
+    name: "Simple shell reference chip",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-tile-ref"] },
+  },
+  {
+    name: "Simple shell option row",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-option-row"] },
+  },
+  {
+    name: "Simple shell style thumbnail",
+    shell: "simple",
+    element: { tag: "img", classes: [], ancestorClasses: ["su-style-thumb"] },
+  },
 ];
 
-describe("the transparency backdrop", () => {
-  it("exists exactly once, as a shared block", () => {
-    expect(checkerIndex).toBeGreaterThan(-1);
-    expect(styles.indexOf("--checker-tile:", checkerIndex + 1)).toBe(
-      styles.lastIndexOf("--checker-tile:"),
+describe("the transparency backdrop wins the cascade", () => {
+  it.each(SURFACES)("$name", ({ element }) => {
+    const winner = winningDeclaration(
+      RULES,
+      element,
+      "background-image",
+      backgroundShorthand,
     );
+    expect(winner, "no rule paints a background on this surface at all").not.toBeNull();
+    expect(
+      isCheckerboard(winner.value),
+      `the winning background for this surface is \`${winner.via}: ${winner.value.replace(/\s+/g, " ").slice(0, 120)}\` from \`${winner.selector}\` (${winner.rule.source}), not the checkerboard`,
+    ).toBe(true);
   });
 
-  it("is a checkerboard and not a stripe", () => {
-    const block = styles.slice(checkerIndex, styles.indexOf("}", checkerIndex));
-    // Two 45-degree gradients offset by half a tile is the app's existing convention, taken from
-    // `.ie-canvas`. One gradient would be diagonal stripes, which is the repo's *other* 45-degree
-    // pattern (the empty-state hazard fill) and means something else entirely.
-    expect(block.match(/linear-gradient\(\s*45deg/g)).toHaveLength(2);
-    expect(block).toContain("background-position: 0 0, calc(var(--checker-tile) / 2)");
+  it("is blind to neither a shell nor a media query", () => {
+    // Guards the resolver itself: if `parseRules` silently returned nothing for one of the two
+    // sheets, every assertion above would be resolving over the wrong corpus.
+    expect(RULES.some((rule) => rule.source === "styles.css")).toBe(true);
+    expect(RULES.some((rule) => rule.source === "simple.css")).toBe(true);
+    expect(RULES.length).toBeGreaterThan(500);
   });
+});
 
-  it.each(CHECKERED_SURFACES)("covers %s", (selector) => {
-    expect(selectorList).toContain(selector);
-  });
-
-  it.each(CHECKERED_SURFACES)(
-    "is not flattened again after the fact for %s",
-    (selector) => {
-      // A `background: <color>` shorthand resets `background-image`, so a later rule on the same
-      // selector would silently put the flat fill back. Earlier ones are fine — they are what this
-      // block overrides.
-      const pattern = new RegExp(
-        `${selector.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}[^{]*\\{[^}]*background:\\s*var\\(`,
-        "g",
+describe("the checkerboard itself", () => {
+  it("is a checkerboard and not a stripe, in both shells", () => {
+    // One gradient would be diagonal stripes — which is the repo's OTHER 45-degree pattern, the
+    // empty-state hazard fill, and means something else entirely.
+    for (const [label, css] of [
+      ["styles.css", advanced],
+      ["simple.css", simple],
+    ]) {
+      const at = css.indexOf("--checker-tile:");
+      expect(at, `${label} has no checkerboard block`).toBeGreaterThan(-1);
+      const block = css.slice(at, css.indexOf("}", at));
+      expect(block.match(/linear-gradient\(\s*45deg/g), label).toHaveLength(2);
+      expect(block, label).toContain(
+        "background-position: 0 0, calc(var(--checker-tile) / 2)",
       );
-      for (const match of styles.matchAll(pattern)) {
-        expect(match.index).toBeLessThan(checkerIndex);
-      }
-    },
-  );
+    }
+  });
 
   it("leaves <video> surfaces flat", () => {
-    // No video format this app plays carries alpha, so a checkerboard behind one would be pure
-    // decoration. The video rules keep their flat fill, and the checkerboard selector list must
-    // not name one.
-    expect(selectorList).not.toContain("video");
-    expect(styles).toContain(".preview-button video");
+    // No video format this app plays carries alpha, so a checkerboard behind one could only ever
+    // be decoration. Resolved the same way as the image surfaces, so this is a claim about what
+    // the browser paints rather than about what the selector list says.
+    for (const ancestorClasses of [["asset-tile"], ["preview-button"], ["su-result"]]) {
+      const winner = winningDeclaration(
+        RULES,
+        { tag: "video", classes: [], ancestorClasses },
+        "background-image",
+        backgroundShorthand,
+      );
+      expect(
+        winner === null || !isCheckerboard(winner.value),
+        `video inside .${ancestorClasses[0]} got a checkerboard`,
+      ).toBe(true);
+    }
   });
 
   it("keeps the Image Editor canvas checkerboarded", () => {
     // The third surface the story names, and the one that already worked — the sc-22461 color-key
-    // and SAM3 cutout previews read against it. Asserted so a redesign of `.ie-canvas` cannot
-    // quietly remove the thing the tool panel's copy promises the user.
-    // There are two `.ie-canvas` rules (a one-line grid-area assignment and the painted one); the
-    // checkerboard is in the multi-line block, which is the one with a newline after its brace.
-    const canvasIndex = styles.indexOf(".ie-canvas {\n");
-    expect(canvasIndex).toBeGreaterThan(-1);
-    const block = styles.slice(canvasIndex, styles.indexOf("}", canvasIndex));
-    expect(block.match(/linear-gradient\(45deg/g)).toHaveLength(2);
-    expect(block).toContain("background-position: 0 0, 11px 11px");
-  });
-
-  it("sizes the fullscreen preview to its bitmap so the checker is not letterbox bars", () => {
-    // `.preview-modal img` is the one `object-fit: contain` surface in the list. Contain is what
-    // would put the checkerboard in the letterbox bars of every opaque image, so the element is
-    // sized to the bitmap instead and there are no bars to fill.
-    const modal = styles.lastIndexOf(".preview-modal img {");
-    expect(modal).toBeGreaterThan(checkerIndex);
-    const block = styles.slice(modal, styles.indexOf("}", modal));
-    expect(block).toContain("width: auto");
-    expect(block).toContain("max-width: 100%");
-    expect(block).toContain("height: auto");
+    // and SAM3 cutout previews read against it.
+    const winner = winningDeclaration(
+      RULES,
+      { tag: "div", classes: ["ie-canvas"], ancestorClasses: ["ie-shell"] },
+      "background-image",
+      backgroundShorthand,
+    );
+    expect(winner).not.toBeNull();
+    expect(isCheckerboard(winner.value)).toBe(true);
   });
 });
+
+describe("the fullscreen preview is sized to its bitmap", () => {
+  it("wins `width` against .preview-modal-stage img", () => {
+    // If `width` does not resolve to `auto` here, a portrait image letterboxes inside the stage
+    // and the bars paint checkerboard — the checkerboard is only safe on this surface BECAUSE the
+    // element is sized to its bitmap. Asserting the WINNER rather than the presence of the
+    // declaration is the whole point: the competitor is `.preview-modal-stage img,
+    // .preview-modal-stage video { width: 100% }`, and whether the override beats it is a cascade
+    // question, not a grep question.
+    const winner = winningDeclaration(
+      RULES,
+      {
+        tag: "img",
+        classes: [],
+        ancestorClasses: [
+          "preview-modal",
+          "preview-modal-stage",
+          "preview-zoom-viewport",
+          "preview-zoom-inner",
+        ],
+      },
+      "width",
+    );
+    expect(winner).not.toBeNull();
+    expect(
+      winner.value.trim(),
+      `\`width\` is won by \`${winner.selector}\``,
+    ).toBe("auto");
+    // And it is not winning by accident of being matched more loosely than the competitor: it is
+    // at least as specific as the rule it overrides.
+    expect(
+      compareSpecificity(
+        specificity(winner.selector),
+        specificity(".preview-modal-stage img"),
+      ),
+    ).toBeGreaterThanOrEqual(0);
+  });
+
+  it("still lets a video fill the stage", () => {
+    // The override is `img`-only on purpose: a <video> has no transparency to reveal and its
+    // player chrome expects the full stage width.
+    const winner = winningDeclaration(
+      RULES,
+      {
+        tag: "video",
+        classes: [],
+        ancestorClasses: ["preview-modal", "preview-modal-stage"],
+      },
+      "width",
+    );
+    expect(winner?.value.trim()).toBe("100%");
+  });
+});
+
+function compareSpecificity(a, b) {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}

@@ -9537,6 +9537,7 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
         &plan,
         &base_fact,
         &upscaled,
+        None,
         "seedvr2",
         2,
         0.5,
@@ -9599,6 +9600,7 @@ fn write_upscaled_asset_confines_malicious_model_id() {
             &plan,
             &base_fact,
             &upscaled,
+            None,
             "seedvr2",
             2,
             0.5,
@@ -26729,4 +26731,372 @@ fn checkpoint_negative_prompt_uses_provider_capabilities() {
     let mut blank = req;
     blank.negative_prompt = " \n ".into();
     assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
+}
+
+// ---------------------------------------------------------------------------
+// Native transparency through the generation funnel (sc-24111)
+// ---------------------------------------------------------------------------
+//
+// `write_image_asset` is the one function EVERY generated image asset is written through, and it
+// used to call `image::RgbImage::from_raw(width, height, pixels)` directly. That single
+// constructor — not the PNG writer below it — is what made an RGBA generation impossible: a
+// 4-channel engine buffer was rejected as "size mismatch" when it was perfectly well formed.
+//
+// The mapping is keyed on the buffer's own channel count and on nothing else, because the model
+// that emits four channels today (`qwen_image_2_1`, from the inference half of this story) must not
+// be the model that has to be named here tomorrow.
+
+/// The committed RGBA fixture, as a flat 4-channel engine buffer at the requested geometry.
+fn alpha_engine_buffer(width: u32, height: u32) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("alpha")
+        .join("alpha-64.png");
+    let source = image::open(&path)
+        .unwrap_or_else(|error| panic!("RGBA fixture at {} decodes: {error}", path.display()))
+        .to_rgba8();
+    image::imageops::resize(&source, width, height, image::imageops::FilterType::Nearest).into_raw()
+}
+
+fn alpha_histogram(image: &image::RgbaImage) -> std::collections::BTreeMap<u8, usize> {
+    let mut histogram = std::collections::BTreeMap::new();
+    for pixel in image.pixels() {
+        *histogram.entry(pixel.0[3]).or_insert(0) += 1;
+    }
+    histogram
+}
+
+#[test]
+fn write_image_asset_writes_a_four_channel_engine_buffer_as_an_rgba_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1", "prompt": "A cut-out courier",
+        "count": 1, "width": 320, "height": 256, "seed": 101,
+        "modelManifestEntry": { "family": "qwen-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let pixels = alpha_engine_buffer(req.width, req.height);
+    let expected = image::RgbaImage::from_raw(req.width, req.height, pixels.clone()).unwrap();
+    // The fixture's own shape, asserted before it is used to prove anything.
+    let expected_histogram = alpha_histogram(&expected);
+    assert!(
+        expected_histogram.len() >= 8
+            && expected_histogram.contains_key(&0)
+            && expected_histogram.contains_key(&255),
+        "the scaled fixture lost its soft/transparent/opaque structure"
+    );
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        101,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+
+    let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+    let decoded = image::open(project_path.join(media_rel)).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the generation funnel flattened a 4-channel engine buffer"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!((decoded.width(), decoded.height()), (320, 256));
+    assert_eq!(alpha_histogram(&decoded), expected_histogram);
+    assert_eq!(decoded.as_raw(), expected.as_raw());
+    // And it is still a workflow-carrying PNG: the alpha did not cost the chunk.
+    assert!(
+        sceneworks_core::workflow_png::read_workflow_chunk_file(&project_path.join(media_rel))
+            .is_ok()
+    );
+}
+
+#[test]
+fn write_image_asset_leaves_a_three_channel_engine_buffer_byte_identical() {
+    // The control, and the reason the mapping is on channel count rather than a flag: widening
+    // this funnel must not move a single byte for the lanes that were already here.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 101,
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let pixels = stub_rgb8(req.width, req.height, 101);
+    let expected = image::RgbImage::from_raw(req.width, req.height, pixels.clone()).unwrap();
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        101,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+
+    let written = project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap());
+    let decoded = image::open(&written).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgb8,
+        "an opaque generation grew an alpha channel"
+    );
+    assert_eq!(decoded.to_rgb8().as_raw(), expected.as_raw());
+
+    // Byte-for-byte against the pre-sc-24111 write: the same pixels through the same writer with
+    // the same envelope. A change to the encoder settings or the colour type reds this.
+    let reference = dir.path().join("reference.png");
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&written).unwrap();
+    sceneworks_core::workflow_png::write_workflow_chunk(&expected, &reference, share.as_ref())
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&written).unwrap(),
+        std::fs::read(&reference).unwrap(),
+        "the RGB write through the widened funnel is no longer byte-identical"
+    );
+}
+
+#[test]
+fn write_image_asset_refuses_a_buffer_that_is_neither_three_nor_four_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "x",
+        "count": 1, "width": 320, "height": 256, "seed": 1
+    }));
+    let plan = ImagePlan::new(&req);
+
+    for (label, pixels) in [
+        ("grayscale", vec![0u8; 320 * 256]),
+        ("truncated", vec![0u8; 320 * 256 * 3 - 1]),
+    ] {
+        let error = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .expect_err("a malformed engine buffer is refused, not reinterpreted");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(_)),
+            "{label} buffer produced {error:?}"
+        );
+    }
+}
+
+#[test]
+fn split_alpha_separates_the_plane_the_post_pass_engines_cannot_carry() {
+    let source = image::RgbaImage::from_fn(4, 4, |x, y| {
+        image::Rgba([10 + x as u8, 20 + y as u8, 30, (x * 60) as u8])
+    });
+    let (rgb, alpha) = split_alpha(&image::DynamicImage::ImageRgba8(source.clone()));
+    let alpha = alpha.expect("an RGBA source has a plane");
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_eq!(rgb.get_pixel(x, y).0, [10 + x as u8, 20 + y as u8, 30]);
+            assert_eq!(alpha.get_pixel(x, y).0[0], source.get_pixel(x, y).0[3]);
+        }
+    }
+
+    // An opaque source has no plane, which is what keeps every pre-existing lane on the RGB arm.
+    let opaque = image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+    let (_, none) = split_alpha(&image::DynamicImage::ImageRgb8(opaque));
+    assert!(none.is_none());
+}
+
+#[test]
+fn reattach_alpha_is_verbatim_at_the_same_geometry_and_keeps_the_bands_when_scaled() {
+    // Same geometry — the detail refiner's case. Nothing resamples, so the source's alpha survives
+    // exactly, every soft value included.
+    let alpha = image::GrayImage::from_fn(8, 8, |x, _| image::Luma([(x * 36).min(255) as u8]));
+    let rgb = image::RgbImage::from_pixel(8, 8, image::Rgb([9, 8, 7]));
+    let GeneratedPixels::Rgba(same) = reattach_alpha(rgb.clone(), Some(&alpha)) else {
+        panic!("attaching a plane must produce RGBA");
+    };
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(same.get_pixel(x, y).0[3], alpha.get_pixel(x, y).0[0]);
+            assert_eq!(&same.get_pixel(x, y).0[..3], &[9, 8, 7]);
+        }
+    }
+
+    // Scaled geometry — the upscale case. The fully transparent and fully opaque BANDS survive
+    // bilinear resampling (it interpolates between equal values inside a band); only the ramp
+    // moves.
+    let banded = image::GrayImage::from_fn(16, 4, |x, _| {
+        image::Luma(if x < 4 {
+            [0]
+        } else if x < 12 {
+            [((x - 4) * 32).min(255) as u8]
+        } else {
+            [255]
+        })
+    });
+    let scaled_rgb = image::RgbImage::from_pixel(32, 8, image::Rgb([1, 1, 1]));
+    let GeneratedPixels::Rgba(scaled) = reattach_alpha(scaled_rgb, Some(&banded)) else {
+        panic!("attaching a plane must produce RGBA");
+    };
+    assert_eq!(scaled.dimensions(), (32, 8));
+    assert_eq!(
+        scaled.get_pixel(1, 4).0[3],
+        0,
+        "the transparent band closed"
+    );
+    assert_eq!(scaled.get_pixel(30, 4).0[3], 255, "the opaque band opened");
+    let histogram = alpha_histogram(&scaled);
+    assert!(
+        histogram.len() >= 6,
+        "the soft ramp collapsed to {} values",
+        histogram.len()
+    );
+
+    // No plane — the RGB arm, untouched.
+    assert!(matches!(reattach_alpha(rgb, None), GeneratedPixels::Rgb(_)));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_reattaches_the_alpha_the_engine_could_not_see() {
+    // The inline Image Studio upscale's write, driven with the plane `apply_inline_upscale` splits
+    // off its source. The engines are RGB-only, so this is where the channel has to come back.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1", "prompt": "A cut-out courier",
+        "count": 1, "width": 320, "height": 256, "seed": 7
+    }));
+    let plan = ImagePlan::new(&req);
+    let base_fact = json!({
+        "index": 0, "seed": 7, "type": "image", "displayName": "Base",
+        "mediaPath": "assets/images/base.png", "width": 320, "height": 256
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+
+    // A 2x upscale result, plus the SOURCE-sized alpha plane, so the resample is exercised.
+    let upscaled = image::RgbImage::from_fn(640, 512, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 77])
+    });
+    let source_alpha = image::GrayImage::from_fn(320, 256, |x, _| {
+        image::Luma(if x < 80 {
+            [0]
+        } else if x < 240 {
+            [((x - 80) * 255 / 159) as u8]
+        } else {
+            [255]
+        })
+    });
+
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        Some(&source_alpha),
+        "real-esrgan",
+        2,
+        0.0,
+        project_path,
+    )
+    .unwrap();
+
+    let written = project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap());
+    let decoded = image::open(&written).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the upscaled variant dropped the base render's alpha"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!(decoded.dimensions(), (640, 512));
+    assert_eq!(
+        decoded.get_pixel(2, 2).0[3],
+        0,
+        "the transparent band closed"
+    );
+    assert_eq!(
+        decoded.get_pixel(637, 2).0[3],
+        255,
+        "the opaque band opened"
+    );
+    assert!(
+        alpha_histogram(&decoded).len() >= 8,
+        "the soft edge did not survive the 2x resample"
+    );
+    // The colour the engine produced is untouched by the re-attach.
+    assert_eq!(
+        &decoded.get_pixel(637, 2).0[..3],
+        &upscaled.get_pixel(637, 2).0[..]
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist", "count": 1,
+        "width": 320, "height": 256, "seed": 7
+    }));
+    let plan = ImagePlan::new(&req);
+    let base_fact = json!({
+        "index": 0, "seed": 7, "type": "image", "displayName": "Base",
+        "mediaPath": "assets/images/base.png", "width": 320, "height": 256
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let upscaled = image::RgbImage::from_fn(640, 512, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 77])
+    });
+
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        None,
+        "real-esrgan",
+        2,
+        0.0,
+        project_path,
+    )
+    .unwrap();
+
+    let decoded =
+        image::open(project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap()))
+            .unwrap();
+    assert_eq!(decoded.color(), image::ColorType::Rgb8);
+    assert_eq!(decoded.to_rgb8().as_raw(), upscaled.as_raw());
 }

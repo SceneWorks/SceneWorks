@@ -7505,6 +7505,48 @@ pub(crate) fn load_reference_image(
     })
 }
 
+/// The alpha plane of the same asset [`load_reference_image`] loads, or `None` when it has none
+/// (sc-24111).
+///
+/// A deliberate second read rather than a widening of `load_reference_image`. That function's
+/// return type is `gen_core::Image`, whose `pixels` is a flat 3-channel buffer — the engine-side
+/// contract, which the inference half of this story owns and which this PR does not touch. The
+/// product-side lanes that refine or rescale an image and then write it back as an asset still
+/// have to preserve the channel, so the plane travels beside the engine image instead of inside
+/// it, and is re-attached after the pass by `image_jobs::reattach_alpha`.
+///
+/// Reads the same path through the same `safe_project_path` confinement, so a poisoned sidecar
+/// cannot reach a different file here than it does there.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn load_reference_alpha(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<Option<image::GrayImage>> {
+    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
+        .get_asset(project_id, asset_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id}: {error}"))
+        })?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
+        })?;
+    let path = crate::safe_project_path(project_path, rel)?;
+    let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
+        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+    })?;
+    Ok(split_alpha(&decoded).1)
+}
+
 /// The clamped identity img2img-init strength for a strict-pose set, or `None` for the pose-only tier.
 /// `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty `referenceAssetId` is present;
 /// `strength` is the user value clamped to `[0.05, 1.0]`, carrying the mflux `image_strength`

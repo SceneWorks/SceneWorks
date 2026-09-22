@@ -2780,3 +2780,59 @@
 .su-root[data-bp="phone"] .su-audio-viewer {
   width: 100%;
 }
+
+/* ---------- Transparency backdrop (sc-24111) ----------
+   The Simple shell's twin of the block at the end of `../styles.css`.
+
+   It has to be restated here rather than reused because the Simple shell has its
+   own result view, its own asset grid and its own fullscreen preview, and shares
+   none of the advanced shell's class names — `.su-result img` is not
+   `.asset-tile img`. It is also loaded AFTER `styles.css` (SimpleShell imports it
+   on mount), so a block over there naming these selectors could be overridden from
+   here; keeping each shell's rule in its own file keeps the cascade obvious.
+
+   The tokens are the shared ones, so the two shells checkerboard identically.
+
+   Safe to apply unconditionally, same reasoning as the advanced shell: every
+   selector below is `object-fit: cover` except `.su-preview-stage img`, which is
+   `contain` but already sizes to its bitmap (`max-width`/`max-height` with no
+   explicit width), so it has no letterbox bars to fill either. An opaque image
+   covers the checkerboard completely and nothing changes for it.
+
+   `<video>` is deliberately excluded — no video format this app plays carries
+   alpha — so `.su-result video` and `.su-preview-stage video` keep their flat
+   surface. */
+.su-result img,
+.su-asset img,
+.su-preview-stage img,
+.su-tile-ref img,
+.su-option-row img,
+.su-style-thumb img {
+  --checker-tile: 16px;
+  --checker-ink: color-mix(in srgb, var(--text) 11%, transparent);
+  background-color: var(--bg-2);
+  background-image:
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    ),
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    );
+  background-size: var(--checker-tile) var(--checker-tile);
+  background-position: 0 0, calc(var(--checker-tile) / 2) calc(var(--checker-tile) / 2);
+}
+
+/* 32–34px reference and option chips get two tiles at 16px, which reads as a
+   diagonal stripe rather than a checker. Halve it. */
+.su-tile-ref img,
+.su-option-row img {
+  --checker-tile: 8px;
+}

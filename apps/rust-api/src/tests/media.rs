@@ -1787,6 +1787,7 @@ fn scaled_fixture(name: &str, side: u32) -> image::RgbaImage {
 async fn an_rgba_asset_keeps_its_alpha_through_the_file_and_thumbnail_routes() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
     let (_, created) = request(
         app.clone(),
@@ -1851,8 +1852,30 @@ async fn an_rgba_asset_keeps_its_alpha_through_the_file_and_thumbnail_routes() {
         "the thumbnail's alpha histogram differs from the source's"
     );
 
-    // Hop 3 — the warm cache. The derivative is read off disk on the second request, so the cached
-    // PNG has to carry the channel too; a flatten here would only show up on a reused thumbnail.
+    // Hop 3 — the cached derivative, read as a FILE rather than as a second identical response.
+    // Asserting that the warm request returns the same bytes as the cold one says nothing about
+    // alpha: both would be equally flat. What has to be true is that the PNG sitting in the cache
+    // directory — the one every later request is served from, and the one a flattening
+    // `ensure_grid_thumbnail` would have written — still carries the channel.
+    let cached: Vec<_> =
+        std::fs::read_dir(std::path::PathBuf::from(&data_dir).join("cache/media-thumbnails/v1"))
+            .expect("thumbnail cache exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+            .collect();
+    assert_eq!(cached.len(), 1, "expected exactly one cached derivative");
+    let on_disk = image::open(&cached[0]).expect("the cached derivative decodes");
+    assert_eq!(
+        on_disk.color(),
+        image::ColorType::Rgba8,
+        "the cached thumbnail on disk lost its alpha channel"
+    );
+    assert_eq!(
+        alpha_histogram(&on_disk.to_rgba8()),
+        alpha_histogram(&original)
+    );
+
     let (status, _, warm) = request_raw(
         app,
         "GET",

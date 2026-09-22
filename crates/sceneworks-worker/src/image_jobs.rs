@@ -2507,8 +2507,135 @@ fn resolved_sampler_for_share<'a>(adapter: &str, raw_settings: &'a JsonObject) -
         .filter(|sampler| matches!(*sampler, "euler"))
 }
 
-/// Save image `index` (its RGB8 `pixels`) under `assets/images/` and return the flat
-/// fact the API turns into an indexed asset (every key here is consumed by
+/// The engine's flat pixel buffer, typed by the channel count it actually carries (sc-24111).
+///
+/// `write_image_asset` used to call `image::RgbImage::from_raw(width, height, pixels)` directly,
+/// and since it is the one funnel EVERY generated image asset is written through, that single
+/// constructor decided that no image job in the app could ever emit an RGBA PNG. Widening
+/// `workflow_png::write_workflow_chunk` to accept alpha was necessary and not sufficient: the
+/// buffer never got that far with four channels.
+///
+/// The mapping is keyed on the buffer's channel count, derived from its own length, and on nothing
+/// else. Not on the model id: the inference half of this story makes `qwen_image_2_1` emit a
+/// 4-channel `Image` when transparency is requested, and the next model to do so must work here
+/// without a second edit. A buffer whose length is not an exact 3- or 4-channel multiple of the
+/// declared geometry is a typed refusal rather than a silent reinterpretation — the old code's
+/// `from_raw` returning `None` was the same decision for 3 channels only, and a 4-channel buffer
+/// used to fail it as "size mismatch" when it was in fact perfectly well formed.
+pub(crate) enum GeneratedPixels {
+    /// 8-bit RGB. Every lane before sc-24111, byte-identical.
+    Rgb(image::RgbImage),
+    /// 8-bit RGBA. Native transparency, written straight through to the PNG.
+    Rgba(image::RgbaImage),
+}
+
+impl GeneratedPixels {
+    /// Type an engine buffer by its channel count, or refuse it by name.
+    pub(crate) fn from_engine_buffer(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> WorkerResult<Self> {
+        let geometry = (width as usize)
+            .checked_mul(height as usize)
+            .filter(|count| *count > 0)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "image buffer geometry is degenerate: {width}x{height}"
+                ))
+            })?;
+        let channels = if pixels.len().is_multiple_of(geometry) {
+            pixels.len() / geometry
+        } else {
+            0
+        };
+        match channels {
+            3 => image::RgbImage::from_raw(width, height, pixels)
+                .map(Self::Rgb)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("image buffer size mismatch".to_owned())
+                }),
+            4 => image::RgbaImage::from_raw(width, height, pixels)
+                .map(Self::Rgba)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("image buffer size mismatch".to_owned())
+                }),
+            _ => Err(WorkerError::InvalidPayload(format!(
+                "image buffer of {} bytes is neither 3- nor 4-channel at {width}x{height}",
+                pixels.len()
+            ))),
+        }
+    }
+
+    pub(crate) fn as_workflow_image(&self) -> sceneworks_core::workflow_png::WorkflowImage<'_> {
+        match self {
+            Self::Rgb(image) => image.into(),
+            Self::Rgba(image) => image.into(),
+        }
+    }
+}
+
+/// Split a decoded source into the 3-channel buffer the post-pass engines accept and the alpha
+/// plane they cannot see (sc-24111).
+///
+/// Real-ESRGAN's ONNX export is `(1, 3, H, W)` and SeedVR2 returns a 3-channel `GenerationOutput`;
+/// the SDXL tile refiner takes the same flat 3-channel `gen_core::Image`. None of them can be
+/// handed an alpha channel, and widening them is not this repo's call. So the plane travels
+/// AROUND the model: split here, resampled and re-attached by [`reattach_alpha`] after the pass.
+///
+/// `None` for a source that has no alpha, which keeps every pre-sc-24111 render on exactly the
+/// path it was on — the `Rgb` arm of [`GeneratedPixels`], byte-identical output.
+pub(crate) fn split_alpha(
+    decoded: &image::DynamicImage,
+) -> (image::RgbImage, Option<image::GrayImage>) {
+    let rgb = decoded.to_rgb8();
+    if !decoded.color().has_alpha() {
+        return (rgb, None);
+    }
+    let rgba = decoded.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    let alpha = image::GrayImage::from_fn(width, height, |x, y| {
+        image::Luma([rgba.get_pixel(x, y).0[3]])
+    });
+    (rgb, Some(alpha))
+}
+
+/// Re-attach a split alpha plane to a post-pass result, resampling it to the result's geometry.
+///
+/// Two regimes, and the distinction matters:
+///
+/// * **Same geometry** (the detail refiner, which refines in place) — the plane is attached
+///   verbatim, so the source's alpha survives exactly, soft edges included. No resampler touches
+///   it, so there is nothing to round.
+/// * **Scaled geometry** (upscale) — bilinear (`Triangle`). Nearest would stair-step every soft
+///   edge at 2x/4x, which is precisely the edge quality an upscale exists to improve; bilinear on
+///   the plane matches what the model is doing to the colour beside it. A fully transparent or
+///   fully opaque REGION stays fully transparent or opaque because bilinear is interpolating
+///   between equal values there; only the ramp is resampled.
+pub(crate) fn reattach_alpha(
+    rgb: image::RgbImage,
+    alpha: Option<&image::GrayImage>,
+) -> GeneratedPixels {
+    let Some(alpha) = alpha else {
+        return GeneratedPixels::Rgb(rgb);
+    };
+    let (width, height) = (rgb.width(), rgb.height());
+    let scaled;
+    let alpha = if alpha.dimensions() == (width, height) {
+        alpha
+    } else {
+        scaled =
+            image::imageops::resize(alpha, width, height, image::imageops::FilterType::Triangle);
+        &scaled
+    };
+    GeneratedPixels::Rgba(image::RgbaImage::from_fn(width, height, |x, y| {
+        let source = rgb.get_pixel(x, y).0;
+        image::Rgba([source[0], source[1], source[2], alpha.get_pixel(x, y).0[0]])
+    }))
+}
+
+/// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
+/// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_image_asset(
@@ -2547,8 +2674,9 @@ pub(crate) fn write_image_asset(
             .as_ref(),
         );
     }
-    let rgb_image = image::RgbImage::from_raw(width, height, pixels)
-        .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
+    // Typed by the engine's channel count, not assumed to be three (sc-24111). See
+    // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
+    let generated = GeneratedPixels::from_engine_buffer(width, height, pixels)?;
 
     // Sanitize the payload-supplied model id before it becomes a path component: it
     // arrives verbatim from the untrusted job payload, and a `../` / `\` / absolute id
@@ -2609,7 +2737,7 @@ pub(crate) fn write_image_asset(
         share.upscale = None;
         Some(share)
     });
-    write_workflow_chunk(&rgb_image, &temp_path, share.as_ref())
+    write_workflow_chunk(generated.as_workflow_image(), &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
@@ -2734,14 +2862,16 @@ async fn apply_inline_upscale(
             })?;
         // Decode the base image off the async runtime thread (sc-8909 / F-107).
         let source_path = project_path.join(media_rel);
-        let source = tokio::task::spawn_blocking(move || {
+        // The base render may carry native transparency (sc-24111). The engine only takes three
+        // channels, so the alpha plane is split off here and re-attached at the write below.
+        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
             crate::image_decode::decode_image_any(source_path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
                         "Upscale source could not be loaded: {error}"
                     ))
                 })
-                .map(|decoded| decoded.to_rgb8())
+                .map(|decoded| split_alpha(&decoded))
         })
         .await
         .map_err(|error| crate::task_join_error("upscale source decode task", error))??;
@@ -2789,6 +2919,7 @@ async fn apply_inline_upscale(
                 &plan_for_task,
                 &base_fact_for_task,
                 &upscaled,
+                source_alpha.as_ref(),
                 &engine_for_task,
                 factor,
                 softness,
@@ -2810,10 +2941,14 @@ async fn apply_inline_upscale(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn write_upscaled_asset(
     plan: &ImagePlan,
     base_fact: &JsonObject,
     upscaled: &image::RgbImage,
+    // The base render's alpha plane, split off before the engine (sc-24111). `None` for an
+    // opaque source, which keeps the write byte-identical to what it always was.
+    source_alpha: Option<&image::GrayImage>,
     engine_id: &str,
     factor: u8,
     softness: f32,
@@ -2858,7 +2993,9 @@ fn write_upscaled_asset(
         share.model_hash = plan.model_hash.clone();
         share.loras = plan.loras.clone();
     }
-    write_workflow_chunk(upscaled, &temp_path, share.as_ref())
+    // Re-attach the plane the engine could not carry, resampled to the upscaled geometry.
+    let written = reattach_alpha(upscaled.clone(), source_alpha);
+    write_workflow_chunk(written.as_workflow_image(), &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
