@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "81fda3bd5a9d5920ad9cdc62796df3305be96742",
+    "inferenceRevision": "826c1082114754890fd790140ccee4dde97a2f5d",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -432,6 +432,7 @@
       "minimax_h3",
       "mochi_1",
       "qwen_image",
+      "qwen_image_2_1",
       "sana_1600m",
       "sana_sprint_1600m",
       "scail2_14b",
@@ -1586,6 +1587,47 @@
           "ddim_uniform",
           "beta57",
           "flow_match_euler"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image_2_1",
+        "family": "qwen-image-2-1",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
         ],
         "supported_guidance_methods": []
       },
