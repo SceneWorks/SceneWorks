@@ -177,6 +177,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
             CandleImageLane::MageEdit,
+            CandleImageLane::QwenImage21Edit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
@@ -258,6 +259,24 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         (edit("mage_flow_edit_base"), CandleImageLane::MageEdit),
         (edit("mage_flow_edit"), CandleImageLane::MageEdit),
         (edit("mage_flow_edit_turbo"), CandleImageLane::MageEdit),
+        // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
+        // txt2img id, so both the edit shape and the Character-Studio reference shape must be
+        // claimed by this bespoke lane before the generic gate can refuse them.
+        (edit("qwen_image_2_1"), CandleImageLane::QwenImage21Edit),
+        (
+            character("qwen_image_2_1"),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "edit_image",
+                "sourceAssetId": "source_1",
+                "maskAssetId": "mask_1",
+                "referenceAssetIds": ["ref_1", "ref_2"]
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
         (reference("boogu_image"), CandleImageLane::BooguImg2Img),
         (
             reference("boogu_image_turbo"),

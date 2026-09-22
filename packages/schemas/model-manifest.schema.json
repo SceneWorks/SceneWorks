@@ -1146,21 +1146,14 @@
                 "type": "integer", "minimum": 0,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_max_reference_assets" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_reference_limit_error(" }],
-                "description": "Ceiling on `referenceAssetIds` — the ordered reference list. Long-standing on VIDEO models (sc-17160, where it defaults to 8 via reference_caps); sc-24113 adds an IMAGE reader with NO default, because most image models take no references at all and an absent key there must mean 'this gate has no opinion'. Enforced at enqueue by rejecting, never truncating: for Qwen-Image 2.1 (1-10 ordered references) a dropped entry is not a smaller render but a different one, since the template numbers the images (<image1> …) and block-causal attention makes each visible only to what follows, so shortening the list renumbers every reference after the cut."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_max_reference_assets" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/base.rs", "anchor": "sceneworks_core::video_request::image_max_reference_assets(" }],
+                "description": "Ceiling on the model's ordered reference list. Long-standing on VIDEO models (sc-17160, where it counts `referenceAssetIds` and defaults to 8 via reference_caps); sc-24113 adds an IMAGE reader with NO default, because most image models take no references at all and an absent key there must mean 'this gate has no opinion'. On the IMAGE lane it counts the FLATTENED ordered conditioning list (sc-24110) - `sourceAssetId`, `maskAssetId` and every `referenceAssetIds` entry together - because the engine receives ONE list and a per-carrier count would admit `source + mask + 9` as nine references. Enforced at enqueue by rejecting, never truncating, and re-read by the worker resolver so both ends share one ceiling: for Qwen-Image 2.1 (1-10 ordered references) a dropped entry is not a smaller render but a different one, since the template numbers the images (<image1> ...) and block-causal attention makes each visible only to what follows, so shortening the list renumbers every reference after the cut."
               },
               "recommendedMaxDuration": {
                 "type": "number", "exclusiveMinimum": 0,
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel.limits.recommendedMaxDuration" }],
                 "description": "Non-blocking UI recommendation; intentionally not enforced."
-              },
-              "maxReferenceAssets": {
-                "type": "integer", "minimum": 0,
-                "x-sceneworks-contract": "binding",
-                "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
-                "description": "Maximum still-image references (`referenceAssetIds`) this model conditions on; API and worker reject an over-cap request rather than dropping the extras. ABSENT MEANS 8, the ceiling every video family shipped before sc-17160 enforced, so an undeclared model is byte-for-byte unchanged. Declared only by a family whose real cap differs (MiniMax-H3 Ref2VA takes 9) — no builtin model needs it yet; sc-17158 is the first."
               },
               "maxSourceClipAssets": {
                 "type": "integer", "minimum": 0,

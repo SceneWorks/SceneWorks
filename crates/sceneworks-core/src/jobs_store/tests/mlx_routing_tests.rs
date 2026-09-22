@@ -522,13 +522,16 @@ fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
         );
     }
 
-    // The edit shapes claim too, through the same public entry point: the Image Editor's working
-    // image (`sourceAssetId`), the single-reference flows (`referenceAssetId`), and the ordered
-    // 1–10 list (`referenceAssetIds`) that is the real multi-reference surface.
+    // The CONDITIONED shapes claim through the same public entry point: the Image Editor's working
+    // image (`sourceAssetId`), the single-reference flows (`referenceAssetId`), the ordered 1-10
+    // list (`referenceAssetIds`) that is the real multi-reference surface, and a mask — which on
+    // this model is an ORDINARY ordered reference the prompt names, not a mask tensor (sc-24110).
     for payload in [
-        json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "sourceAssetId": "src_1" }),
         json!({ "referenceAssetId": "ref_1" }),
         json!({ "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "maskAssetId": "mask_1" }),
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
         json!({ "mode": "edit_image", "referenceAssetIds": ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"] }),
         json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
     ] {
@@ -538,15 +541,30 @@ fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
         );
     }
 
-    // What is still refused, and it is a short list with a reason each: there is no mask tensor in
-    // this family at all (a mask is an ordinary extra reference the prompt names), and no
-    // strict-control tier for pose/ControlNet to reach.
+    // What is still refused, and it is a short list with a reason each.
+    //
+    // NOT the mask carrier — sc-24113 refused it here and sc-24110 removed that refusal. The
+    // reasoning behind it was right and the conclusion was one step too far: 2.1 has no mask
+    // TENSOR, which is why `Conditioning::Mask` must never be SENT, but a mask IMAGE is an
+    // ordinary ordered reference the prompt names ("use the second image as a mask") — the
+    // engine's own refusal text says exactly that. Dropping the carrier at the door would have
+    // left the Image Editor's existing mask output with no route on this model at all. The
+    // never-send-a-Mask half is enforced where the conditioning list is BUILT, in the worker.
+    //
+    // What remains: there is no strict-control tier for pose/ControlNet to reach, and a malformed
+    // carrier fails closed rather than being read as "not supplied".
     for payload in [
-        json!({ "maskAssetId": "mask_1" }),
-        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
         json!({ "advanced": { "poses": [{ "id": "p1" }] } }),
         json!({ "controls": [{ "kind": "canny" }] }),
         json!({ "controlnets": [{ "kind": "depth" }] }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "src_1",
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }),
+        json!({ "mode": "edit_image", "sourceAssetId": 7 }),
+        json!({ "mode": "edit_image", "referenceAssetIds": "ref_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", ""] }),
     ] {
         assert!(
             !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
@@ -565,6 +583,127 @@ fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
     assert!(qwen_mlx_eligible(&object(json!({
         "advanced": { "poses": [{ "id": "p1" }] }
     }))));
+}
+
+/// sc-24110: the reference / local-editing half of the 2.1 contract.
+///
+/// Upstream ships ONE pipeline — text-to-image is the call with no condition images, and edit /
+/// multi-reference / local editing are the SAME call with an ordered list of 1..=10. So this pins
+/// the two things the routing layer actually decides: **which shapes claim**, and **what the
+/// ordered list is**. The order is semantic (the prompt template numbers the images, the size
+/// fallback reads the last one, attention is block-causal), so a reordering here is a different
+/// render, not a cosmetic difference — which is why it is asserted as a sequence rather than a set.
+#[test]
+fn qwen_image_2_1_routes_an_ordered_reference_edit_to_mlx() {
+    // Every conditioned shape the Image Editor and Character Studio produce claims.
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1"] }),
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
+        // A MASK is an ordinary ordered reference on this model, never `Conditioning::Mask` —
+        // 2.1 has no mask tensor and performs no inpainting. Claiming it is the whole point.
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+    ] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "the MLX worker must claim an ordered-reference 2.1 edit: {payload}"
+        );
+    }
+
+    // The CEILING is deliberately NOT a routing verdict, and neither is "a conditioned mode with
+    // nothing to condition on". Both are enqueue-time 400s read from `limits.maxReferenceAssets`,
+    // so exactly one place knows the number. What routing must guarantee is that a job which
+    // already EXISTS stays claimable: an over-cap job refused here would sit "Waiting for an
+    // available worker" forever (the Anima defect, sc-10523) instead of failing out loud in the
+    // worker with the engine's own wording.
+    let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("ref_{i}")).collect() };
+    for count in [1usize, 10, 11, 25] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(
+                json!({ "mode": "edit_image", "referenceAssetIds": ids(count) })
+            )),
+            "{count} well-formed references must stay CLAIMABLE — the cap is the enqueue gate's"
+        );
+    }
+    for payload in [
+        json!({ "mode": "edit_image" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": [] }),
+    ] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "an empty ordered list is the text-to-image call, which this worker serves: {payload}"
+        );
+    }
+
+    // A malformed carrier fails CLOSED — never silently read as "not supplied".
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": 7 }),
+        json!({ "mode": "edit_image", "referenceAssetIds": "ref_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", ""] }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", 7] }),
+    ] {
+        assert!(
+            !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "a malformed carrier must fail closed: {payload}"
+        );
+    }
+}
+
+/// The ORDER of the flattened conditioning list, pinned on its own because it is a semantic claim
+/// about the render rather than a routing verdict: upstream numbers the images in the prompt
+/// template (`<image1>…`), reads the LAST one for its size fallback, and attends block-causally, so
+/// swapping two entries is a DIFFERENT request. Both backends and the worker's payload builder read
+/// this one function, so this is the single place the order is stated.
+#[test]
+fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
+    use crate::jobs_store::routing::qwen_image_2_1_reference_ids;
+
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "src",
+            "maskAssetId": "mask",
+            "referenceAssetIds": ["a", "b", "c"],
+            "referenceAssetId": "single"
+        }))),
+        Some(vec![
+            "src".to_owned(),
+            "mask".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "single".to_owned(),
+        ]),
+    );
+
+    // Swapping two submitted references changes the list — the property the worker payload test
+    // and the API order test both rest on.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "referenceAssetIds": ["b", "a"] }))),
+        Some(vec!["b".to_owned(), "a".to_owned()]),
+    );
+
+    // Absent / null / blank carriers are "not supplied"; wrong-typed ones are malformed.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": Value::Null,
+            "maskAssetId": "   ",
+            "referenceAssetIds": ["only"]
+        }))),
+        Some(vec!["only".to_owned()]),
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "sourceAssetId": ["src"] }))),
+        None
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "referenceAssetIds": [""] }))),
+        None
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({}))),
+        Some(Vec::<String>::new())
+    );
 }
 
 #[test]

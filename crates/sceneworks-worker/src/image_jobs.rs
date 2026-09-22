@@ -1573,6 +1573,7 @@ pub(crate) async fn run_image_generate_job(
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
+                | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
                 | CandleImageRoute::CandleTxt2Img => {
