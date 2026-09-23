@@ -483,27 +483,27 @@ describe("per-tier memory floor: the lane selects the evidence", () => {
   });
 
   // sc-24112: a model whose tiers have genuinely different floors declares `minMemoryGbByTier`
-  // beside the scalar. `qwen_image_2_1` spans 23 to 48 GB across q4/q8/bf16, so quoting its
+  // beside the scalar. `qwen_image_2_1` spans 21 to 45 GB across q4/q8/bf16, so quoting its
   // heaviest tier's requirement at a user who picked the lightest reads as "your machine is too
   // small" for a tier that fits comfortably — which is the whole reason the per-tier key exists.
   it("prefers the per-tier floor over the blanket scalar when a tier is named", () => {
     const model = {
-      candle: { minMemoryGb: 48, minMemoryGbByTier: { bf16: 48, q8: 31, q4: 23 } },
-      mlx: { minMemoryGb: 48, minMemoryGbByTier: { bf16: 48, q8: 31, q4: 23 } },
+      candle: { minMemoryGb: 45, minMemoryGbByTier: { bf16: 45, q8: 29, q4: 21 } },
+      mlx: { minMemoryGb: 45, minMemoryGbByTier: { bf16: 45, q8: 29, q4: 21 } },
     };
     for (const backend of ["mlx", "candle"]) {
-      expect(blanketFloorGb(model, backend, "q4")).toBe(23);
-      expect(blanketFloorGb(model, backend, "q8")).toBe(31);
-      expect(blanketFloorGb(model, backend, "bf16")).toBe(48);
+      expect(blanketFloorGb(model, backend, "q4")).toBe(21);
+      expect(blanketFloorGb(model, backend, "q8")).toBe(29);
+      expect(blanketFloorGb(model, backend, "bf16")).toBe(45);
       // A tier with no row falls through to the scalar, which stays the conservative number — the
       // same resolution order `vram_gate::predicted_peak_gb` uses, and for the same reason: an
       // unlisted tier landing on a LIGHT tier's floor would under-state what it needs.
-      expect(blanketFloorGb(model, backend, "nvfp4")).toBe(48);
-      // No tier in hand ⇒ today's blanket answer, unchanged. Every existing caller passes two
-      // arguments, so this is what keeps them untouched.
-      expect(blanketFloorGb(model, backend)).toBe(48);
+      expect(blanketFloorGb(model, backend, "nvfp4")).toBe(45);
+      // No tier in hand ⇒ the blanket scalar. Callers that answer for a tier pass it
+      // (`lightestInstallableTier`, the installed set).
+      expect(blanketFloorGb(model, backend)).toBe(45);
       // A blank/whitespace tier is "no tier", not a lookup miss worth a different answer.
-      expect(blanketFloorGb(model, backend, "  ")).toBe(48);
+      expect(blanketFloorGb(model, backend, "  ")).toBe(45);
     }
     // The key is still LANE-SCOPED: a per-tier row on one lane never answers for the other.
     expect(

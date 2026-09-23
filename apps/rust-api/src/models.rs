@@ -2192,47 +2192,15 @@ pub(crate) async fn delete_model_variant(
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
     let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
-        let repo = download
-            .get("repo")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let files = string_array_field(&download, "files");
-        // A tier with no `files` scope is the whole repo (a single-variant "default"), not a
-        // deletable slice of a shared cache — refuse rather than risk wiping every tier. The UI
-        // only offers this on real quant tiers (bf16/q8/q4), which always carry a `files` glob.
-        if files.is_empty() {
-            return Err(ApiError::bad_request(format!(
-                "Tier '{variant}' has no file scope; delete the whole model instead"
-            )));
-        }
-        let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
-        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
-        // Some families expose load-time quant choices over one dense snapshot (Mage-Flow):
-        // their q4/q8/bf16 entries intentionally overlap. Protect every path still referenced
-        // by a sibling logical tier; a delete then truthfully reclaims zero bytes rather than
-        // corrupting the snapshot used by the remaining choices.
-        let retained_files = model
-            .get("downloads")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                !is_co_requisite_download(entry)
-                    && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
-                    && entry
-                        .get("variant")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| !value.eq_ignore_ascii_case(&variant))
-            })
-            .flat_map(|entry| string_array_field(entry, "files"))
-            .collect::<Vec<_>>();
+        let scope = tier_delete_scope(&model, &download, &variant)?;
+        let repo_cache = huggingface_repo_cache_path(data_dir, &scope.repo);
+        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&scope.repo)));
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
         remove_tier_artifacts(
             repo_cache,
             managed_dir,
-            &files,
-            &retained_files,
+            &scope.files,
+            &scope.retained_files,
             &allowed_roots,
             true,
         )
@@ -2307,6 +2275,97 @@ pub(crate) async fn delete_model_variant(
     })))
 }
 
+/// What one per-tier delete removes: the repo it lives in, the globs that select its files, and
+/// the globs a sibling tier in the SAME repo still owns.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TierDeleteScope {
+    pub(crate) repo: String,
+    pub(crate) files: Vec<String>,
+    pub(crate) retained_files: Vec<String>,
+}
+
+/// Whether a tier row with NO `files` scope is still reclaimable on its own (sc-24112): no other
+/// download row of the same model — tier, alternate or co-requisite — names its `repo`, so that
+/// repo's whole snapshot IS this tier. `qwen_image_2_1`'s bf16 tier is the released upstream
+/// snapshot, the only row on `Qwen/Qwen-Image-2.1`, while its q8/q4 live in the SceneWorks re-host;
+/// deleting it can strand nothing. A scope-less row on a repo a sibling shares is still the model,
+/// not a slice of it, and stays refused.
+pub(crate) fn is_sole_repo_tier(model: &Value, download: &Value) -> bool {
+    // Only a DECLARED tier: an untagged single-download row is the "default" pseudo-variant, which
+    // the per-tier route cannot address at all.
+    let tagged = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .is_some_and(|variant| !variant.trim().is_empty());
+    let Some(repo) = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .filter(|_| tagged)
+    else {
+        return false;
+    };
+    let sharers = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+        .count();
+    sharers == 1
+}
+
+/// Scope a per-tier delete of `variant` (its catalog row is `download`).
+///
+/// A row with a `files` scope deletes that slice and protects every path a sibling logical tier in
+/// the same repo still references (Mage-Flow's overlapping load-time tiers reclaim zero bytes
+/// rather than corrupting the snapshot the remaining choices use). A row with NO scope is refused
+/// ("delete the whole model instead") unless it is the sole row on its repo
+/// ([`is_sole_repo_tier`]), in which case the whole repo snapshot is the tier and every file in it
+/// goes.
+pub(crate) fn tier_delete_scope(
+    model: &Value,
+    download: &Value,
+    variant: &str,
+) -> Result<TierDeleteScope, ApiError> {
+    let repo = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        if is_sole_repo_tier(model, download) {
+            return Ok(TierDeleteScope {
+                repo,
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            });
+        }
+        return Err(ApiError::bad_request(format!(
+            "Tier '{variant}' has no file scope; delete the whole model instead"
+        )));
+    }
+    let retained_files = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            !is_co_requisite_download(entry)
+                && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
+                && entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.eq_ignore_ascii_case(variant))
+        })
+        .flat_map(|entry| string_array_field(entry, "files"))
+        .collect::<Vec<_>>();
+    Ok(TierDeleteScope {
+        repo,
+        files,
+        retained_files,
+    })
+}
 /// Result of removing a single quant tier's on-disk artifacts (sc-12024).
 #[derive(Default)]
 pub(crate) struct TierRemoval {
@@ -7108,13 +7167,14 @@ struct ModelVariantState {
     /// sc-24112). The picker still lists it — the tier axis is real — but it can never be queued,
     /// never reads `installed`, and is rendered unavailable rather than as a download button.
     pending_artifact: bool,
-    /// Whether the PER-TIER delete can reclaim this tier on its own: true iff the row carries a
-    /// non-empty `files` scope. A whole-repo row (`files: []`) is the model, not a slice of it, and
-    /// `DELETE /models/:id/variants/:variant` refuses it with "delete the whole model instead" —
-    /// so the UI must not offer a per-tier delete for it. Before sc-24112 every variant row carried
-    /// a glob and the API's own comment assumed it always would; `qwen_image_2_1`'s bf16 tier IS
-    /// the whole upstream snapshot and broke that assumption, which is why this is now explicit
-    /// rather than inferred.
+    /// Whether the PER-TIER delete can reclaim this tier on its own (never for a pending row):
+    /// true when the row carries a non-empty `files` scope, OR when it is a scope-less tier that is
+    /// the sole row on its repo ([`is_sole_repo_tier`]) — `qwen_image_2_1`'s bf16 tier, which IS
+    /// the whole upstream snapshot and shares that repo with nothing. A scope-less row on a repo a
+    /// sibling shares is the model rather than a slice of it, and `DELETE
+    /// /models/:id/variants/:variant` refuses it with "delete the whole model instead", so the UI
+    /// must not offer a per-tier delete for it. Both answers come from [`tier_delete_scope`]'s own
+    /// rule, so the button and the route cannot disagree.
     tier_deletable: bool,
 }
 
@@ -7374,7 +7434,8 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     .or_else(|| variant_footprint_disk_bytes(entry)),
                 footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
                 pending_artifact,
-                tier_deletable: !pending_artifact && !files.is_empty(),
+                tier_deletable: !pending_artifact
+                    && (!files.is_empty() || is_sole_repo_tier(model, entry)),
             }
         })
         .collect()
@@ -12024,6 +12085,39 @@ mod variant_install_tests {
         );
     }
 
+    /// sc-24112 — a scope-less tier that is the SOLE row on its repo IS reclaimable on its own: that
+    /// repo's whole snapshot is the tier. The split-repo layout (`qwen_image_2_1`'s bf16 is the
+    /// upstream snapshot, its q8/q4 the SceneWorks re-host) otherwise left a 30.86 GiB tier with no
+    /// per-tier delete at all. The shared-repo case above stays refused.
+    #[test]
+    fn a_scope_less_tier_alone_on_its_repo_is_deletable() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+        downloads[2]["repo"] = json!("Upstream/dense");
+
+        let states = model_variant_states(&model, data.path());
+        assert!(
+            states.iter().all(|state| state.tier_deletable),
+            "the sole-repo bf16 and its scoped siblings all reclaim alone"
+        );
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        assert_eq!(
+            tier_delete_scope(&model, &bf16, "bf16").expect("scoped"),
+            TierDeleteScope {
+                repo: "Upstream/dense".to_owned(),
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            }
+        );
+        // …and the route's refusal still holds for a scope-less row whose repo IS shared.
+        let mut shared = model.clone();
+        shared["downloads"][0]["files"] = json!([]);
+        let shared_q4 = model_download_for_variant(&shared, "q4").expect("q4 row");
+        assert!(tier_delete_scope(&shared, &shared_q4, "q4").is_err());
+    }
+
     #[test]
     fn variant_footprint_disk_bytes_reads_required_field() {
         let entry = json!({ "footprint": { "diskSizeBytes": 42 } });
@@ -12413,6 +12507,93 @@ mod variant_delete_tests {
         assert!(!repo.join("snapshots/rev/q4").exists());
         // Only the exclusive blob's bytes count as reclaimed; the shared blob does not.
         assert_eq!(removal.reclaimed_bytes, 100);
+    }
+
+    /// sc-24112 — the SHIPPED `qwen_image_2_1` entry, as the terminal story leaves it (placeholder
+    /// flags dropped): deleting bf16 reclaims the whole upstream `Qwen/Qwen-Image-2.1` snapshot
+    /// (30.86 GiB in production, the tier's only bytes) and leaves the SceneWorks re-host holding
+    /// q8/q4 untouched. Before, the scope-less bf16 row could never be reclaimed per tier at all.
+    ///
+    /// *Mutation that reds this:* `is_sole_repo_tier` answering `false` — the scope is refused.
+    #[tokio::test]
+    async fn deleting_the_qwen_image_2_1_bf16_tier_reclaims_only_the_upstream_snapshot() {
+        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        let mut model = shipped["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .clone();
+        for download in model["downloads"].as_array_mut().expect("downloads") {
+            download
+                .as_object_mut()
+                .expect("row")
+                .remove("pendingArtifact");
+        }
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        let scope = tier_delete_scope(&model, &bf16, "bf16").expect("bf16 is reclaimable alone");
+        assert_eq!(scope.repo, "Qwen/Qwen-Image-2.1");
+        assert!(scope.retained_files.is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let upstream = hub.join("models--Qwen--Qwen-Image-2.1");
+        let rehost = hub.join("models--SceneWorks--qwen-image-2-1-mlx");
+        seed(
+            &upstream,
+            "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+            "u1",
+            300,
+        );
+        seed(&upstream, "text_encoder/model.safetensors", "u2", 200);
+        seed(&upstream, "model_index.json", "u3", 10);
+        seed(
+            &rehost,
+            "q8/transformer/diffusion_pytorch_model.safetensors",
+            "r8",
+            70,
+        );
+        seed(
+            &rehost,
+            "q4/transformer/diffusion_pytorch_model.safetensors",
+            "r4",
+            40,
+        );
+
+        let removal = remove_tier_artifacts(
+            Some(upstream.clone()),
+            None,
+            &scope.files,
+            &scope.retained_files,
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            removal.reclaimed_bytes, 510,
+            "every upstream blob is the bf16 tier's"
+        );
+        assert!(!upstream.join("blobs/u1").exists());
+        assert!(!upstream.join("snapshots/rev/model_index.json").exists());
+        // The re-host — the q8/q4 tiers — is a different repo and is never scanned.
+        assert!(rehost.join("blobs/r8").exists());
+        assert!(rehost.join("blobs/r4").exists());
+        assert!(rehost
+            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model.safetensors")
+            .exists());
+        assert!(rehost
+            .join("snapshots/rev/q4/transformer/diffusion_pytorch_model.safetensors")
+            .exists());
     }
 
     #[tokio::test]

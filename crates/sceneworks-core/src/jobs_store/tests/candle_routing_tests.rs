@@ -1993,9 +1993,12 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
 /// future revision that narrows one provider must be expressible by changing one of them, and the
 /// assertions below are written so that it is.
 ///
-/// What has NOT changed: `spec.quantize` on Candle is a tier SELECTOR, not a transform request. A
-/// dense snapshot plus a quantize request is still a typed refusal at load on both backends — which
-/// is why the tier axis is an install-time choice of artifact, never a load-time conversion.
+/// What has NOT changed on Candle: `spec.quantize` is a tier SELECTOR, not a transform request — a
+/// dense snapshot plus a quantize request is a typed `Unsupported` at load (candle cannot produce a
+/// packed tier itself). MLX differs: against the dense bf16 snapshot it load-time quantizes
+/// (`quant::installed_tier(root) == Tier::Bf16` prices a `GroupQuantized` projection). So the worker
+/// resolves the tier from the artifact on disk and sends no quantize against the bf16 root on either
+/// lane (`image_jobs::tier_key_for_resolved_dir`); the tier axis is an install-time choice.
 #[test]
 fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
     // sc-24109: the model IS claimable off-Mac — a plain text-to-image job routes to the generic

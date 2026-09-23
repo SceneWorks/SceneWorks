@@ -4090,34 +4090,43 @@ def test_qwen_image_2_1_tier_download_sizes_are_derived_from_the_bf16_tree():
 def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
     """The per-tier floors the fit gates admit against, and the rule that produced them.
 
-    `ceil(derived resident peak at the 2048-square default, in GB, x 1.25)` — one rule applied
-    three times. It is validated by REPRODUCING sc-24109's independently-chosen 48 for bf16, which
-    is why bf16's column is unchanged by this story: the quantized tiers open the cards a bf16-only
-    install locked out, and loosening bf16 is not how.
+    `ceil(derived resident peak at the 2048-square default, in GiB, x 1.25)` — one rule applied
+    three times, in GiB because every consumer budget is GiB (`VramBudget.free_gb` divides
+    nvidia-smi MiB by 1024). x1.25 rather than the `+ HEADROOM_GB` a MEASURED row gets, because
+    the engine's peak is a structural derivation that omits allocator slack.
+
+    *Mutation that reds this:* restating a floor in decimal GB (the pre-fix 48/31/23), or dropping
+    the margin to `peak + 2`.
     """
     qwen = _qwen_image_2_1_entry()
     # Derived resident peaks (GiB) at 2048²: resident weights + the tier-independent 6.75 GiB
-    # activation transient. Stated here as the INPUT to the rule, so the rule is checked and not
-    # just its outputs.
+    # activation transient (inference b12c632b4 `memory_strategy::derived`). Stated here as the
+    # INPUT to the rule, so the rule is checked and not just its outputs.
     peaks_gib = {"bf16": 28.61 + 6.75, "q8": 16.33 + 6.75, "q4": 9.78 + 6.75}
     for backend in ("mlx", "candle"):
         block = qwen[backend]
-        assert block["minMemoryGb"] == 48, (
-            f"{backend}: the scalar stays the conservative fallback for an unlisted tier (nvfp4); "
-            "an under-prediction there admits a load that OOMs"
-        )
         by_tier = block["minMemoryGbByTier"]
         assert set(by_tier) == {"bf16", "q8", "q4"}
-        for tier, floor in (("bf16", 48), ("q8", 31), ("q4", 23)):
-            assert by_tier[tier] == floor, f"{backend}/{tier}"
-            derived = math.ceil(peaks_gib[tier] * (1024**3) / 1e9 * 1.25)
-            assert floor == derived, (
-                f"{backend}/{tier}: {floor} must be ceil({peaks_gib[tier]} GiB in GB x 1.25) "
-                f"= {derived}"
+        for tier, peak in peaks_gib.items():
+            derived = math.ceil(peak * 1.25)
+            assert by_tier[tier] == derived, (
+                f"{backend}/{tier}: {by_tier[tier]} must be ceil({peak:.2f} GiB x 1.25) = {derived}"
             )
-        assert by_tier["bf16"] == block["minMemoryGb"], (
-            f"{backend}: bf16 is UNCHANGED from sc-24109"
+        assert block["minMemoryGb"] == by_tier["bf16"] == max(by_tier.values()), (
+            f"{backend}: the scalar is the densest tier's floor — the conservative fallback for an "
+            "unlisted tier (nvfp4); an under-prediction there admits a load that OOMs"
         )
+    # The product outcome, against REAL card reports (GiB free): a 5090 reports 31.84 total and an
+    # A100-40GB 39.5, so a desktop's held memory must not refuse q8 on either.
+    candle = qwen["candle"]["minMemoryGbByTier"]
+    for card, free_gib, admitted in (
+        ("24 GB card", 22.5, {"q4"}),
+        ("RTX 5090", 30.5, {"q4", "q8"}),
+        ("A100-40GB", 38.5, {"q4", "q8"}),
+        ("48 GB card", 46.5, {"q4", "q8", "bf16"}),
+    ):
+        fits = {tier for tier, floor in candle.items() if floor <= free_gib}
+        assert fits == admitted, f"{card} with {free_gib} GiB free admits {sorted(fits)}"
     # No MEASURED ladder on either lane — these floors carry no evidence class, which is exactly
     # why they do not ride `vramGbByTier`.
     for key in ("vramGbByTier", "sequentialPeakGb", "measured", "calibrations"):
@@ -4125,11 +4134,54 @@ def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
         assert key not in qwen["mlx"], f"mlx.{key} is a measured-evidence key"
 
 
+def test_qwen_image_2_1_declares_derived_staged_floors_on_mlx():
+    """The MLX STAGED floor per tier — the same x1.25 rule over the engine's `bounded_peak_bytes`
+    (staged weight floor `max(tower, DiT + VAE)` + the 512/64 bounded-decode transient) — so a
+    host no tier fits RESIDENT is still told which tier runs staged. Derived, like the resident
+    floors; Candle declares none (its gate has no staged floor key).
+
+    *Mutation that reds this:* using the staged WEIGHT floor alone (14.51 / 8.30 / 4.99), which
+    omits the decode transient every staged request still pays.
+    """
+    qwen = _qwen_image_2_1_entry()
+    staged_weight_floor_gib = {"bf16": 14.51, "q8": 8.30, "q4": 4.99}
+    bounded_decode_gib = 1.66
+    staged = qwen["mlx"]["stagedMinMemoryGbByTier"]
+    for tier, weights in staged_weight_floor_gib.items():
+        assert staged[tier] == math.ceil((weights + bounded_decode_gib) * 1.25), tier
+        assert staged[tier] < qwen["mlx"]["minMemoryGbByTier"][tier], (
+            f"{tier}: staging must sit below the resident floor or it states nothing"
+        )
+    assert "stagedMinMemoryGbByTier" not in qwen["candle"]
+
+
+def test_qwen_image_2_1_pending_tiers_are_still_the_placeholder_tripwire():
+    """FAIL-CLOSED TRIPWIRE for the epic's terminal story. The packed q8/q4 tiers are the
+    null-SHA placeholder AND unofferable (`pendingArtifact`, never the default) — today, together.
+
+    This test is MEANT to go red. The terminal story uploads the artifacts and must, in ONE edit per
+    row, replace `0000000000000000000000000000000000000000` with the real commit AND drop
+    `pendingArtifact` AND move `default` to q4 — and then delete this test in the same commit.
+    Replacing the SHA without dropping the flag, or dropping the flag without the SHA, reds here
+    (and in `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`); doing
+    neither leaves the placeholder visible here rather than silently shipping forever.
+    """
+    downloads = {d.get("variant"): d for d in _qwen_image_2_1_entry()["downloads"]}
+    for tier in ("q8", "q4"):
+        row = downloads[tier]
+        assert row["revision"] == "0" * 40, f"{tier}: the terminal story pinned it — delete this test"
+        assert row.get("pendingArtifact") is True, f"{tier}: flag and placeholder move together"
+        assert row.get("default") is not True, f"{tier}: a pending tier is never the default"
+    assert downloads["bf16"].get("default") is True
+    assert downloads["bf16"].get("pendingArtifact") is not True
+
+
 def test_qwen_image_2_1_declares_the_admission_geometry_its_gate_consumes():
     """The request-admission envelope, mirrored from the provider's `admission_geometry()`.
 
-    The gate (`crates/sceneworks-worker/src/admission_geometry.rs`) is declaration-driven, so a
-    missing or wrong block makes it silently inert or silently wrong rather than loud.
+    The gate (`crates/sceneworks-core/src/admission_geometry.rs`, run at enqueue and in the
+    worker) is declaration-driven, so a missing or wrong block makes it silently inert or silently
+    wrong rather than loud.
     """
     geometry = _qwen_image_2_1_entry()["admissionGeometry"]
     assert geometry == {

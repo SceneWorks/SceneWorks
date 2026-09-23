@@ -27956,7 +27956,16 @@ mod qwen_image_2_1_tiers {
         entry: &serde_json::Map<String, Value>,
         bits: Option<i64>,
     ) -> Option<PathBuf> {
+        resolved_with_tier(data_dir, entry, bits).map(|(dir, _)| dir)
+    }
+
+    fn resolved_with_tier(
+        data_dir: &Path,
+        entry: &serde_json::Map<String, Value>,
+        bits: Option<i64>,
+    ) -> Option<(PathBuf, &'static str)> {
         super::super::qwen_image_2_1_tier_dir(&settings(data_dir), &request(entry, bits))
+            .expect("the resolver answers rather than refusing")
     }
 
     /// Each tier resolves into ITS OWN repo — the whole reason this family needs a bespoke
@@ -28014,14 +28023,15 @@ mod qwen_image_2_1_tiers {
         );
     }
 
-    /// An uninstalled tier falls back DENSEST FIRST, so a partial install never silently lands on
-    /// the washed q4 — the same ordering, for the same reason, as every other tier resolver.
+    /// With NO tier selection, an uninstalled catalog default falls back DENSEST FIRST, so a
+    /// partial install never silently lands on the washed q4 — the same ordering, for the same
+    /// reason, as every other tier resolver.
     #[test]
-    fn an_uninstalled_tier_falls_back_densest_first() {
+    fn an_unselected_default_falls_back_densest_first() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
-        // Only bf16 and q4 on disk; a q8 request must land on bf16, not on q4.
+        // Only bf16 and q4 on disk; the q8 default must land on bf16, not on q4.
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
         stage_tier(
             data.path(),
@@ -28029,26 +28039,68 @@ mod qwen_image_2_1_tiers {
             REHOST_REVISION_AFTER_UPLOAD,
             Some("q4"),
         );
-        let fallback = resolved(data.path(), &entry, Some(8)).expect("something is installed");
+        let fallback = resolved(data.path(), &entry, None).expect("something is installed");
         assert!(
             fallback.ends_with(UPSTREAM_REVISION),
-            "a q8 request with q8 absent must fall back to bf16, never down to q4: {}",
+            "the q8 default with q8 absent must fall back to bf16, never down to q4: {}",
             fallback.display()
         );
     }
 
-    /// Nothing installed ⇒ `None`, which the caller turns into the ordinary default-snapshot path
-    /// and, from there, an actionable "install it" error. Never a directory that does not exist.
+    /// An EXPLICIT tier is honoured exactly or refused — never substituted. A q8 pick with only
+    /// q4 on disk is a typed error naming q8, and never `q4/`; the same for a bf16 pick. This is
+    /// the FLUX.1 Candle precedent (`candle_flux1_packed_requested_tier`): the silent fallback used
+    /// to rewrite the load to Q4 on MLX with only a `quant_tier_downgraded` event, and load q4
+    /// outright on Candle.
+    ///
+    /// *Mutation that reds this:* letting the explicit arm fall through to the densest-first
+    /// fallback (`installed(tier).or_else(...)`).
+    #[test]
+    fn an_explicit_uninstalled_tier_is_refused_never_substituted() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(
+            data.path(),
+            REHOST_REPO,
+            REHOST_REVISION_AFTER_UPLOAD,
+            Some("q4"),
+        );
+        for (bits, tier) in [(8, "q8"), (0, "bf16")] {
+            let answer = super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry, Some(bits)),
+            );
+            let error = answer
+                .expect_err("an explicit uninstalled tier must be refused, not substituted")
+                .to_string();
+            assert!(
+                error.contains(&format!("tier {tier} is not installed")),
+                "{error}"
+            );
+        }
+        // The installed pick itself still resolves.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(4)).map(|(_, tier)| tier),
+            Some("q4")
+        );
+    }
+
+    /// Nothing installed ⇒ `None` for a selection or none, which the caller turns into the ordinary
+    /// default-snapshot path and, from there, an actionable "install it" error — not a tier
+    /// refusal, and never a directory that does not exist.
     #[test]
     fn nothing_installed_resolves_to_nothing() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         assert_eq!(resolved(data.path(), &entry_after_upload(), Some(4)), None);
+        assert_eq!(resolved(data.path(), &entry_after_upload(), None), None);
     }
 
     /// THE SHIPPED CATALOG, unmodified: the packed tiers carry the null-SHA placeholder and
     /// `pendingArtifact`, so they resolve to NOTHING even with a directory staged at that
-    /// revision. A pending tier must never point the loader anywhere.
+    /// revision. A pending tier must never point the loader anywhere: the unselected default lands
+    /// on the only real tier, and an explicit pick of a pending tier is a refusal, not a load.
     ///
     /// *Mutation that reds this:* dropping the `is_pending_artifact_download` guard — the null SHA
     /// is a syntactically valid pinned revision, so the staged directory below would resolve.
@@ -28066,13 +28118,110 @@ mod qwen_image_2_1_tiers {
             "0000000000000000000000000000000000000000",
             Some("q4"),
         );
-        let resolved_q4 = resolved(data.path(), &entry, Some(4)).expect("bf16 is installed");
+        let default = resolved(data.path(), &entry, None).expect("bf16 is installed");
         assert!(
-            resolved_q4.ends_with(UPSTREAM_REVISION),
-            "a q4 request against the shipped (pending) catalog must fall back to the only real \
-             tier, not resolve the placeholder revision: {}",
-            resolved_q4.display()
+            default.ends_with(UPSTREAM_REVISION),
+            "the default against the shipped (pending) catalog must land on the only real tier, \
+             not resolve the placeholder revision: {}",
+            default.display()
         );
+        assert!(
+            super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry, Some(4))
+            )
+            .is_err(),
+            "an explicit pick of a pending tier is refused, never resolved to the placeholder"
+        );
+    }
+
+    /// THE SHIPPED CATALOG with bf16 staged — the only installable tier today — must be priced and
+    /// loaded AS bf16. Its directory is the upstream snapshot root, whose basename is a commit SHA,
+    /// so the basename reader alone answers `None` and every consumer used to fall back to the
+    /// request/manifest default (`mlx.quantize: 8` ⇒ "q8"): the Candle gate priced it at q8's floor
+    /// and Candle sent `LoadSpec.quantize = Q8` against a dense root, which the provider refuses; MLX
+    /// silently load-time-quantized bf16 to q8 behind a gate sized for packed q8.
+    ///
+    /// *Mutation that reds this:* `split_repo_root_tier_key` returning `None` (the pre-fix mapping).
+    #[test]
+    fn the_shipped_bf16_root_is_gated_and_loaded_as_bf16() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = shipped_qwen_2_1_entry();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        let (dir, tier) = resolved_with_tier(data.path(), &entry, None).expect("bf16 is installed");
+        assert_eq!(tier, "bf16");
+        assert_eq!(
+            super::super::tier_key_from_resolved_dir(&dir),
+            None,
+            "precondition: the root's basename is a SHA, not a tier token"
+        );
+        assert_eq!(
+            super::super::tier_key_for_resolved_dir(&entry, &dir),
+            Some("bf16")
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                super::super::tier_quant_from_resolved_dir(&entry, &dir),
+                Some((None, None)),
+                "MLX candidate quant: a dense root is never load-time quantized"
+            );
+            // The request carries no selection, so it derives the manifest's q8; reconcile must
+            // correct that to the dense tier that is actually on disk.
+            assert_eq!(
+                super::super::reconcile_resolved_tier_quant(
+                    (Some(Quant::Q8), Some(8)),
+                    &dir,
+                    &entry,
+                    true,
+                    "qwen_image_2_1",
+                    "job",
+                    "mlx",
+                ),
+                (None, None)
+            );
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            let request = request(&entry, None);
+            let gate = super::super::gate_tier_key(false, &dir, &request.advanced, &entry, false);
+            assert_eq!(gate, "bf16", "the VRAM gate prices the tier that loads");
+            assert_eq!(
+                super::super::candle_quant_for_resolved_tier(&request, gate, &dir, true, false),
+                (None, None),
+                "Candle never sends LoadSpec.quantize against the dense root"
+            );
+        }
+    }
+
+    /// The identity the resolver returns and the identity every consumer re-derives from the
+    /// directory are the same answer for every installed tier — the two cannot drift.
+    #[test]
+    fn resolved_tier_identity_round_trips_through_the_directory() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        for tier in ["q8", "q4"] {
+            stage_tier(
+                data.path(),
+                REHOST_REPO,
+                REHOST_REVISION_AFTER_UPLOAD,
+                Some(tier),
+            );
+        }
+        for (bits, expected) in [(0, "bf16"), (8, "q8"), (4, "q4")] {
+            let (dir, tier) =
+                resolved_with_tier(data.path(), &entry, Some(bits)).expect("tier installed");
+            assert_eq!(tier, expected);
+            assert_eq!(
+                super::super::tier_key_for_resolved_dir(&entry, &dir),
+                Some(expected),
+                "{}",
+                dir.display()
+            );
+        }
     }
 }
 
@@ -28108,6 +28257,62 @@ fn the_admission_reference_count_prices_every_condition_carrier() {
     assert_eq!(
         count(json!({ "sourceAssetId": "a", "referenceAssetIds": ["a", "b"] })),
         2
+    );
+}
+
+/// `qwen_image_2_1` is priced off the list its lane RENDERS — source, mask (an ordinary reference
+/// to this engine), then every reference — not the largest single carrier. Source + mask + nine
+/// references is eleven reference blocks, past the declared ten, and must be refused as such.
+///
+/// *Mutation that reds this:* dropping the `qwen_image_2_1` arm of `reference_image_count`, which
+/// falls back to the carrier `max` and prices this request as 9 (admitted).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_admission_counts_source_mask_and_every_reference() {
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .clone();
+    let references: Vec<String> = (1..=9).map(|n| format!("ref{n}")).collect();
+    let request = ImageRequest::from_payload(
+        json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "sourceAssetId": "source",
+            "maskAssetId": "mask",
+            "referenceAssetIds": references,
+            "modelManifestEntry": entry,
+        })
+        .as_object()
+        .expect("payload object"),
+    );
+    assert_eq!(super::reference_image_count(&request), 11);
+    let geometry =
+        crate::admission_geometry::AdmissionGeometry::from_manifest(&request.model_manifest_entry)
+            .expect("the shipped entry declares an envelope");
+    assert_eq!(
+        geometry.admit(2048, 2048, super::reference_image_count(&request), 1),
+        Err(
+            crate::admission_geometry::AdmissionRefusal::ReferenceCount {
+                requested: 11,
+                max: 10
+            }
+        )
     );
 }
 

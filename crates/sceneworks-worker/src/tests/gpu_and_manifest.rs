@@ -3155,10 +3155,10 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
 ///
 /// The consequence this guards is not a rounding error, it is a product decision. With NO `candle`
 /// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, a tier
-/// resolves to a floor and the gate REFUSES the load pre-flight below it. sc-24109's single 48 GB
-/// number refused a 32 GB RTX 5090 and a 40 GB A100 — correctly for a bf16-only install whose
-/// weights are 28.61 GiB resident. sc-24112 keeps that number for bf16 and gives q8 and q4 their
-/// own, which is what makes those cards usable. Neither may drift silently in either direction.
+/// resolves to a floor and the gate REFUSES the load pre-flight below it. The floors are DERIVED
+/// in GiB — the unit `VramBudget.free_gb` is in — as `ceil(resident peak GiB x 1.25)`, so a real
+/// RTX 5090 (31.84 GiB) and A100-40GB (39.5 GiB) admit q8 and a 24 GB card admits q4. Neither may
+/// drift silently in either direction.
 #[test]
 fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() {
     let models = builtin_models_manifest();
@@ -3175,21 +3175,20 @@ fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() 
             panic!("the {backend} block must exist; without it the {backend} floor is unstated")
         });
         assert_eq!(
-            block["minMemoryGb"], 48,
-            "{backend}: the SCALAR stays the conservative fallback for any tier with no row \
-             (today `nvfp4`). Lowering it to the default tier's floor would under-predict an \
-             unlisted tier, and an under-prediction admits a load that OOMs"
+            block["minMemoryGb"], 45,
+            "{backend}: the SCALAR is the densest tier's floor, the conservative fallback for any \
+             tier with no row (today `nvfp4`). Lowering it to a lighter tier's floor would \
+             under-predict an unlisted tier, and an under-prediction admits a load that OOMs"
         );
         let by_tier = block
             .get("minMemoryGbByTier")
             .unwrap_or_else(|| panic!("{backend}: sc-24112 declares a per-tier floor"));
-        for (tier, floor) in [("bf16", 48), ("q8", 31), ("q4", 23)] {
+        for (tier, floor) in [("bf16", 45), ("q8", 29), ("q4", 21)] {
             assert_eq!(
                 by_tier[tier], floor,
-                "{backend}/{tier}: DERIVED as ceil(resident peak at the 2048-square default in GB \
-                 x 1.25) — bf16 35.36 GiB, q8 23.08 GiB, q4 16.54 GiB. The rule is validated by \
-                 reproducing sc-24109's own 48 for bf16; changing a number here changes which \
-                 cards are refused"
+                "{backend}/{tier}: DERIVED as ceil(resident peak at the 2048-square default in GiB \
+                 x 1.25) — bf16 35.36 GiB, q8 23.08 GiB, q4 16.54 GiB; changing a number here \
+                 changes which cards are refused"
             );
         }
         assert_eq!(
@@ -3198,8 +3197,6 @@ fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() 
             "{backend}: a row for a tier the catalog does not ship would gate a tier nobody can \
              select, and a missing row silently falls through to the conservative scalar"
         );
-        // bf16 is UNCHANGED from sc-24109. The story opens cards for the quantized tiers; it does
-        // not loosen the dense one, and a reviewer coming back to this should see that stated.
         assert_eq!(by_tier["bf16"], block["minMemoryGb"]);
     }
 

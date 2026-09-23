@@ -11,7 +11,12 @@ import {
   licenseAcknowledgmentBlocked,
 } from "../licenseAcknowledgment.js";
 import { modelLoraFamilies } from "../presetUtils.js";
-import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
+import {
+  blanketFloorGb,
+  declaredFloorHostGb,
+  installedFloorHostGb,
+  lightestInstallableTier,
+} from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
@@ -324,6 +329,6 @@ export function needsLabel(model, tierOptions) {
       return `from ${entry} GB`;
     }
   }
-  const floor = blanketFloorGb(model, tierOptions?.backend);
+  const floor = blanketFloorGb(model, tierOptions?.backend, lightestInstallableTier(model));
   return floor === null ? null : `needs ${floor} GB`;
 }

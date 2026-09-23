@@ -382,6 +382,7 @@ async fn generate_pulid_flux_stream(
     let (quant, recipe_bits) = reconcile_resolved_tier_quant(
         resolve_quant(request, Some(&flux_base)),
         &flux_base,
+        &request.model_manifest_entry,
         true,
         &request.model,
         &job.id,

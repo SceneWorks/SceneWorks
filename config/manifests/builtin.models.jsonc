@@ -3337,9 +3337,9 @@
         // the per-tier `SHA256SUMS` (a few KB) and is not adjusted for it.
         //
         //   q8 = 33_134_949_212 + (7_559_806_976 - 14_230_224_896)
-        //                       + (8_625_537_024 - 13_891_534_848) = 19_952_874_332  (18.58 GiB)
+        //                       + (7_379_877_888 - 13_891_534_848) = 19_952_874_332  (18.58 GiB)
         //   q4 = 33_134_949_212 + (4_002_250_752 - 14_230_224_896)
-        //                       + (5_151_653_312 - 13_891_534_848) = 12_922_434_396  (12.03 GiB)
+        //                       + (3_906_994_176 - 13_891_534_848) = 12_922_434_396  (12.03 GiB)
         //
         // These are DERIVED UNTIL THE UPLOAD PINS A REVISION. The terminal story replaces the null
         // SHA with the real one and re-sums the resolved blobs, exactly as the bf16 row's total was
@@ -3561,18 +3561,39 @@
       // reason the tower is packed on this route where 2512 leaves it dense — see the tier note at
       // the top of this entry.
       //
-      // `minMemoryGbByTier` turns the ladder into a per-tier floor with the rule
-      // `ceil(resident_peak_at_the_default_preset_in_GB x 1.25)`, one rule applied three times:
+      // `minMemoryGbByTier` turns the ladder into a per-tier floor with ONE rule, stated in GiB
+      // because every consumer's budget is GiB (`VramBudget.free_gb` divides nvidia-smi MiB by
+      // 1024; the web compares against the host's reported memory the same way):
       //
-      //   bf16  35.36 GiB = 37.97 GB  x1.25 = 47.46 -> 48   (EXACTLY the sc-24109/sc-24112 number,
-      //                                                      which is how the rule is validated)
-      //   q8    23.08 GiB = 24.79 GB  x1.25 = 30.98 -> 31
-      //   q4    16.54 GiB = 17.76 GB  x1.25 = 22.20 -> 23
+      //   floor = ceil(resident peak at the 2048-square default, in GiB, x 1.25)
       //
-      // The scalar `minMemoryGb` STAYS 48 and is not "the default tier's floor": it is the
-      // conservative fallback for any tier key not in the map (today, `nvfp4`). Falling through to
-      // a light tier's floor for an unknown tier would be a PERMISSIVE under-prediction, which
-      // admits a load that OOMs — the one failure mode these gates exist to prevent.
+      //   bf16  35.36 GiB x1.25 = 44.20 -> 45
+      //   q8    23.08 GiB x1.25 = 28.85 -> 29   admits an RTX 5090 (31.84 GiB) and an A100-40GB
+      //   q4    16.54 GiB x1.25 = 20.68 -> 21   admits a 24 GB card as well
+      //
+      // Why x1.25 and not the `measured peak + HEADROOM_GB` (2 GiB) this repo applies to a
+      // `vramGbByTier` row: these peaks are DERIVED, and the engine's own doc says its transient is
+      // a structural count that omits allocator slack, MLX graph retention and kernel workspace. A
+      // derived number carries a proportional margin; a measured one carries the fixed headroom.
+      // When the terminal measurement story lands real rows they win ahead of these floors and get
+      // the ordinary `+ HEADROOM_GB`. (An earlier revision applied x1.25 to the peak in DECIMAL GB,
+      // giving 48/31/23 — which refused a real 5090 once a compositor held 0.84 GiB.)
+      //
+      // The scalar `minMemoryGb` is the densest tier's floor, 45: the conservative fallback for any
+      // tier key not in the map (today, `nvfp4`). Falling through to a light tier's floor for an
+      // unknown tier would be a PERMISSIVE under-prediction, which admits a load that OOMs.
+      //
+      // `stagedMinMemoryGbByTier` (MLX only) is the same rule over the STAGED request peak — the
+      // engine's `bounded_peak_bytes`: the staged weight floor `max(tower, DiT + VAE)` plus the
+      // 512/64 bounded-decode transient, the configuration a memory-constrained host runs:
+      //
+      //   bf16  14.51 + 1.66 = 16.17 GiB x1.25 = 20.21 -> 21
+      //   q8     8.30 + 1.66 =  9.96 GiB x1.25 = 12.45 -> 13
+      //   q4     4.99 + 1.66 =  6.65 GiB x1.25 =  8.31 ->  9
+      //
+      // DERIVED, like everything in this block. The Model Manager reads it only when no tier fits
+      // resident, and then suggests the LIGHTEST tier that fits staged — so a 24 GB Mac, which no
+      // tier fits resident on the footprint estimate, is pointed at q4 rather than at nothing.
       //
       // Still NO `calibrations` and NO `memoryStrategyContract` on either lane: the provider's
       // ladder declaration reaches SceneWorks only through the pin-bound engine-capability dumps,
@@ -3580,8 +3601,9 @@
       // terminal pin bump both routes stay the consumer fallback (the spec is handed to the engine
       // unshaped), exactly as `ideogram_4` did on MLX before its ladder landed.
       "mlx": {
-        "minMemoryGb": 48,
-        "minMemoryGbByTier": { "bf16": 48, "q8": 31, "q4": 23 },
+        "minMemoryGb": 45,
+        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
+        "stagedMinMemoryGbByTier": { "bf16": 21, "q8": 13, "q4": 9 },
         // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
         // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
         // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
@@ -3602,12 +3624,11 @@
       // VRAM than the resolved floor. A refusal that names the number is the intended behaviour; a
       // reactive OOM is not.
       //
-      // WHAT sc-24112 CHANGES HERE, and what it does not. sc-24109 set a single 48 GB floor for
-      // every tier key, which deliberately refused a 32 GB RTX 5090 and a 40 GB A100 — correct for
-      // a bf16-only install whose weights alone are 28.61 GiB resident. It is the WRONG answer for
-      // q8 (16.33 GiB) and q4 (9.78 GiB), and it is those tiers, not a loosened bf16 number, that
-      // make those cards usable. `minMemoryGbByTier` states each tier's own derived floor; bf16's
-      // stays exactly 48, so no card that could run bf16 before is affected in either direction.
+      // WHAT sc-24112 CHANGES HERE. sc-24109 set a single floor for every tier key, which refused a
+      // 32 GB RTX 5090 and a 40 GB A100 — correct for a bf16-only install whose weights alone are
+      // 28.61 GiB resident. It is the WRONG answer for q8 (16.33 GiB) and q4 (9.78 GiB), and it is
+      // those tiers, not a loosened bf16 number, that make those cards usable.
+      // `minMemoryGbByTier` states each tier's own derived floor.
       //
       // The resolution order in `predicted_peak_gb` is: `vramGbByTier[tier]` + HEADROOM_GB, else
       // `minMemoryGbByTier[tier]`, else `minMemoryGb`. The new key sits in the middle BECAUSE it is
@@ -3615,13 +3636,15 @@
       // there would pad it twice AND, via the sibling `measured` flag, file it as evidence.
       // Nothing about 2.1 has been measured on any CUDA host, so `vramGbByTier` stays ABSENT.
       //
-      // Derived candle floors (the ladder and the `x1.25` rule are documented in full above the
-      // `mlx` block; the two lanes share one derivation because they hold the same bytes resident):
-      //   bf16 48 GB — resident peak 35.36 GiB at 2048^2
-      //   q8   31 GB — resident peak 23.08 GiB  → admits a 32 GB RTX 5090 and a 40 GB A100
-      //   q4   23 GB — resident peak 16.54 GiB  → admits a 24 GB card as well
-      // The scalar `minMemoryGb` stays 48 as the conservative fallback for a tier key with no row
+      // Derived candle floors, in GiB (the ladder and the `ceil(peak GiB x 1.25)` rule — and why it
+      // is not `peak + HEADROOM_GB` — are documented in full above the `mlx` block; the two lanes
+      // share one derivation because they hold the same bytes resident):
+      //   bf16 45 — resident peak 35.36 GiB at 2048^2
+      //   q8   29 — resident peak 23.08 GiB  → admits an RTX 5090 (31.84 GiB total) and an A100-40GB
+      //   q4   21 — resident peak 16.54 GiB  → admits a 24 GB card as well
+      // The scalar `minMemoryGb` is bf16's 45, the conservative fallback for a tier key with no row
       // (today `nvfp4`): falling through to a light tier's floor would be a PERMISSIVE
+      // under-prediction, and an under-prediction admits a load that OOMs.
       // under-prediction, and an under-prediction admits a load that OOMs.
       //
       // Deliberately ABSENT, each for its own reason:
@@ -3643,8 +3666,8 @@
       //   would be an unsourced claim. The route reports the consumer fallback until the epic's
       //   terminal pin bump re-dumps the file.
       "candle": {
-        "minMemoryGb": 48,
-        "minMemoryGbByTier": { "bf16": 48, "q8": 31, "q4": 23 }
+        "minMemoryGb": 45,
+        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 }
       },
       "ui": {
         "label": "Qwen Image 2.1",
@@ -27356,7 +27379,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "d085985386de006bb8b572b4b82a18a6a59655387f01986b6c45b45ece8d3537",
+              "sha256": "2c42920886fd251818154a65d28834aa5c37f2a2c729c6ab477cb48ed6d56181",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27390,8 +27413,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 133400,
-                  "sha256": "e96eece131539c575f3dbeda9bc96f0b3f4ffa4db5cac4edb1e8c57748c26c5c"
+                  "byteSize": 134816,
+                  "sha256": "1cc6f998773fa7b60de271973cfd950781cb1c7a2ca03f0e53ad22d634489be0"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -27435,8 +27458,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 148045,
-                  "sha256": "495fb3328811d05ed65e1d8254609a0027e7310777fedc664f968c0743eb6fb5"
+                  "byteSize": 148073,
+                  "sha256": "12f817616b3319b5c33d13138db66b951bd24b5e9b2e37d1a078721ccad9af10"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -27475,8 +27498,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 146319,
-                  "sha256": "fe3442248c46b67162e5d10c72ab0fc4e2490f81ae0b8e4a6e09b099f164de6f"
+                  "byteSize": 148325,
+                  "sha256": "3c4e23764bc0a94ff3dacdfd5a060682e2a85225282464dca0eb44d88613a37a"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

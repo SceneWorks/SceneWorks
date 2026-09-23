@@ -5952,19 +5952,21 @@ mod tests {
     ///
     /// Before the candle block existed, `predicted_peak_gb` returned `None` for the id and the fit
     /// gate was skipped ENTIRELY — a too-small card learned it was too small by OOMing mid-load.
-    /// sc-24109 gave it one 48 GB floor for every tier key, which was right for a bf16-only install
-    /// (28.61 GiB of weights resident, 35.36 GiB peak at 2048²) and deliberately refused a 32 GB
-    /// RTX 5090 and a 40 GB A100. It is the WRONG answer for tiers whose weights are 16.33 and 9.78
-    /// GiB, and this story ships those tiers.
+    /// sc-24109 gave it one floor for every tier key, which was right for a bf16-only install
+    /// (28.61 GiB of weights resident, 35.36 GiB peak at 2048²) and refused a 32 GB RTX 5090 and a
+    /// 40 GB A100. It is the WRONG answer for tiers whose weights are 16.33 and 9.78 GiB.
     ///
-    /// The floors below are DERIVED, not measured — `ceil(derived resident peak in GB × 1.25)`,
-    /// one rule applied three times, validated by the fact that it reproduces sc-24109's own 48 for
-    /// bf16 exactly. They ride `candle.minMemoryGbByTier`, NOT `candle.vramGbByTier`: a
-    /// `vramGbByTier` row is a raw measured/estimated peak that this gate pads with `HEADROOM_GB`
-    /// and that the sibling `measured` flag classifies as evidence, and nothing about 2.1 has been
-    /// measured on any CUDA host. The epic's terminal measurement story adds the real rows; when it
-    /// does, `measured_resident_peak_gb` starts winning ahead of these floors, which is exactly the
-    /// transition this test would then have to acknowledge again.
+    /// The floors are DERIVED, not measured, and stated in GiB because `VramBudget.free_gb` is GiB
+    /// (`gpu::nvidia_vram_budget_gb` divides MiB by 1024): `ceil(derived resident peak GiB × 1.25)`.
+    /// The ×1.25 is deliberately NOT the `peak + HEADROOM_GB` this gate applies to a MEASURED row:
+    /// the engine's peak is a structural count that its own doc says omits allocator slack, graph
+    /// retention and kernel workspace, so a derived number carries a proportional margin until the
+    /// terminal measurement story replaces it with `vramGbByTier` rows (which then win ahead of
+    /// these floors and get the ordinary `+ HEADROOM_GB`).
+    ///
+    /// Budgets are REAL card reports, not round numbers: an RTX 5090 reports 31.84 GiB total, an
+    /// A100-40GB 39.5, a 24 GB card ~23.99 — so a floor stated in decimal GB (the pre-fix 31 for q8)
+    /// refused a 5090 as soon as a desktop compositor held 0.84 GiB.
     #[test]
     fn qwen_image_2_1_resolves_a_derived_candle_floor_per_tier() {
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
@@ -5985,22 +5987,26 @@ mod tests {
 
         // Each installable tier resolves its OWN derived floor, with no headroom added on top —
         // these are already-padded floors, and padding them again is the double-charge that makes
-        // a per-tier floor read as a measured peak.
-        for (tier, floor) in [("bf16", 48.0), ("q8", 31.0), ("q4", 23.0)] {
+        // a per-tier floor read as a measured peak. The rule is recomputed from the engine's
+        // derived peaks (b12c632b4 `memory_strategy::derived`) rather than restated.
+        for (tier, peak_gib) in [
+            ("bf16", 28.61 + 6.75),
+            ("q8", 16.33 + 6.75),
+            ("q4", 9.78 + 6.75),
+        ] {
+            let floor = (peak_gib * 1.25_f64).ceil();
             assert_eq!(
                 predicted_peak_gb(&entry, tier),
                 Some(floor),
-                "{tier} must resolve its own derived floor from candle.minMemoryGbByTier"
+                "{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
             );
         }
-        // A tier key with no row falls through to the SCALAR, which stays the conservative 48.
-        // Landing NVFP4 on q4's 23 would be a permissive under-prediction, and an under-prediction
-        // admits a load that OOMs.
-        assert_eq!(predicted_peak_gb(&entry, NVFP4_TIER), Some(48.0));
+        // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
+        // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
+        // under-prediction admits a load that OOMs.
         assert_eq!(
-            entry["candle"]["minMemoryGb"],
-            serde_json::json!(48),
-            "the scalar is the unlisted-tier fallback and must stay conservative"
+            predicted_peak_gb(&entry, NVFP4_TIER),
+            predicted_peak_gb(&entry, "bf16")
         );
         assert!(
             entry["candle"].get("vramGbByTier").is_none(),
@@ -6008,20 +6014,16 @@ mod tests {
              here would be an unmeasured claim wearing an evidence flag"
         );
 
-        // The armed consequence, spelled as the decision the gate actually returns. This is the
-        // product outcome sc-24112 exists for: the cards a bf16-only install locked out are opened
-        // by the quantized tiers, and NOT by loosening bf16 — its column is unchanged from sc-24109.
-        for (free_gb, bf16, q8, q4) in [
-            (24.0, false, false, true),
-            (32.0, false, true, true),
-            (40.0, false, true, true),
-            (48.0, true, true, true),
-            (96.0, true, true, true),
+        // The armed consequence, as the decision the gate actually returns, against realistic
+        // (total, free) GiB reports.
+        for (card, total_gb, free_gb, bf16, q8, q4) in [
+            ("24 GB card", 23.99, 22.5, false, false, true),
+            ("RTX 5090", 31.84, 30.5, false, true, true),
+            ("A100-40GB", 39.5, 38.5, false, true, true),
+            ("48 GB card", 47.99, 46.5, true, true, true),
+            ("H100-80GB", 79.2, 78.0, true, true, true),
         ] {
-            let budget = VramBudget {
-                total_gb: free_gb,
-                free_gb,
-            };
+            let budget = VramBudget { total_gb, free_gb };
             for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
                 assert_eq!(
                     matches!(
@@ -6029,7 +6031,7 @@ mod tests {
                         FitDecision::Fits
                     ),
                     admitted,
-                    "a {free_gb} GB card must {} the {tier} install",
+                    "{card} ({free_gb} GiB free) must {} the {tier} install",
                     if admitted {
                         "be admitted for"
                     } else {

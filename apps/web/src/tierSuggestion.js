@@ -398,11 +398,12 @@ function declaredPeakGb(byTier, backend, tier) {
 // mlx 50 / candle 56 proves the MLX blanket can sit BELOW the candle requirement.
 // A `tier` (sc-24112) prefers that tier's OWN declared floor from `<backend>.minMemoryGbByTier`
 // before falling back to the blanket scalar. A model whose tiers have genuinely different floors —
-// `qwen_image_2_1` spans 23 to 48 GB across q4/q8/bf16 — otherwise quotes its heaviest tier's
+// `qwen_image_2_1` spans 21 to 45 GB across q4/q8/bf16 — otherwise quotes its heaviest tier's
 // requirement at a user who picked the lightest, which reads as "your machine is too small" for a
 // tier that fits it comfortably. Both keys carry the SAME already-padded semantics, so neither gets
 // headroom added here; a tier with no row falls through to the scalar, which stays the conservative
-// number. Callers with no tier in hand pass nothing and get today's blanket answer unchanged.
+// number. Every production caller passes the tier it is answering for — the installed set's
+// heaviest (`installedFloorHostGb`), or the lightest installable (`lightestInstallableTier`).
 export function blanketFloorGb(model, backend, tier = null) {
   const block = backend === "candle" ? model?.candle : model?.mlx;
   if (typeof tier === "string" && tier.trim() !== "") {
@@ -413,6 +414,78 @@ export function blanketFloorGb(model, backend, tier = null) {
   }
   const gb = numberOrNull(block?.minMemoryGb);
   return gb !== null && gb > 0 ? gb : null;
+}
+
+// `tier`'s own RESIDENT floor row (`<backend>.minMemoryGbByTier[tier]`, sc-24112), or null. Unlike
+// `blanketFloorGb` this never falls back to the scalar: the scalar is the whole model's conservative
+// number and must not veto a tier that has no row of its own.
+function tierFloorRowGb(model, backend, tier) {
+  if (typeof tier !== "string") {
+    return null;
+  }
+  const block = backend === "candle" ? model?.candle : model?.mlx;
+  const gb = numberOrNull(block?.minMemoryGbByTier?.[tier]);
+  return gb !== null && gb > 0 ? gb : null;
+}
+
+// `tier`'s declared STAGED floor on MLX — `mlx.stagedMinMemoryGbByTier` (sc-24112) — or null. A
+// staged (sequential-residency) load drops the text tower before the DiT and VAE load and decodes
+// in bounded tiles, so its floor sits far below the resident one. MLX only: nothing declares a
+// Candle staged floor.
+function stagedFloorGb(model, backend, tier) {
+  if (backend === "candle" || typeof tier !== "string") {
+    return null;
+  }
+  const gb = numberOrNull(model?.mlx?.stagedMinMemoryGbByTier?.[tier]);
+  return gb !== null && gb > 0 ? gb : null;
+}
+
+// Whether `variant`'s declared STAGED floor fits a `hostMemoryGb` host. The Model Manager asks it
+// only of a tier `tierFits` already rejected, and then labels the row "fits with staging" instead
+// of "may exceed memory" — so a host no tier fits resident is still told which tiers run. It never
+// changes the suggestion: a staged run is slower (components reload every render) and must not
+// outrank a resident one.
+export function tierFitsStaged(variant, hostMemoryGb, options = {}) {
+  if (hostMemoryGb == null || !Number.isFinite(hostMemoryGb)) {
+    return false;
+  }
+  const staged = stagedFloorGb(options.model, options.backend, variant?.variant);
+  return staged !== null && staged <= hostMemoryGb;
+}
+
+// The lightest tier of `model` that can actually be installed (a declared bf16/q8/q4 variant that
+// is not a pending, unpublished artifact), or null for a model with no tier matrix. The tier a
+// "can this machine run the model at all" floor must be quoted for: `qwen_image_2_1` declares q4,
+// but while q4 is pending only bf16 can be installed, and quoting q4's floor would promise a tier
+// the user cannot download.
+export function lightestInstallableTier(model) {
+  if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {
+    return null;
+  }
+  const installable = model.variants
+    .filter(
+      (variant) =>
+        tierQuantize(variant?.variant) !== null &&
+        variant?.pendingArtifact !== true &&
+        variant?.installState !== "pending",
+    )
+    .map((variant) => variant.variant);
+  const ordered = [...TIER_FIDELITY].reverse();
+  return ordered.find((tier) => installable.includes(tier)) ?? null;
+}
+
+// The declared floor over `model`'s INSTALLED tiers on `backend`: the heaviest installed tier's own
+// row (a studio picker can switch among them at will), each tier falling back to the scalar when it
+// has no row. With no installed tier, the scalar alone.
+function installedTiersFloorGb(model, backend, options) {
+  let floor = null;
+  for (const tier of installedTiers(model, options)) {
+    const gb = blanketFloorGb(model, backend, tier);
+    if (gb !== null && (floor === null || gb > floor)) {
+      floor = gb;
+    }
+  }
+  return floor ?? blanketFloorGb(model, backend);
 }
 
 // Fixed transient/runtime headroom (GB) the CANDLE lane adds on top of a per-tier measured peak. Quoted
@@ -683,7 +756,7 @@ export function installedFloorHostGb(model, options = {}) {
   if (complete && !estimated && !laneEvidenceUncalibrated(model, backend)) {
     return converted;
   }
-  const blanket = blanketFloorGb(model, backend);
+  const blanket = installedTiersFloorGb(model, backend, options);
   if (!complete && blanket === null) {
     return null;
   }
@@ -699,7 +772,7 @@ export function declaredFloorHostGb(model, options = {}) {
   if (converted === null || !laneEvidenceUncalibrated(model, backend)) {
     return converted;
   }
-  return maxHostGb(converted, blanketFloorGb(model, backend));
+  return maxHostGb(converted, blanketFloorGb(model, backend, lightestInstallableTier(model)));
 }
 
 // The CHEAPEST measured tier peak (GB) on `options.backend` among the model's declared quant tiers, or
@@ -755,10 +828,19 @@ export function tierFits(variant, hostMemoryGb, options = {}) {
   if (hostMemoryGb == null || !Number.isFinite(hostMemoryGb)) {
     return true;
   }
+  // A tier's own declared RESIDENT floor (sc-24112 `minMemoryGbByTier`) is a hard veto on both
+  // lanes: it is the number the Candle VRAM gate refuses on, and the MLX lane's statement of the
+  // same derived peak. Without it a Candle tier with no measured row read as "unknown ⇒ fits" on
+  // every host, and an MLX tier fit on its disk-size estimate alone.
+  const floorRow = tierFloorRowGb(options.model, options.backend, variant?.variant);
+  if (floorRow !== null && floorRow > hostMemoryGb) {
+    return false;
+  }
   if (options.backend === "candle") {
     const tier = variant?.variant;
     const peak = tier ? peakGbByTier(options.model, "candle").get(tier) ?? null : null;
-    // Missing Candle evidence is unknown, never permission to borrow the MLX footprint.
+    // Missing Candle evidence is unknown, never permission to borrow the MLX footprint — unless the
+    // tier declares its own floor, which has just been checked and passed.
     return peak === null ? true : peak + CANDLE_HEADROOM_GB <= hostMemoryGb;
   }
   const footprint = variantFootprintBytes(variant, options.model);

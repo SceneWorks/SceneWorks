@@ -12279,6 +12279,97 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     );
 }
 
+/// sc-24112 — the declared request-geometry ENVELOPE (`admissionGeometry`) is enforced at ENQUEUE,
+/// not only in the worker. 2752x2752 passes every per-side check (`maxDimension: 2752`, the 32-px
+/// grid) and is still 7.57 Mpx against the 4.30 Mpx largest-preset area; before this the API
+/// accepted it and the job failed later in the worker. Driven off the SHIPPED catalog entry, so the
+/// envelope under test is the declared one, with an admitting twin at the widest real preset.
+///
+/// *Mutation that reds this:* removing the `refuse_over_envelope` call from `create_image_job`.
+#[tokio::test]
+async fn image_jobs_outside_the_declared_admission_envelope_are_refused_at_enqueue() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = shipped["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .clone();
+    assert!(
+        entry.get("admissionGeometry").is_some(),
+        "precondition: the shipped entry declares its envelope"
+    );
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string(&json!({ "schemaVersion": 1, "models": [entry] }))
+            .expect("fixture serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Envelope Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let enqueue = |width: u32, height: u32| {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+    };
+
+    let (status, body) = enqueue(2752, 1536).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the widest shipped preset is inside the envelope: {body}"
+    );
+
+    let (status, body) = enqueue(2752, 2752).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "2752x2752 is over the declared area: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("4300800"),
+        "must name the declared area: {detail}"
+    );
+    assert!(
+        detail.contains("refused rather than silently resized"),
+        "{detail}"
+    );
+}
+
 /// sc-24110 — the parts of the ordered-conditioning contract the count gate above cannot see.
 ///
 /// `image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits` owns the CEILING

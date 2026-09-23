@@ -983,7 +983,7 @@
               "maxBatch"
             ],
             "x-sceneworks-contract": "binding",
-            "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/admission_geometry.rs", "anchor": "AdmissionGeometry::from_manifest" }],
+            "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/admission_geometry.rs", "anchor": "AdmissionGeometry::from_manifest" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "sceneworks_core::admission_geometry::refuse_over_envelope(" }, { "path": "crates/sceneworks-worker/src/image_jobs.rs", "anchor": "crate::admission_geometry::refuse_over_envelope(" }],
             "description": "The engine's own request-admission envelope, mirrored from the provider's `memory_strategy::admission_geometry()` (sc-24112). Declared ONLY for a route whose joint attention sequence grows with the REFERENCE COUNT as well as the target area — a consumer that knows only limits.resolutions cannot bound such a route, because the transient is linear in the joint sequence and references are extra image-token blocks. The gate this feeds REFUSES an over-envelope request naming the number; it never silently shrinks the geometry, drops references, or downgrades a tier. These are structural counts from the frozen engine geometry, not measurements.",
             "properties": {
               "maxSide": { "type": "integer", "minimum": 1, "description": "Longest side any declared preset uses (the engine's Capabilities::max_size)." },
@@ -1325,7 +1325,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\")" }],
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1334,8 +1334,21 @@
                 "additionalProperties": { "type": "integer", "minimum": 1 },
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }],
-                "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own."
+                "x-sceneworks-readers": [
+                  { "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
+                  { "path": "apps/web/src/tierSuggestion.js", "anchor": "tierFloorRowGb(options.model, options.backend, variant?.variant)" },
+                  { "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }
+                ],
+                "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; no MLX runtime gate reads it (the MLX fit gate admits from the provider's own memory contract)."
+              },
+              "stagedMinMemoryGbByTier": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "type": "integer", "minimum": 1 },
+                "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "model?.mlx?.stagedMinMemoryGbByTier?.[tier]" }],
+                "description": "Per-tier ALREADY-PADDED floor (GB) for a STAGED (sequential-residency + bounded-decode) MLX load, for a model whose provider stages its components (sc-24112). Lower than minMemoryGbByTier because the text tower is dropped before the DiT and VAE load. Read only when no tier fits resident: the Model Manager then suggests the LIGHTEST tier whose staged floor fits, never ranking a staged fit above a resident one. May be DERIVED; the entry's comment must say so."
               },
               "measuredSiblingActiveDiskFraction": {
                 "type": "number",

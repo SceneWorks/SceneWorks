@@ -2193,7 +2193,7 @@ pub(crate) fn resolve_weights_dir(
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     if request.model == "qwen_image_2_1" {
-        if let Some(tier_dir) = qwen_image_2_1_tier_dir(settings, request) {
+        if let Some((tier_dir, _tier)) = qwen_image_2_1_tier_dir(settings, request)? {
             return Ok(Some(tier_dir));
         }
         return Ok(snapshot);
@@ -2209,37 +2209,65 @@ pub(crate) fn resolve_weights_dir(
     Ok(snapshot)
 }
 
-/// The installed tier directory for a `qwen_image_2_1` request, or `None` to fall back to the
-/// model's default snapshot (sc-24112).
+/// The installed tier directory for a `qwen_image_2_1` request AND the tier it is, or `None` to
+/// fall back to the model's default snapshot (sc-24112).
 ///
-/// Resolution, in order:
+/// The identity rides alongside the path because the path alone cannot carry it: bf16 is the
+/// upstream snapshot ROOT, whose basename is a commit SHA rather than a tier token, so
+/// [`tier_key_from_resolved_dir`] answers `None` for it. Every consumer that prices or loads the
+/// resolved directory (the Candle VRAM gate via [`gate_tier_key`], the Candle load quant, the MLX
+/// candidate quant and reconcile) reads it back through [`tier_key_for_resolved_dir`], which maps
+/// that root to `bf16` from the same catalog rows this resolver descends. The two agree by
+/// construction and `resolved_tier_identity_round_trips_through_the_directory` pins it.
 ///
-/// 1. the requested tier (`advanced.mlxQuantize`: `<= 0` ⇒ bf16, `1..=4` ⇒ q4, anything else ⇒ the
-///    app-wide q8 default, matching [`standard_tier_subdir`]'s own rule so a 2.1 job and every
-///    other matrix job read one knob the same way);
-/// 2. then, if that tier is not installed, the remaining tiers **densest first** (bf16 → q8 → q4),
-///    so a partial install never silently lands on the washed q4 — the identical fallback ordering
-///    every other tier resolver uses, and the identical reason.
+/// Resolution:
 ///
-/// A tier is "installed" when its resolved directory holds a loadable `transformer/`. The bf16 tier
-/// is the upstream repo ROOT (no tier subdir); q8 and q4 are subdirs of the re-host. Nothing here
-/// quantizes, converts, or substitutes a tier silently in the sense that matters: the resolved tier
-/// is recorded and reported, exactly as the shared resolver's fallback is.
+/// * an EXPLICIT `advanced.mlxQuantize` (`<= 0` ⇒ bf16, `1..=4` ⇒ q4, else q8) is honoured exactly
+///   or refused: a pick whose tier is not installed is a typed error naming the tier, never a
+///   silent substitution of another one (the FLUX.1 Candle precedent,
+///   `candle_flux1_packed_requested_tier`). The Studio only sends a tier it resolved from the
+///   installed set, so this fires for a stale replay or a direct API call, not for the picker;
+/// * with NO selection, the catalog default (`mlx.quantize`, q8) first, then the remaining
+///   installed tiers DENSEST FIRST (bf16 → q8 → q4), so a partial install never lands on the washed
+///   q4 while a denser tier is on disk.
+///
+/// A tier is "installed" when its resolved directory holds a loadable `transformer/`. With nothing
+/// installed at all this answers `None` for either kind of request, so the caller's ordinary
+/// "install the model" path owns that error rather than blaming a tier.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn qwen_image_2_1_tier_dir(settings: &Settings, request: &ImageRequest) -> Option<PathBuf> {
-    let bits = request
+fn qwen_image_2_1_tier_dir(
+    settings: &Settings,
+    request: &ImageRequest,
+) -> WorkerResult<Option<(PathBuf, &'static str)>> {
+    const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+    let tier_for_bits = |bits: i64| -> &'static str {
+        match bits {
+            bits if bits <= 0 => "bf16",
+            bits if bits <= 4 => "q4",
+            _ => "q8",
+        }
+    };
+    let explicit = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    let requested = match bits {
-        Some(bits) if bits <= 0 => "bf16",
-        Some(bits) if bits <= 4 => "q4",
-        _ => "q8",
-    };
-    let installed = |tier: &str| -> Option<PathBuf> {
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .map(tier_for_bits)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{} advanced.mlxQuantize must be an integer bit count, got {value}",
+                        request.model
+                    ))
+                })
+        })
+        .transpose()?;
+    let installed = |tier: &'static str| -> Option<(PathBuf, &'static str)> {
         let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
         // The same "has a loadable backbone" probe the shared resolver applies, spelled for this
         // family's diffusers layout: a sharded `transformer/` with its index, or a single file.
@@ -2250,13 +2278,91 @@ fn qwen_image_2_1_tier_dir(settings: &Settings, request: &ImageRequest) -> Optio
             || transformer
                 .join("diffusion_pytorch_model.safetensors")
                 .is_file();
-        loadable.then_some(dir)
+        loadable.then_some((dir, tier))
     };
-    installed(requested).or_else(|| {
-        ["bf16", "q8", "q4"]
+    if let Some(tier) = explicit {
+        if let Some(resolved) = installed(tier) {
+            return Ok(Some(resolved));
+        }
+        if TIERS.into_iter().all(|other| installed(other).is_none()) {
+            return Ok(None);
+        }
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} tier {tier} is not installed; install it or pick an installed tier \
+             (an explicit tier selection is never substituted with a different tier)",
+            request.model
+        )));
+    }
+    let default = request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("quantize"))
+        .and_then(Value::as_i64)
+        .map_or("q8", tier_for_bits);
+    Ok(installed(default).or_else(|| {
+        TIERS
             .into_iter()
-            .filter(|tier| *tier != requested)
+            .filter(|tier| *tier != default)
             .find_map(installed)
+    }))
+}
+
+/// The tier a resolved directory IS, reading the request's catalog entry when the basename is not
+/// a tier token (sc-24112).
+///
+/// Only a split-repo family reaches the second arm: `qwen_image_2_1`'s bf16 tier is a whole upstream
+/// snapshot ROOT (`files` empty), resolved to `<library>/models--<org>--<name>/snapshots/<rev>`.
+/// That directory is matched back to its catalog row by repo AND revision — the same pin
+/// [`qwen_image_2_1_declared_tier_dir`] descends — so the gate, the Candle load quant and the MLX
+/// reconcile see `bf16` instead of falling back to the request/manifest default (`q8`) and asking a
+/// dense root for a packed load.
+///
+/// Scoped to [`SPLIT_REPO_TIER_MODELS`] on purpose: other catalog rows are also tier-tagged
+/// whole-repo roots (the Candle SANA and Wan diffusers snapshots), and relabelling THEIR resolved
+/// directories would move their gate pricing and load quant, which nothing here has validated.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn tier_key_for_resolved_dir(
+    manifest_entry: &JsonObject,
+    dir: &Path,
+) -> Option<&'static str> {
+    tier_key_from_resolved_dir(dir).or_else(|| split_repo_root_tier_key(manifest_entry, dir))
+}
+
+/// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const SPLIT_REPO_TIER_MODELS: &[&str] = &["qwen_image_2_1"];
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_pending_artifact_download, model_download_for_variant,
+    };
+    let model_id = manifest_entry.get("id").and_then(Value::as_str)?;
+    if !SPLIT_REPO_TIER_MODELS.contains(&model_id) {
+        return None;
+    }
+    let revision = dir.file_name()?.to_str()?;
+    let snapshots = dir.parent()?;
+    if snapshots.file_name()?.to_str()? != "snapshots" {
+        return None;
+    }
+    let repo_dir = snapshots.parent()?.file_name()?.to_str()?;
+    let entry = Value::Object(manifest_entry.clone());
+    ["bf16", "q8", "q4"].into_iter().find(|tier| {
+        let Some(download) = model_download_for_variant(&entry, tier) else {
+            return false;
+        };
+        let root_row = download
+            .get("files")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty);
+        root_row
+            && !is_pending_artifact_download(&download)
+            && download.get("revision").and_then(Value::as_str) == Some(revision)
+            && download
+                .get("repo")
+                .and_then(Value::as_str)
+                .is_some_and(|repo| repo_dir == format!("models--{}", repo.replace('/', "--")))
     })
 }
 
@@ -3623,7 +3729,7 @@ fn gate_tier_key(
     if convrot_resolved {
         return INT8_CONVROT_TIER;
     }
-    tier_key_from_resolved_dir(weights_dir)
+    tier_key_for_resolved_dir(manifest_entry, weights_dir)
         .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
 }
 
@@ -3647,8 +3753,8 @@ fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
 ///
 /// macOS-only: the candle lane has no quant-tier layout to reconcile, so this would be dead code there.
 #[cfg(target_os = "macos")]
-fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
-    match tier_key_from_resolved_dir(dir)? {
+fn tier_quant_from_resolved_dir(manifest_entry: &JsonObject, dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
+    match tier_key_for_resolved_dir(manifest_entry, dir)? {
         "bf16" => Some((None, None)),
         "q4" => Some((Some(Quant::Q4), Some(4))),
         "q8" => Some((Some(Quant::Q8), Some(8))),
@@ -3678,7 +3784,7 @@ fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> 
         .advanced
         .insert("mlxQuantize".to_owned(), Value::from(bits));
     let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
-    (tier_key_from_resolved_dir(&dir) == Some(tier_static_name(tier))).then_some(dir)
+    (tier_key_for_resolved_dir(&request.model_manifest_entry, &dir) == Some(tier_static_name(tier))).then_some(dir)
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4692,12 +4798,13 @@ fn downtier_candidate_tiers(
 fn reconcile_resolved_tier_quant(
     requested: (Option<Quant>, Option<i64>),
     weights_dir: &Path,
+    manifest_entry: &JsonObject,
     allow_quant_change: bool,
     model_id: &str,
     job_id: &str,
     engine: &str,
 ) -> (Option<Quant>, Option<i64>) {
-    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(weights_dir) else {
+    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(manifest_entry, weights_dir) else {
         // Not a recognizable tier dir (fell back to the repo root, or a modelPath override) — keep
         // the request-derived quant; the engine will surface any missing-weights error itself.
         return requested;
@@ -9171,7 +9278,7 @@ fn mlx_candidate_quant(
         return (None, None);
     }
     let requested = resolve_quant(request, Some(dir));
-    match tier_quant_from_resolved_dir(dir) {
+    match tier_quant_from_resolved_dir(&request.model_manifest_entry, dir) {
         Some((actual, bits)) => (
             if is_dense_te_tier(request) {
                 requested.0
@@ -9393,8 +9500,12 @@ async fn generate_stream(
     // loads tensors, and the winning spec/plan are retained rather than rebuilt after selection.
     let prepare = |weights_dir: PathBuf| -> WorkerResult<PreparedMlxImageTier> {
         let (quant, quant_bits) = mlx_candidate_quant(request, &model, &weights_dir);
-        let effective_tier =
-            resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
+        // A split-repo snapshot root (sc-24112's `qwen_image_2_1` bf16) names its tier only
+        // through the catalog, so ask for it first; `None` for every other family.
+        let effective_tier = split_repo_root_tier_key(&request.model_manifest_entry, &weights_dir)
+            .or_else(|| {
+                resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits)
+            });
         let resolved_artifact = if calibration_opt_in || quality_opt_in {
             resolved_mlx_artifact_provenance(
                 request,
@@ -9570,7 +9681,7 @@ async fn generate_stream(
             inputs: mlx_request_inputs,
         })
     };
-    let default_tier = tier_key_from_resolved_dir(&weights_dir);
+    let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
     let explicit_pick = request
         .advanced
         .get("mlxQuantizeExplicit")
@@ -9621,7 +9732,7 @@ async fn generate_stream(
     }).await?;
     if selected.weights_dir != weights_dir {
         tracing::warn!(model = %request.model, from = ?default_tier,
-            to = ?tier_key_from_resolved_dir(&selected.weights_dir),
+            to = ?tier_key_for_resolved_dir(&request.model_manifest_entry, &selected.weights_dir),
             "MLX request ladder selected a lower installed tier");
     }
     let PreparedMlxImageTier {
@@ -9680,6 +9791,7 @@ async fn generate_stream(
         reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &weights_dir,
+            &request.model_manifest_entry,
             !is_dense_te_tier(request),
             &request.model,
             &job.id,
@@ -16618,33 +16730,33 @@ mod quant_tier_reconcile_tests {
         let root = std::path::Path::new("/models/sd3_5_large-mlx");
         // Standard `q4`/`q8`/`bf16` tier dirs → their precision.
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("q4")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("q4")),
             Some((Some(Quant::Q4), Some(4)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("q8")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("q8")),
             Some((Some(Quant::Q8), Some(8)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("bf16")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("bf16")),
             Some((None, None))
         );
         // Boogu `<variant>-<tier>` and bare `<variant>` (= the packed Q8 default).
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("base-q4")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("base-q4")),
             Some((Some(Quant::Q4), Some(4)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("turbo-bf16")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("turbo-bf16")),
             Some((None, None))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("edit")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("edit")),
             Some((Some(Quant::Q8), Some(8)))
         );
         // A fell-all-the-way-back-to-root (or modelPath) dir is not a recognizable tier → None, so the
         // caller keeps the request-derived quant.
-        assert_eq!(tier_quant_from_resolved_dir(root), None);
+        assert_eq!(tier_quant_from_resolved_dir(&JsonObject::new(), root), None);
     }
 
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
@@ -16657,6 +16769,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (Some(Quant::Q8), Some(8)),
                 std::path::Path::new("/m/q8"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16670,6 +16783,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (None, None),
                 std::path::Path::new("/m/q4"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16683,6 +16797,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (None, None),
                 std::path::Path::new("/m/q4"),
+                &JsonObject::new(),
                 false,
                 "flux2_klein_9b",
                 "job1",
@@ -16695,6 +16810,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (Some(Quant::Q8), Some(8)),
                 std::path::Path::new("/m/root"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16782,7 +16898,7 @@ mod quant_tier_reconcile_tests {
         let requested = resolve_quant(&req, Some(&resolved));
         assert_eq!(requested, (None, None), "bf16 request derives dense");
         let (quant, bits) =
-            reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
+            reconcile_resolved_tier_quant(requested, &resolved, &JsonObject::new(), true, "sd3_5_large", "job1", "mlx");
         assert_eq!((quant, bits), (Some(Quant::Q4), Some(4)));
     }
 
@@ -16847,6 +16963,7 @@ mod quant_tier_reconcile_tests {
         let (quant, bits) = reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &resolved,
+            &JsonObject::new(),
             false, // dense-TE: keep the load quant None
             "flux2_klein_9b",
             "job1",
@@ -16874,6 +16991,7 @@ mod quant_tier_reconcile_tests {
         let (quant, bits) = reconcile_resolved_tier_quant(
             (None, dense_te_requested_tier_bits(&req)),
             std::path::Path::new("/m/q4"),
+            &JsonObject::new(),
             false,
             "flux2_klein_9b",
             "job1",

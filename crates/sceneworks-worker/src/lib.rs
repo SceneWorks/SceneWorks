@@ -65,7 +65,7 @@ use uuid::Uuid;
 /// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
 /// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
 /// share, so a per-lane copy would be two declarations of one fact.
-mod admission_geometry;
+pub(crate) use sceneworks_core::admission_geometry;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

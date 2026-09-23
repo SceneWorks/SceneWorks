@@ -33,39 +33,39 @@ use serde_json::{Map as JsonObject, Value};
 /// `admission_geometry()`. Every field is a structural count off frozen engine geometry — none of
 /// this is measured, and none of it is a budget in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AdmissionGeometry {
+pub struct AdmissionGeometry {
     /// Longest side any declared preset uses.
-    pub(crate) max_side: u32,
+    pub max_side: u32,
     /// Largest preset AREA in pixels. Deliberately separate from [`Self::max_side`]: the widest
     /// preset and the largest-AREA preset are usually different objects, and budgeting from the
     /// former under-counts the latter.
-    pub(crate) max_preset_area: u64,
+    pub max_preset_area: u64,
     /// Latent tokens the largest-area preset contributes.
-    pub(crate) max_target_image_tokens: u64,
+    pub max_target_image_tokens: u64,
     /// Most reference images the engine's joint layout can express.
-    pub(crate) max_reference_images: u32,
+    pub max_reference_images: u32,
     /// Latent tokens ONE reference adds — constant in the target size for a route that fits every
     /// condition image to a fixed output resolution first.
-    pub(crate) max_batch_reference_tokens: u64,
+    pub max_batch_reference_tokens: u64,
     /// The worst-case joint sequence: conditioning + [`Self::max_target_image_tokens`] +
     /// [`Self::max_reference_images`] x [`Self::max_batch_reference_tokens`].
-    pub(crate) max_joint_tokens: u64,
+    pub max_joint_tokens: u64,
     /// Pixels one latent token covers on each axis.
-    pub(crate) pixels_per_token: u64,
+    pub pixels_per_token: u64,
     /// Images one request may ask for. They render sequentially, so this multiplies time, not peak.
-    pub(crate) max_batch: u32,
+    pub max_batch: u32,
 }
 
 /// The conditioning-token count the published envelope is stated at. The engine's own table uses a
 /// full prompt through its template, and [`AdmissionGeometry::max_joint_tokens`] already includes
 /// it — so admitting a request means comparing like with like, which is why this is a named
 /// constant rather than a zero.
-pub(crate) const DECLARED_CONDITIONING_TOKENS: u64 = 256;
+pub const DECLARED_CONDITIONING_TOKENS: u64 = 256;
 
 /// Why a request is outside the envelope. Each variant carries the declared bound AND the requested
 /// value, because a refusal a user cannot act on is barely better than an OOM.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AdmissionRefusal {
+pub enum AdmissionRefusal {
     /// A side longer than any preset uses.
     Side { requested: u32, max: u32 },
     /// An area larger than the largest preset's, even if both sides are individually legal. This is
@@ -84,7 +84,7 @@ pub(crate) enum AdmissionRefusal {
 impl AdmissionRefusal {
     /// The message the worker surfaces. It names the bound, the request, and — for the composite
     /// case — how the number was arrived at, so the user can see which axis to reduce.
-    pub(crate) fn message(&self, model: &str) -> String {
+    pub fn message(&self, model: &str) -> String {
         match self {
             Self::Side { requested, max } => format!(
                 "{model}: {requested} px exceeds the model's {max} px longest side. Pick a smaller \
@@ -121,7 +121,7 @@ impl AdmissionGeometry {
     /// which is the same way a model with no `candle` block skips the VRAM gate. It fails OPEN
     /// deliberately — a malformed declaration must not start refusing renders that a correct
     /// declaration would have admitted; the manifest audit is what makes the block well-formed.
-    pub(crate) fn from_manifest(entry: &JsonObject<String, Value>) -> Option<Self> {
+    pub fn from_manifest(entry: &JsonObject<String, Value>) -> Option<Self> {
         let block = entry.get("admissionGeometry")?;
         let u32_field = |key: &str| -> Option<u32> {
             block
@@ -143,7 +143,7 @@ impl AdmissionGeometry {
     }
 
     /// Latent tokens one `width` x `height` image contributes.
-    pub(crate) fn image_tokens(&self, width: u32, height: u32) -> u64 {
+    pub fn image_tokens(&self, width: u32, height: u32) -> u64 {
         if self.pixels_per_token == 0 {
             return 0;
         }
@@ -158,7 +158,7 @@ impl AdmissionGeometry {
     /// to its own output resolution before the vision tower and the VAE see it, so a reference
     /// costs the same whatever the target size; charging the target's count instead would over-
     /// state the worst case by more than 3x at the largest preset and refuse legal requests.
-    pub(crate) fn joint_tokens(&self, width: u32, height: u32, reference_count: u32) -> u64 {
+    pub fn joint_tokens(&self, width: u32, height: u32, reference_count: u32) -> u64 {
         DECLARED_CONDITIONING_TOKENS
             + self.image_tokens(width, height)
             + reference_count as u64 * self.max_batch_reference_tokens
@@ -169,7 +169,7 @@ impl AdmissionGeometry {
     /// The per-axis checks run first so a single over-large axis is named directly rather than
     /// surfacing as an opaque token total; the composite joint-token check runs last and is the one
     /// that catches a request every individual axis admits.
-    pub(crate) fn admit(
+    pub fn admit(
         &self,
         width: u32,
         height: u32,
@@ -220,7 +220,7 @@ impl AdmissionGeometry {
 /// Backend-neutral on purpose. The envelope is a property of the engine's attention layout, which
 /// MLX and Candle share exactly — a per-lane copy would be two declarations of one fact, free to
 /// diverge.
-pub(crate) fn refuse_over_envelope(
+pub fn refuse_over_envelope(
     model: &str,
     entry: &JsonObject<String, Value>,
     width: u32,
@@ -241,8 +241,8 @@ mod tests {
     use serde_json::json;
 
     fn shipped_entry(id: &str) -> JsonObject<String, Value> {
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
+            crate::builtin_manifests::BUILTIN_MANIFESTS
                 .iter()
                 .find(|(name, _)| *name == "builtin.models.jsonc")
                 .expect("builtin.models.jsonc embedded")

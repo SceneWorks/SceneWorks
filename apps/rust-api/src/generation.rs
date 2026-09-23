@@ -296,6 +296,30 @@ pub(crate) async fn create_image_job(
                 ) {
                     return Err(ApiError::bad_request(message));
                 }
+                // The declared request-geometry ENVELOPE (sc-24112, `admissionGeometry`): the
+                // largest-preset area, the reference count and the batch, jointly. Per-side bounds
+                // cannot express it — 2752x2752 passes every side check and is still 7.57 Mpx
+                // against a 4.30 Mpx envelope — and the worker refuses it anyway, so without this
+                // the job enqueued and failed later instead of 400ing here. The SAME core function
+                // the worker calls, over the same ordered reference list the worker renders.
+                // ABSENT block ⇒ inert.
+                let reference_count =
+                    sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
+                        .map_or(0, |ids| ids.len());
+                let batch = job_payload
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                if let Some(message) = sceneworks_core::admission_geometry::refuse_over_envelope(
+                    &model_id,
+                    entry,
+                    width,
+                    height,
+                    u32::try_from(reference_count).unwrap_or(u32::MAX),
+                    u32::try_from(batch).unwrap_or(u32::MAX),
+                ) {
+                    return Err(ApiError::bad_request(message));
+                }
             }
         }
         // The SHAPE half of the same contract (sc-24110): a conditioned mode with NOTHING to

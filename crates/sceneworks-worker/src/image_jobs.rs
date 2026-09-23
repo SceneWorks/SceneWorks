@@ -324,18 +324,24 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 
 /// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
 ///
-/// The three carriers are MUTUALLY EXCLUSIVE — `routing::conditioned_reference_count` fails a
-/// request closed when more than one is populated — so the count is simply whichever one is
-/// present: the plural multi-reference list, the singular `referenceAssetId`, or the Image
-/// Editor's `sourceAssetId`. All three are counted rather than just the reference pair: to this
-/// engine a working image IS an ordered condition image (upstream ships ONE pipeline and "editing"
-/// is the same call with condition images), so leaving `sourceAssetId` out would under-price an
-/// edit by one full reference block.
+/// `qwen_image_2_1` — the one route that declares an envelope — is priced off the EXACT ordered
+/// list its lane renders ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an
+/// ORDINARY reference to this engine — it has no mask tensor), the plural list and the singular
+/// reference, deduped by asset id. Every entry is one reference block of the joint attention
+/// sequence, so counting anything else prices a different request than the one that runs: a
+/// `max` over the carriers priced source + mask + 8 references as 8.
 ///
-/// `max` rather than a fallback chain, so a payload that somehow carries two still prices the
-/// larger — under-counting is the direction that admits a request the engine cannot run. A model
-/// with no declared envelope never consults this, so it costs nothing on every other route.
+/// Every other model falls through to the carrier `max` (whichever of the plural list, the
+/// singular `referenceAssetId` or `sourceAssetId` is largest); a model with no declared envelope
+/// never consults this, so it costs nothing on those routes.
 fn reference_image_count(request: &ImageRequest) -> u32 {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if request.model == "qwen_image_2_1" {
+        return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
+    }
     let plural = request
         .reference_asset_ids
         .iter()

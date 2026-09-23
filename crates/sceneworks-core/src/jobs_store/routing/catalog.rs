@@ -844,8 +844,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // the same packed triples on the DiT and the Qwen3 tower that MLX does — and the provider now
     // declares `supported_quants: [Q4, Q8]`. `advanced.mlxQuantize` off-Mac is therefore a tier
     // SELECT into an already-packed q4/q8 snapshot, exactly as on Mac, and the loader serves it.
-    // (A DENSE snapshot plus a quantize request is still a typed refusal on candle: `spec.quantize`
-    // selects a tier here, it does not transform weights.)
+    // (A DENSE snapshot plus a quantize request is still a typed refusal on CANDLE: `spec.quantize`
+    // selects a tier there, it does not transform weights. MLX is different — against the dense
+    // snapshot it load-time quantizes — which is why the worker derives the load quant from the
+    // resolved artifact and sends none against the bf16 root on either lane.)
     //
     // This is NOT a merge of the two backends' surfaces. `candle_quant` is the CANDLE column and
     // nothing else; the MLX lane's tier surface is the manifest's own `mlx` block; there is still
