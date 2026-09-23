@@ -80,6 +80,12 @@ pub(crate) const OUTPUT_CHANNELS_RGBA: &str = "rgba";
 ///
 /// Sending such a reference flattened to RGB is a DIFFERENT request, not a lossy version of the
 /// same one, because the VAE encodes all four channels.
+// Read only by `reference_conditioning_kind`, whose callers are backend lanes.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) const CONDITIONING_REFERENCE_RGBA: &str = "ReferenceRgba";
 
 /// The `advanced` key the Studio/Editor set when the user turns the transparency toggle on.
@@ -249,6 +255,7 @@ pub(crate) fn output_channels_request_fragment(channels: u8) -> BTreeMap<&'stati
 // the variant is not in the pinned `gen_core` — so that is what the builder refuses on, by name,
 // rather than flattening; see `qwen_image_2_1_rgba_reference_is_pending_the_pin`.
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]

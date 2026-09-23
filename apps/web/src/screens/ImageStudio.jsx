@@ -313,6 +313,7 @@ export function ImageStudio() {
     createImageJob,
     createPreset,
     refinePrompt,
+    qwenRewritePrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
