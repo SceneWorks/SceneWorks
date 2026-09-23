@@ -2585,6 +2585,13 @@ impl GeneratedPixels {
 ///
 /// `None` for a source that has no alpha, which keeps every pre-sc-24111 render on exactly the
 /// path it was on — the `Rgb` arm of [`GeneratedPixels`], byte-identical output.
+// Every caller (upscale, detail refine, the reference alpha reader) is a backend lane, so a
+// no-backend build compiles this only for its tests.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn split_alpha(
     decoded: &image::DynamicImage,
 ) -> (image::RgbImage, Option<image::GrayImage>) {
@@ -2612,6 +2619,11 @@ pub(crate) fn split_alpha(
 ///   the plane matches what the model is doing to the colour beside it. A fully transparent or
 ///   fully opaque REGION stays fully transparent or opaque because bilinear is interpolating
 ///   between equal values there; only the ramp is resampled.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn reattach_alpha(
     rgb: image::RgbImage,
     alpha: Option<&image::GrayImage>,

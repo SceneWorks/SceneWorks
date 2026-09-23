@@ -353,6 +353,15 @@ use prompt_refine_jobs::*;
 //   native TextLlm lane.
 mod downloads;
 mod qwen_alpha;
+// Every consumer is the TextLlm lane in `prompt_refine_jobs`, which only a backend build compiles;
+// a no-backend build keeps the module for its pure-function tests.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
 mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.

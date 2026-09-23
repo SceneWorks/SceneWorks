@@ -80,6 +80,8 @@ pub(crate) const OUTPUT_CHANNELS_RGBA: &str = "rgba";
 ///
 /// Sending such a reference flattened to RGB is a DIFFERENT request, not a lossy version of the
 /// same one, because the VAE encodes all four channels.
+// Read only by `reference_conditioning_kind`, which has no call site on this branch yet.
+#[allow(dead_code)]
 pub(crate) const CONDITIONING_REFERENCE_RGBA: &str = "ReferenceRgba";
 
 /// The `advanced` key the Studio/Editor set when the user turns the transparency toggle on.

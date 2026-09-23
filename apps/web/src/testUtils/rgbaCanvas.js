@@ -17,6 +17,7 @@
 // destination size, `getImageData` / `putImageData`, `fillRect`. No transforms, no paths, no
 // interpolation beyond nearest-neighbour. That is what the export paths under test use.
 
+import { Buffer } from "node:buffer";
 import { deflateSync, inflateSync } from "node:zlib";
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
