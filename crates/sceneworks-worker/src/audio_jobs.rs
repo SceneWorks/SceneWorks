@@ -771,9 +771,14 @@ async fn run_audio_synthesis_using(
             .map_err(|error| classify_audio_synthesis_error("audio generation failed", error))?;
             match output {
                 GenerationOutput::Audio(track) => Ok(track),
-                GenerationOutput::Images(_) => Err(WorkerError::Engine(
-                    "audio model returned images, expected an audio track".to_owned(),
-                )),
+                // Either channel count is the same defect: an audio job asked for a track and
+                // got pixels. `ImagesRgba` (sc-24111) is unreachable here — this request never
+                // sets `output_channels` — but the match must name it.
+                GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
+                    Err(WorkerError::Engine(
+                        "audio model returned images, expected an audio track".to_owned(),
+                    ))
+                }
                 GenerationOutput::Video { .. } => Err(WorkerError::Engine(
                     "audio model returned video, expected an audio track".to_owned(),
                 )),
@@ -1194,9 +1199,11 @@ async fn run_native_voice_clone_synthesis_using(
                     classify_audio_synthesis_error("clone-TTS generation failed", error)
                 })? {
                 GenerationOutput::Audio(track) => Ok(track),
-                GenerationOutput::Images(_) => Err(WorkerError::Engine(
-                    "clone-TTS model returned images, expected an audio track".to_owned(),
-                )),
+                GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
+                    Err(WorkerError::Engine(
+                        "clone-TTS model returned images, expected an audio track".to_owned(),
+                    ))
+                }
                 GenerationOutput::Video { .. } => Err(WorkerError::Engine(
                     "clone-TTS model returned video, expected an audio track".to_owned(),
                 )),

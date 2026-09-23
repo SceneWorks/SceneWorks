@@ -5236,7 +5236,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         .map_err(|error| format!("finish {LTX25_ID} capture scope: {error}"))?;
     let (frames, fps, audio) = match output {
         GenerationOutput::Video { frames, fps, audio } => (frames, fps, audio),
-        GenerationOutput::Images(_) => {
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
             return Err(format!("{LTX25_ID} returned images, not a video clip"))
         }
         GenerationOutput::Audio(_) => {
@@ -6346,7 +6346,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
         .map_err(|error| format!("finish {} capture scope: {error}", arm.engine_id))?;
     let (frames, fps, audio) = match output {
         GenerationOutput::Video { frames, fps, audio } => (frames, fps, audio),
-        GenerationOutput::Images(_) => {
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
             return Err(format!(
                 "{} returned images, not a video clip",
                 arm.model_id
