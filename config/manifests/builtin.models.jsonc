@@ -3582,17 +3582,14 @@
       // tier key not in the map (today, `nvfp4`). Falling through to a light tier's floor for an
       // unknown tier would be a PERMISSIVE under-prediction, which admits a load that OOMs.
       //
-      // `stagedMinMemoryGbByTier` (MLX only) is the same rule over the STAGED request peak — the
-      // engine's `bounded_peak_bytes`: the staged weight floor `max(tower, DiT + VAE)` plus the
-      // 512/64 bounded-decode transient, the configuration a memory-constrained host runs:
-      //
-      //   bf16  14.51 + 1.66 = 16.17 GiB x1.25 = 20.21 -> 21
-      //   q8     8.30 + 1.66 =  9.96 GiB x1.25 = 12.45 -> 13
-      //   q4     4.99 + 1.66 =  6.65 GiB x1.25 =  8.31 ->  9
-      //
-      // DERIVED, like everything in this block. The Model Manager reads it only when no tier fits
-      // resident, and then suggests the LIGHTEST tier that fits staged — so a 24 GB Mac, which no
-      // tier fits resident on the footprint estimate, is pointed at q4 rather than at nothing.
+      // There is deliberately NO staged-floor key (sc-24114 removed `stagedMinMemoryGbByTier`): the
+      // MLX contract below declares no staged row, so no worker path ever applied that number, and
+      // a floor the UI quotes must be one the product stands behind. On MLX `minMemoryGbByTier` is
+      // `advisory` (schema: no MLX runtime gate reads it — the MLX fit gate admits from the
+      // provider's own memory model); it is PINNED to that same provider model by
+      // `qwen_image_2_1_mlx_floors_are_derived_from_the_linked_provider`. The Candle keys are
+      // `binding` and consumed by `vram_gate::predicted_peak_gb`
+      // (`qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`).
       //
       // NO `calibrations` on either lane (nothing has been measured). BOTH blocks carry a
       // HAND-AUTHORED, request-owned `memoryStrategyContract` (sc-24114): this route's MLX rules are
@@ -3603,7 +3600,6 @@
       "mlx": {
         "minMemoryGb": 45,
         "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
-        "stagedMinMemoryGbByTier": { "bf16": 21, "q8": 13, "q4": 9 },
         // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
         // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
         // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
@@ -3625,9 +3621,7 @@
         // request`), and this provider's `Sequential` policy drops and reloads the language tower
         // on EVERY request — so declaring it would slow every Mac that fits resident. Staging stays
         // what the fit gate chooses when resident does not fit (`decide_residency_for_spec`, the
-        // descriptor's `supports_sequential_offload`); `stagedMinMemoryGbByTier` states that staged
-        // peak for the Model Manager, pinned to the provider's derived table by
-        // `qwen_image_2_1_mlx_floors_are_derived_from_the_linked_provider`.
+        // descriptor's `supports_sequential_offload`), and no staged floor is advertised for it.
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "qwen_image_2_1",
@@ -27413,7 +27407,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "2fd15a92ef90ce5096328d97459bab27506990f79aa10d7f9f898867bfa979cd",
+              "sha256": "3217871ee52839a8851db2abb342f67cb344f6d18982ffba8e818c22c98263a6",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27532,8 +27526,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 148325,
-                  "sha256": "3c4e23764bc0a94ff3dacdfd5a060682e2a85225282464dca0eb44d88613a37a"
+                  "byteSize": 147353,
+                  "sha256": "321eb8f2fe37645316b97ad26c9765a50c6fa237b1ac9e60a8f7a70436658287"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

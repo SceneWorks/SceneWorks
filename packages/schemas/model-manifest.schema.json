@@ -1341,15 +1341,6 @@
                 ],
                 "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; no MLX runtime gate reads it (the MLX fit gate admits from the provider's own memory contract)."
               },
-              "stagedMinMemoryGbByTier": {
-                "type": "object",
-                "minProperties": 1,
-                "additionalProperties": { "type": "integer", "minimum": 1 },
-                "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
-                "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "model?.mlx?.stagedMinMemoryGbByTier?.[tier]" }],
-                "description": "Per-tier ALREADY-PADDED floor (GB) for a STAGED (sequential-residency + bounded-decode) MLX load, for a model whose provider stages its components (sc-24112). Lower than minMemoryGbByTier because the text tower is dropped before the DiT and VAE load. Read only when no tier fits resident: the Model Manager then suggests the LIGHTEST tier whose staged floor fits, never ranking a staged fit above a resident one. May be DERIVED; the entry's comment must say so."
-              },
               "measuredSiblingActiveDiskFraction": {
                 "type": "number",
                 "exclusiveMinimum": 0,

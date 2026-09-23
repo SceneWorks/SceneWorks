@@ -428,31 +428,6 @@ function tierFloorRowGb(model, backend, tier) {
   return gb !== null && gb > 0 ? gb : null;
 }
 
-// `tier`'s declared STAGED floor on MLX — `mlx.stagedMinMemoryGbByTier` (sc-24112) — or null. A
-// staged (sequential-residency) load drops the text tower before the DiT and VAE load and decodes
-// in bounded tiles, so its floor sits far below the resident one. MLX only: nothing declares a
-// Candle staged floor.
-function stagedFloorGb(model, backend, tier) {
-  if (backend === "candle" || typeof tier !== "string") {
-    return null;
-  }
-  const gb = numberOrNull(model?.mlx?.stagedMinMemoryGbByTier?.[tier]);
-  return gb !== null && gb > 0 ? gb : null;
-}
-
-// Whether `variant`'s declared STAGED floor fits a `hostMemoryGb` host. The Model Manager asks it
-// only of a tier `tierFits` already rejected, and then labels the row "fits with staging" instead
-// of "may exceed memory" — so a host no tier fits resident is still told which tiers run. It never
-// changes the suggestion: a staged run is slower (components reload every render) and must not
-// outrank a resident one.
-export function tierFitsStaged(variant, hostMemoryGb, options = {}) {
-  if (hostMemoryGb == null || !Number.isFinite(hostMemoryGb)) {
-    return false;
-  }
-  const staged = stagedFloorGb(options.model, options.backend, variant?.variant);
-  return staged !== null && staged <= hostMemoryGb;
-}
-
 // The lightest tier of `model` that can actually be installed (a declared bf16/q8/q4 variant that
 // is not a pending, unpublished artifact), or null for a model with no tier matrix. The tier a
 // "can this machine run the model at all" floor must be quoted for: `qwen_image_2_1` declares q4,

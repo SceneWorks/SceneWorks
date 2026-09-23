@@ -48,7 +48,6 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
-  tierFitsStaged,
 } from "../tierSuggestion.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
@@ -395,10 +394,6 @@ function ModelTierDownloadPanel({
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
           const overBudget = !tierFits(variant, unifiedMemoryGb, { backend, model });
-          // sc-24112: a tier over budget RESIDENT whose declared STAGED floor fits
-          // (`mlx.stagedMinMemoryGbByTier`) runs with sequential residency — say so, rather than
-          // warning that it may not fit at all.
-          const fitsStaged = overBudget && tierFitsStaged(variant, unifiedMemoryGb, { backend, model });
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
@@ -420,7 +415,7 @@ function ModelTierDownloadPanel({
           if (isSuggested) {
             rowClasses.push("suggested");
           }
-          if (overBudget && !fitsStaged) {
+          if (overBudget) {
             rowClasses.push("over-budget");
           }
           if (incomplete) {
@@ -440,14 +435,7 @@ function ModelTierDownloadPanel({
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
                   {/* Distinct class (NOT `.status-badge`) so it never collides with the per-row
                       install-state status badge query/rendering — this is a separate RAM advisory. */}
-                  {fitsStaged ? (
-                    <span
-                      className="model-tier-memory-staged"
-                      title={`This tier's resident peak is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB, but it runs with staged loading (one component resident at a time), which is slower.`}
-                    >
-                      fits with staging
-                    </span>
-                  ) : overBudget ? (
+                  {overBudget ? (
                     <span
                       className="model-tier-memory-warning"
                       title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}

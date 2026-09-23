@@ -794,6 +794,12 @@ SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
 # `pendingArtifact` (null-SHA placeholder) until the epic's terminal upload pins them; until then
 # `--list` reports q8/q4 `weights_missing` naming the pending row and `--download-missing` refuses to
 # fetch them. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
+# SCOPE (sc-24114): the six qwen_image_2_1 anchors are TEXT-TO-IMAGE at the 2048x2048 DEFAULT preset with
+# ZERO references — one anchor per (model, tier, lane) by design (epic 22505). Reference-bearing
+# requests (edit_image / image_to_image / character_image, 1..=10 refs) and the other six presets are
+# NOT anchored: admission prices them from the provider's own memory contract (which counts each
+# reference as extra joint-sequence tokens). No reference-count or max-geometry anchor is measured,
+# and none is planned.
 SCENEWORKS_QWEN_IMAGE_2_1_REPOSITORY=SceneWorks/qwen-image-2-1-mlx  # fixed; validated against QWEN_IMAGE_2_1_REPOSITORY
 SCENEWORKS_QWEN_IMAGE_2_1_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_2_1_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8 ONLY — bf16 is the family below

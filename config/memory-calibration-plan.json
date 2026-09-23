@@ -2027,7 +2027,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
-      "fixture": "fresh-five-rung-qwen-image-2-1-bf16-2048-seed16402-step2"
+      "fixture": "fresh-five-rung-qwen-image-2-1-bf16-t2i-2048-default-preset-noref-seed16402-step2"
     },
     "qwen_image_2_1:bf16:mlx": {
       "provider": "qwen_image_2_1",
@@ -2042,7 +2042,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
-      "fixture": "qwen-image-2-1-mlx-bf16-2048-seed22732-step2"
+      "fixture": "qwen-image-2-1-mlx-bf16-t2i-2048-default-preset-noref-seed22732-step2"
     },
     "qwen_image_2_1:q4:candle": {
       "provider": "qwen_image_2_1",
@@ -2057,7 +2057,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
-      "fixture": "fresh-five-rung-qwen-image-2-1-q4-2048-seed16402-step2"
+      "fixture": "fresh-five-rung-qwen-image-2-1-q4-t2i-2048-default-preset-noref-seed16402-step2"
     },
     "qwen_image_2_1:q4:mlx": {
       "provider": "qwen_image_2_1",
@@ -2072,7 +2072,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
-      "fixture": "qwen-image-2-1-mlx-q4-2048-seed22732-step2"
+      "fixture": "qwen-image-2-1-mlx-q4-t2i-2048-default-preset-noref-seed22732-step2"
     },
     "qwen_image_2_1:q8:candle": {
       "provider": "qwen_image_2_1",
@@ -2087,7 +2087,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
-      "fixture": "fresh-five-rung-qwen-image-2-1-q8-2048-seed16402-step2"
+      "fixture": "fresh-five-rung-qwen-image-2-1-q8-t2i-2048-default-preset-noref-seed16402-step2"
     },
     "qwen_image_2_1:q8:mlx": {
       "provider": "qwen_image_2_1",
@@ -2102,7 +2102,7 @@
       "evidenceScope": "authoritative",
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
-      "fixture": "qwen-image-2-1-mlx-q8-2048-seed22732-step2"
+      "fixture": "qwen-image-2-1-mlx-q8-t2i-2048-default-preset-noref-seed22732-step2"
     },
     "qwen_image_edit_2511:bf16:candle": {
       "provider": "qwen_image_edit",

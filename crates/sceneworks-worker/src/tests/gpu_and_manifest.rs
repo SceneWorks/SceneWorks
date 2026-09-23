@@ -3208,49 +3208,91 @@ fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
     }
 }
 
-/// sc-24114 — the MLX per-tier RESIDENT and STAGED floors the Model Manager reads are DERIVED FROM
-/// the linked provider's own memory model, not a second hand-maintained opinion. The worker's MLX
-/// admission prices requests off that same provider model; this pins the UI's keys to it: `ceil(peak GiB x 1.25)` at the default preset, the resident peak for
-/// `minMemoryGbByTier`, the Sequential + bounded-decode peak for `stagedMinMemoryGbByTier`.
+/// sc-24114 — every memory FLOOR key the UI reads for `qwen_image_2_1` has a worker source, so none
+/// is dead:
 ///
-/// *Mutation that reds this:* editing any `mlx.minMemoryGbByTier` / `mlx.stagedMinMemoryGbByTier`
-/// value, or a pin that moves the provider's derived table without the catalog following.
-#[cfg(target_os = "macos")]
+/// * the Candle keys (`binding`) are CONSUMED by the pre-load gate: `vram_gate::predicted_peak_gb`
+///   answers each tier's `candle.minMemoryGbByTier` row and falls back to `candle.minMemoryGb`;
+/// * the MLX keys (`advisory` — no MLX runtime gate reads a manifest floor; the fit gate admits from
+///   the provider's own memory model) are DERIVED FROM that same provider model: `ceil(resident
+///   peak GiB x 1.25)` at the default preset, per tier, and the scalar is the densest tier's floor;
+/// * no other floor key exists on either lane — a staged floor no worker path applies (the MLX
+///   contract declares no staged row) was removed rather than kept as UI-only decoration.
+///
+/// *Mutation that reds this:* re-adding `mlx.stagedMinMemoryGbByTier`; editing any floor value;
+/// or `predicted_peak_gb` no longer reading `candle.minMemoryGbByTier`.
 #[test]
-fn qwen_image_2_1_mlx_floors_are_derived_from_the_linked_provider() {
-    use runtime_macos::providers::qwen_image_2_1 as provider;
-    const GIB: f64 = (1_u64 << 30) as f64;
-    let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
-
+fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
     let models = builtin_models_manifest();
     let entry = models
         .iter()
         .find(|model| model["id"] == "qwen_image_2_1")
-        .expect("qwen_image_2_1 is in the shipped catalog");
-    let default = provider::config::PRESETS[0];
-    let mut checked = 0;
-    for row in provider::memory_strategy::derived::table() {
-        if (row.preset.width, row.preset.height) != (default.width, default.height) {
-            continue;
-        }
-        let tier = match row.tier {
-            provider::quant::Tier::Bf16 => "bf16",
-            provider::quant::Tier::Q8 => "q8",
-            provider::quant::Tier::Q4 => "q4",
-        };
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+    for backend in ["mlx", "candle"] {
+        let floors: std::collections::BTreeSet<&str> = entry[backend]
+            .as_object()
+            .expect("backend block")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.contains("MemoryGb"))
+            .collect();
         assert_eq!(
-            entry["mlx"]["minMemoryGbByTier"][tier].as_u64(),
-            Some(floor(row.resident_peak_bytes())),
-            "mlx.minMemoryGbByTier.{tier} is ceil(resident peak GiB x 1.25) at the default preset"
+            floors,
+            ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
+            "{backend}: every floor key must have a worker source"
         );
-        assert_eq!(
-            entry["mlx"]["stagedMinMemoryGbByTier"][tier].as_u64(),
-            Some(floor(row.bounded_peak_bytes())),
-            "mlx.stagedMinMemoryGbByTier.{tier} is ceil(staged + bounded-decode peak GiB x 1.25)"
-        );
-        checked += 1;
     }
-    assert_eq!(checked, 3, "one row per shipped tier at the default preset");
+    // Candle: consumed by the gate, row by row, with the scalar as the unlisted-tier fallback.
+    // `vram_gate` compiles on the candle build only, so this half runs on the windows-candle lane.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(&entry, tier),
+            entry["candle"]["minMemoryGbByTier"][tier].as_f64(),
+            "candle/{tier}"
+        );
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        crate::vram_gate::predicted_peak_gb(&entry, "nvfp4"),
+        entry["candle"]["minMemoryGb"].as_f64()
+    );
+    // MLX: derived from the linked provider's memory model (the fit gate's own source).
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        const GIB: f64 = (1_u64 << 30) as f64;
+        let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
+        let default = provider::config::PRESETS[0];
+        let mut checked = 0;
+        for row in provider::memory_strategy::derived::table() {
+            if (row.preset.width, row.preset.height) != (default.width, default.height) {
+                continue;
+            }
+            let tier = match row.tier {
+                provider::quant::Tier::Bf16 => "bf16",
+                provider::quant::Tier::Q8 => "q8",
+                provider::quant::Tier::Q4 => "q4",
+            };
+            assert_eq!(
+                entry["mlx"]["minMemoryGbByTier"][tier].as_u64(),
+                Some(floor(row.resident_peak_bytes())),
+                "mlx.minMemoryGbByTier.{tier} is ceil(resident peak GiB x 1.25) at the default preset"
+            );
+            if tier == "bf16" {
+                assert_eq!(
+                    entry["mlx"]["minMemoryGb"].as_u64(),
+                    Some(floor(row.resident_peak_bytes())),
+                    "the MLX scalar is the densest tier's derived floor"
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "one row per shipped tier at the default preset");
+    }
 }
 
 /// sc-24114 — `qwen_image_2_1`'s sampler / scheduler menu is EXACTLY what the linked provider
