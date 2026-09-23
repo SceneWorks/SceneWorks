@@ -3985,14 +3985,15 @@ def test_the_pending_pairing_guard_catches_each_half():
     manifest = _load_builtin_models_manifest()
     qwen = next(m for m in manifest["models"] if m["id"] == "qwen_image_2_1")
     q8 = next(d for d in qwen["downloads"] if d.get("variant") == "q8")
+    assert _pending_artifact_rows(manifest) == _null_sha_rows(manifest), "precondition"
 
-    # Half one: the revision is pinned, the flag is forgotten.
-    q8["revision"] = "a" * 40
+    # Half one: the flag rides on a real revision (the flag outliving the upload).
+    q8["pendingArtifact"] = True
     assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
 
-    # Half two: the flag is dropped, the placeholder is forgotten.
-    q8["revision"] = _PENDING_ARTIFACT_REVISION
+    # Half two: the placeholder returns without the flag.
     del q8["pendingArtifact"]
+    q8["revision"] = _PENDING_ARTIFACT_REVISION
     assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
 
 
@@ -4040,17 +4041,25 @@ def test_qwen_image_2_1_ships_three_tiers_on_both_backends_from_pinned_bundles()
     assert "re-hosted by SceneWorks" in qwen["licenseNotice"]
 
 
-def test_qwen_image_2_1_tier_download_sizes_are_derived_from_the_bf16_tree():
-    """The packed tiers' `estimatedSizeBytes` are DERIVED — there is nothing on disk to sum until
-    the upload — and this recomputes the derivation rather than restating its answers.
+#: The q8/q4 re-host as PUBLISHED (sc-24114): the revision and each tier's EXACT byte total, summed
+#: over every file under the tier's subdir from `HfApi().model_info(repo, revision=...,
+#: files_metadata=True)`.
+_QWEN_IMAGE_2_1_REHOST_REVISION = "1691de01c24a070131e0a28bf4c065fd027f4fe9"
+_QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES = {"q8": 19_949_564_007, "q4": 12_919_123_211}
 
-    Method (the manifest comment states it, and the engine's own `packed_bytes` is the same
-    arithmetic, so the two cannot drift): take the bf16 tree's EXACT byte total and swap the two
-    packable components from bf16 width to packed width. Everything else in the tree is byte-copied
-    and cancels — the norm scales, the dense token embedding, the untied `lm_head` and the whole
-    vision tower, the f32 VAE, and the tokenizer corpus.
 
-    *Mutation that reds this:* rounding a tier's size, or copying a 2512 `qwen_image` row.
+def test_qwen_image_2_1_tier_download_sizes_are_measured_from_the_published_blobs():
+    """The packed tiers' `estimatedSizeBytes`/`diskSizeBytes` are the EXACT published totals at the
+    pinned revision — measured, not derived.
+
+    They are also cross-checked against the sc-24112 derivation (the bf16 tree's exact total with
+    the DiT's and tower's group-64 Linears swapped from bf16 to packed width — the engine's own
+    `packed_bytes` arithmetic): both tiers sit the SAME constant below it, so the packed-weight
+    arithmetic is exact and only the non-weight files differ. A per-tier residue that disagreed
+    would mean one tier's number is wrong.
+
+    *Mutation that reds this:* restoring the derived 19_952_874_332 / 12_922_434_396, or rounding a
+    tier's size.
     """
     group_size = 64
     bf16_width = 2
@@ -4062,25 +4071,25 @@ def test_qwen_image_2_1_tier_download_sizes_are_derived_from_the_bf16_tree():
 
     by_variant = {d["variant"]: d for d in _qwen_image_2_1_entry()["downloads"]}
     bf16_total = by_variant["bf16"]["estimatedSizeBytes"]
-    assert bf16_total == 33_134_949_212, (
-        "the derivation is anchored on the bf16 tree's exact total; if that changes, every derived "
-        "tier size changes with it"
-    )
+    assert bf16_total == 33_134_949_212
+    residues = set()
     for tier, bits in (("q8", 8), ("q4", 4)):
-        expected = (
+        measured = _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier]
+        assert by_variant[tier]["estimatedSizeBytes"] == measured, tier
+        assert by_variant[tier]["footprint"]["diskSizeBytes"] == measured, tier
+        # Nothing has been measured on either backend, so no tier may claim a memory footprint.
+        assert by_variant[tier]["footprint"]["residentMemoryBytes"] is None
+        assert by_variant[tier]["footprint"]["peakMemoryBytes"] is None
+        derived = (
             bf16_total
             + (packed(dit_linear_params, bits) - dit_linear_params * bf16_width)
             + (packed(lm_linear_params, bits) - lm_linear_params * bf16_width)
         )
-        assert by_variant[tier]["estimatedSizeBytes"] == expected, (
-            f"{tier}: derived size must be {expected}"
-        )
-        assert by_variant[tier]["footprint"]["diskSizeBytes"] == expected, (
-            f"{tier}: the footprint's disk size is the same derived number"
-        )
-        # Nothing has been measured on either backend, so no tier may claim a memory footprint.
-        assert by_variant[tier]["footprint"]["residentMemoryBytes"] is None
-        assert by_variant[tier]["footprint"]["peakMemoryBytes"] is None
+        residues.add(derived - measured)
+    # q8 3_310_325 B, q4 3_311_185 B: the weight arithmetic is exact to within the few KB of
+    # per-tier text files, and the rest is the non-weight files the re-host carries instead of
+    # upstream's. A residue outside this band means a weight file is not what the tier claims.
+    assert all(3_300_000 < residue < 3_320_000 for residue in residues), residues
 
     # Monotone in fidelity, which a copied or hand-typed number is the easiest way to break.
     sizes = [by_variant[t]["estimatedSizeBytes"] for t in ("q4", "q8", "bf16")]
@@ -4144,25 +4153,89 @@ def test_qwen_image_2_1_advertises_no_staged_floor():
         assert "stagedMinMemoryGbByTier" not in qwen[backend], backend
 
 
-def test_qwen_image_2_1_pending_tiers_are_still_the_placeholder_tripwire():
-    """FAIL-CLOSED TRIPWIRE for the epic's terminal story. The packed q8/q4 tiers are the
-    null-SHA placeholder AND unofferable (`pendingArtifact`, never the default) — today, together.
-
-    This test is MEANT to go red. The terminal story uploads the artifacts and must, in ONE edit per
-    row, replace `0000000000000000000000000000000000000000` with the real commit AND drop
-    `pendingArtifact` AND move `default` to q4 — and then delete this test in the same commit.
-    Replacing the SHA without dropping the flag, or dropping the flag without the SHA, reds here
-    (and in `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`); doing
-    neither leaves the placeholder visible here rather than silently shipping forever.
+def test_qwen_image_2_1_packed_tiers_pin_the_published_revision():
+    """FAIL-CLOSED against a placeholder coming back (sc-24114). The q8/q4 tiers are PUBLISHED: both
+    rows pin the real re-host revision, carry no `pendingArtifact`, and q4 — not bf16 — is the
+    default. Re-introducing the null SHA, the flag, or the bf16 default reds here.
     """
     downloads = {d.get("variant"): d for d in _qwen_image_2_1_entry()["downloads"]}
     for tier in ("q8", "q4"):
         row = downloads[tier]
-        assert row["revision"] == "0" * 40, f"{tier}: the terminal story pinned it — delete this test"
-        assert row.get("pendingArtifact") is True, f"{tier}: flag and placeholder move together"
-        assert row.get("default") is not True, f"{tier}: a pending tier is never the default"
-    assert downloads["bf16"].get("default") is True
-    assert downloads["bf16"].get("pendingArtifact") is not True
+        assert row["revision"] == _QWEN_IMAGE_2_1_REHOST_REVISION, tier
+        assert row["revision"] != _PENDING_ARTIFACT_REVISION, tier
+        assert "pendingArtifact" not in row, f"{tier}: the flag left with the placeholder"
+    assert downloads["q4"].get("default") is True
+    assert downloads["q8"].get("default") is not True
+    assert downloads["bf16"].get("default") is not True
+
+
+#: The published `SHA256SUMS` of each re-host tier at `_QWEN_IMAGE_2_1_REHOST_REVISION`, vendored
+#: verbatim as `<tier>/SHA256SUMS.txt` (fetched once with `hf_hub_download`; the `.txt` suffix is only
+#: so the source-control byte scanner classifies it) so E7 is checked without the network. Each value
+#: is the Hub's git blob id for that file at the revision, so a hand edit of the fixture reds.
+_QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS = {
+    "q8": "0eb8019c89740398a363e7c8f74db20d9aeb438c",
+    "q4": "4b0494d9db0efa7096c304b5612df56085d3675e",
+}
+
+
+def test_qwen_image_2_1_published_tiers_carry_the_licence_record():
+    """E7 (§3), pinned against the PUBLISHED artefacts: each re-host tier's `SHA256SUMS` lists the
+    Agreement (`LICENSE`), the attribution `README.md`, the §3(b) change record `CHANGES.md`, and
+    the three safetensors the tier ships — so "the licence travels in the bundle" is a fact about
+    the uploaded bytes, not about the converter's intent.
+
+    *Mutation that reds this:* deleting any of those lines from a vendored `SHA256SUMS` (the blob id
+    moves too), or vendoring a file that is not the one published at the revision.
+    """
+    import hashlib
+
+    required = {
+        "LICENSE",
+        "README.md",
+        "CHANGES.md",
+        "transformer/model.safetensors",
+        "text_encoder/model.safetensors",
+        "vae/diffusion_pytorch_model.safetensors",
+    }
+    for tier, blob_id in _QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS.items():
+        raw = (ROOT / "tests/fixtures/qwen_image_2_1_rehost" / tier / "SHA256SUMS.txt").read_bytes()
+        git_blob = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
+        assert git_blob == blob_id, f"{tier}: fixture is not the SHA256SUMS published at the pin"
+        listed = {}
+        for line in raw.decode().splitlines():
+            digest, name = line.split(maxsplit=1)
+            assert re.fullmatch(r"[0-9a-f]{64}", digest), line
+            listed[name] = digest
+        missing = required - listed.keys()
+        assert not missing, f"{tier}: SHA256SUMS does not list {sorted(missing)}"
+
+
+def test_qwen_image_2_1_description_states_its_own_parameter_counts():
+    """2.1 is a ~7.1B DiT + ~7.6B Qwen3-VL tower; "20B" is Qwen-Image-2512's figure.
+
+    *Mutation that reds this:* restoring "A 20B single-stream flow-matching transformer".
+    """
+    description = _qwen_image_2_1_entry()["ui"]["description"]
+    assert "20B" not in description
+    assert "~7.1B single-stream flow-matching transformer" in description
+    assert "~7.6B Qwen3-VL language tower" in description
+
+
+def test_qwen_image_2_1_licence_component_names_the_change_record_and_checksums():
+    """E7 (§3): the shipped licence component says each derived bundle carries the §3(b) change
+    record `CHANGES.md` AND the `SHA256SUMS` manifest, at the published re-host revision.
+
+    *Mutation that reds this:* dropping either file name from the component's `usage`.
+    """
+    licenses = json.loads((ROOT / "apps/desktop/licenses/manifest.json").read_text())
+    component = next(c for c in licenses["components"] if c["id"] == "qwen-image-2-1")
+    usage = component["usage"]
+    assert "CHANGES.md" in usage
+    assert "SHA256SUMS" in usage
+    assert "§3(b)" in usage
+    assert _QWEN_IMAGE_2_1_REHOST_REVISION in usage
+    assert "SHA256SUMS" in _qwen_image_2_1_entry()["licenseNotice"]
 
 
 def test_qwen_image_2_1_declares_the_admission_geometry_its_gate_consumes():

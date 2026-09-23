@@ -175,19 +175,21 @@ test("the committed evidence grades the real catalog clean", async () => {
 // and `-PE-I2I`, both frozen at their first published revision — bringing the current census to
 // 106. They are ordinary manifest claims like every other row here; being optional
 // (`autoDownload: false`) changes when they are fetched, not whether their pattern claims must
-// resolve against an immutable tree.
+// resolve against an immutable tree. SC-24114 publishes the Qwen-Image 2.1 q8/q4 re-host
+// (`SceneWorks/qwen-image-2-1-mlx`); its two rows drop `pendingArtifact` and become ordinary claims
+// on one repo@revision key, bringing the current census to 107.
 // SC-21306 adds two exact historical rows for the audited artifact importer; they are not manifest
 // claims and are guarded separately against absence, identity drift, and file-census drift.
-test("all 106 current and two frozen legacy download keys use immutable commit SHAs", async () => {
+test("all 107 current and two frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 106, "update the 106/106 disclosure when the real key census changes");
+  assert.equal(keys.size, 107, "update the 107/107 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    108,
-    "the evidence census must be the 106 current claims plus two frozen importer authorities",
+    109,
+    "the evidence census must be the 107 current claims plus two frozen importer authorities",
   );
   for (const claim of claims) {
     assert.match(

@@ -791,9 +791,9 @@ SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
 # halves swapped: q8/q4 are the `<tier>/` subdirs of the SceneWorks re-host, and bf16 IS the upstream
 # `Qwen/Qwen-Image-2.1` snapshot at its ROOT (the converter refuses to emit a `bf16/` copy), exactly
 # the directories the worker's `qwen_image_2_1_declared_tier_dir` resolves. The re-host rows are
-# `pendingArtifact` (null-SHA placeholder) until the epic's terminal upload pins them; until then
-# `--list` reports q8/q4 `weights_missing` naming the pending row and `--download-missing` refuses to
-# fetch them. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
+# PUBLISHED (sc-24114) at `SceneWorks/qwen-image-2-1-mlx@1691de01c24a070131e0a28bf4c065fd027f4fe9`, each
+# tier a packed `transformer/model.safetensors` + `text_encoder/model.safetensors` with a
+# `quantization` marker in each `config.json`. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
 # SCOPE (sc-24114): the six qwen_image_2_1 anchors are TEXT-TO-IMAGE at the 2048x2048 DEFAULT preset with
 # ZERO references — one anchor per (model, tier, lane) by design (epic 22505). Reference-bearing
 # requests (edit_image / image_to_image / character_image, 1..=10 refs) and the other six presets are

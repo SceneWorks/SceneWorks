@@ -12509,8 +12509,8 @@ mod variant_delete_tests {
         assert_eq!(removal.reclaimed_bytes, 100);
     }
 
-    /// sc-24112 — the SHIPPED `qwen_image_2_1` entry, as the terminal story leaves it (placeholder
-    /// flags dropped): deleting bf16 reclaims the whole upstream `Qwen/Qwen-Image-2.1` snapshot
+    /// sc-24112 — the SHIPPED `qwen_image_2_1` entry, as published at sc-24114 (no placeholder
+    /// flags left): deleting bf16 reclaims the whole upstream `Qwen/Qwen-Image-2.1` snapshot
     /// (30.86 GiB in production, the tier's only bytes) and leaves the SceneWorks re-host holding
     /// q8/q4 untouched. Before, the scope-less bf16 row could never be reclaimed per tier at all.
     ///
@@ -12525,19 +12525,13 @@ mod variant_delete_tests {
                 .1,
         ))
         .expect("builtin.models.jsonc parses");
-        let mut model = shipped["models"]
+        let model = shipped["models"]
             .as_array()
             .expect("models array")
             .iter()
             .find(|model| model["id"] == "qwen_image_2_1")
             .expect("qwen_image_2_1 is in the shipped catalog")
             .clone();
-        for download in model["downloads"].as_array_mut().expect("downloads") {
-            download
-                .as_object_mut()
-                .expect("row")
-                .remove("pendingArtifact");
-        }
         let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
         let scope = tier_delete_scope(&model, &bf16, "bf16").expect("bf16 is reclaimable alone");
         assert_eq!(scope.repo, "Qwen/Qwen-Image-2.1");
@@ -12555,18 +12549,8 @@ mod variant_delete_tests {
         );
         seed(&upstream, "text_encoder/model.safetensors", "u2", 200);
         seed(&upstream, "model_index.json", "u3", 10);
-        seed(
-            &rehost,
-            "q8/transformer/diffusion_pytorch_model.safetensors",
-            "r8",
-            70,
-        );
-        seed(
-            &rehost,
-            "q4/transformer/diffusion_pytorch_model.safetensors",
-            "r4",
-            40,
-        );
+        seed(&rehost, "q8/transformer/model.safetensors", "r8", 70);
+        seed(&rehost, "q4/transformer/model.safetensors", "r4", 40);
 
         let removal = remove_tier_artifacts(
             Some(upstream.clone()),
@@ -12589,10 +12573,10 @@ mod variant_delete_tests {
         assert!(rehost.join("blobs/r8").exists());
         assert!(rehost.join("blobs/r4").exists());
         assert!(rehost
-            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model.safetensors")
+            .join("snapshots/rev/q8/transformer/model.safetensors")
             .exists());
         assert!(rehost
-            .join("snapshots/rev/q4/transformer/diffusion_pytorch_model.safetensors")
+            .join("snapshots/rev/q4/transformer/model.safetensors")
             .exists());
     }
 
