@@ -59,7 +59,7 @@ pub use routing::gaps::{
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 pub use routing::{
-    canonical_video_route_probe, video_backend_mode_supported,
+    canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
     video_mode_conditioning_requirements, video_ui_modes,
 };
 

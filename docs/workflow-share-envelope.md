@@ -391,6 +391,7 @@ smuggled under a scalar key.
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
 | `enhancePrompt` | `Scalar` | Caption-upsampling opt-in — it changes the prompt the model sees. |
+| `transparentBackground` | `Scalar` | Transparency: the model decodes four channels and the render carries a real alpha channel instead of being composited onto white. A cut-out is the picture the author asked for, so replaying their recipe onto an opaque render would produce a different image. Only models that advertise alpha output emit it; a replay onto one that does not is refused by name rather than downgraded. |
 | `usePid` | `Scalar` | PiD decoder opt-in. Changes the produced image, and is its non-commercial marker. |
 | `decoder` | `Scalar` | Experimental alternate terminal decoder id. Native is omitted. |
 | `pidTarget` | `Scalar` | PiD output tier (2k / 4k). |

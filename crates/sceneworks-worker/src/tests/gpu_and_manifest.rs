@@ -407,6 +407,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
         ("qwen_image", true, true),
+        // Qwen-Image 2.1 (sc-24108): a true-CFG family — the engine takes a real negative branch
+        // and a `true_cfg` scale.
+        ("qwen_image_2_1", true, true),
         ("qwen_image_edit", true, true),
         ("qwen_image_edit_2509", true, true),
         ("qwen_image_edit_2511", true, true),
@@ -3052,4 +3055,109 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
             "a worker that stays usable must report no unhealthy reason"
         );
     }
+}
+
+
+/// sc-24109/sc-24112 — the INPUTS the two fit gates read for `qwen_image_2_1`, pinned on a lane
+/// that can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
+/// `qwen_image_2_1_resolves_a_derived_candle_floor_per_tier` first executes on the windows-candle
+/// CI lane; this is the manifest half, which runs everywhere).
+///
+/// The consequence this guards is not a rounding error, it is a product decision. With NO `candle`
+/// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, a tier
+/// resolves to a floor and the gate REFUSES the load pre-flight below it. The floors are DERIVED
+/// in GiB — the unit `VramBudget.free_gb` is in — as `ceil(resident peak GiB x 1.25)`, so a real
+/// RTX 5090 (31.84 GiB) and A100-40GB (39.5 GiB) admit q8 and a 24 GB card admits q4. Neither may
+/// drift silently in either direction.
+#[test]
+fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+
+    // BOTH lanes carry the same ladder, because both hold the same bytes resident. They are equal
+    // by shared derivation, not because one was copied from the other — which is why the loop
+    // below asserts the same numbers against each block rather than asserting the blocks are equal.
+    for backend in ["mlx", "candle"] {
+        let block = entry.get(backend).unwrap_or_else(|| {
+            panic!("the {backend} block must exist; without it the {backend} floor is unstated")
+        });
+        assert_eq!(
+            block["minMemoryGb"], 45,
+            "{backend}: the SCALAR is the densest tier's floor, the conservative fallback for any \
+             tier with no row (today `nvfp4`). Lowering it to a lighter tier's floor would \
+             under-predict an unlisted tier, and an under-prediction admits a load that OOMs"
+        );
+        let by_tier = block
+            .get("minMemoryGbByTier")
+            .unwrap_or_else(|| panic!("{backend}: sc-24112 declares a per-tier floor"));
+        for (tier, floor) in [("bf16", 45), ("q8", 29), ("q4", 21)] {
+            assert_eq!(
+                by_tier[tier], floor,
+                "{backend}/{tier}: DERIVED as ceil(resident peak at the 2048-square default in GiB \
+                 x 1.25) — bf16 35.36 GiB, q8 23.08 GiB, q4 16.54 GiB; changing a number here \
+                 changes which cards are refused"
+            );
+        }
+        assert_eq!(
+            by_tier.as_object().map(serde_json::Map::len),
+            Some(3),
+            "{backend}: a row for a tier the catalog does not ship would gate a tier nobody can \
+             select, and a missing row silently falls through to the conservative scalar"
+        );
+        assert_eq!(by_tier["bf16"], block["minMemoryGb"]);
+    }
+
+    assert!(
+        entry["candle"].get("vramGbByTier").is_none(),
+        "a measured per-tier row would WIN over these floors in predicted_peak_gb; nothing has \
+         been measured for 2.1 on CUDA, so declaring one would be an unmeasured claim wearing an \
+         evidence flag. The epic's terminal measurement story adds them"
+    );
+    assert!(
+        entry["candle"].get("measured").is_none() && entry["candle"].get("sequentialPeakGb").is_none(),
+        "the sibling evidence keys must be absent for the same reason"
+    );
+}
+
+/// sc-24112 — the ADMISSION ENVELOPE the catalog mirrors from the provider, pinned beside the
+/// memory floors because the two answer different questions about the same request and are easy to
+/// confuse: the floors say whether the WEIGHTS fit the host, the envelope says whether the REQUEST
+/// fits the engine.
+///
+/// `crate::admission_geometry` owns the behaviour and its own tests; this asserts the shipped
+/// catalog actually carries the block, because the gate is declaration-driven and a missing block
+/// makes it silently inert rather than loud.
+#[test]
+fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let geometry = entry
+        .get("admissionGeometry")
+        .expect("sc-24112 declares the envelope; without it the request gate is a no-op");
+    for (key, value) in [
+        ("maxSide", 2752),
+        ("maxPresetArea", 4_300_800),
+        ("maxTargetImageTokens", 16_800),
+        ("maxReferenceImages", 10),
+        ("tokensPerMaxReference", 4_096),
+        ("maxJointTokens", 58_016),
+        ("pixelsPerToken", 16),
+        ("maxBatch", 8),
+    ] {
+        assert_eq!(
+            geometry[key], value,
+            "{key} is mirrored from the provider's own admission_geometry(); a value invented here \
+             would gate requests against a bound the engine does not have"
+        );
+    }
+    // The largest-AREA preset is neither the widest nor the square default. Stated here because it
+    // is the mistake the whole field exists to prevent.
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2752 * 1536);
+    assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2048 * 2048);
 }

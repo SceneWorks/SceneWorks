@@ -536,6 +536,56 @@
       ]
     },
     {
+      "key": "Qwen/Qwen-Image-2.1-PE-I2I@72927bc08afc99b7888ceb7d7d51a12db3700bbd",
+      "repo": "Qwen/Qwen-Image-2.1-PE-I2I",
+      "revision": "72927bc08afc99b7888ceb7d7d51a12db3700bbd",
+      "resolvedSha": "72927bc08afc99b7888ceb7d7d51a12db3700bbd",
+      "servedRepo": "Qwen/Qwen-Image-2.1-PE-I2I",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "chat_template.jinja",
+        "config.json",
+        "generation_config.json",
+        "model-00001.safetensors",
+        "model-00002.safetensors",
+        "model-00003.safetensors",
+        "model-00004.safetensors",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "system_prompt.txt",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
+      "key": "Qwen/Qwen-Image-2.1-PE-T2I@f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+      "repo": "Qwen/Qwen-Image-2.1-PE-T2I",
+      "revision": "f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+      "resolvedSha": "f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+      "servedRepo": "Qwen/Qwen-Image-2.1-PE-T2I",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "chat_template.jinja",
+        "config.json",
+        "generation_config.json",
+        "model-00001.safetensors",
+        "model-00002.safetensors",
+        "model-00003.safetensors",
+        "model-00004.safetensors",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "system_prompt.txt",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
       "key": "Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
       "repo": "Qwen/Qwen3.6-27B",
       "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",

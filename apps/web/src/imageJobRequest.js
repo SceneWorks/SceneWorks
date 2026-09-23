@@ -109,6 +109,9 @@ export function buildImageJobRequest(state) {
     enhancePrompt,
     precisionToggle,
     bf16Precision,
+    // sc-24113 — the transparency toggle + the model it is judged against.
+    selectedModel,
+    transparentBackground,
     showTierPicker,
     quantTier,
     // sc-10733's "this tier is a DELIBERATE pick" marker. ImageStudio computes it (its
@@ -281,6 +284,8 @@ export function buildImageJobRequest(state) {
       enhancePrompt,
       precisionToggle,
       bf16Precision,
+      selectedModel,
+      transparentBackground,
       showTierPicker,
       quantTier,
       tierExplicit,

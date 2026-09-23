@@ -694,6 +694,11 @@ enum CandleImageRoute {
     /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
     /// source-first ordered multi-reference conditioning rather than the plain T2I request shape.
     MageEdit,
+    /// Qwen-Image 2.1 reference / local editing (sc-24110). `qwen_image_2_1` is ALSO a candle
+    /// txt2img id, so a conditioned request must divert here first or the generic arm would render
+    /// it as plain text-to-image and silently drop every reference. Uses the same generic registry
+    /// stream once the ordered conditioning list is resolved.
+    QwenImage21Edit,
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
     /// the required `krea2_identity_edit` LoRA (epic 10871).
     KreaEdit,
@@ -1097,9 +1102,9 @@ impl CandleImageRoute {
                 flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
             }
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
-            CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
-                candle_adapter_label(&request.model)
-            }
+            CandleImageRoute::MageEdit
+            | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
     }
 }
@@ -1201,6 +1206,12 @@ fn resolve_candle_image_route_with_prepared_availability(
             .is_some_and(|id| !id.trim().is_empty())
     {
         Some(CandleImageRoute::MageEdit)
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110), named by the resolver for the same
+        // reason Mage Edit is: the id is a candle txt2img id, so a conditioned request that fell
+        // through would be rendered as plain T2I with every reference silently dropped. The core
+        // router's `CandleImageLane::QwenImage21Edit` claims exactly these shapes.
+        Some(CandleImageRoute::QwenImage21Edit)
     } else if request.model == "kolors"
         && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
             || (non_empty(&request.reference_asset_id)
@@ -2160,10 +2171,249 @@ pub(crate) fn resolve_weights_dir(
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
     // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
     // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
+    // Qwen-Image 2.1 (sc-24112) — a SPLIT-REPO tier layout, and the reason it cannot use
+    // `standard_tier_subdir`: that resolver descends into `<root>/<tier>/` of ONE repo, and 2.1's
+    // three tiers do not live in one repo. bf16 IS the released upstream snapshot at its own root
+    // (the converter refuses to emit a `bf16/` copy, and re-hosting unmodified weights would be a
+    // §3 redistribution SceneWorks does not need to make), while q8 and q4 are `q8/`/`q4/` subdirs
+    // of the SceneWorks re-host. So the tier picks the REPO first, then the subdir.
+    //
+    // Exactly the shape the Ideogram-4 branch above already has, with the halves swapped: there
+    // the packed tiers are the turnkey and bf16 lives in a separate shared repo; here bf16 is the
+    // upstream tree and the packed pair is the re-host. Both fall back to the resolved default
+    // rather than half-loading when the requested tier is not on disk.
+    //
+    // Repo and revision come from the MANIFEST's own download rows, not from consts here: the
+    // catalog is the pin authority (F-029), and reading it means the terminal story's revision pin
+    // reaches the loader by editing one place. A row still carrying the null-SHA placeholder
+    // resolves to nothing, so a pending tier falls back to the installed default instead of
+    // pointing the loader at a snapshot directory that cannot exist.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if request.model == "qwen_image_2_1" {
+        if let Some((tier_dir, _tier)) = qwen_image_2_1_tier_dir(settings, request)? {
+            return Ok(Some(tier_dir));
+        }
+        return Ok(snapshot);
+    }
+    // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
+    // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
+    // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
+    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
+    // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
     if uses_standard_tier_layout(request) {
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
+}
+
+/// The installed tier directory for a `qwen_image_2_1` request AND the tier it is, or `None` to
+/// fall back to the model's default snapshot (sc-24112).
+///
+/// The identity rides alongside the path because the path alone cannot carry it: bf16 is the
+/// upstream snapshot ROOT, whose basename is a commit SHA rather than a tier token, so
+/// [`tier_key_from_resolved_dir`] answers `None` for it. Every consumer that prices or loads the
+/// resolved directory (the Candle VRAM gate via [`gate_tier_key`], the Candle load quant, the MLX
+/// candidate quant and reconcile) reads it back through [`tier_key_for_resolved_dir`], which maps
+/// that root to `bf16` from the same catalog rows this resolver descends. The two agree by
+/// construction and `resolved_tier_identity_round_trips_through_the_directory` pins it.
+///
+/// Resolution:
+///
+/// * an EXPLICIT `advanced.mlxQuantize` (`<= 0` ⇒ bf16, `1..=4` ⇒ q4, else q8) is honoured exactly
+///   or refused: a pick whose tier is not installed is a typed error naming the tier, never a
+///   silent substitution of another one (the FLUX.1 Candle precedent,
+///   `candle_flux1_packed_requested_tier`). The Studio only sends a tier it resolved from the
+///   installed set, so this fires for a stale replay or a direct API call, not for the picker;
+/// * with NO selection, the catalog default (`mlx.quantize`, q8) first, then the remaining
+///   installed tiers DENSEST FIRST (bf16 → q8 → q4), so a partial install never lands on the washed
+///   q4 while a denser tier is on disk.
+///
+/// A tier is "installed" when its resolved directory holds a loadable `transformer/`. With nothing
+/// installed at all this answers `None` for either kind of request, so the caller's ordinary
+/// "install the model" path owns that error rather than blaming a tier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_tier_dir(
+    settings: &Settings,
+    request: &ImageRequest,
+) -> WorkerResult<Option<(PathBuf, &'static str)>> {
+    const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+    let tier_for_bits = |bits: i64| -> &'static str {
+        match bits {
+            bits if bits <= 0 => "bf16",
+            bits if bits <= 4 => "q4",
+            _ => "q8",
+        }
+    };
+    let explicit = request
+        .advanced
+        .get("mlxQuantize")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .map(tier_for_bits)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{} advanced.mlxQuantize must be an integer bit count, got {value}",
+                        request.model
+                    ))
+                })
+        })
+        .transpose()?;
+    let installed = |tier: &'static str| -> Option<(PathBuf, &'static str)> {
+        let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
+        // The same "has a loadable backbone" probe the shared resolver applies, spelled for this
+        // family's diffusers layout: a sharded `transformer/` with its index, or a single file.
+        let transformer = dir.join("transformer");
+        let loadable = transformer
+            .join("diffusion_pytorch_model.safetensors.index.json")
+            .is_file()
+            || transformer
+                .join("diffusion_pytorch_model.safetensors")
+                .is_file();
+        loadable.then_some((dir, tier))
+    };
+    if let Some(tier) = explicit {
+        if let Some(resolved) = installed(tier) {
+            return Ok(Some(resolved));
+        }
+        if TIERS.into_iter().all(|other| installed(other).is_none()) {
+            return Ok(None);
+        }
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} tier {tier} is not installed; install it or pick an installed tier \
+             (an explicit tier selection is never substituted with a different tier)",
+            request.model
+        )));
+    }
+    let default = request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("quantize"))
+        .and_then(Value::as_i64)
+        .map_or("q8", tier_for_bits);
+    Ok(installed(default).or_else(|| {
+        TIERS
+            .into_iter()
+            .filter(|tier| *tier != default)
+            .find_map(installed)
+    }))
+}
+
+/// The tier a resolved directory IS, reading the request's catalog entry when the basename is not
+/// a tier token (sc-24112).
+///
+/// Only a split-repo family reaches the second arm: `qwen_image_2_1`'s bf16 tier is a whole upstream
+/// snapshot ROOT (`files` empty), resolved to `<library>/models--<org>--<name>/snapshots/<rev>`.
+/// That directory is matched back to its catalog row by repo AND revision — the same pin
+/// [`qwen_image_2_1_declared_tier_dir`] descends — so the gate, the Candle load quant and the MLX
+/// reconcile see `bf16` instead of falling back to the request/manifest default (`q8`) and asking a
+/// dense root for a packed load.
+///
+/// Scoped to [`SPLIT_REPO_TIER_MODELS`] on purpose: other catalog rows are also tier-tagged
+/// whole-repo roots (the Candle SANA and Wan diffusers snapshots), and relabelling THEIR resolved
+/// directories would move their gate pricing and load quant, which nothing here has validated.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn tier_key_for_resolved_dir(
+    manifest_entry: &JsonObject,
+    dir: &Path,
+) -> Option<&'static str> {
+    tier_key_from_resolved_dir(dir).or_else(|| split_repo_root_tier_key(manifest_entry, dir))
+}
+
+/// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const SPLIT_REPO_TIER_MODELS: &[&str] = &["qwen_image_2_1"];
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_pending_artifact_download, model_download_for_variant,
+    };
+    let model_id = manifest_entry.get("id").and_then(Value::as_str)?;
+    if !SPLIT_REPO_TIER_MODELS.contains(&model_id) {
+        return None;
+    }
+    let revision = dir.file_name()?.to_str()?;
+    let snapshots = dir.parent()?;
+    if snapshots.file_name()?.to_str()? != "snapshots" {
+        return None;
+    }
+    let repo_dir = snapshots.parent()?.file_name()?.to_str()?;
+    let entry = Value::Object(manifest_entry.clone());
+    ["bf16", "q8", "q4"].into_iter().find(|tier| {
+        let Some(download) = model_download_for_variant(&entry, tier) else {
+            return false;
+        };
+        let root_row = download
+            .get("files")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty);
+        root_row
+            && !is_pending_artifact_download(&download)
+            && download.get("revision").and_then(Value::as_str) == Some(revision)
+            && download
+                .get("repo")
+                .and_then(Value::as_str)
+                .is_some_and(|repo| repo_dir == format!("models--{}", repo.replace('/', "--")))
+    })
+}
+
+/// Where `tier`'s snapshot directory would be, read off the request's OWN manifest entry.
+///
+/// `None` when the catalog declares no such tier, when its revision is still the sc-24112
+/// null-SHA placeholder (the artifact is not published, so there is nothing to point at), or when
+/// that pinned snapshot is not in the cache. The `files` glob's leading path component is what
+/// names the subdir — `["q8/*"]` ⇒ `q8/` — and an empty `files` (the whole-repo upstream bf16 row)
+/// means the snapshot ROOT, which is exactly the distinction that makes this family split-repo.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_declared_tier_dir(
+    settings: &Settings,
+    request: &ImageRequest,
+    tier: &str,
+) -> Option<PathBuf> {
+    let entry = Value::Object(request.model_manifest_entry.clone());
+    let download = sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+        &entry, tier,
+    )?;
+    if sceneworks_core::model_artifacts::artifact_selection::is_pending_artifact_download(&download)
+    {
+        return None;
+    }
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let revision = download.get("revision").and_then(Value::as_str)?;
+    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
+    let subdir = download
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .and_then(|pattern| pattern.split('/').next())
+        // Confined to a single plain directory name. The value is a checked-in catalog string
+        // rather than user input, but a glob is still a string a future edit could widen, and a
+        // traversal component here would point the LOADER outside the cache — cheap to refuse.
+        .filter(|component| {
+            !component.is_empty()
+                && *component != "*"
+                && !component.starts_with('.')
+                && component
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        });
+    match subdir {
+        Some(component) => Some(root.join(component)),
+        None => Some(root),
+    }
 }
 
 /// FLUX.1's generic Candle route reads only the hosted packed q4/q8 turnkeys. The shared resolver
@@ -3479,7 +3729,7 @@ fn gate_tier_key(
     if convrot_resolved {
         return INT8_CONVROT_TIER;
     }
-    tier_key_from_resolved_dir(weights_dir)
+    tier_key_for_resolved_dir(manifest_entry, weights_dir)
         .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
 }
 
@@ -3503,8 +3753,8 @@ fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
 ///
 /// macOS-only: the candle lane has no quant-tier layout to reconcile, so this would be dead code there.
 #[cfg(target_os = "macos")]
-fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
-    match tier_key_from_resolved_dir(dir)? {
+fn tier_quant_from_resolved_dir(manifest_entry: &JsonObject, dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
+    match tier_key_for_resolved_dir(manifest_entry, dir)? {
         "bf16" => Some((None, None)),
         "q4" => Some((Some(Quant::Q4), Some(4))),
         "q8" => Some((Some(Quant::Q8), Some(8))),
@@ -3534,7 +3784,7 @@ fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> 
         .advanced
         .insert("mlxQuantize".to_owned(), Value::from(bits));
     let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
-    (tier_key_from_resolved_dir(&dir) == Some(tier_static_name(tier))).then_some(dir)
+    (tier_key_for_resolved_dir(&request.model_manifest_entry, &dir) == Some(tier_static_name(tier))).then_some(dir)
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4548,12 +4798,13 @@ fn downtier_candidate_tiers(
 fn reconcile_resolved_tier_quant(
     requested: (Option<Quant>, Option<i64>),
     weights_dir: &Path,
+    manifest_entry: &JsonObject,
     allow_quant_change: bool,
     model_id: &str,
     job_id: &str,
     engine: &str,
 ) -> (Option<Quant>, Option<i64>) {
-    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(weights_dir) else {
+    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(manifest_entry, weights_dir) else {
         // Not a recognizable tier dir (fell back to the repo root, or a modelPath override) — keep
         // the request-derived quant; the engine will surface any missing-weights error itself.
         return requested;
@@ -7057,6 +7308,10 @@ fn take_prompt_enhancement_fact(
 /// (no-ControlNet) Z-Image reference-without-pose path, reusing the same engine img2img the
 /// strict-pose tier already drives. `None` → plain txt2img. `enhance` carries the optional
 /// caption-upsampling settings (sc-6135; only FLUX.2-dev acts on them).
+///
+/// Production renders go through [`generate_one_on_surface`]; this RGB-surface form is the one the
+/// engine smokes drive.
+#[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 fn generate_one(
     generator: &dyn Generator,
@@ -7097,7 +7352,88 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
+    generate_one_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        prompt_enhancement,
+        preview,
+        &LaneRgbaSurface::default(),
+        cancel,
+        on_progress,
+    )
+}
+
+/// The four-channel surface of one generic-lane render (sc-24111 / sc-24113 S4 contract).
+///
+/// `Default` is the historical three-channel lane, byte-identical: no reference carries alpha and
+/// the request asks for `OutputChannels::Rgb`. Only a model whose descriptor advertises
+/// `supports_alpha_output` / `ReferenceRgba` (Qwen-Image 2.1) ever gets a non-default value.
+#[derive(Default)]
+pub(crate) struct LaneRgbaSurface<'a> {
+    /// The alpha plane of each `multi_references` entry, positionally; `None` (or a missing entry)
+    /// is an ordinary RGB reference. An entry that carries one is sent as
+    /// `Conditioning::ReferenceRgba`, UN-flattened, because the VAE encodes all four channels.
+    pub(crate) multi_reference_alpha: &'a [Option<image::GrayImage>],
+    /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
+    /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
+    pub(crate) output_channels: gen_core::OutputChannels,
+}
+
+/// [`generate_one`] with an explicit [`LaneRgbaSurface`].
+#[allow(clippy::too_many_arguments)]
+fn generate_one_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let conditioning = build_lane_conditioning_with_alpha(
+        reference,
+        multi_references,
+        surface.multi_reference_alpha,
+        edit_mask,
+    );
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -7116,6 +7452,7 @@ fn generate_one(
         text_style_gain,
         memory,
         conditioning,
+        output_channels: surface.output_channels,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
@@ -7130,6 +7467,15 @@ fn generate_one(
         .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
+            let image = images
+                .pop()
+                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
+        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
+        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
+        GenerationOutput::ImagesRgba(mut images) => {
             let image = images
                 .pop()
                 .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
@@ -7187,16 +7533,30 @@ fn resolve_hires_fix_plan(
 /// The conditioning one generic-lane render carries. Split out of [`generate_one`] so
 /// [`lane_reference_count`] — the count the backend request scope grades the request against — can be
 /// tested against the conditioning this lane REALLY sends rather than against a restatement of it.
+#[cfg(test)]
 fn build_lane_conditioning(
     reference: Option<&(Image, f32)>,
     multi_references: &[Image],
+    edit_mask: Option<&Image>,
+) -> Vec<Conditioning> {
+    build_lane_conditioning_with_alpha(reference, multi_references, &[], edit_mask)
+}
+
+/// [`build_lane_conditioning`] where the ordered `multi_references` may carry alpha planes
+/// (Qwen-Image 2.1, sc-24110/sc-24113). With no alpha anywhere it is exactly
+/// [`build_lane_conditioning`]; otherwise the ordered list is built per entry by
+/// [`build_ordered_reference_conditioning`].
+fn build_lane_conditioning_with_alpha(
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    multi_reference_alpha: &[Option<image::GrayImage>],
     edit_mask: Option<&Image>,
 ) -> Vec<Conditioning> {
     // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
     // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
     // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
     let mut conditioning = if !multi_references.is_empty() {
-        build_reference_conditioning(multi_references)
+        build_ordered_reference_conditioning(multi_references, multi_reference_alpha)
     } else {
         match reference {
             Some((image, strength)) => vec![Conditioning::Reference {
@@ -7316,8 +7676,78 @@ fn generate_one_with_hires(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    generate_one_with_hires_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        hires_first_pass_memory,
+        memory_strategy_context,
+        hires_first_pass_memory_context,
+        enhance,
+        hires_fix,
+        preview,
+        prompt_enhancement,
+        &LaneRgbaSurface::default(),
+        cancel,
+        on_progress,
+    )
+}
+
+/// [`generate_one_with_hires`] with an explicit [`LaneRgbaSurface`].
+///
+/// The disposable Hires.fix BASE pass always decodes RGB: it only exists to become the
+/// three-channel img2img reference of the refinement pass. The surface's `output_channels` applies
+/// to the pass that is persisted.
+#[allow(clippy::too_many_arguments)]
+fn generate_one_with_hires_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    hires_fix: Option<HiresFixPlan>,
+    preview: gen_core::PreviewSink,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
     let Some(hires) = hires_fix else {
-        return generate_one(
+        return generate_one_on_surface(
             generator,
             prompt,
             width,
@@ -7341,6 +7771,7 @@ fn generate_one_with_hires(
             enhance,
             prompt_enhancement,
             preview,
+            surface,
             cancel,
             on_progress,
         );
@@ -7372,7 +7803,11 @@ fn generate_one_with_hires(
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
-    let (base_width, base_height, base_pixels) = generate_one(
+    let base_surface = LaneRgbaSurface {
+        multi_reference_alpha: surface.multi_reference_alpha,
+        output_channels: gen_core::OutputChannels::Rgb,
+    };
+    let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
         prompt,
         width,
@@ -7396,6 +7831,7 @@ fn generate_one_with_hires(
         &PromptEnhance::default(),
         gen_core::PromptEnhancementSink::default(),
         preview.clone(),
+        &base_surface,
         cancel,
         &mut first_progress,
     )?;
@@ -7421,7 +7857,11 @@ fn generate_one_with_hires(
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
     };
-    generate_one(
+    let refine_surface = LaneRgbaSurface {
+        multi_reference_alpha: &[],
+        output_channels: surface.output_channels,
+    };
+    generate_one_on_surface(
         generator,
         prompt,
         hires.width,
@@ -7445,6 +7885,7 @@ fn generate_one_with_hires(
         enhance,
         prompt_enhancement,
         preview,
+        &refine_surface,
         cancel,
         &mut second_progress,
     )
@@ -7475,6 +7916,70 @@ pub(crate) fn load_reference_image(
     asset_id: &str,
     project_path: &Path,
 ) -> WorkerResult<Image> {
+    // Every caller that existed before sc-24113 keeps upstream-parity truncation, byte-for-byte.
+    load_reference_image_with(
+        data_dir,
+        project_id,
+        asset_id,
+        project_path,
+        FlattenPolicy::Truncate,
+    )
+}
+
+/// How a reference that CARRIES an alpha channel is reduced to the 3-channel `gen_core::Image`
+/// every RGB-only engine takes (sc-24113).
+///
+/// A PARITY knob, not a quality one, and both answers are correct — for different upstream
+/// pipelines:
+///
+/// * [`Truncate`](FlattenPolicy::Truncate) drops the fourth byte, which is what
+///   `DynamicImage::to_rgb8()` does and what upstream `PIL.Image.convert("RGB")` does. Every edit
+///   model SceneWorks shipped before 2.1 — SDXL inpaint, FLUX.2 edit, Kolors IP-adapter,
+///   `qwen_image_edit_2511` — is compared against a reference implementation that truncates, so
+///   this is the only answer that keeps them at parity, and it is the default for that reason.
+/// * [`OverWhite`](FlattenPolicy::OverWhite) composites straight (un-premultiplied) alpha over an
+///   opaque white backdrop, matching the S4 contract's `RgbaImage::to_rgb_over_white()`.
+///   Qwen-Image 2.1 feeds its VISION tower the composited copy, so its reference path wants this.
+///
+/// ⚠️ The two are IDENTICAL on an opaque image (`A=255`) and differ MAXIMALLY on a transparent one,
+/// because 2.1's alpha is straight: `A=0` does NOT zero RGB, so a transparent pixel keeps whatever
+/// colour it was authored with. A blanket change of this default would therefore move every
+/// existing model silently rather than loudly — which is exactly what the first cut of sc-24113 did.
+///
+/// Qwen-Image 2.1 does not flatten here at all: an alpha-carrying 2.1 reference travels UN-FLATTENED
+/// as `Conditioning::ReferenceRgba` (its RGB via `Truncate`, which is the straight colour, plus its
+/// own alpha plane), and the engine composites the vision tower's copy itself.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum FlattenPolicy {
+    /// Drop the alpha byte — upstream `convert("RGB")` semantics. Every pre-2.1 lane.
+    #[default]
+    Truncate,
+    /// Composite straight alpha over opaque white — the S4 `to_rgb_over_white()` semantics.
+    ///
+    /// Constructed only by tests: the one lane whose engine consumes a white composite
+    /// (`qwen_image_2_1`'s vision tower) builds that copy engine-side from the un-flattened
+    /// `Conditioning::ReferenceRgba`, so no production caller flattens over white. Kept so the
+    /// parity decision stays stated and tested beside the default it contrasts with.
+    #[allow(dead_code)]
+    OverWhite,
+}
+
+/// [`load_reference_image`] with an explicit [`FlattenPolicy`].
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn load_reference_image_with(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+    flatten: FlattenPolicy,
+) -> WorkerResult<Image> {
     let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
         .get_asset(project_id, asset_id)
         .map_err(|error| {
@@ -7493,16 +7998,85 @@ pub(crate) fn load_reference_image(
     // than a bare join — matching the media-jobs reads and keeping a poisoned
     // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
     let path = crate::safe_project_path(project_path, rel)?;
-    let decoded = crate::image_decode::decode_image_any(&path)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
-        })?
-        .to_rgb8();
+    let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
+        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+    })?;
+    // sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the
+    // default is upstream-parity truncation. See [`FlattenPolicy`] for why both answers are
+    // correct and why the default must not move: `to_rgb8()` drops the fourth byte exactly as
+    // `PIL.Image.convert("RGB")` does, which is what every pre-2.1 edit model is compared against.
+    //
+    // `OverWhite` composites straight alpha over an opaque white backdrop, matching the S4
+    // contract's `RgbaImage::to_rgb_over_white()`. It matters only for an image that actually
+    // carries alpha, and only where the transparency is real: `A=255` makes the two identical, and
+    // `A=0` makes them maximally different because straight alpha leaves the hidden RGB intact.
+    //
+    // A non-alpha source takes `to_rgb8()` under either policy — the same call, the same bytes —
+    // so nothing here can perturb an ordinary opaque reference.
+    let rgb = match (flatten, decoded.color().has_alpha()) {
+        (FlattenPolicy::OverWhite, true) => {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = (rgba.width(), rgba.height());
+            image::RgbImage::from_fn(width, height, |x, y| {
+                let [r, g, b, a] = rgba.get_pixel(x, y).0;
+                let over_white = |channel: u8| {
+                    // Straight alpha over an opaque white backdrop, rounded half-up:
+                    //   out = channel * a/255 + 255 * (1 - a/255)
+                    let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
+                    ((blended + 127) / 255) as u8
+                };
+                image::Rgb([over_white(r), over_white(g), over_white(b)])
+            })
+        }
+        _ => decoded.to_rgb8(),
+    };
     Ok(Image {
-        width: decoded.width(),
-        height: decoded.height(),
-        pixels: decoded.into_raw(),
+        width: rgb.width(),
+        height: rgb.height(),
+        pixels: rgb.into_raw(),
     })
+}
+
+/// The alpha plane of the same asset [`load_reference_image`] loads, or `None` when it has none
+/// (sc-24111).
+///
+/// A deliberate second read rather than a widening of `load_reference_image`. That function's
+/// return type is `gen_core::Image`, whose `pixels` is a flat 3-channel buffer — the engine-side
+/// contract, which the inference half of this story owns and which this PR does not touch. The
+/// product-side lanes that refine or rescale an image and then write it back as an asset still
+/// have to preserve the channel, so the plane travels beside the engine image instead of inside
+/// it, and is re-attached after the pass by `image_jobs::reattach_alpha`.
+///
+/// Reads the same path through the same `safe_project_path` confinement, so a poisoned sidecar
+/// cannot reach a different file here than it does there.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn load_reference_alpha(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+) -> WorkerResult<Option<image::GrayImage>> {
+    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
+        .get_asset(project_id, asset_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id}: {error}"))
+        })?;
+    let rel = asset
+        .get("file")
+        .and_then(|file| file.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("reference asset {asset_id} has no media path"))
+        })?;
+    let path = crate::safe_project_path(project_path, rel)?;
+    let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
+        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+    })?;
+    Ok(split_alpha(&decoded).1)
 }
 
 /// The clamped identity img2img-init strength for a strict-pose set, or `None` for the pose-only tier.
@@ -7840,6 +8414,110 @@ fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
+/// The ordered reference list where entries may carry their own alpha (S4 contract, sc-24111).
+///
+/// With no alpha anywhere this IS [`build_reference_conditioning`], byte for byte. Otherwise every
+/// entry is emitted individually and in order — `Conditioning::Reference` for an RGB entry,
+/// `Conditioning::ReferenceRgba` for one that carries alpha — because a `MultiReference` holds only
+/// RGB images and flattening an alpha-carrying reference would send a DIFFERENT request (the VAE
+/// encodes all four channels; the vision tower's white composite is engine-internal). The engine
+/// numbers `Reference` / `ReferenceRgba` / `MultiReference` entries in one ordered sequence, so the
+/// per-entry form keeps every reference's slot. Strength is `None`: upstream's condition images
+/// have none, and a provider without img2img strength requires it unset.
+fn build_ordered_reference_conditioning(
+    references: &[Image],
+    alpha: &[Option<image::GrayImage>],
+) -> Vec<Conditioning> {
+    if !alpha.iter().any(Option::is_some) {
+        return build_reference_conditioning(references);
+    }
+    references
+        .iter()
+        .enumerate()
+        .map(|(slot, image)| match alpha.get(slot).and_then(Option::as_ref) {
+            None => Conditioning::Reference {
+                image: image.clone(),
+                strength: None,
+            },
+            Some(plane) => Conditioning::ReferenceRgba {
+                image: rgba_reference(image, plane),
+                strength: None,
+            },
+        })
+        .collect()
+}
+
+/// Interleave an RGB engine image with its (same-geometry) alpha plane into a straight-alpha
+/// `RgbaImage`. The plane is fitted alongside the image by [`fit_alpha_plane`], so a geometry
+/// mismatch here is a programming error; it is resampled defensively rather than misaligned.
+fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImage {
+    let resized;
+    let plane = if plane.dimensions() == (image.width, image.height) {
+        plane
+    } else {
+        resized = image::imageops::resize(
+            plane,
+            image.width,
+            image.height,
+            image::imageops::FilterType::Triangle,
+        );
+        &resized
+    };
+    let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
+    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+        pixels.extend_from_slice(rgb);
+        pixels.push(*a);
+    }
+    gen_core::RgbaImage {
+        width: image.width,
+        height: image.height,
+        pixels,
+    }
+}
+
+/// The inverse of [`rgba_reference`]: split a straight-alpha `RgbaImage` into the lane's RGB engine
+/// image and its alpha plane, byte for byte.
+fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, image::GrayImage)> {
+    let mut rgb = Vec::with_capacity(image.pixels.len() / 4 * 3);
+    let mut plane = Vec::with_capacity(image.pixels.len() / 4);
+    for pixel in image.pixels.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+        plane.push(pixel[3]);
+    }
+    let plane = image::GrayImage::from_raw(image.width, image.height, plane).ok_or_else(|| {
+        WorkerError::InvalidPayload("RGBA reference buffer size mismatch".to_owned())
+    })?;
+    Ok((
+        Image {
+            width: image.width,
+            height: image.height,
+            pixels: rgb,
+        },
+        plane,
+    ))
+}
+
+/// Fit an alpha plane to `width`×`height` with EXACTLY the geometry [`fit_engine_image`] gives the
+/// RGB it belongs to: the plane is replicated into three identical channels and run through the
+/// same [`fit_rgb`], whose per-channel resampling makes the result the plane's own fit. The
+/// letterbox of `pad`/`outpaint` comes out `A = 0` — transparent, which is what an area the source
+/// never covered is.
+fn fit_alpha_plane(
+    plane: &image::GrayImage,
+    width: u32,
+    height: u32,
+    mode: &str,
+) -> image::GrayImage {
+    let replicated = image::RgbImage::from_fn(plane.width(), plane.height(), |x, y| {
+        let a = plane.get_pixel(x, y).0[0];
+        image::Rgb([a, a, a])
+    });
+    let fitted = fit_rgb(&replicated, width, height, mode);
+    image::GrayImage::from_fn(fitted.width(), fitted.height(), |x, y| {
+        image::Luma([fitted.get_pixel(x, y).0[0]])
+    })
+}
+
 /// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
 /// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
@@ -7902,6 +8580,356 @@ fn is_mage_edit_model(model: &str) -> bool {
         model,
         "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo"
     )
+}
+
+/// One resolved Qwen-Image 2.1 condition image, with the alpha plane it arrived with (sc-24110).
+///
+/// The plane travels BESIDE the engine image rather than inside it because `gen_core::Image` is a
+/// flat 3-channel buffer — the same reason sc-24111 carries it beside the render on the way out.
+/// Which of the two conditioning kinds an entry becomes is decided from `alpha` alone, so the
+/// classification is a property of the ASSET, never of its ordinal position.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct QwenImage21Reference {
+    pub(crate) image: Image,
+    /// `Some` iff the source asset carried an alpha channel. An RGBA reference is a DIFFERENT
+    /// request from the same picture flattened over white (S4 contract), so this is never dropped
+    /// silently — see [`build_qwen_image_2_1_conditioning`].
+    pub(crate) alpha: Option<image::GrayImage>,
+}
+
+/// Is this the model whose edit route is ONE ordered conditioning list (sc-24110)?
+///
+/// Deliberately a single id rather than a family predicate: the 2512-weights `qwen_image_edit*` ids
+/// are a different engine, a different latent space and a different edit contract, and they keep
+/// the `ImageRoute::QwenEdit` / `CandleImageRoute::QwenEdit` lanes they have always had.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
+    request.model == "qwen_image_2_1" && !qwen_image_2_1_reference_ids(request).is_empty()
+}
+
+/// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
+/// them. The worker-side twin of `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`, over
+/// the parsed [`ImageRequest`] instead of the raw payload — and pinned against it by
+/// `qwen_image_2_1_worker_and_router_agree_on_the_reference_order`, because a disagreement between
+/// the two would mean the API validated one list and the worker rendered another.
+///
+/// Order: `sourceAssetId`, then `maskAssetId` (an ORDINARY reference — 2.1 has no mask tensor),
+/// then `referenceAssetIds` in submitted order, then the singular `referenceAssetId`.
+///
+/// **MODE-INDEPENDENT**, matching the router exactly. A payload with no `mode` and a
+/// `sourceAssetId`, or `mode: "image_generation"` with a `referenceAssetIds` list, is claimed by
+/// the router as a conditioned request — so if this function consulted the mode it would return
+/// empty for a job the router already admitted, and the references would be silently dropped into
+/// a plain text-to-image render. There is no mode axis in the upstream contract at all: an empty
+/// ordered list IS text-to-image and a non-empty one IS the edit call.
+///
+/// **DEDUPED by asset id, keeping the first occurrence.** The web's `editReferenceIds` leads
+/// `referenceAssetIds` with the working image while `buildEditJobBody` also sets `sourceAssetId`,
+/// so the ordinary Image-Editor payload names the same asset twice. Sending it twice is not a
+/// harmless duplicate here: every entry occupies one of the ten slots and gets its own number in
+/// the prompt template, so a duplicate silently costs a slot AND renumbers every reference after
+/// it. First-occurrence wins because the earlier slot is the one the prompt refers to.
+///
+/// **No `.take(N)`.** Every other edit lane silently truncates an over-long set; here the API
+/// refuses it with a 400 that names the cap, so a list that reaches the worker is already inside
+/// the cap and truncating would only hide a routing defect.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if request.model != "qwen_image_2_1" {
+        return Vec::new();
+    }
+    let scalar = |value: &Option<String>| -> Option<String> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    let mut ids = Vec::with_capacity(2 + request.reference_asset_ids.len());
+    ids.extend(scalar(&request.source_asset_id));
+    ids.extend(scalar(&request.mask_asset_id));
+    ids.extend(request.reference_asset_ids.iter().cloned());
+    ids.extend(scalar(&request.reference_asset_id));
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.retain(|id| seen.insert(id.clone()));
+    ids
+}
+
+/// Resolve those ids into fitted engine images, each with the alpha plane its asset carried.
+///
+/// Every reference is fitted to the request geometry the same way the other registry editors fit
+/// theirs; the engine then does its own 1024-px vision/VAE fit per reference (S3 contract), so this
+/// fit is about the SceneWorks lane's geometry contract, not about the engine's preprocessing.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_qwen_image_2_1_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<QwenImage21Reference>> {
+    let ids = qwen_image_2_1_reference_ids(request);
+    // The ceiling comes from the job's own resolved manifest entry — the SAME `limits` key the
+    // enqueue gate read — so the worker cannot hold a second opinion about what "too many" means,
+    // and a manifest edit moves both. Absent means no cap, exactly as it does at enqueue.
+    if let Some(cap) = sceneworks_core::video_request::image_max_reference_assets(
+        &request.model_manifest_entry,
+    ) {
+        if ids.len() > cap {
+            // Unreachable through the API, which refuses this at enqueue. Stated anyway because the
+            // worker is also driven directly by tests and by jobs stored before the gate existed,
+            // and because the alternative every sibling lane chose — a silent `.take(N)` — renders
+            // a DIFFERENT request than the one asked for and reports success.
+            return Err(WorkerError::InvalidPayload(format!(
+                "qwen_image_2_1: {} reference images were supplied; upstream composes at most {cap}",
+                ids.len()
+            )));
+        }
+    }
+    let mut references = Vec::with_capacity(ids.len());
+    for id in &ids {
+        // `FlattenPolicy::Truncate`, named EXPLICITLY rather than taken from the default
+        // (sc-24110 answering the note on [`FlattenPolicy`]).
+        //
+        // Truncation drops the fourth byte and keeps the STRAIGHT RGB, which is exactly the colour
+        // half of `Conditioning::ReferenceRgba`: an alpha-carrying reference travels UN-FLATTENED,
+        // RGB + its own alpha plane, and the engine composites the vision-tower copy over white
+        // itself (S4 contract). `OverWhite` would bake that composite into the colour the VAE
+        // encodes — a different request. On an opaque reference the two policies are identical.
+        let source = load_reference_image_with(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+            FlattenPolicy::Truncate,
+        )?;
+        // sc-24111's lane, reused verbatim: the same asset, read through the same
+        // `safe_project_path` confinement, for its alpha plane alone — fitted with EXACTLY the
+        // geometry the RGB gets, so the two halves of an RGBA reference stay aligned.
+        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?
+            .map(|plane| fit_alpha_plane(&plane, request.width, request.height, &request.fit_mode));
+        references.push(QwenImage21Reference {
+            image: fit_engine_image(source, request.width, request.height, &request.fit_mode)?,
+            alpha,
+        });
+    }
+    Ok(references)
+}
+
+/// The ONE ordered conditioning list a Qwen-Image 2.1 edit sends, built from the resolved
+/// references (sc-24110).
+///
+/// * No references → empty (the text-to-image call).
+/// * All-RGB → exactly what every other registry editor sends: one `Conditioning::Reference` for a
+///   single image, one `Conditioning::MultiReference` for many. Both kinds flatten into the same
+///   ordered list engine-side, so the single case stays byte-identical to the one-reference path.
+/// * **Never `Conditioning::Mask`.** The engine does not declare that kind and refuses it by name;
+///   a mask asset is an ordinary ordered reference (see [`qwen_image_2_1_reference_ids`]). Such a
+///   carrier reaches this route only from a DIRECT API CALLER OR WORKFLOW REPLAY — the Image
+///   Editor gates its mask tool on `image_inpaint`, which this model does not declare.
+/// * Strength is always `None` — upstream's condition images have no strength, and the engine
+///   refuses anything but an unset-or-1.0 value.
+///
+/// * An alpha-carrying reference → `Conditioning::ReferenceRgba`, UN-flattened (S4 contract): the
+///   VAE encodes all four channels, so flattening it would send a DIFFERENT request. A list with
+///   any such entry is emitted per entry, in order ([`build_ordered_reference_conditioning`]).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_qwen_image_2_1_conditioning(
+    references: &[QwenImage21Reference],
+) -> WorkerResult<Vec<Conditioning>> {
+    let images: Vec<Image> = references.iter().map(|entry| entry.image.clone()).collect();
+    let alpha: Vec<Option<image::GrayImage>> =
+        references.iter().map(|entry| entry.alpha.clone()).collect();
+    let conditioning = build_ordered_reference_conditioning(&images, &alpha);
+    // The per-entry classification is `qwen_alpha::reference_conditioning_kind` (sc-24113), so
+    // both halves of the epic name the carrier the same way. Asserted rather than assumed: the
+    // builder above and the classifier must never disagree about what an entry became.
+    if conditioning.len() == references.len() {
+        for (entry, built) in references.iter().zip(&conditioning) {
+            let built_kind = match built {
+                Conditioning::ReferenceRgba { .. } => crate::qwen_alpha::CONDITIONING_REFERENCE_RGBA,
+                _ => "Reference",
+            };
+            if built_kind != crate::qwen_alpha::reference_conditioning_kind(entry.alpha.is_some()) {
+                return Err(WorkerError::Engine(format!(
+                    "qwen_image_2_1: reference conditioning disagrees with its classification \
+                     ({built_kind})"
+                )));
+            }
+        }
+    }
+    Ok(conditioning)
+}
+
+/// The ordered condition images a Qwen-Image 2.1 edit contributes to the generic lane's
+/// `edit_refs` slot, with each one's fitted alpha plane (`None` for an opaque asset) — resolved,
+/// validated, and in request order.
+///
+/// [`build_qwen_image_2_1_conditioning`] is the ONE source of truth for what this route sends: its
+/// answer is unpacked here into the lane's `edit_refs` slot (plus each entry's alpha plane), and
+/// `build_lane_conditioning_with_alpha` re-wraps those into exactly that answer (`Reference` for
+/// one opaque image, `MultiReference` for many, per-entry `Reference` / `ReferenceRgba` once any
+/// entry carries alpha — pinned by `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`
+/// and the live-path tests). So the builder's shape is what reaches the engine, and a builder that
+/// ever emitted anything else — a `Mask` above all — is refused here rather than silently dropped.
+/// Running it here also means a refusal happens before any weights are loaded, next to the asset
+/// reads that produced it, rather than as a render failure.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_qwen_image_2_1_edit_images(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<(Vec<Image>, Vec<Option<image::GrayImage>>)> {
+    let references = resolve_qwen_image_2_1_edit(request, settings, project_path)?;
+    let mut images = Vec::with_capacity(references.len());
+    let mut alpha = Vec::with_capacity(references.len());
+    for conditioning in build_qwen_image_2_1_conditioning(&references)? {
+        match conditioning {
+            Conditioning::Reference {
+                image,
+                strength: None,
+            } => {
+                images.push(image);
+                alpha.push(None);
+            }
+            Conditioning::MultiReference { images: ordered } => {
+                alpha.extend(ordered.iter().map(|_| None));
+                images.extend(ordered);
+            }
+            // S4: an alpha-carrying reference, split back into the lane's RGB slot + its plane.
+            Conditioning::ReferenceRgba {
+                image,
+                strength: None,
+            } => {
+                let (rgb, plane) = split_rgba_reference(&image)?;
+                images.push(rgb);
+                alpha.push(Some(plane));
+            }
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "qwen_image_2_1: the ordered conditioning list may carry only strength-less \
+                     reference images, but the builder produced {other:?}"
+                )))
+            }
+        }
+    }
+    Ok((images, alpha))
+}
+
+/// Everything the generic MLX lane conditions one render on, resolved once per job: the
+/// per-family slots from [`resolve_generic_lane_conditioning`] plus the registry editors' ordered
+/// `edit_refs` (Boogu, Mage, Qwen-Image 2.1).
+///
+/// Split out of [`generate_stream`] (sc-24110) so the conditioning a job REALLY sends is testable
+/// without weights: [`generate_one`] assembles `build_lane_conditioning(identity_init, &edit_refs,
+/// mask)` from exactly this tuple, so a test that resolves it for a real on-disk payload is looking
+/// at the live path, not at a restatement of it.
+#[cfg(target_os = "macos")]
+#[allow(clippy::type_complexity)]
+fn resolve_generic_lane_inputs(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    has_reference: bool,
+) -> WorkerResult<(LaneConditioning, Vec<Image>, Vec<Option<image::GrayImage>>)> {
+    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter,
+    // Kolors img2img, Ideogram edit + mask), resolved once — same predicate order + per-family
+    // values as the historical inline 5-way match, table-ized into one resolver (sc-8828, F-026).
+    // The strict-pose ControlNet / edit tiers divert earlier in `resolve_image_route`.
+    let lane = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
+    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
+    // source followed by every optional reference in client order. Both thread through
+    // `generate_one` as `Reference` (one) / `MultiReference` (many), never the img2img-init slot.
+    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
+        // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
+        // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
+        // and the ordering + the never-a-Mask guarantee live in the resolver.
+        let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
+        edit_ref_alpha = alpha;
+        images
+    } else {
+        Vec::new()
+    };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs.
+    guard_qwen_image_2_1_lane_slots(
+        request,
+        lane.identity_init.as_ref(),
+        lane.ideogram_edit_mask.as_ref(),
+    )?;
+    Ok((lane, edit_refs, edit_ref_alpha))
+}
+
+/// Refuse a Qwen-Image 2.1 render whose generic-lane slots carry anything but the ordered
+/// reference list (sc-24110).
+///
+/// The never-a-Mask guarantee has to hold on the path that actually RUNS. What `generate_one`
+/// sends is [`build_lane_conditioning`]`(identity_init, &edit_refs, edit_mask)` — so
+/// [`build_qwen_image_2_1_conditioning`] can state the contract perfectly and still be bypassed if
+/// either of the other two slots is ever populated for this model. Today neither is
+/// (`resolve_generic_lane_conditioning` is a per-family table and 2.1 is in none of its arms, and
+/// the candle lane's `edit_reference` is likewise family-keyed), which is exactly the problem: it
+/// holds by accident of a table this model is absent from, and adding an arm for it would silently
+/// start sending the engine a `Conditioning::Mask` it refuses by name, or an img2img-init
+/// `Reference` carrying a strength it also refuses.
+///
+/// So the invariant is ASSERTED at the seam rather than inferred. Erroring is the right answer
+/// over quietly clearing the slots: a populated slot means some caller believes this model has an
+/// img2img or inpaint surface, and it does not — upstream's pipeline takes only an ordered list of
+/// condition images (S3 contract).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn guard_qwen_image_2_1_lane_slots(
+    request: &ImageRequest,
+    identity_init: Option<&(Image, f32)>,
+    edit_mask: Option<&Image>,
+) -> WorkerResult<()> {
+    if request.model != "qwen_image_2_1" {
+        return Ok(());
+    }
+    if edit_mask.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "qwen_image_2_1: an inpaint mask reached the generic lane's mask slot, which would be \
+             sent as Conditioning::Mask — a carrier this engine does not declare and refuses by \
+             name. 2.1 has no mask tensor and performs no inpainting: draw the annotation into the \
+             reference, or pass the mask as an ordinary ordered reference the prompt names."
+                .to_owned(),
+        ));
+    }
+    if identity_init.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "qwen_image_2_1: an img2img-init reference reached the generic lane's single-reference \
+             slot, which would be sent with a strength. Upstream's condition images have no \
+             strength and this engine refuses one; every 2.1 reference travels in the ordered \
+             conditioning list instead."
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
@@ -8582,7 +9610,7 @@ fn mlx_candidate_quant(
         return (None, None);
     }
     let requested = resolve_quant(request, Some(dir));
-    match tier_quant_from_resolved_dir(dir) {
+    match tier_quant_from_resolved_dir(&request.model_manifest_entry, dir) {
         Some((actual, bits)) => (
             if is_dense_te_tier(request) {
                 requested.0
@@ -8718,26 +9746,25 @@ async fn generate_stream(
         .reference_asset_id
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
-    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter, Kolors
-    // img2img, Ideogram edit + mask), resolved once — same predicate order + per-family values as the
-    // historical inline 5-way match, now table-ized into one resolver (sc-8828, F-026). The strict-pose
-    // ControlNet / edit tiers divert earlier in `resolve_image_route`.
-    let LaneConditioning {
-        identity_init,
-        flux_ip_dir,
-        flux_true_cfg,
-        ideogram_edit_mask,
-    } = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
-    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
-    // source followed by every optional reference in client order. Both thread through `generate_one`
-    // as `Reference` (one) / `MultiReference` (many), never the single img2img-init slot.
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else {
-        Vec::new()
-    };
+    // The per-family slots + the registry editors' ordered `edit_refs`, resolved once — see
+    // `resolve_generic_lane_inputs`, which is also what the sc-24110 live-path tests drive.
+    let (
+        LaneConditioning {
+            identity_init,
+            flux_ip_dir,
+            flux_true_cfg,
+            ideogram_edit_mask,
+        },
+        edit_refs,
+        edit_ref_alpha,
+    ) = resolve_generic_lane_inputs(request, settings, project_path, has_reference)?;
+    // The S4 four-channel surface (sc-24113): the transparency toggle resolved against the engine's
+    // own `supports_alpha_output` (refused by name when it cannot serve it) and assigned onto the
+    // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
+    // alpha — for every model but Qwen-Image 2.1.
+    let rgba_output_channels = crate::qwen_alpha::request_output_channels(
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+    );
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
@@ -8792,8 +9819,12 @@ async fn generate_stream(
     // loads tensors, and the winning spec/plan are retained rather than rebuilt after selection.
     let prepare = |weights_dir: PathBuf| -> WorkerResult<PreparedMlxImageTier> {
         let (quant, quant_bits) = mlx_candidate_quant(request, &model, &weights_dir);
-        let effective_tier =
-            resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
+        // A split-repo snapshot root (sc-24112's `qwen_image_2_1` bf16) names its tier only
+        // through the catalog, so ask for it first; `None` for every other family.
+        let effective_tier = split_repo_root_tier_key(&request.model_manifest_entry, &weights_dir)
+            .or_else(|| {
+                resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits)
+            });
         let resolved_artifact = if calibration_opt_in || quality_opt_in {
             resolved_mlx_artifact_provenance(
                 request,
@@ -8969,7 +10000,7 @@ async fn generate_stream(
             inputs: mlx_request_inputs,
         })
     };
-    let default_tier = tier_key_from_resolved_dir(&weights_dir);
+    let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
     let explicit_pick = request
         .advanced
         .get("mlxQuantizeExplicit")
@@ -9020,7 +10051,7 @@ async fn generate_stream(
     }).await?;
     if selected.weights_dir != weights_dir {
         tracing::warn!(model = %request.model, from = ?default_tier,
-            to = ?tier_key_from_resolved_dir(&selected.weights_dir),
+            to = ?tier_key_for_resolved_dir(&request.model_manifest_entry, &selected.weights_dir),
             "MLX request ladder selected a lower installed tier");
     }
     let PreparedMlxImageTier {
@@ -9079,6 +10110,7 @@ async fn generate_stream(
         reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &weights_dir,
+            &request.model_manifest_entry,
             !is_dense_te_tier(request),
             &request.model,
             &job.id,
@@ -9185,7 +10217,7 @@ async fn generate_stream(
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                        generate_one_with_hires(
+                        generate_one_with_hires_on_surface(
                             generator,
                             &prompt,
                             width,
@@ -9212,6 +10244,10 @@ async fn generate_stream(
                             hires_fix,
                             preview.clone(),
                             prompt_enhancement.for_prompt(&prompt),
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &edit_ref_alpha,
+                                output_channels: rgba_output_channels,
+                            },
                             &cancel,
                             on_progress,
                         )
@@ -9295,6 +10331,16 @@ fn candle_adapter_label(model: &str) -> &'static str {
             "candle_flux2"
         }
         "qwen_image" => "candle_qwen",
+        // Qwen-Image 2.1 (sc-24109) is its OWN engine, not a newer build of the row above: a
+        // different snapshot on a different latent space with a different text tower. It must
+        // stamp its own adapter or a replayed asset cannot say which weights produced it.
+        //
+        // These labels are a SEPARATE namespace from the recipe's adapter ids: this one is the
+        // per-asset `adapter` the candle stream writes (`candle_<family>`, the off-Mac sibling of
+        // the MODEL_TABLE `mlx_<family>` labels), while the recipe stamp is
+        // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
+        // for the same reason, and neither is derived from the other.
+        "qwen_image_2_1" => "candle_qwen_2_1",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -10924,6 +11970,104 @@ async fn gate_with_evict_reclaim<D>(
     Ok((reclaimed, reclaimed_budget))
 }
 
+/// Everything the generic Candle lane conditions one render on, resolved once per job: the
+/// single-reference (img2img-init) slot + its strength, the inpaint-mask slot, and the registry
+/// editors' ordered `edit_refs` — the candle twin of `resolve_generic_lane_inputs`.
+///
+/// In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
+/// (+ optional `Mask` for Ideogram) + strength once, seed-independent. Both families edit on the
+/// SAME engine as their T2I (no separate bespoke stream), so the generic lane resolves the source
+/// here. `resolve_ideogram_edit` / `resolve_boogu_edit` return `None` for a non-edit (T2I) job, and
+/// each is gated to its family so a stray job reaching this generic lane is untouched. Boogu has no
+/// mask (the `boogu_image_edit` descriptor accepts only `Reference`). Other candle edit families
+/// (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before this dispatch).
+///
+/// Split out of [`generate_candle_stream`] (sc-24110) so the conditioning a job REALLY sends is
+/// testable without weights — `generate_one` assembles `build_lane_conditioning` from exactly this
+/// tuple.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::type_complexity)]
+fn resolve_candle_lane_inputs(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    is_ideogram: bool,
+) -> WorkerResult<(
+    Option<(Image, f32)>,
+    Option<Image>,
+    Vec<Image>,
+    Vec<Option<image::GrayImage>>,
+)> {
+    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
+            })?;
+        let reference = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            reference_id,
+            project_path,
+        )?;
+        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
+        (
+            Some((
+                reference,
+                zimage_identity_candle_strength(request).expect("checked above"),
+            )),
+            None,
+        )
+    } else if is_ideogram {
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => (Some((source, strength)), mask),
+            None => (None, None),
+        }
+    } else if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
+        // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
+        (resolve_zimage_edit_init(request, settings, project_path)?, None)
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        (
+            resolve_candle_kolors_edit_init(request, settings, project_path)?,
+            None,
+        )
+    } else {
+        (None, None)
+    };
+    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
+    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
+    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
+        // because the Candle port registers the same engine id and declares the same
+        // `Reference` + `ReferenceRgba` + `MultiReference` conditioning. One request contract, two
+        // backends.
+        let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
+        edit_ref_alpha = alpha;
+        images
+    } else if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        resolve_sensenova_candle_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
+    };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs — the candle
+    // twin of the MLX call. `edit_reference` is this lane's single-reference (img2img-init) slot
+    // and `edit_mask` its mask slot; both must stay empty for 2.1.
+    guard_qwen_image_2_1_lane_slots(request, edit_reference.as_ref(), edit_mask.as_ref())?;
+    Ok((edit_reference, edit_mask, edit_refs, edit_ref_alpha))
+}
+
 /// Windows/CUDA registry-generator path (sc-3675 SDXL, generalized in sc-5096). This is the Candle
 /// sibling of [`generate_stream`], driving the same neutral streaming harness
 /// (`start_cached_gen_stream` → `generate_one` → `consume_gen_events`) for base generation and the
@@ -11095,68 +12239,17 @@ async fn generate_candle_stream(
             .collect()
     };
     let total = work.len();
-    // In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
-    // (+ optional `Mask` for Ideogram) + strength once, seed-independent — the candle sibling of the MLX
-    // `generate_stream` edit path. Both families edit on the SAME engine as their T2I (no separate bespoke
-    // stream), so the generic lane resolves the source here. `resolve_ideogram_edit` / `resolve_boogu_edit`
-    // return `None` for a non-edit (T2I) job, and each is gated to its family so a stray job reaching this
-    // generic lane is untouched. Boogu has no mask (the `boogu_image_edit` descriptor accepts only
-    // `Reference` — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent).
-    // Other candle edit families (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before
-    // this dispatch).
-    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
-        let reference_id = request
-            .reference_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
-            })?;
-        let reference = load_reference_image(
-            &settings.data_dir,
-            &request.project_id,
-            reference_id,
-            project_path,
-        )?;
-        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
-        (
-            Some((
-                reference,
-                zimage_identity_candle_strength(request).expect("checked above"),
-            )),
-            None,
-        )
-    } else if is_ideogram {
-        match resolve_ideogram_edit(request, settings, project_path)? {
-            Some((source, strength, mask)) => (Some((source, strength)), mask),
-            None => (None, None),
-        }
-    } else if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
-        // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
-        // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
-        (resolve_zimage_edit_init(request, settings, project_path)?, None)
-    } else if request.model == "kolors" && request.mode == "edit_image" {
-        (
-            resolve_candle_kolors_edit_init(request, settings, project_path)?,
-            None,
-        )
-    } else {
-        (None, None)
-    };
-    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
-    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else if is_sensenova_candle_model(&request.model)
-        && matches!(request.mode.as_str(), "edit_image" | "character_image")
-    {
-        resolve_sensenova_candle_edit(request, settings, project_path)?
-    } else {
-        Vec::new()
-    };
+    // The single-reference + mask slots and the registry editors' ordered `edit_refs`, resolved once
+    // — see `resolve_candle_lane_inputs`, which is also what the sc-24110 live-path test drives.
+    let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+        resolve_candle_lane_inputs(request, settings, project_path, is_ideogram)?;
+    // The S4 four-channel surface (sc-24113): the transparency toggle resolved against the engine's
+    // own `supports_alpha_output` (refused by name when it cannot serve it) and assigned onto the
+    // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
+    // alpha — for every model but Qwen-Image 2.1.
+    let rgba_output_channels = crate::qwen_alpha::request_output_channels(
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+    );
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
     }
@@ -12620,7 +13713,7 @@ async fn generate_candle_stream(
                 work,
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                    generate_one_with_hires(
+                    generate_one_with_hires_on_surface(
                         generator,
                         &prompt,
                         width,
@@ -12661,6 +13754,10 @@ async fn generate_candle_stream(
                         hires_fix,
                         preview.clone(),
                         prompt_enhancement.for_prompt(&prompt),
+                        &LaneRgbaSurface {
+                            multi_reference_alpha: &edit_ref_alpha,
+                            output_channels: rgba_output_channels,
+                        },
                         &cancel,
                         on_progress,
                     )
@@ -15998,33 +17095,33 @@ mod quant_tier_reconcile_tests {
         let root = std::path::Path::new("/models/sd3_5_large-mlx");
         // Standard `q4`/`q8`/`bf16` tier dirs → their precision.
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("q4")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("q4")),
             Some((Some(Quant::Q4), Some(4)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("q8")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("q8")),
             Some((Some(Quant::Q8), Some(8)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("bf16")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("bf16")),
             Some((None, None))
         );
         // Boogu `<variant>-<tier>` and bare `<variant>` (= the packed Q8 default).
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("base-q4")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("base-q4")),
             Some((Some(Quant::Q4), Some(4)))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("turbo-bf16")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("turbo-bf16")),
             Some((None, None))
         );
         assert_eq!(
-            tier_quant_from_resolved_dir(&root.join("edit")),
+            tier_quant_from_resolved_dir(&JsonObject::new(), &root.join("edit")),
             Some((Some(Quant::Q8), Some(8)))
         );
         // A fell-all-the-way-back-to-root (or modelPath) dir is not a recognizable tier → None, so the
         // caller keeps the request-derived quant.
-        assert_eq!(tier_quant_from_resolved_dir(root), None);
+        assert_eq!(tier_quant_from_resolved_dir(&JsonObject::new(), root), None);
     }
 
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
@@ -16037,6 +17134,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (Some(Quant::Q8), Some(8)),
                 std::path::Path::new("/m/q8"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16050,6 +17148,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (None, None),
                 std::path::Path::new("/m/q4"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16063,6 +17162,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (None, None),
                 std::path::Path::new("/m/q4"),
+                &JsonObject::new(),
                 false,
                 "flux2_klein_9b",
                 "job1",
@@ -16075,6 +17175,7 @@ mod quant_tier_reconcile_tests {
             reconcile_resolved_tier_quant(
                 (Some(Quant::Q8), Some(8)),
                 std::path::Path::new("/m/root"),
+                &JsonObject::new(),
                 true,
                 "sd3_5_large",
                 "job1",
@@ -16162,7 +17263,7 @@ mod quant_tier_reconcile_tests {
         let requested = resolve_quant(&req, Some(&resolved));
         assert_eq!(requested, (None, None), "bf16 request derives dense");
         let (quant, bits) =
-            reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
+            reconcile_resolved_tier_quant(requested, &resolved, &JsonObject::new(), true, "sd3_5_large", "job1", "mlx");
         assert_eq!((quant, bits), (Some(Quant::Q4), Some(4)));
     }
 
@@ -16227,6 +17328,7 @@ mod quant_tier_reconcile_tests {
         let (quant, bits) = reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &resolved,
+            &JsonObject::new(),
             false, // dense-TE: keep the load quant None
             "flux2_klein_9b",
             "job1",
@@ -16254,6 +17356,7 @@ mod quant_tier_reconcile_tests {
         let (quant, bits) = reconcile_resolved_tier_quant(
             (None, dense_te_requested_tier_bits(&req)),
             std::path::Path::new("/m/q4"),
+            &JsonObject::new(),
             false,
             "flux2_klein_9b",
             "job1",

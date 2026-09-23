@@ -18762,6 +18762,7 @@ mod tests {
             "z_image_turbo",
             "z_image_turbo_control",
             "qwen_image",
+            "qwen_image_2_1",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -18800,7 +18801,6 @@ mod tests {
             "chroma1_hd",
             "ideogram_4",
             "ideogram_4_turbo",
-            "kolors",
             "anima_base",
             "anima_aesthetic",
             "anima_turbo",
@@ -18896,13 +18896,22 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
-        for id in [
+        // Bound to a local rather than iterated inline so the completeness loop at the bottom can
+        // test MEMBERSHIP of this exact list. That matters: `scripts/generate-memory-matrix.mjs`
+        // (`parseMlxStagedResidencyEngines`) parses the STRING LITERALS in this function body as
+        // the MLX staged-residency authority, so an engine that stages but is missing HERE still
+        // publishes `Missing` in the matrix no matter what its descriptor says. Checking the
+        // predicate instead of the list would therefore pass while the artifact stayed wrong.
+        // The literals stay inside the function, ahead of the first negative assert, because that
+        // span is exactly what the generator's regex reads.
+        let swept = [
             "sdxl",
             "z_image",
             "z_image_control",
             "z_image_turbo",
             "z_image_turbo_control",
             "qwen_image",
+            "qwen_image_2_1",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -18948,7 +18957,8 @@ mod tests {
             "wan2_2_ti2v_5b",
             "wan2_2_vace_fun_14b",
             "wan_vace",
-        ] {
+        ];
+        for id in swept {
             assert!(
                 engine_engages_staged_residency(id),
                 "{id}: registered staged-residency declaration must remain visible to the ladder"
@@ -18956,7 +18966,71 @@ mod tests {
         }
         assert!(!engine_engages_staged_residency("sensenova_u1_8b"));
         assert!(!engine_engages_staged_residency("no_such_engine_xyz"));
+
+        // COMPLETENESS (sc-24108). The sweep above only asserts the ids it LISTS, so a newly
+        // registered engine that belongs in it is invisible: the list stays green, the memory-matrix
+        // generator — which parses this exact block as its authority for MLX staged residency
+        // (scripts/generate-memory-matrix.mjs) — publishes `Missing` for it, and the census fixture
+        // pins that `Missing` as if it were a decision. That is a silent, un-armed deferment: no
+        // test anywhere turns red when the provider finally registers.
+        //
+        // So: every MODEL_TABLE row whose engine the PINNED runtime actually resolves must appear
+        // in the positive list or in the explicit negative one. An engine that registers and is in
+        // neither fails HERE, which is what forces both the sweep entry and the matrix
+        // regeneration at the moment the pin lands rather than whenever someone notices.
+        //
+        // Both lists are read back off the source of truth — `engine_engages_staged_residency`
+        // itself — rather than restated, so this cannot drift from the assertions above.
+        let mut unclassified: Vec<&str> = crate::engines::MODEL_TABLE
+            .iter()
+            // Not registered by this pin: nothing to classify yet. The moment a provider registers,
+            // this loop demands its classification, which is the point.
+            .filter(|row| crate::engines::mlx_model(row.sceneworks_id).is_some())
+            .map(|row| row.engine_id)
+            .filter(|engine_id| {
+                !swept.contains(engine_id)
+                    && !ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY.contains(engine_id)
+            })
+            .collect();
+        unclassified.sort_unstable();
+        unclassified.dedup();
+        assert_eq!(
+            unclassified,
+            Vec::<&str>::new(),
+            "these engines are registered by the pinned runtime but appear in neither the \
+             staged-residency sweep above nor ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY. \
+             Classify each: add it to the sweep and re-run `npm run generate:memory-matrix` (the \
+             generator reads the sweep as its MLX authority, so the cells publish Missing until \
+             you do), or record its descriptor as advertising no staging bit (sc-24108)."
+        );
     }
+
+    /// Engines the pinned MLX runtime registers whose DESCRIPTOR advertises no staged-residency
+    /// capability — neither `supports_sequential_offload` nor the SC-18816
+    /// `unconditionally_engages_staged_residency` bit — so
+    /// [`engine_engages_staged_residency_is_derived_from_the_registered_capability`]'s completeness
+    /// loop does not demand a sweep entry for them. This is an OBSERVED fact about each descriptor,
+    /// read back from `engine_engages_staged_residency` in that same test, not a claim that the
+    /// provider never stages anything.
+    ///
+    /// That distinction matters for the six Mage engines. The generated matrix publishes their
+    /// `staged_residency` cells as `Anchored`, which folds to "implemented" in the census — but it
+    /// does so from MEASURED ANCHORS, not from this predicate, which the generator consults only to
+    /// choose between `Implemented` and `Missing`. So the matrix and this list do not disagree:
+    /// Mage has evidence and no advertised capability bit. Whether `mlx-gen-mage`'s descriptor
+    /// SHOULD advertise one is a real question about that provider and predates sc-24108, which
+    /// added this loop; it is recorded here rather than silently absorbed.
+    #[cfg(target_os = "macos")]
+    const ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY: &[&str] = &[
+        "mage_flow",
+        "mage_flow_base",
+        "mage_flow_edit",
+        "mage_flow_edit_base",
+        "mage_flow_edit_turbo",
+        "mage_flow_turbo",
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+    ];
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a
     /// residency policy the provider won't honor) — a cross-platform invariant.

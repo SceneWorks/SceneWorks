@@ -211,11 +211,31 @@ export function buildSimpleImageRequest({
   loras: selectedLoras = [],
   quantTier = "",
   tierExplicit = false,
+  // sc-24113 — transparency, and the model it is judged against. Simple exposes the model, so it
+  // exposes the toggle; the CAPABILITY check happens in `buildImageJobRequest` -> `transparencyAdvanced`,
+  // the one place either shell decides whether the request field is emitted.
+  selectedModel = null,
+  transparentBackground = false,
+  // sc-24113 — the controls Simple's advanced fold added. Each defaults to the value that means
+  // "untouched", so a caller that passes none produces a byte-identical payload to before.
+  referenceAssetIds = [],
+  steps = "",
+  seed = "",
+  negativePrompt = "",
+  guidance = "",
+  width: widthOverride = null,
+  height: heightOverride = null,
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
     return null;
   }
+  // The free-size override wins per axis when the caller resolved one, mirroring the full studio's
+  // `resolutionOverride`. The caller has already validated it against the model's own envelope, so
+  // an illegal size never reaches here.
+  const width = Number.isFinite(widthOverride) && widthOverride > 0 ? widthOverride : size.width;
+  const height =
+    Number.isFinite(heightOverride) && heightOverride > 0 ? heightOverride : size.height;
   const editing = mode === "edit_image";
   // Only claim img2img on the text path AND on a model that advertises it — the flag is
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
@@ -246,8 +266,15 @@ export function buildSimpleImageRequest({
     promptToSend: prompt,
     submitIntent: prompt,
     resolution,
-    width: size.width,
-    height: size.height,
+    width,
+    height,
+    // sc-24113: the advanced fold's knobs, through the SAME builder the full studio uses
+    // (`stepsOverride` / `guidanceOverride` are its names for "" = use the model default).
+    referenceAssetIds,
+    stepsOverride: steps,
+    guidanceOverride: guidance,
+    negativePrompt,
+    seed,
     mode,
     model,
     count,
@@ -257,6 +284,8 @@ export function buildSimpleImageRequest({
     styleId: styleId || null,
     quantTier,
     tierExplicit,
+    selectedModel,
+    transparentBackground,
   });
 }
 

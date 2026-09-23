@@ -218,6 +218,136 @@ pub(crate) async fn create_image_job(
             let count = image_default_count(entry).unwrap_or(4);
             job_payload.insert("count".to_owned(), Value::from(count));
         }
+        // The model's declared `limits.hardMinSteps` / `limits.steps`, enforced at IMAGE enqueue
+        // (sc-24108). Until now this key was video-only — `steps_limit_error`'s two call sites were
+        // `create_video_job` and the worker's video lane — and the schema said so. Qwen-Image 2.1 is
+        // the first image model with a real sampling floor: its engine refuses `steps < 2`, so
+        // `advanced.steps: 1` used to travel all the way to the MLX provider and die there, which
+        // reaches the user as a failed render rather than a 400 naming the floor.
+        //
+        // Same shape as the video call site: the count is read off `job_payload` (post-preset, so
+        // the gate judges what is actually enqueued), rejected rather than clamped — raising the
+        // step count for the caller silently doubles the compute they asked for — and ABSENT means
+        // no floor, so every image model that declares nothing is byte-for-byte unchanged. Today
+        // exactly one does.
+        if let Some(steps) = job_payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(requested_steps)
+        {
+            if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
+        // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets`
+        // (sc-24113 introduced the key and this call; sc-24110 corrected what is counted).
+        //
+        // `validate_image_job` never looked at `referenceAssetIds` at all: the only image-side caps
+        // were per-family constants deep in the worker (`MAX_EDIT_REFERENCES`, Krea's 2, FLUX.2's
+        // 5), which silently TRUNCATE. For Qwen-Image 2.1 truncation is not a smaller render, it is
+        // a DIFFERENT one — the template numbers the references (`<image1>` …) and block-causal
+        // attention makes each visible only to what follows, so shortening the list renumbers every
+        // reference after the cut. The engine refuses an 11th by name at `validate`; this says so
+        // at enqueue instead, before a job exists.
+        //
+        // What is counted is the FLATTENED ordered list, not `referenceAssetIds` alone (sc-24110).
+        // The engine receives ONE list, and `sourceAssetId` and `maskAssetId` are entries in it —
+        // on this model a mask is an ordinary reference the prompt names, not a mask tensor. A
+        // per-carrier count would therefore admit `source + mask + 9` as "nine references" and hand
+        // the worker eleven images. `ordered_image_reference_ids` is the SAME function the routing
+        // predicate and the worker's resolver read, so the API cannot cap a different list than the
+        // one that gets rendered.
+        //
+        // Read off `job_payload` rather than the DTO so the count reflects what is actually
+        // enqueued after preset/style patching. ABSENT ⇒ no cap, so every other image model is
+        // byte-for-byte unchanged.
+        if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
+            &model_id,
+            sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
+                .map_or(0, |ids| ids.len()),
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+        // The model's declared FREE-SIZE envelope — `limits.minDimension` / `maxDimension` /
+        // `requiresDimensionsMultipleOf` (sc-24113).
+        //
+        // `validate_image_job` enforces one global 256..=4096 with no stride, which is both too
+        // narrow and too wide for a native-resolution model: Qwen-Image 2.1 renders from 32 px (far
+        // BELOW the global floor) up to 2752 (far below its ceiling), on a 32-px grid. Without this
+        // an off-grid or over-cap size passed every check in the app and died in the provider,
+        // reaching the user as a failed render rather than a 400 naming the bound.
+        //
+        // Read post-default, so the gate judges the geometry actually enqueued — including the one
+        // this function just filled in from `defaults.resolution`, which is exactly the value a
+        // bare API call renders at. ABSENT ⇒ the global bounds alone, unchanged.
+        if let (Some(width), Some(height)) = (
+            job_payload.get("width").and_then(Value::as_u64),
+            job_payload.get("height").and_then(Value::as_u64),
+        ) {
+            if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
+                if let Some(message) = sceneworks_core::video_request::image_dimension_error(
+                    &model_id,
+                    width,
+                    height,
+                    entry,
+                    crate::HISTORICAL_MIN_IMAGE_DIMENSION,
+                    crate::MAX_IMAGE_DIMENSION,
+                ) {
+                    return Err(ApiError::bad_request(message));
+                }
+                // The declared request-geometry ENVELOPE (sc-24112, `admissionGeometry`): the
+                // largest-preset area, the reference count and the batch, jointly. Per-side bounds
+                // cannot express it — 2752x2752 passes every side check and is still 7.57 Mpx
+                // against a 4.30 Mpx envelope — and the worker refuses it anyway, so without this
+                // the job enqueued and failed later instead of 400ing here. The SAME core function
+                // the worker calls, over the same ordered reference list the worker renders.
+                // ABSENT block ⇒ inert.
+                let reference_count =
+                    sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
+                        .map_or(0, |ids| ids.len());
+                let batch = job_payload
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                if let Some(message) = sceneworks_core::admission_geometry::refuse_over_envelope(
+                    &model_id,
+                    entry,
+                    width,
+                    height,
+                    u32::try_from(reference_count).unwrap_or(u32::MAX),
+                    u32::try_from(batch).unwrap_or(u32::MAX),
+                ) {
+                    return Err(ApiError::bad_request(message));
+                }
+            }
+        }
+        // The SHAPE half of the same contract (sc-24110): a conditioned mode with NOTHING to
+        // condition on, a malformed carrier, and a per-reference `strength` the engine has no input
+        // for. Counting is the cap gate's job above; this is everything else the ordered list can
+        // be wrong about, and it is pure — no I/O.
+        if let Some(message) = sceneworks_core::image_request::ordered_image_reference_error(
+            &model_id,
+            &job_payload,
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+        // The PER-ENTRY half: each ordered reference must actually BE a raster image this project
+        // owns. Needs the asset store, so it cannot live in the pure core helper. Only runs for a
+        // model that declares the cap — no other image model pays an asset read it never paid.
+        if sceneworks_core::video_request::image_max_reference_assets(entry).is_some() {
+            let ordered = sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
+                .unwrap_or_default();
+            if !ordered.is_empty() {
+                validate_ordered_image_references(
+                    state.clone(),
+                    payload.project_id.clone(),
+                    ordered,
+                )
+                .await?;
+            }
+        }
     }
     validate_job_lora_compatibility_with(
         &state,
@@ -518,6 +648,84 @@ async fn validate_vector_source_asset(
         return Err(ApiError::bad_request(
             "sourceAssetId media is missing from its project",
         ));
+    }
+    Ok(())
+}
+
+/// Reject an ordered image-reference set whose entries are not raster images this project owns
+/// (sc-24110).
+///
+/// The counterpart to `sceneworks_core::image_request::ordered_image_reference_error`, which judges
+/// the SHAPE of the set (count, cap, strength, malformed carriers) with no I/O. This judges each
+/// ENTRY, and needs the asset store to do it. Same three questions as
+/// [`validate_vector_source_asset`] — is it an image, is it raster, is its media still on disk —
+/// plus the pixel dimensions, because a zero-dimension asset is exactly the per-reference geometry
+/// error the engine refuses after the weights are already loaded.
+///
+/// The ORDINAL is named in every message. On this route the position is semantic (the prompt
+/// numbers the images), so "reference 3" is information the caller can act on in a way that a bare
+/// asset id is not.
+///
+/// Deliberately serial rather than a join: the sets are at most ten entries, the store call is a
+/// blocking task, and the first bad entry is the one the caller has to fix — reporting it in
+/// request order is more useful than reporting whichever read finished first.
+async fn validate_ordered_image_references(
+    state: AppState,
+    project_id: String,
+    asset_ids: Vec<String>,
+) -> Result<(), ApiError> {
+    for (index, asset_id) in asset_ids.iter().enumerate() {
+        let ordinal = index + 1;
+        let project = project_id.clone();
+        let id = asset_id.clone();
+        let (asset, media_path) = project_call(state.clone(), move |store| {
+            let asset = store.get_asset(&project, &id)?;
+            let media_path = store.resolve_asset_media_path(&project, &id)?;
+            Ok((asset, media_path))
+        })
+        .await
+        .map_err(|_| {
+            ApiError::bad_request(format!(
+                "reference {ordinal} ({asset_id}) is not an asset of this project"
+            ))
+        })?;
+        let media_type = asset
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mime = asset
+            .pointer("/file/mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+            return Err(ApiError::bad_request(format!(
+                "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
+            )));
+        }
+        if !media_path.is_file() {
+            return Err(ApiError::bad_request(format!(
+                "reference {ordinal} ({asset_id}) media is missing from its project"
+            )));
+        }
+        // Dimensions are checked only when the asset records them. An absent pair is NOT an error:
+        // the record is written by several ingest paths and an older asset may predate the field,
+        // and refusing those would break re-editing art the user already has. A RECORDED zero is a
+        // different statement — it says the ingest measured the image and found no pixels — so it
+        // is refused here rather than at load time.
+        for axis in ["width", "height"] {
+            if let Some(value) = asset
+                .pointer(&format!("/file/{axis}"))
+                .or_else(|| asset.get(axis))
+                .and_then(Value::as_i64)
+            {
+                if value <= 0 {
+                    return Err(ApiError::bad_request(format!(
+                        "reference {ordinal} ({asset_id}) records a {axis} of {value}; a reference \
+                         image must have non-zero pixel dimensions"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }

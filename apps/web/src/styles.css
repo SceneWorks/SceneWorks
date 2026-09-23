@@ -3015,6 +3015,122 @@ label {
   gap: 8px;
 }
 
+/* Qwen-Image 2.1's official prompt rewriter (sc-24113).
+   The rewrite is EDITABLE, unlike the generic refiner's read-only paragraph, so the suggestion is a
+   real textarea. It inherits `.refine-review-text`'s type, then takes the affordances a text field
+   needs — a resizable box, the form background, and a visible border — so it never reads as a
+   paragraph the user is not allowed to touch. */
+.qwen-rewrite-draft {
+  width: 100%;
+  min-height: 140px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* The aspect-ratio suggestion, deliberately its own row beneath the prompt: the prose and the
+   geometry are two decisions, and a user who wants the rewrite at their own aspect ratio must not
+   have to take both. */
+.qwen-rewrite-aspect {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.qwen-rewrite-aspect-label {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.qwen-rewrite-aspect-size {
+  opacity: 0.75;
+}
+
+/* The ordered-reference rail (sc-24113), shared by Image Studio and the Simple shell. The order of
+   these references is part of the request for a model whose template numbers them, so the ordinal
+   is shown and the arrows edit it in place. */
+.ordered-references {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ordered-reference {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface-2, var(--surface));
+  font-size: 12.5px;
+}
+
+.ordered-reference-ordinal {
+  flex: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.ordered-reference-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ordered-reference-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.ordered-reference-actions button {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+.ordered-reference-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The transparency toggle's second half (sc-24113): this model has no transparency MODE, so the
+   toggle only keeps the alpha channel and the PROMPT decides whether it holds a cut-out. The
+   affordance is inline copy plus a button that edits the visible prompt — never a silent append. */
+.transparency-prompt-hint {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.transparency-prompt-hint .hero-link {
+  font-size: inherit;
+  text-align: left;
+}
+
+/* The idle-state explanation of what the rewriter will do, and — load-bearing copy — that it will
+   not change the prompt on its own. */
+.refine-hint {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .hero-link {
   display: inline-flex;
   align-items: center;
@@ -7078,6 +7194,54 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* The persistent licence row (sc-24108) — the half of the licence surface that survives the
+   install, unlike `.model-gated-notice`, which is a pre-download gate and disappears with it.
+   Quiet by construction: no border, no warn tone, and the notice itself behind a collapsed
+   disclosure. It is a reference the user can come back to, not a thing to act on. Shared by the
+   Models card and the Simple model list (which passes `su-license-note`). */
+.model-license-summary,
+.su-license-note {
+  display: grid;
+  gap: 4px;
+}
+
+.model-license-summary-head,
+.su-license-note .model-license-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-license-summary-name {
+  font-weight: 600;
+}
+
+/* Not the Simple Licenses screen's badge — that one is a two-state commercial-use verdict. This is
+   a single inline marker that only ever appears on a restricted model. */
+.model-license-summary-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger-soft, rgba(220, 80, 80, 0.14));
+  color: var(--danger, #c2410c);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-license-summary-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.su-license-note {
+  padding: 0 12px 10px;
+  margin-top: -4px;
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;
@@ -10315,6 +10479,22 @@ details[open] > summary.lora-scope-group-heading::before,
 .ie-ref img { width: 100%; height: 100%; object-fit: cover; }
 .ie-ref-remove { position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 50%; color: var(--ie-text); cursor: pointer; display: grid; place-items: center; font-size: 11px; z-index: 1; }
 .ie-ref-add { width: 52px; height: 52px; border-radius: 9px; border: 1px dashed var(--ie-border-strong); background: transparent; color: var(--ie-muted); cursor: pointer; display: grid; place-items: center; font-size: 20px; }
+/* Ordered references (sc-24113). The engine's template numbers the images (<image1> …) and its
+   block-causal attention makes each one visible only to what follows, so the ORDER is part of the
+   request. The ordinal is shown on the thumbnail — the prompt conventions for this family name
+   images directly ("use the second image as a mask"), and a user who cannot see which one is second
+   cannot write that prompt — and the arrows make the order editable in place, where before the only
+   way to reorder was to remove everything and re-add it. */
+.ie-ref-ordinal { position: absolute; left: 0; bottom: 0; right: 0; padding: 1px 3px; font-size: 9px; line-height: 1.3; font-weight: 600; text-align: center; color: var(--ie-text); background: color-mix(in srgb, var(--ie-surface) 82%, transparent); z-index: 1; pointer-events: none; }
+.ie-ref-move { position: absolute; bottom: -8px; width: 18px; height: 18px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 50%; color: var(--ie-text); cursor: pointer; display: grid; place-items: center; font-size: 11px; line-height: 1; z-index: 2; }
+.ie-ref-move:first-of-type { left: -8px; }
+.ie-ref-move:nth-of-type(2) { right: -8px; }
+.ie-ref-move:disabled { opacity: 0.35; cursor: default; }
+/* The thumbnail is the positioning context for all four overlay controls, and it must not clip the
+   ones that sit outside its box. `.ie-ref` above sets `overflow: hidden` for the image's rounded
+   corners, which would also clip the move/remove buttons, so the image is clipped instead. */
+.ie-ref { overflow: visible; }
+.ie-ref img { border-radius: 9px; }
 .ie-histo { width: 100%; height: 58px; border: 1px solid var(--ie-border); border-radius: var(--r-sm); background: var(--ie-surface2); display: block; }
 
 /* Curve editor container tweak (reuse CurveEditor component) */
@@ -18694,3 +18874,98 @@ button.audio-wave {
 .editor-guides-nav { display: flex; flex-wrap: wrap; gap: 8px; }
 .editor-guides-nav button { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
 .editor-guides-nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- Transparency backdrop (sc-24111) ----------
+   Every surface that can paint an RGBA asset, given one checkerboard instead of a
+   flat fill.
+
+   The problem this solves is not lost pixels — nothing on the web side drops the
+   alpha channel. It is that `.asset-tile img`, `.preview-button img`,
+   `.review-card img`, `.preview-modal img` and the queue thumbnails all declared
+   `background: var(--bg-2)`, which in the dark theme is very nearly black. A
+   natively transparent render (Qwen Image 2.1) therefore looked like a render on a
+   black background, and the user had no way to tell the two apart.
+
+   Why it is safe to apply unconditionally: every selector below except the modal is
+   `object-fit: cover` (the shared rule beside `.asset-tile img`), so the bitmap
+   covers its whole box and an opaque image hides the checkerboard completely.
+   Nothing changes for the images that are not transparent, which is why this needs
+   no per-asset alpha fact to key off. `.preview-modal img` is the one `contain`
+   surface and is handled just below by sizing the element to the bitmap instead, so
+   the checkerboard never shows up as letterbox bars.
+
+   `<video>` is deliberately NOT in the list: no video format this app plays carries
+   alpha, so a checkerboard behind one could only ever be decoration. The video rules
+   keep their flat `var(--bg-2)`.
+
+   The pattern is the app's existing convention, lifted from `.ie-canvas` (the Image
+   Editor stage, which has checkerboarded since epic 10243 and is what the sc-22461
+   color-key / SAM3 cutout previews already read against). Two 45-degree gradients
+   offset by half a tile. Kept as a variable-driven block so a 36x30 layer thumbnail
+   can use a smaller tile than a full-bleed grid tile without restating the
+   gradients. */
+.checker-backdrop,
+.asset-tile img,
+.preview-button img,
+.review-card img,
+.tray-item img,
+.reference-media img,
+.preview-modal img,
+.worker-progress-card__thumb-media,
+.ie-layer-thumb {
+  --checker-tile: 16px;
+  --checker-ink: color-mix(in srgb, var(--text) 11%, transparent);
+  background-color: var(--bg-2);
+  background-image:
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    ),
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    );
+  background-size: var(--checker-tile) var(--checker-tile);
+  background-position: 0 0, calc(var(--checker-tile) / 2) calc(var(--checker-tile) / 2);
+}
+
+/* A 36x30 layer chip and a 56px queue thumbnail get two or three tiles at 16px,
+   which reads as a diagonal stripe rather than a checker. Halve it. */
+.ie-layer-thumb,
+.worker-progress-card__thumb-cell.small .worker-progress-card__thumb-media {
+  --checker-tile: 8px;
+}
+
+/* The fullscreen preview is the only `object-fit: contain` surface in the list, and
+   contain is what would put the checkerboard in the letterbox bars of every opaque
+   image. Size the element to the bitmap instead, so the box IS the image and there
+   are no bars to fill. This also removes the flat `var(--bg-2)` bars that were there
+   before.
+
+   Without the height clamp there would be no bars at all: `width: 100%` alone gives
+   an `<img>` its intrinsic ratio. It is `max-height: 78vh` on `.preview-modal img`
+   that clamps a PORTRAIT image's height while the width stays at 100%, and that is
+   what letterboxes. `width: auto` lets the width follow the clamped height.
+
+   The declaration this has to beat is `.preview-modal-stage img, .preview-modal-stage
+   video { width: 100% }`. Review read that selector as (0,2,1) and this rule's earlier
+   `.preview-modal img` as (0,1,1), i.e. inert; both are in fact (0,1,1) — one class,
+   one type — so the earlier form already won on document order. The selector is
+   repeated verbatim here anyway, because "same selector, later in the file" stays true
+   if either block moves, where "different selector, tied specificity, happens to be
+   further down" is something a reader has to re-derive. It also covers both modal
+   layouts (the zoom viewport's `.preview-zoom-inner img` and the side-by-side
+   `.preview-compare-pane` images are both inside the stage), and it is `img`-only so a
+   <video> still fills the stage. `transparencyBackdrop.test.js` resolves the winner
+   rather than trusting either reading. */
+.preview-modal-stage img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}

@@ -198,6 +198,13 @@ pub const IDEOGRAM_REPOSITORY: &str = "SceneWorks/ideogram-4-mlx";
 /// record's loadability fingerprint is the one claim about the snapshot nothing downstream can
 /// re-derive.
 pub const IDEOGRAM_BF16_REPOSITORY: &str = "SceneWorks/ideogram-4";
+/// The Qwen-Image 2.1 packed re-host (sc-24112): `q8/` and `q4/` subdirs, each a complete
+/// `from_snapshot`-loadable tree. It carries NO `bf16/` — the converter refuses to emit one — so the
+/// dense tier is [`QWEN_IMAGE_2_1_BF16_REPOSITORY`], and both lanes load all three roots.
+pub const QWEN_IMAGE_2_1_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-mlx";
+/// The Qwen-Image 2.1 bf16 tier: the released upstream snapshot, loaded at its snapshot ROOT (no tier
+/// sub-directory), the same root the worker's `qwen_image_2_1_declared_tier_dir` resolves.
+pub const QWEN_IMAGE_2_1_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1";
 /// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
 /// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
 /// and the VAE are bit-identical across all six variants and are hosted ONCE in

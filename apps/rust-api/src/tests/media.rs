@@ -1728,3 +1728,294 @@ async fn smart_crop_and_strip_exif_rewrite_and_repoint_items() {
     assert_eq!(stripped["applied"], 1);
     assert_eq!(stripped["dataset"]["version"], 3);
 }
+
+// ---------------------------------------------------------------------------
+// Native transparency through the asset routes (sc-24111)
+// ---------------------------------------------------------------------------
+//
+// Every hop between "the worker wrote an RGBA result.png" and "the browser has pixels" lives in
+// this file's routes: the raw project-file stream, the `?thumbnail=384` grid derivative and its
+// on-disk cache. None of them re-encoded RGB — `ensure_grid_thumbnail` goes `image::open` →
+// `DynamicImage::thumbnail` → `save_with_format(Png)`, and `DynamicImage::thumbnail` keeps the
+// variant it was handed — but nothing said so, and every image fixture in this crate is built with
+// `RgbImage::from_fn`, so no existing test could have caught a regression to `to_rgb8()`.
+
+/// Repo root, for the committed alpha fixtures shared with `crates/sceneworks-core`.
+fn alpha_fixture_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("alpha")
+}
+
+/// The committed RGBA fixture: a fully transparent band, a 32-step soft ramp and a fully opaque
+/// band, over RGB that is neither black nor white so a flatten in either direction is visible.
+fn rgba_fixture() -> image::RgbaImage {
+    let path = alpha_fixture_dir().join("alpha-64.png");
+    image::open(&path)
+        .unwrap_or_else(|error| panic!("RGBA fixture at {} decodes: {error}", path.display()))
+        .to_rgba8()
+}
+
+fn alpha_histogram(image: &image::RgbaImage) -> std::collections::BTreeMap<u8, usize> {
+    let mut histogram = std::collections::BTreeMap::new();
+    for pixel in image.pixels() {
+        *histogram.entry(pixel.0[3]).or_insert(0) += 1;
+    }
+    histogram
+}
+
+/// Nearest-neighbour blow-up of the 64x64 fixture, so a test can pick the size it needs without
+/// inventing different pixels.
+///
+/// Sizing matters here in a way that is easy to get wrong: `DynamicImage::thumbnail` fits the
+/// image to the box it is given in BOTH directions, so a 64x64 source asked for a 384 thumbnail
+/// comes back UPSCALED to 384x384 and resampled. A source at exactly `GRID_THUMBNAIL_SIZE` is the
+/// only one whose derivative is pixel-for-pixel the source, which is what makes an exact histogram
+/// assertion meaningful rather than a restatement of the resampler's behaviour.
+fn scaled_fixture(name: &str, side: u32) -> image::RgbaImage {
+    let path = alpha_fixture_dir().join(name);
+    let source = image::open(&path)
+        .unwrap_or_else(|error| panic!("fixture at {} decodes: {error}", path.display()))
+        .to_rgba8();
+    image::imageops::resize(&source, side, side, image::imageops::FilterType::Nearest)
+}
+
+#[tokio::test]
+async fn an_rgba_asset_keeps_its_alpha_through_the_file_and_thumbnail_routes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Transparent render" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
+    let raw_path = project_path.join("assets/images/transparent.png");
+    std::fs::copy(alpha_fixture_dir().join("alpha-64.png"), &raw_path).expect("fixture copies");
+    let original_bytes = std::fs::read(&raw_path).expect("original reads");
+    // A second copy at exactly the grid size, so the derivative is 1:1 and the histogram claim is
+    // about alpha rather than about the resampler.
+    let media_path = project_path.join("assets/images/transparent-384.png");
+    let original = scaled_fixture("alpha-64.png", 384);
+    original.save(&media_path).expect("scaled source writes");
+
+    // Hop 1 — the raw asset stream (download, <img src>, the editor's "open"). A byte stream, so
+    // the whole file must come back unchanged, chunk framing included.
+    let (status, _, served) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/transparent.png"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(served, original_bytes, "the asset route rewrote the file");
+
+    // Hop 2 — the `?thumbnail=384` derivative behind every grid tile and result card. The source
+    // is exactly 384 square, so `thumbnail` is 1:1 and the histogram must match exactly.
+    let (status, headers, thumbnail) = request_raw(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/files/assets/images/transparent-384.png?thumbnail=384"
+        ),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    let decoded = image::load_from_memory(&thumbnail).expect("thumbnail decodes");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the grid thumbnailer dropped the alpha channel"
+    );
+    assert_eq!(
+        alpha_histogram(&decoded.to_rgba8()),
+        alpha_histogram(&original),
+        "the thumbnail's alpha histogram differs from the source's"
+    );
+
+    // Hop 3 — the cached derivative, read as a FILE rather than as a second identical response.
+    // Asserting that the warm request returns the same bytes as the cold one says nothing about
+    // alpha: both would be equally flat. What has to be true is that the PNG sitting in the cache
+    // directory — the one every later request is served from, and the one a flattening
+    // `ensure_grid_thumbnail` would have written — still carries the channel.
+    let cached: Vec<_> =
+        std::fs::read_dir(std::path::PathBuf::from(&data_dir).join("cache/media-thumbnails/v1"))
+            .expect("thumbnail cache exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
+            .collect();
+    assert_eq!(cached.len(), 1, "expected exactly one cached derivative");
+    let on_disk = image::open(&cached[0]).expect("the cached derivative decodes");
+    assert_eq!(
+        on_disk.color(),
+        image::ColorType::Rgba8,
+        "the cached thumbnail on disk lost its alpha channel"
+    );
+    assert_eq!(
+        alpha_histogram(&on_disk.to_rgba8()),
+        alpha_histogram(&original)
+    );
+
+    let (status, _, warm) = request_raw(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/files/assets/images/transparent-384.png?thumbnail=384"
+        ),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        warm, thumbnail,
+        "the cached derivative differs from the first"
+    );
+}
+
+#[tokio::test]
+async fn a_downscaled_rgba_thumbnail_keeps_its_transparent_and_opaque_regions() {
+    // The resampling case. An exact histogram is not a claim resampling can honour, so what is
+    // asserted is the part that matters and that a flatten destroys: the channel survives, the
+    // fully transparent band is still fully transparent, the opaque band is still opaque, and the
+    // soft ramp is still soft rather than collapsed onto two values.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Large transparent render" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
+    // Nearest-neighbour blow-up so the source's alpha bands are exact multiples of the fixture's
+    // and the thumbnail is a genuine downscale rather than a copy.
+    let large = image::imageops::resize(
+        &rgba_fixture(),
+        768,
+        768,
+        image::imageops::FilterType::Nearest,
+    );
+    large
+        .save(project_path.join("assets/images/large-transparent.png"))
+        .expect("source writes");
+
+    let (status, _, thumbnail) = request_raw(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/files/assets/images/large-transparent.png?thumbnail=384"
+        ),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let decoded = image::load_from_memory(&thumbnail).expect("thumbnail decodes");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the downscaling thumbnailer dropped the alpha channel"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!(decoded.dimensions(), (384, 384));
+    let histogram = alpha_histogram(&decoded);
+    assert!(
+        histogram.get(&0).copied().unwrap_or(0) > 0,
+        "no fully transparent pixel survived the downscale"
+    );
+    assert!(
+        histogram.get(&255).copied().unwrap_or(0) > 0,
+        "no fully opaque pixel survived the downscale"
+    );
+    assert!(
+        histogram.len() >= 8,
+        "the soft edge collapsed to {} alpha values",
+        histogram.len()
+    );
+    // The left column is inside the fully transparent band at every scale.
+    assert_eq!(decoded.get_pixel(1, 1).0[3], 0);
+    // The right column is inside the fully opaque band at every scale.
+    assert_eq!(decoded.get_pixel(382, 1).0[3], 255);
+}
+
+#[tokio::test]
+async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
+    // The control. The same image content with no alpha channel must come back as RGB — the
+    // thumbnailer must not start emitting RGBA for every asset in the library.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Opaque render" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
+    std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
+    let raw_path = project_path.join("assets/images/opaque.png");
+    std::fs::copy(alpha_fixture_dir().join("opaque-rgb-64.png"), &raw_path)
+        .expect("fixture copies");
+    let original_bytes = std::fs::read(&raw_path).expect("original reads");
+    // Same 1:1 sizing as the RGBA test, and RGB on disk rather than an RGBA buffer with a full
+    // alpha channel — the point is that the source has no channel to keep.
+    let media_path = project_path.join("assets/images/opaque-384.png");
+    let source =
+        image::DynamicImage::ImageRgba8(scaled_fixture("opaque-rgb-64.png", 384)).to_rgb8();
+    source.save(&media_path).expect("scaled source writes");
+
+    let (status, _, served) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/opaque.png"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(served, original_bytes);
+
+    let (status, _, thumbnail) = request_raw(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/opaque-384.png?thumbnail=384"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let decoded = image::load_from_memory(&thumbnail).expect("thumbnail decodes");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgb8,
+        "an opaque RGB asset grew an alpha channel"
+    );
+    assert_eq!(decoded.to_rgb8().as_raw(), source.as_raw());
+}

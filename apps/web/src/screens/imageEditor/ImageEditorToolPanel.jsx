@@ -1,6 +1,9 @@
 import React from "react";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
 import { assetDisplayUrl } from "../../components/assetMedia.jsx";
+// sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
+// payload builder and the tests all agree on what "reference 2" means.
+import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
 
 let renderObserverForTests = null;
 
@@ -42,7 +45,7 @@ function samePanelProps(previous, next) {
 }
 
 export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, MAX_EDIT_REFERENCES, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
+  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
   const renderPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -316,12 +319,43 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
         {multiRefCapable ? (
           <div className="ie-section">
             <div className="ie-sec-title">Reference images</div>
+            {/* sc-24113 — the reference list is ORDERED, and the order is semantic. The engine's
+                template numbers the images (<image1> …) and its block-causal attention makes each
+                one visible only to what follows, so swapping two references is a different render.
+                Two consequences are visible here:
+
+                  * every reference carries its 1-based ordinal, because the prompt conventions for
+                    this family name images directly ("use the second image as a mask") and a user
+                    who cannot see which one is second cannot write that prompt;
+                  * the arrows move a reference, because the only way to reorder before this was to
+                    remove everything and re-add it in the right order. */}
             <div className="ie-refs">
-              {refAssetIds.map((id) => {
+              {refAssetIds.map((id, index) => {
                 const asset = imageAssets.find((item) => item.id === id);
                 return (
                   <div className="ie-ref" key={id}>
                     {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
+                    <span className="ie-ref-ordinal" title="References are sent in this order">
+                      {referenceOrdinalLabel(index)}
+                    </span>
+                    <button
+                      aria-label={`Move ${referenceOrdinalLabel(index)} earlier`}
+                      className="ie-ref-move"
+                      disabled={index === 0}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index - 1))}
+                      type="button"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      aria-label={`Move ${referenceOrdinalLabel(index)} later`}
+                      className="ie-ref-move"
+                      disabled={index === refAssetIds.length - 1}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index + 1))}
+                      type="button"
+                    >
+                      ›
+                    </button>
                     <button
                       aria-label="Remove reference"
                       className="ie-ref-remove"
@@ -335,7 +369,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
               })}
               <button
                 className="ie-ref-add"
-                disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
+                disabled={refAssetIds.length >= maxEditReferences - 1}
                 onClick={() => setRefPickerOpen(true)}
                 title="Condition the edit on reference image(s)"
                 type="button"

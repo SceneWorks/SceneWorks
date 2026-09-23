@@ -57,11 +57,23 @@ where
     let encode_tmp = tmp_path.clone();
     let workflow = spec.workflow.take();
     tokio::task::spawn_blocking(move || match workflow {
-        // The embed lane (sc-15948). `write_workflow_chunk` encodes RGB8, which is what the upscale
-        // lane already hands in (`DynamicImage::ImageRgb8`), so this is a move rather than a
-        // conversion. The grayscale mask lane passes `None` and keeps its L8 encoding untouched.
-        Some(share) => write_workflow_chunk(&image.into_rgb8(), &encode_tmp, Some(&share))
-            .map_err(|error| WorkerError::Io(std::io::Error::other(error))),
+        // The embed lane (sc-15948). The conversion follows the buffer the caller produced rather
+        // than forcing one: the upscale lane hands in `DynamicImage::ImageRgb8`, so `into_rgb8()`
+        // is still a move and its files are byte-identical, while an alpha-carrying render
+        // (sc-24111, Qwen Image 2.1's native transparency) is written as RGBA instead of being
+        // silently flattened against whatever RGB sat under the transparent pixels.
+        //
+        // Keyed on the DECLARED colour type, not on whether any pixel is actually transparent —
+        // see `workflow_png::WorkflowImage`. The `None` arm below has always preserved alpha
+        // (`DynamicImage::save_with_format` writes the variant it holds), so before this the two
+        // arms of one function disagreed about the channel count. The grayscale mask lane passes
+        // `None` and keeps its L8 encoding untouched.
+        Some(share) => if image.color().has_alpha() {
+            write_workflow_chunk(&image.into_rgba8(), &encode_tmp, Some(&share))
+        } else {
+            write_workflow_chunk(&image.into_rgb8(), &encode_tmp, Some(&share))
+        }
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error))),
         None => image
             .save_with_format(&encode_tmp, image::ImageFormat::Png)
             .map_err(|error| WorkerError::Io(std::io::Error::other(error))),
@@ -272,5 +284,146 @@ mod tests {
             upscale.softness, None,
             "recording a softness on an engine with no such knob would be inventing a fact"
         );
+    }
+
+    /// An alpha-carrying render keeps its channel through the embed lane (sc-24111).
+    ///
+    /// This seam used to read `write_workflow_chunk(&image.into_rgb8(), ...)`, which meant the two
+    /// arms of one function disagreed: the `None` arm called `DynamicImage::save_with_format` and
+    /// preserved whatever variant it held, while the `Some` arm flattened unconditionally. So
+    /// turning workflow embedding ON silently cost the alpha channel — and embedding is on by
+    /// default. Both arms are driven here with the same RGBA buffer.
+    #[tokio::test]
+    async fn an_rgba_render_keeps_its_alpha_through_both_arms_of_the_write() {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("alpha")
+            .join("alpha-64.png");
+        let source = image::open(&fixture)
+            .unwrap_or_else(|error| {
+                panic!("RGBA fixture at {} decodes: {error}", fixture.display())
+            })
+            .to_rgba8();
+        let expected: std::collections::BTreeMap<u8, usize> =
+            source.pixels().fold(Default::default(), |mut map, pixel| {
+                *map.entry(pixel.0[3]).or_insert(0) += 1;
+                map
+            });
+        assert!(
+            expected.len() >= 8 && expected.contains_key(&0) && expected.contains_key(&255),
+            "the committed fixture lost its soft/transparent/opaque structure"
+        );
+
+        let payload = json!({ "sourceAssetId": "asset_source_1", "factor": 2 })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let share = crate::image_jobs::standalone_upscale_workflow_share(
+            &payload,
+            "real-esrgan",
+            2,
+            None,
+            7,
+            64,
+            64,
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
+
+        for (label, workflow) in [("embed", Some(share)), ("opt-out", None)] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let result = write_single_child_asset(
+                dir.path(),
+                DynamicImage::ImageRgba8(source.clone()),
+                SingleChildAssetSpec {
+                    filename_stem: "transparent",
+                    mode: "image_upscale",
+                    model: "real-esrgan",
+                    adapter: "real-esrgan",
+                    encode_label: "test encode",
+                    workflow,
+                },
+                |write| json!({ "mediaPath": write.media_path }),
+            )
+            .await
+            .expect("child writes");
+
+            let media = dir.path().join(
+                result["assetWrites"][0]["mediaPath"]
+                    .as_str()
+                    .expect("path"),
+            );
+            let decoded = image::open(&media).expect("the written PNG decodes");
+            assert_eq!(
+                decoded.color(),
+                image::ColorType::Rgba8,
+                "the {label} arm dropped the alpha channel"
+            );
+            let decoded = decoded.to_rgba8();
+            let actual: std::collections::BTreeMap<u8, usize> =
+                decoded.pixels().fold(Default::default(), |mut map, pixel| {
+                    *map.entry(pixel.0[3]).or_insert(0) += 1;
+                    map
+                });
+            assert_eq!(
+                actual, expected,
+                "the {label} arm changed the alpha histogram"
+            );
+            assert_eq!(
+                decoded.as_raw(),
+                source.as_raw(),
+                "the {label} arm changed the pixels"
+            );
+        }
+    }
+
+    /// The control: an RGB render must not grow a channel it never had.
+    #[tokio::test]
+    async fn an_rgb_render_is_still_written_as_rgb() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let payload = json!({ "sourceAssetId": "asset_source_1", "factor": 2 })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let share = crate::image_jobs::standalone_upscale_workflow_share(
+            &payload,
+            "real-esrgan",
+            2,
+            None,
+            7,
+            8,
+            8,
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
+        let source = image::RgbImage::from_fn(8, 8, |x, y| {
+            image::Rgb([(x * 7) as u8, (y * 11) as u8, 200])
+        });
+
+        let result = write_single_child_asset(
+            dir.path(),
+            DynamicImage::ImageRgb8(source.clone()),
+            SingleChildAssetSpec {
+                filename_stem: "opaque",
+                mode: "image_upscale",
+                model: "real-esrgan",
+                adapter: "real-esrgan",
+                encode_label: "test encode",
+                workflow: Some(share),
+            },
+            |write| json!({ "mediaPath": write.media_path }),
+        )
+        .await
+        .expect("child writes");
+
+        let media = dir.path().join(
+            result["assetWrites"][0]["mediaPath"]
+                .as_str()
+                .expect("path"),
+        );
+        let decoded = image::open(&media).expect("decodes");
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert_eq!(decoded.to_rgb8().as_raw(), source.as_raw());
     }
 }

@@ -5041,11 +5041,33 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
     // declared `defaults.resolution` in `create_image_job` (sc-12400), the same shape as the video
     // route's duration/fps/size.
+    //
+    // sc-24113 lowers the FLOOR of this shape check from 256 to 32 and nothing else. This gate runs
+    // before the model is known, so — exactly like the video route's `1..=30` duration blanket — it
+    // is a payload-sanity outer bound, not the model's envelope. It had to widen because
+    // Qwen-Image 2.1 genuinely renders from 32 px per side, which the old blanket refused outright
+    // with no model ever getting a say.
+    //
+    // Nothing is loosened for any other model: `create_image_job` immediately re-checks the
+    // resolved geometry against the model's own `limits.minDimension` / `maxDimension` /
+    // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
+    // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
+    // to any pre-existing model still 400s, just one layer down and with the model named.
     if let Some(width) = payload.width {
-        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            width,
+            "width",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if let Some(height) = payload.height {
-        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            height,
+            "height",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if payload.upscale.enabled {
         if ![2, 4].contains(&payload.upscale.factor) {
@@ -5572,6 +5594,21 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 
+/// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
+///
+/// 32, not 256, because Qwen-Image 2.1's envelope really starts at 32 px per side and this check
+/// runs with no model in hand. It is the outer bound only — see
+/// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
+const SHAPE_MIN_IMAGE_DIMENSION: u32 = 32;
+
+/// The per-model fallback floor applied in `create_image_job` to any image model that declares no
+/// `limits.minDimension` (sc-24113).
+///
+/// This is the 256 that `validate_image_job` used to enforce for everything, moved down one layer
+/// so that widening the shape check could not loosen a single already-shipped model: a request
+/// below 256 to a model with no declared floor is refused exactly as before, now naming the model.
+const HISTORICAL_MIN_IMAGE_DIMENSION: u32 = 256;
+
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
 const MAX_VIDEO_DIMENSION: u32 = 1920;
@@ -5692,9 +5729,23 @@ pub(crate) fn validate_video_reference_asset_ids_payload(
 }
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
-    if !(256..=max).contains(&value) {
+    validate_dimension_in(value, field, 256, max)
+}
+
+/// [`validate_dimension`] with an explicit floor (sc-24113).
+///
+/// Every caller but the image-generation shape check passes the historical 256 through the wrapper
+/// above and is byte-identical. The image route passes [`SHAPE_MIN_IMAGE_DIMENSION`] because its
+/// real floor is per-model and is applied once the manifest entry is resolved.
+fn validate_dimension_in(
+    value: u32,
+    field: &'static str,
+    min: u32,
+    max: u32,
+) -> Result<(), ApiError> {
+    if !(min..=max).contains(&value) {
         return Err(ApiError::bad_request(format!(
-            "{field} must be between 256 and {max}"
+            "{field} must be between {min} and {max}"
         )));
     }
     Ok(())

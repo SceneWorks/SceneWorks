@@ -87,6 +87,7 @@ import kolorsKolorsModelLicense from "../../../desktop/licenses/kolors/Kolors-Mo
 import krea2NOTICE from "../../../desktop/licenses/krea-2/NOTICE.txt?url&no-inline";
 import lensMIT from "../../../desktop/licenses/lens/MIT.txt?url&no-inline";
 import qwenImageApache20 from "../../../desktop/licenses/qwen-image/Apache-2.0.txt?url&no-inline";
+import qwenImage21ResearchLicense from "../../../desktop/licenses/qwen-image-2-1/Qwen-RESEARCH-LICENSE-AGREEMENT.txt?url&no-inline";
 import realvisxlCreativeMLOpenRAILM from "../../../desktop/licenses/realvisxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
 import sanaNVIDIAOpenModelLicense from "../../../desktop/licenses/sana/NVIDIA-Open-Model-License.txt?url&no-inline";
 import sd35StabilityAICommunityLicense from "../../../desktop/licenses/sd3.5/Stability-AI-Community-License.txt?url&no-inline";
@@ -187,6 +188,7 @@ const DOCUMENT_URL = {
   "krea-2-notice": krea2NOTICE,
   "lens-mit": lensMIT,
   "qwen-image-apache": qwenImageApache20,
+  "qwen-image-2-1-research": qwenImage21ResearchLicense,
   "realvisxl-creativeml-open-rail-m": realvisxlCreativeMLOpenRAILM,
   "sana-nvidia-open-model-license": sanaNVIDIAOpenModelLicense,
   "sd3.5-stability-ai-community-license": sd35StabilityAICommunityLicense,
@@ -227,3 +229,26 @@ export const bundledLicenses = (manifest.components ?? []).map((component) => ({
 }));
 
 export const licensesIntro = manifest.description ?? "";
+
+/**
+ * The bundled licence component that PRIMARILY attributes a catalog model, or null.
+ *
+ * Matches on `models[]` — the exclusive primary-attribution field `check-license-coverage` uses —
+ * and deliberately NOT on `appliesToModels[]`, which lists products a component's terms merely
+ * COMPOSE with (the Wan 2.1 alternate decoder applies to five models it does not license). Used to
+ * label a model's persistent licence row with the licence's real name (sc-24108); the catalog entry
+ * carries `licenseUrl`/`licenseNotice` but no human licence name of its own.
+ *
+ * @param {string} modelId
+ * @param {Array<object>} [components]
+ */
+export function licenseComponentForModel(modelId, components = bundledLicenses) {
+  if (!modelId) {
+    return null;
+  }
+  return (
+    (components ?? []).find(
+      (component) => Array.isArray(component?.models) && component.models.includes(modelId),
+    ) ?? null
+  );
+}

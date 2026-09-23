@@ -1,8 +1,8 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
-    instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible, sdxl_mlx_lane,
-    video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_image_2_1_mlx_eligible,
+    qwen_mlx_eligible, realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible,
+    sdxl_mlx_lane, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
     z_image_mlx_eligible, JobSnapshot, MlxSdxlLane, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS,
     MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
@@ -488,6 +488,256 @@ fn qwen_edit_reference_falls_back_but_pose_and_lycoris_route_mlx() {
     assert!(qwen_mlx_eligible(&object(json!({
         "loras": [{ "networkType": "lycoris" }]
     }))));
+}
+
+/// sc-24113 (was sc-24108): the MLX worker must CLAIM a Qwen-Image 2.1 job in every shape the
+/// engine can actually serve — plain text-to-image AND the ordered-reference edit — and must refuse
+/// only the carriers it has no shape for.
+///
+/// The original assertion was "2.1 declares no conditioning, refuse everything", which was true for
+/// exactly as long as that was. sc-24110 gave the engine `ConditioningKind::Reference` AND
+/// `MultiReference`, and upstream ships ONE pipeline where editing is the same call with 1–10
+/// ordered condition images. So references now route, and what stays refused is narrower and has
+/// its own reason per carrier (mask: no mask tensor exists; pose/control: no strict-control tier).
+///
+/// Both halves still matter for the reason the sc-24108 version gave: an over-narrow predicate
+/// leaves a job nothing can claim and it sits "Waiting for an available worker" forever (the Anima
+/// defect, sc-10523) — which is why `image_request_mlx_eligible` is exercised through the public
+/// entry point here, not just the predicate.
+#[test]
+fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
+    assert!(MLX_ROUTED_MODELS.contains(&"qwen_image_2_1"));
+
+    // A bare txt2img job, an explicit mode, and the legacy mode spelling all claim.
+    for payload in [
+        json!({}),
+        json!({ "mode": "text_to_image" }),
+        json!({ "mode": "image_generation" }),
+        json!({ "prompt": "a lighthouse", "width": 2048, "height": 2048, "steps": 40, "seed": 7 }),
+        json!({ "negativePrompt": "watermark", "advanced": { "guidanceScale": 4.0 } }),
+    ] {
+        assert!(
+            image_request_mlx_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the MLX worker must claim a plain 2.1 txt2img job: {payload}"
+        );
+    }
+
+    // The CONDITIONED shapes claim through the same public entry point: the Image Editor's working
+    // image (`sourceAssetId`), the single-reference flows (`referenceAssetId`), the ordered 1-10
+    // list (`referenceAssetIds`) that is the real multi-reference surface, and a mask — which on
+    // this model is an ORDINARY ordered reference the prompt names, not a mask tensor (sc-24110).
+    for payload in [
+        json!({ "sourceAssetId": "src_1" }),
+        json!({ "referenceAssetId": "ref_1" }),
+        json!({ "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "maskAssetId": "mask_1" }),
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10"] }),
+        json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
+    ] {
+        assert!(
+            image_request_mlx_eligible("qwen_image_2_1", &object(payload.clone())),
+            "2.1 takes ordered references since sc-24110 and must claim: {payload}"
+        );
+    }
+
+    // What is still refused, and it is a short list with a reason each.
+    //
+    // NOT the mask carrier — sc-24113 refused it here and sc-24110 removed that refusal. The
+    // reasoning behind it was right and the conclusion was one step too far: 2.1 has no mask
+    // TENSOR, which is why `Conditioning::Mask` must never be SENT, but a mask IMAGE is an
+    // ordinary ordered reference the prompt names ("use the second image as a mask") — the
+    // engine's own refusal text says exactly that. The carrier is admitted for DIRECT API CALLERS
+    // AND WORKFLOW REPLAY; the Image Editor gates its own mask tool on `image_inpaint`, which this
+    // model does not declare, so no UI path produces one here. Dropping it at the door would make
+    // a legal API request unroutable. The never-send-a-Mask half is enforced where the
+    // conditioning list is BUILT, in the worker.
+    //
+    // What remains: there is no strict-control tier for pose/ControlNet to reach, and a malformed
+    // carrier fails closed rather than being read as "not supplied".
+    for payload in [
+        json!({ "advanced": { "poses": [{ "id": "p1" }] } }),
+        json!({ "controls": [{ "kind": "canny" }] }),
+        json!({ "controlnets": [{ "kind": "depth" }] }),
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "src_1",
+            "advanced": { "poses": [{ "id": "p1" }] }
+        }),
+        json!({ "mode": "edit_image", "sourceAssetId": 7 }),
+        json!({ "mode": "edit_image", "referenceAssetIds": "ref_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", ""] }),
+    ] {
+        assert!(
+            !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "2.1 has no shape for this carrier and must refuse: {payload}"
+        );
+    }
+
+    // An adapter is NOT a routing refusal (see the predicate's doc comment): the worker claims the
+    // job and the engine returns a typed Unsupported, which is an actionable failure rather than a
+    // job nothing can pick up.
+    assert!(qwen_image_2_1_mlx_eligible(&object(json!({
+        "loras": [{ "networkType": "lora" }]
+    }))));
+
+    // The 2512 entry is untouched by all of this — it still takes its strict-pose tier.
+    assert!(qwen_mlx_eligible(&object(json!({
+        "advanced": { "poses": [{ "id": "p1" }] }
+    }))));
+}
+
+/// sc-24110: the reference / local-editing half of the 2.1 contract.
+///
+/// Upstream ships ONE pipeline — text-to-image is the call with no condition images, and edit /
+/// multi-reference / local editing are the SAME call with an ordered list of 1..=10. So this pins
+/// the two things the routing layer actually decides: **which shapes claim**, and **what the
+/// ordered list is**. The order is semantic (the prompt template numbers the images, the size
+/// fallback reads the last one, attention is block-causal), so a reordering here is a different
+/// render, not a cosmetic difference — which is why it is asserted as a sequence rather than a set.
+#[test]
+fn qwen_image_2_1_routes_an_ordered_reference_edit_to_mlx() {
+    // Every conditioned shape the Image Editor and Character Studio produce claims.
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1"] }),
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "mode": "character_image", "referenceAssetId": "ref_1" }),
+        // A MASK is an ordinary ordered reference on this model, never `Conditioning::Mask` —
+        // 2.1 has no mask tensor and performs no inpainting. Claiming it is the whole point.
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+    ] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "the MLX worker must claim an ordered-reference 2.1 edit: {payload}"
+        );
+    }
+
+    // The CEILING is deliberately NOT a routing verdict, and neither is "a conditioned mode with
+    // nothing to condition on". Both are enqueue-time 400s read from `limits.maxReferenceAssets`,
+    // so exactly one place knows the number. What routing must guarantee is that a job which
+    // already EXISTS stays claimable: an over-cap job refused here would sit "Waiting for an
+    // available worker" forever (the Anima defect, sc-10523) instead of failing out loud in the
+    // worker with the engine's own wording.
+    let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("ref_{i}")).collect() };
+    for count in [1usize, 10, 11, 25] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(
+                json!({ "mode": "edit_image", "referenceAssetIds": ids(count) })
+            )),
+            "{count} well-formed references must stay CLAIMABLE — the cap is the enqueue gate's"
+        );
+    }
+    for payload in [
+        json!({ "mode": "edit_image" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": [] }),
+    ] {
+        assert!(
+            qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "an empty ordered list is the text-to-image call, which this worker serves: {payload}"
+        );
+    }
+
+    // A malformed carrier fails CLOSED — never silently read as "not supplied".
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": 7 }),
+        json!({ "mode": "edit_image", "referenceAssetIds": "ref_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", ""] }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["ref_1", 7] }),
+    ] {
+        assert!(
+            !qwen_image_2_1_mlx_eligible(&object(payload.clone())),
+            "a malformed carrier must fail closed: {payload}"
+        );
+    }
+}
+
+/// The ORDER of the flattened conditioning list, pinned on its own because it is a semantic claim
+/// about the render rather than a routing verdict: upstream numbers the images in the prompt
+/// template (`<image1>…`), reads the LAST one for its size fallback, and attends block-causally, so
+/// swapping two entries is a DIFFERENT request. Both backends and the worker's payload builder read
+/// this one function, so this is the single place the order is stated.
+#[test]
+fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
+    use crate::jobs_store::routing::qwen_image_2_1_reference_ids;
+
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "src",
+            "maskAssetId": "mask",
+            "referenceAssetIds": ["a", "b", "c"],
+            "referenceAssetId": "single"
+        }))),
+        Some(vec![
+            "src".to_owned(),
+            "mask".to_owned(),
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+            "single".to_owned(),
+        ]),
+    );
+
+    // DEDUPED by asset id, first occurrence winning — and this is correctness, not tidiness. The
+    // web's `editReferenceIds` leads `referenceAssetIds` with the working image while
+    // `buildEditJobBody` ALSO sets `sourceAssetId`, so the ordinary Image-Editor payload names the
+    // same asset twice. On this engine every entry costs one of the model's slots and gets its own
+    // number in the prompt template, so a duplicate silently burns a slot AND renumbers every
+    // reference after it — and it inflates the count the cap is measured against.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "A",
+            "referenceAssetIds": ["A", "B"]
+        }))),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+        "the duplicated working image must occupy ONE slot, at its first position"
+    );
+    // Across every carrier, not just source-vs-plural.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "A",
+            "maskAssetId": "A",
+            "referenceAssetIds": ["B", "A", "B"],
+            "referenceAssetId": "B"
+        }))),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+    );
+    // Distinct ids are never collapsed — the dedupe must not be a `sort`/`unique` in disguise.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "referenceAssetIds": ["b", "a", "c", "a"]
+        }))),
+        Some(vec!["b".to_owned(), "a".to_owned(), "c".to_owned()]),
+    );
+
+    // Swapping two submitted references changes the list — the property the worker payload test
+    // and the API order test both rest on.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "referenceAssetIds": ["b", "a"] }))),
+        Some(vec!["b".to_owned(), "a".to_owned()]),
+    );
+
+    // Absent / null / blank carriers are "not supplied"; wrong-typed ones are malformed.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": Value::Null,
+            "maskAssetId": "   ",
+            "referenceAssetIds": ["only"]
+        }))),
+        Some(vec!["only".to_owned()]),
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "sourceAssetId": ["src"] }))),
+        None
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({ "referenceAssetIds": [""] }))),
+        None
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({}))),
+        Some(Vec::<String>::new())
+    );
 }
 
 #[test]
@@ -1787,31 +2037,12 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
     // entry-less candle model cannot join it by accident.
     const NO_CATALOG_ENTRY: &[&str] = &["mochi_1"];
 
-    // Primary (non-co-requisite) download rows that survive `retain_downloads_for_os` for `os`: a
-    // row with no `platforms` is platform-agnostic and always applies.
-    fn primary_rows_on(model: &Value, os: &str) -> usize {
-        model["downloads"]
-            .as_array()
-            .map(|downloads| {
-                downloads
-                    .iter()
-                    .filter(|download| download["coRequisite"].as_bool() != Some(true))
-                    .filter(|download| match download["platforms"].as_array() {
-                        Some(platforms) => platforms.iter().any(|value| value.as_str() == Some(os)),
-                        None => true,
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    }
+    // `primary_rows_on` + `builtin_models` moved to the parent test module (sc-24109) so the image
+    // twin `candle_routed_image_models_have_an_installable_off_mac_download` asks this exact
+    // question of the exact same bytes, rather than growing a second private copy of the parse.
+    use super::{builtin_models, primary_rows_on};
 
-    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
-        "../../../../../config/manifests/builtin.models.jsonc"
-    )))
-    .expect("builtin.models.jsonc parses");
-    let models = manifest["models"]
-        .as_array()
-        .expect("builtin.models.jsonc has a models array");
+    let models = builtin_models();
     let entry = |id: &str| models.iter().find(|model| model["id"].as_str() == Some(id));
 
     let mut without_entry: Vec<&str> = Vec::new();

@@ -1931,7 +1931,10 @@ fn conditioning_payload(
             job_type = kind;
             payload = character;
         }
-        "reference" => {
+        // `referenceRgba` (sc-24111 S4, Qwen-Image 2.1) is not a different SceneWorks request: the
+        // alpha is a property of the referenced ASSET, and the worker picks the carrier from the
+        // decoded image. So its canonical probe is the ordinary reference request.
+        "reference" | "referenceRgba" => {
             if job_type != JobType::ImageEdit {
                 payload["referenceAssetId"] = Value::String("probe".to_owned());
             }
@@ -2532,6 +2535,39 @@ fn utility_model_cells(
                 }),
             ))
         }
+        // The two optional Qwen-Image 2.1 prompt rewriters (sc-24113, epic 24107). Both ride the
+        // SAME production prompt-refine TextLlm seam the film planner above does — `model` is the
+        // rewriter checkpoint, `modelId` is the target image model — which is the point: no second
+        // LLM runtime was built for them.
+        //
+        // The two probes differ in exactly the one field that selects between them in production.
+        // The T2I probe carries no reference image; the I2I probe carries one, because "which
+        // rewriter applies" is decided by the REQUEST (references present ⇒ editing) and never by a
+        // user-facing picker. Probing both with the same payload would leave that binding untested
+        // in the matrix.
+        "qwen_image_2_1_pe_t2i" => Some((
+            "prompt_refine:qwen_image_rewrite",
+            JobType::PromptRefine,
+            json!({
+                "prompt": "probe",
+                "task": "qwen_image_rewrite",
+                "workflow": "image",
+                "model": "Qwen/Qwen-Image-2.1-PE-T2I",
+                "modelId": "qwen_image_2_1",
+            }),
+        )),
+        "qwen_image_2_1_pe_i2i" => Some((
+            "prompt_refine:qwen_image_rewrite",
+            JobType::PromptRefine,
+            json!({
+                "prompt": "probe",
+                "task": "qwen_image_rewrite",
+                "workflow": "image",
+                "model": "Qwen/Qwen-Image-2.1-PE-I2I",
+                "modelId": "qwen_image_2_1",
+                "imagePaths": ["probe"],
+            }),
+        )),
         "real_esrgan" => Some((
             "engine:real-esrgan",
             JobType::ImageUpscale,

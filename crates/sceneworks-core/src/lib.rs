@@ -1,3 +1,4 @@
+pub mod admission_geometry;
 pub mod angle_kps;
 pub mod app_paths;
 pub mod asset_index;

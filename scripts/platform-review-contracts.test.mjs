@@ -3373,17 +3373,17 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
   );
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 5\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 6\] = \[([\s\S]*?)\n\];/.exec(adapter);
   assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
   const consts = new Map(
-    [...adapter.matchAll(/\bconst ([A-Z_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
+    [...adapter.matchAll(/\bconst ([A-Z0-9_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
   );
-  const members = [...table[1].matchAll(/provider_id: ([A-Z_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
+  const members = [...table[1].matchAll(/provider_id: ([A-Z0-9_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
     .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
   assert.deepEqual(
     members.map((member) => member.providerId),
-    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"],
-    "the five turnkey members, in table order",
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1"],
+    "the six turnkey members, in table order",
   );
   for (const member of members) {
     const entry = manifest.models.find((model) => model.id === member.providerId);
@@ -3401,7 +3401,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     );
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
-  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true"]);
 
   // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
   // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
@@ -3411,7 +3411,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
   // where it runs on the host that writes the arm and the mutation is killable before a push.
   const foldArm =
-    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, Some\(quant\)\) => \{([\s\S]*?)\n        \}/
+    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
       .exec(adapter);
   assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
   assert.match(
@@ -3422,7 +3422,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
   assert.match(
     adapter,
-    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, None\) => spec,/,
+    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*None,\s*\) => spec,/,
     "the dense turnkey tier must bind no quant",
   );
   // The spec builder must be the pure function the Rust test can call — if the fold moves back

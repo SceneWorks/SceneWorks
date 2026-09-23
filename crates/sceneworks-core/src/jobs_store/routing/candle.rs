@@ -11,8 +11,8 @@ use crate::jobs_store::routing::catalog::{
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, pulid_flux_mlx_eligible, upscale_job_is_mlx_eligible,
-    video_upscale_job_is_mlx_eligible,
+    instantid_mlx_eligible, pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible,
+    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -71,6 +71,11 @@ pub(crate) enum CandleImageLane {
     IdeogramImg2Img,
     BooguEdit,
     MageEdit,
+    /// Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
+    /// images. A bespoke lane rather than a widening of the generic txt2img gate because that gate
+    /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
+    /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
+    QwenImage21Edit,
     BooguImg2Img,
     KreaEdit,
     BerniniEdit,
@@ -201,6 +206,16 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "mage_flow_edit_turbo",
         ]),
         shape: mage_edit_candle_eligible,
+    },
+    // Qwen-Image 2.1 reference / local editing (sc-24110). The Candle port registers the SAME
+    // engine id as the MLX one and declares the SAME `Reference` + `MultiReference` conditioning,
+    // so this lane's shape predicate is literally the MLX one — one request contract, one gate, two
+    // backends. Placed with the other registry editors, above the generic txt2img fall-through,
+    // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
+    CandleImageRoute {
+        lane: CandleImageLane::QwenImage21Edit,
+        models: ModelMatch::Any(&["qwen_image_2_1"]),
+        shape: qwen_image_2_1_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguImg2Img,
@@ -1720,6 +1735,30 @@ pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         .get("sourceAssetId")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Qwen-Image 2.1 reference / local editing (sc-24110) on the Candle lane: a conditioned request
+/// carrying 1..=10 ordered condition images.
+///
+/// Deliberately DELEGATES to [`qwen_image_2_1_mlx_eligible`] instead of restating it. The Candle
+/// port registers the same engine id, the same `Reference` + `ReferenceRgba` + `MultiReference`
+/// conditioning, the same 10-image cap and the same refusal of pose/control carriers — there is
+/// exactly ONE request contract for this model, so a second copy of the predicate could only ever
+/// drift from it. The only thing this wrapper adds is the CONDITIONED narrowing: the plain
+/// text-to-image arm of that predicate (an empty ordered list) belongs to the generic candle
+/// txt2img gate, which already claims 2.1 t2i off-Mac and applies `CANDLE_IMAGE_CHECKS`'s LoRA and
+/// quant-tier refusals to it.
+///
+/// The narrowing is on the ordered REFERENCE LIST, never on `mode` — exactly like the MLX predicate
+/// and the worker's `is_qwen_image_2_1_edit`. Upstream has no mode axis: a non-empty list IS the
+/// edit call. A mode-keyed narrowing (what this used to be) left a `text_to_image` request carrying
+/// a `referenceAssetId` — the manifest's `image_to_image` operation — unclaimable off-Mac while the
+/// Mac claimed it, which the backend capability matrix at the terminal pin surfaced as three
+/// MLX-only cells (`image_to_image`, `reference`, `referenceRgba`) with no exception behind them.
+pub(crate) fn qwen_image_2_1_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    qwen_image_2_1_mlx_eligible(payload)
+        && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
+            .is_some_and(|ids| !ids.is_empty())
 }
 
 /// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic

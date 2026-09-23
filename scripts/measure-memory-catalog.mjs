@@ -1242,6 +1242,18 @@ export const PROVIDER_FAMILIES = Object.freeze({
     env: "IDEOGRAM", repo: "SceneWorks/ideogram-4-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "IDEOGRAM_BF16", repo: "SceneWorks/ideogram-4" } },
   },
+  // Qwen-Image 2.1 (sc-24112): the SPLIT-REPO turnkey, Ideogram's shape with the halves swapped.
+  // `q8`/`q4` are the `q8/`/`q4/` subdirs of the SceneWorks re-host, and `bf16` IS the released
+  // upstream `Qwen/Qwen-Image-2.1` snapshot at its OWN root (the converter refuses to emit a `bf16/`
+  // copy) — hence `layout: "flat"` on that tier alone. Both lanes load the same three roots (the
+  // Candle port binds the MLX-packed tiers through `AdaptLinear::linear_detect_gs`), mirroring the
+  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are `pendingArtifact` until the
+  // epic's terminal upload pins them, which `resolveArtifactRoot` reports rather than probing.
+  qwen_image_2_1: {
+    env: "QWEN_IMAGE_2_1", repo: "SceneWorks/qwen-image-2-1-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat" } },
+    requiredTensorComponents: ["text_encoder", "transformer", "vae"],
+  },
   // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
   // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
   // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
@@ -1741,6 +1753,17 @@ export async function resolveArtifactRoot(models, modelId, tier, artifact, hubs)
   const suffix = artifact.layout === "flat" ? [] : [tier];
   const label = suffix.length > 0 ? `/${tier}` : "";
   const declared = tierVariantDownload(models, modelId, artifact.repo, tier);
+  // sc-24112: a `pendingArtifact` row carries the null-SHA placeholder for an artifact that is not
+  // on the Hub yet (its upload is the epic's terminal story), so there is no snapshot to probe and
+  // none to fetch. `weights_missing` naming the pending row, never a probe of `@00000000`.
+  if (declared?.pendingArtifact === true) {
+    return {
+      root: null,
+      revision: null,
+      expected: snapshotPath(hubs[0], artifact.repo, "<pending>", ...suffix),
+      reason: `${artifact.repo}${label} is a pendingArtifact download (not yet published), so ${modelId}:${tier} has no root to bind`,
+    };
+  }
   const revision = tierDownloadRevision(models, modelId, artifact.repo, tier, declared);
   if (revision) {
     const root = await firstExistingDirectory(
@@ -2512,8 +2535,15 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
     }
     // One target per (repo, revision): a family whose co-requisites sit at a different revision
     // from its tier weights is two fetches, never one fetch at whichever revision sorted first.
+    // sc-24112: a `pendingArtifact` row's null-SHA placeholder names no Hub commit, so it is
+    // unfetchable — never a `--revision 0000…` download.
+    if (rows.every((download) => download.pendingArtifact === true)) {
+      unfetchable.push(`${repo} ${row.modelId}:${row.tier} is a pendingArtifact download and is not published yet`);
+      continue;
+    }
     const byRevision = new Map();
     for (const download of rows) {
+      if (download.pendingArtifact === true) continue;
       if (!/^[0-9a-f]{40}$/.test(download.revision ?? "")) continue;
       const entry = byRevision.get(download.revision) ?? { include: [], estimatedBytes: 0, whole: false };
       if ((download.files ?? []).length === 0) entry.whole = true;

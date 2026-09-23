@@ -567,6 +567,54 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
+    // sc-24112 — Qwen-Image 2.1, registered on BOTH lanes with the SAME coordinates. That symmetry
+    // is the declaration, not a shortcut: after inference #1007 both providers load the same packed
+    // artefacts, declare the same `supported_quants: [Q4, Q8]` (plus the dense bf16 snapshot), and
+    // publish the same `Resident` / `StagedResidency` / `BoundedDecode` ladder off one derived
+    // memory model. A per-lane divergence here would be a claim neither engine makes.
+    //
+    // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
+    // tier either provider can serve.
+    //
+    // `TEXT_ONLY`, and this is the one field that is NOT simply the catalog's answer. The entry's
+    // `capabilities` gained `edit_image` / `image_to_image` with sc-24110, so the REQUEST route
+    // serves edits — but the provider's own `memory_strategy::safety_check` still opens with
+    // `if !matches!(context.mode, MemoryMode::TextToImage) { return Err(...) }`, so the MEMORY
+    // route admits text-to-image alone. Verified against the pinned-at-#1007 descriptor: its
+    // `memoryRouteWitnesses` for this provider are exactly three — one per tier, `text_to_image` /
+    // `none` / `plain`. Declaring an edit coordinate here would advertise a memory route the
+    // provider refuses at `safety_check`, which is a worse failure than the consumer fallback an
+    // unmatched edit gets today. Widen this the moment that gate does. Re-read against the
+    // terminal pin (inference b12c632b4): both providers' `safety_check` still admit
+    // `MemoryMode::TextToImage` alone, and the dumped `memoryRouteWitnesses` are still exactly the
+    // three `text_to_image` / `none` / `plain` rows, one per tier.
+    //
+    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
+    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
+    // reachable at all — it is absent rather than exempted.
+    //
+    // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
+    // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
+    // declaration-owned and was never in the pre-declaration shaper, so removing the declaration
+    // must make it unreachable rather than fall back to legacy shaping.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image_edit",

@@ -132,6 +132,10 @@ export const MODEL_STORIES = {
   z_image: { mlx: 15457, candle: 16170 },
   z_image_edit: { mlx: 15458, candle: 15862 },
   qwen_image: { mlx: 15459, candle: 15865 },
+  // Qwen-Image 2.1 (epic 24107): one engine id on two backends, each owned by the story that
+  // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
+  // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
+  qwen_image_2_1: { mlx: 24108, candle: 24109 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },

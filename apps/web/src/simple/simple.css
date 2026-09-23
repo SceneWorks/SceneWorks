@@ -721,6 +721,84 @@
   gap: 6px;
 }
 
+/* A boolean control in the Simple settings bar (sc-24113). Simple had no checkbox pattern — every
+   control until now was a select, a chip row or a tile — so this is the first one, kept to the
+   same 34px row height as `.su-chip` so it lines up with its neighbours in the bar. */
+/* The Advanced disclosure (sc-24113). Simple's contract is a reduced SURFACE, so the controls a
+   model declares live behind one fold that is closed by default rather than lengthening the
+   settings bar for everyone. */
+.su-advanced {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: var(--surface);
+}
+
+.su-advanced-summary {
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.su-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.su-advanced-summary::after {
+  content: "\203A";
+  float: right;
+  transform: rotate(90deg);
+  opacity: 0.6;
+}
+
+.su-advanced[open] .su-advanced-summary::after {
+  transform: rotate(-90deg);
+}
+
+.su-advanced-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 0 14px;
+}
+
+.su-free-size-row {
+  display: flex;
+  gap: 8px;
+}
+
+.su-free-size-row .su-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.su-error {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--danger, #c0392b);
+}
+
+.su-checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.su-checkline input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--accent, currentColor);
+  cursor: pointer;
+}
+
 .su-chip {
   flex: 1;
   min-width: 0;
@@ -2779,4 +2857,60 @@
 
 .su-root[data-bp="phone"] .su-audio-viewer {
   width: 100%;
+}
+
+/* ---------- Transparency backdrop (sc-24111) ----------
+   The Simple shell's twin of the block at the end of `../styles.css`.
+
+   It has to be restated here rather than reused because the Simple shell has its
+   own result view, its own asset grid and its own fullscreen preview, and shares
+   none of the advanced shell's class names — `.su-result img` is not
+   `.asset-tile img`. It is also loaded AFTER `styles.css` (SimpleShell imports it
+   on mount), so a block over there naming these selectors could be overridden from
+   here; keeping each shell's rule in its own file keeps the cascade obvious.
+
+   The tokens are the shared ones, so the two shells checkerboard identically.
+
+   Safe to apply unconditionally, same reasoning as the advanced shell: every
+   selector below is `object-fit: cover` except `.su-preview-stage img`, which is
+   `contain` but already sizes to its bitmap (`max-width`/`max-height` with no
+   explicit width), so it has no letterbox bars to fill either. An opaque image
+   covers the checkerboard completely and nothing changes for it.
+
+   `<video>` is deliberately excluded — no video format this app plays carries
+   alpha — so `.su-result video` and `.su-preview-stage video` keep their flat
+   surface. */
+.su-result img,
+.su-asset img,
+.su-preview-stage img,
+.su-tile-ref img,
+.su-option-row img,
+.su-style-thumb img {
+  --checker-tile: 16px;
+  --checker-ink: color-mix(in srgb, var(--text) 11%, transparent);
+  background-color: var(--bg-2);
+  background-image:
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    ),
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    );
+  background-size: var(--checker-tile) var(--checker-tile);
+  background-position: 0 0, calc(var(--checker-tile) / 2) calc(var(--checker-tile) / 2);
+}
+
+/* 32–34px reference and option chips get two tiles at 16px, which reads as a
+   diagonal stripe rather than a checker. Halve it. */
+.su-tile-ref img,
+.su-option-row img {
+  --checker-tile: 8px;
 }

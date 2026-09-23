@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GENERATION_QUALITY,
@@ -19,6 +23,25 @@ import {
   INT8_CONVROT_TIER,
   NVFP4_TIER,
 } from "./quantTier.js";
+import {
+  blanketFloorGb,
+  lightestInstallableTier,
+  suggestTier,
+  tierFits,
+  tierFitsStaged,
+} from "./tierSuggestion.js";
+import { needsLabel } from "./simple/SimpleModelManager.jsx";
+
+// The SHIPPED catalog, parsed from the exact bytes the product embeds (same loader shape as
+// imageAxesParity.test.js). Used by the sc-24109 suite at the bottom so its model object is derived
+// from `builtin.models.jsonc` rather than hand-written.
+const MANIFEST_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../config/manifests/builtin.models.jsonc",
+);
+const manifestById = new Map(
+  JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")).models.map((model) => [model.id, model]),
+);
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
 // files are present (installState "installed"); every other declared tier reports "missing".
@@ -698,5 +721,289 @@ describe("defaultTierSelection — capability-aware Auto base (epic 10721 R1/R3/
     // Auto suggested q4, but the model's floor is q8 → raised to q8 (floor wins over the suggestion).
     const model = flooredConvertModel({ mlxTiers: ["q4", "q8", "bf16"], floor: "q8" });
     expect(defaultTierSelection(model, null, { defaultQuality: "auto", autoTier: "q4" })).toBe("q8");
+  });
+});
+
+// sc-24109 — Qwen Image 2.1 ships ONE bf16 artifact and has no precision tier on either backend:
+// the MLX provider advertises [Q4, Q8] and, since inference #1007, so does the Candle provider —
+// so the picker must be OPEN on both platforms. It stayed closed at sc-24109 only because the
+// catalog declared no tier at all, not because the picker was told to hide one.
+//
+// ⚠️ THE MODEL OBJECT IS DERIVED FROM THE SHIPPED MANIFEST, NOT HAND-WRITTEN. `installedTiers` /
+// `allPossibleTiers` / `shouldShowTierPicker` read only `runtimeQuantTiers`, `hasVariantMatrix` +
+// `variants`, `mlxTierStates` and `mlxTiers` — so a literal `{ id, type, installState }` object
+// asserts nothing about Qwen 2.1 at all: `{}` passes it too, and removing the `variant` rows from
+// the catalog would not red it. `projectTierShapes` below therefore rebuilds those exact fields
+// from `config/manifests/builtin.models.jsonc` the way `apply_variant_fields` /
+// `model_has_variant_matrix` / `apply_mac_and_mlx_fields` do server-side, so the catalog is what is
+// under test. The "negative control" case proves the derivation is live by running it over a
+// mutated copy of the SAME entry.
+describe("qwen_image_2_1 tier surface", () => {
+  // The three tier shapes GET /models can emit, derived from a manifest entry:
+  //   * `hasVariantMatrix` / `variants` — any supported, non-co-requisite download carrying a
+  //     non-empty `variant` (apps/rust-api/src/models.rs `model_has_variant_matrix`). A model with
+  //     no matrix still gets a one-element `"default"` pseudo-variant, which `isSelectableTier`
+  //     rejects. A `pendingArtifact` row is STILL a variant — the tier axis is real before the
+  //     bytes exist — but its `installState` is `"pending"` rather than `"missing"`.
+  //   * `mlxTiers` / `mlxTierStates` — convert-at-install models only, gated on
+  //     `mlx.requiresConversion === true` (`entry_requires_converted_artifact_here`).
+  //   * `runtimeQuantTiers` — IMPORTED entries only, projected from the import provider's
+  //     descriptor. A builtin id never carries it.
+  function projectTierShapes(entry) {
+    const downloads = Array.isArray(entry.downloads) ? entry.downloads : [];
+    const primaries = downloads.filter((download) => download?.coRequisite !== true);
+    const declared = primaries
+      .map((download) => download?.variant)
+      .filter((variant) => typeof variant === "string" && variant.trim() !== "");
+    const hasVariantMatrix = declared.length > 0;
+    const stateFor = (download) => {
+      if (download?.pendingArtifact === true) {
+        return { installState: "pending", cacheState: "missing" };
+      }
+      return { installState: "installed", cacheState: "complete" };
+    };
+    const projected = {
+      id: entry.id,
+      type: entry.type,
+      installState: "installed",
+      cacheState: "complete",
+      hasVariantMatrix,
+      variants: hasVariantMatrix
+        ? primaries
+            .filter((download) => typeof download?.variant === "string" && download.variant !== "")
+            .map((download) => ({
+              variant: download.variant,
+              pendingArtifact: download.pendingArtifact === true,
+              // Mirrors `ModelVariantState::tier_deletable` (apps/rust-api/src/models.rs): a
+              // scoped row, OR a scope-less row that is the SOLE download on its repo — that
+              // repo's whole snapshot is the tier (`is_sole_repo_tier`).
+              tierDeletable:
+                download.pendingArtifact !== true &&
+                ((Array.isArray(download.files) && download.files.length > 0) ||
+                  downloads.filter((other) => other?.repo === download.repo).length === 1),
+              ...stateFor(download),
+            }))
+        : [{ variant: "default", installState: "installed", cacheState: "complete" }],
+    };
+    if (entry?.mlx?.requiresConversion === true) {
+      projected.mlxTiers = declared.length > 0 ? declared : ["bf16"];
+    }
+    return projected;
+  }
+
+  const entry = manifestById.get("qwen_image_2_1");
+  const qwenImage21 = projectTierShapes(entry);
+
+  it("is in the shipped catalog with three tier artifacts and no convert-at-install tiers", () => {
+    // The facts the projection above rests on, asserted directly so a catalog change cannot slip
+    // through as "the projection happened to produce the right shape".
+    expect(entry, "qwen_image_2_1 must be in builtin.models.jsonc").toBeTruthy();
+    const primaries = entry.downloads.filter((download) => download?.coRequisite !== true);
+    expect(primaries).toHaveLength(3);
+    expect(primaries.map((download) => download.variant)).toEqual(["bf16", "q8", "q4"]);
+    // sc-24112 is a DOWNLOAD matrix, not a convert-at-install one: the tiers are fetched, never
+    // produced on the user's machine. `mlxTiers` must stay undefined or the Studio would render a
+    // convert picker for a model with nothing to convert.
+    expect(entry.mlx?.requiresConversion).toBeUndefined();
+    expect(qwenImage21.mlxTiers).toBeUndefined();
+    expect(qwenImage21.runtimeQuantTiers).toBeUndefined();
+    // `mlx.quantize` is the lane's DEFAULT TIER, which is a different statement from the tier set.
+    expect(entry.mlx?.quantize).toBe(8);
+    expect(entry.candle?.quantize).toBeUndefined();
+    expect(qwenImage21.hasVariantMatrix).toBe(true);
+  });
+
+  // The helper orders tiers LIGHTEST FIRST, which is the order the picker renders them in.
+  //
+  // TWO SURFACES, TWO QUESTIONS — and conflating them is the trap here. `allPossibleTiers` is the
+  // OFFER: every tier the catalog advertises, which is what the Model Manager's download panel
+  // renders with a per-tier button. `shouldShowTierPicker` is the GENERATION-time selector, and it
+  // opens only once more than one tier is actually INSTALLED — there is nothing to choose between
+  // otherwise. So while q8/q4 are pending the offer is all three and the selector is closed, and
+  // the moment the artifacts land and a second tier installs the selector opens with no further
+  // code change. The "AFTER THE UPLOAD" case below is that statement made executable.
+  it("offers all three tiers", () => {
+    expect(allPossibleTiers(qwenImage21)).toEqual(["q4", "q8", "bf16"]);
+    // Only one tier is installable today, so there is nothing to select between yet.
+    expect(shouldShowTierPicker(qwenImage21)).toBe(false);
+  });
+
+  it("offers the same three tiers on a Windows/CUDA host", () => {
+    // Both providers declare [Q4, Q8] after inference #1007, so neither host-eligibility gate may
+    // narrow this set — and the gates can only ever REMOVE candle-only tiers, never conjure one.
+    // This is the assertion that would red if someone narrowed the picker on the Candle lane,
+    // which sc-24109's truth would have required and #1007 undid.
+    for (const options of [
+      { convRotEligible: true, nvfp4Eligible: true },
+      { convRotEligible: false, nvfp4Eligible: false },
+    ]) {
+      expect(allPossibleTiers(qwenImage21, options)).toEqual(["q4", "q8", "bf16"]);
+    }
+  });
+
+  it("counts only the published tier as INSTALLED while q8/q4 are pending", () => {
+    // The tier axis is real before the artifacts are; `installedTiers` reads install state, so it
+    // must show only what can actually be loaded. When the terminal story pins the revisions this
+    // becomes all three — which is what the next case asserts, from the SAME entry.
+    expect(installedTiers(qwenImage21)).toEqual(["bf16"]);
+    const pending = qwenImage21.variants.filter((variant) => variant.pendingArtifact);
+    expect(pending.map((variant) => variant.variant)).toEqual(["q8", "q4"]);
+    expect(pending.every((variant) => variant.installState === "pending")).toBe(true);
+    // A pending tier carries no per-tier delete: there is nothing on disk to reclaim.
+    expect(pending.every((variant) => variant.tierDeletable === false)).toBe(true);
+    // The published bf16 tier is the whole upstream repo (`files: []`), and it is the ONLY row on
+    // `Qwen/Qwen-Image-2.1` — q8/q4 live in the SceneWorks re-host — so that repo's snapshot IS
+    // the tier and the per-tier delete reclaims it on its own (sc-24112 review: 30.86 GiB that was
+    // otherwise unreclaimable short of deleting the model).
+    const bf16 = qwenImage21.variants.find((variant) => variant.variant === "bf16");
+    expect(bf16.tierDeletable).toBe(true);
+  });
+
+  it("AFTER THE UPLOAD: all three tiers install, and each reclaims on its own", () => {
+    // The same entry with the pending flags dropped — i.e. exactly what the terminal story leaves
+    // behind. The picker shape must not need a second edit to catch up.
+    const published = projectTierShapes({
+      ...entry,
+      downloads: entry.downloads.map(({ pendingArtifact: _pendingArtifact, ...download }) => download),
+    });
+    expect(installedTiers(published)).toEqual(["q4", "q8", "bf16"]);
+    // …and with three installed tiers the generation-time selector opens, on both platforms.
+    expect(shouldShowTierPicker(published)).toBe(true);
+    expect(
+      shouldShowTierPicker(published, { convRotEligible: false, nvfp4Eligible: false }),
+    ).toBe(true);
+    const deletable = published.variants
+      .filter((variant) => variant.tierDeletable)
+      .map((variant) => variant.variant);
+    expect(deletable).toEqual(["bf16", "q8", "q4"]);
+  });
+
+  it("NEGATIVE CONTROL: the derivation closes the picker when the catalog declares no variants", () => {
+    // The emptiness the sc-24109 revision of this suite asserted has to be a consequence of the
+    // catalog, not of a hand-written stub — so run the SAME projection over the SAME entry with
+    // the tier tags removed and watch the picker close.
+    const untiered = projectTierShapes({
+      ...entry,
+      downloads: [{ ...entry.downloads[0], variant: undefined }],
+    });
+    expect(untiered.hasVariantMatrix).toBe(false);
+    expect(installedTiers(untiered)).toEqual([]);
+    expect(allPossibleTiers(untiered)).toEqual([]);
+    expect(shouldShowTierPicker(untiered)).toBe(false);
+  });
+});
+
+// sc-24112 review — the per-tier floors reach the Model Manager's fit questions, driven off the
+// SHIPPED catalog entry rather than hand-typed numbers. Before, no production caller passed a tier
+// to `blanketFloorGb`, so every surface quoted the whole model's scalar at a user who could only
+// ever run q4, and a Candle tier with no measured row read as "fits" on any host.
+describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
+  const entry = manifestById.get("qwen_image_2_1");
+  // Catalog-shaped: the manifest `mlx`/`candle` blocks pass through verbatim, and each tier row
+  // carries its footprint and download size, exactly as the /models projection emits them.
+  function catalogModel({ published = false } = {}) {
+    return {
+      id: entry.id,
+      mlx: entry.mlx,
+      candle: entry.candle,
+      hasVariantMatrix: true,
+      installState: "missing",
+      variants: entry.downloads
+        .filter((download) => download.coRequisite !== true && download.variant)
+        .map((download) => {
+          const pending = !published && download.pendingArtifact === true;
+          return {
+            variant: download.variant,
+            pendingArtifact: pending,
+            installState: pending ? "pending" : "missing",
+            cacheState: "missing",
+            downloadSizeBytes: download.estimatedSizeBytes,
+            footprint: download.footprint ?? null,
+          };
+        }),
+    };
+  }
+  const variantOf = (model, tier) => model.variants.find((variant) => variant.variant === tier);
+
+  // *Mutation that reds this:* dropping the per-tier floor veto from `tierFits` — the Candle lane
+  // has no measured row, so bf16 then reads "unknown ⇒ fits" on a 32 GB card.
+  it("tells a 32 GB host that q4 fits and bf16 does not, on both lanes", () => {
+    const model = catalogModel({ published: true });
+    for (const backend of ["mlx", "candle"]) {
+      const options = { model, backend };
+      expect(tierFits(variantOf(model, "q4"), 32, options), `${backend} q4`).toBe(true);
+      expect(tierFits(variantOf(model, "bf16"), 32, options), `${backend} bf16`).toBe(false);
+    }
+    // The pre-selected tier is the densest that fits: q8 on a 32 GB card (its 29 floor admits
+    // it), q4 on a 32 GB Mac (q8's footprint estimate is over 32 x 0.9).
+    expect(suggestTier(model, 32, { backend: "candle" })).toBe("q8");
+    expect(suggestTier(model, 32, { backend: "mlx" })).toBe("q4");
+  });
+
+  // *Mutation that reds this:* reading the staged row off the wrong key, or declaring the staged
+  // floor as the weight floor alone (its tests in test_builtin_manifest_audit.py).
+  it("tells a 24 GB Mac that q4 fits with staging where it does not fit resident", () => {
+    const model = catalogModel({ published: true });
+    const mlx = { model, backend: "mlx" };
+    // Resident: q4's footprint estimate (12.03 GiB + the 14 GiB transient allowance) is over
+    // 24 x 0.9, so the row would warn "may exceed memory" — but q4 stages in 9 GB.
+    expect(tierFits(variantOf(model, "q4"), 24, mlx)).toBe(false);
+    expect(tierFitsStaged(variantOf(model, "q4"), 24, mlx)).toBe(true);
+    // A 16 GB Mac is told the same for q4 (9) and q8 (13), and not for bf16 (21).
+    expect(tierFitsStaged(variantOf(model, "q8"), 16, mlx)).toBe(true);
+    expect(tierFitsStaged(variantOf(model, "bf16"), 16, mlx)).toBe(false);
+    // Candle declares no staged floor, so staging never answers there.
+    expect(tierFitsStaged(variantOf(model, "q4"), 24, { model, backend: "candle" })).toBe(false);
+  });
+
+  // The Simple Model Manager's "needs N GB" label, end to end through its call sites
+  // (`needsLabel` → `blanketFloorGb(model, backend, lightestInstallableTier(model))` for a model not
+  // installed; `installedFloorHostGb` → the installed tiers' floors once one is).
+  // *Mutation that reds this:* either call site passing no tier — both then quote the scalar 45.
+  it("labels the Simple Model Manager row with the floor of the tier it would run", () => {
+    const published = catalogModel({ published: true });
+    const withInstalled = (tiers) => ({
+      ...published,
+      installState: "installed",
+      variants: published.variants.map((variant) =>
+        tiers.includes(variant.variant)
+          ? { ...variant, installState: "installed", cacheState: "complete" }
+          : variant,
+      ),
+    });
+    for (const backend of ["mlx", "candle"]) {
+      // Not installed: the entry floor is the lightest installable tier's own row, on both lanes.
+      expect(needsLabel(published, { backend }), backend).toBe(
+        `needs ${entry[backend].minMemoryGbByTier.q4} GB`,
+      );
+    }
+    // Installed, Candle: the installed tiers' own floors, the HEAVIEST ruling once bf16 is there
+    // too (the picker can switch to it). No Candle peak estimate exists, so the floors are the label.
+    const candle = entry.candle.minMemoryGbByTier;
+    expect(needsLabel(withInstalled(["q4"]), { backend: "candle" })).toBe(`needs ${candle.q4} GB`);
+    expect(needsLabel(withInstalled(["q4", "bf16"]), { backend: "candle" })).toBe(
+      `needs ${candle.bf16} GB`,
+    );
+    // Installed, MLX: the lane's footprint ESTIMATE may raise the label above the floor (it may
+    // never lower it) — so q4 reads its estimate, and never the whole model's scalar.
+    const mlxQ4 = Number(needsLabel(withInstalled(["q4"]), { backend: "mlx" }).match(/\d+/)[0]);
+    expect(mlxQ4).toBeGreaterThanOrEqual(entry.mlx.minMemoryGbByTier.q4);
+    expect(mlxQ4).toBeLessThan(entry.mlx.minMemoryGb);
+  });
+  it("quotes the floor of a tier the user can actually install, not the whole model's scalar", () => {
+    // While q8/q4 are pending only bf16 installs, so "can this machine run it" is bf16's floor.
+    const pending = catalogModel();
+    expect(lightestInstallableTier(pending)).toBe("bf16");
+    expect(blanketFloorGb(pending, "mlx", lightestInstallableTier(pending))).toBe(
+      entry.mlx.minMemoryGbByTier.bf16,
+    );
+    // After the upload the same call quotes q4's — far below the scalar every caller used to show.
+    const published = catalogModel({ published: true });
+    expect(lightestInstallableTier(published)).toBe("q4");
+    for (const backend of ["mlx", "candle"]) {
+      const floor = blanketFloorGb(published, backend, lightestInstallableTier(published));
+      expect(floor).toBe(entry[backend].minMemoryGbByTier.q4);
+      expect(floor).toBeLessThan(entry[backend].minMemoryGb);
+    }
   });
 });
