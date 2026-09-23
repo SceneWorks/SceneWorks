@@ -265,9 +265,15 @@ const seededFallbackModels = [
     ui: {
       description: "Qwen-Image 2.1 text-to-image and reference editing (research licence).",
       // The ordered-reference surface: `multiReference` opens the Image Editor's reference rail and
-      // `editReferences` the Studio's pair, both of which sc-24113 widens to the model's declared
+      // the Studio's plural `referenceAssetIds` payload, widened to the model's declared
       // `limits.maxReferenceAssets` instead of the global MAX_EDIT_REFERENCES.
-      img2img: true,
+      //
+      // `img2img` was declared here and is REMOVED (sc-24110), for the same reason the manifest
+      // does not declare it: that flag's whole control is the `advanced.strength` slider, and
+      // upstream's condition images have NO strength — the engine refuses one and the API 400s it
+      // at enqueue, so the slider would advertise a knob every render rejects. It also drifted from
+      // the manifest, which never declared it. The single-reference case is the ordered list with
+      // one entry, which is the same engine call.
       multiReference: true,
       promptGuide: {
         title: "Qwen Image 2.1 Prompt Guide",

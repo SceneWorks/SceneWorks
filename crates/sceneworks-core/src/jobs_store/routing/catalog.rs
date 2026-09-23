@@ -829,9 +829,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // licence, and NOT a shared quant surface with it.
     //
     // `candle_routed` (sc-24109): the native Candle/CUDA port registers the SAME engine id
-    // `qwen_image_2_1`, so the one request contract that routes to MLX on a Mac routes to the
-    // generic candle txt2img lane off-Mac. Plain text-to-image only — every conditioning carrier is
-    // refused by the shared `CANDLE_IMAGE_CHECKS` gate, exactly as the MLX arm refuses them.
+    // `qwen_image_2_1`, so the one request contract that routes to MLX on a Mac routes off-Mac too.
+    // It takes TWO candle lanes to do that, and the split is not cosmetic (sc-24110): plain
+    // text-to-image reaches the generic txt2img lane, while a CONDITIONED request — the same
+    // upstream call with 1..N ordered condition images — is claimed by the bespoke
+    // `CandleImageLane::QwenImage21Edit` BEFORE the generic gate, because `CANDLE_IMAGE_CHECKS`
+    // refuses `edit_image` and every conditioning carrier for every family. The MLX arm makes the
+    // same two-shapes-one-contract decision in a single predicate.
     //
     // `candle_quant` FLIPS TO TRUE at sc-24112, and the reason is a change in the ENGINE, not a
     // wiring catch-up. At sc-24109 the candle provider declared `supported_quants: []` and refused

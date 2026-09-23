@@ -3649,7 +3649,19 @@
       "ui": {
         "label": "Qwen Image 2.1",
         "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a record of what was changed.",
-        "recommendedFor": ["text_to_image"],
+        "recommendedFor": ["text_to_image", "edit_image"],
+        // Multi-image reference editing (sc-24110). The Image Editor gates its reference picker on
+        // this flag, and the Image Studio its plural `referenceAssetIds` payload — so without it
+        // the 1-10 ordered references this model is built around were reachable only by driving
+        // the API directly, while the shipped prompt guide documented them. The picker's CEILING
+        // is not this flag: it is `limits.maxReferenceAssets` via `maxReferencesForModel`, so the
+        // one manifest number serves the enqueue gate, the worker and the picker alike.
+        "multiReference": true,
+        // `img2img` is deliberately NOT declared. That flag opens the Image Studio's single-source
+        // reference flow, whose whole control is `advanced.strength` — and upstream's condition
+        // images have NO strength, which the engine refuses and the API 400s at enqueue. Offering
+        // the control would advertise a knob every render rejects. The single-reference case is
+        // served by the ordered list with one entry, which is the same engine call.
         "promptGuide": {
           "title": "Qwen Image 2.1 Prompt Guide",
           "path": "/prompt-guides/qwen-image-2-1.md",

@@ -768,6 +768,11 @@ pub fn image_max_reference_assets(model_manifest_entry: &JsonObject) -> Option<u
 /// family it would change it twice over, because the ordered list is semantic: the template numbers
 /// the images (`<image1>` …) and block-causal attention makes each one visible only to what follows,
 /// so silently shortening the list re-numbers every reference after the cut.
+///
+/// `references` is the FLATTENED ordered conditioning list, not `referenceAssetIds.len()` — the
+/// engine receives ONE list and `sourceAssetId` / `maskAssetId` are entries in it (sc-24110). The
+/// wording below says so, because naming a single carrier would send the caller to trim a field
+/// that may not even be the one over budget.
 pub fn image_reference_limit_error(
     model: &str,
     references: usize,
@@ -778,12 +783,14 @@ pub fn image_reference_limit_error(
         if cap == 0 {
             format!(
                 "{model} takes no reference images, but this request supplies {references}. \
-                 Remove referenceAssetIds, or choose a model that conditions on references."
+                 Remove the reference carriers (sourceAssetId, maskAssetId and referenceAssetIds), \
+                 or choose a model that conditions on references."
             )
         } else {
             format!(
                 "{model} takes up to {cap} reference images, but this request supplies \
-                 {references}. Reduce referenceAssetIds to {cap} or fewer."
+                 {references}. Reduce the ordered conditioning list (source, mask and references \
+                 together) to {cap} or fewer."
             )
         }
     })
@@ -2342,7 +2349,18 @@ mod tests {
             .expect("an 11th reference must be refused");
         assert!(message.contains("up to 10"), "{message}");
         assert!(message.contains("11"), "{message}");
-        assert!(message.contains("referenceAssetIds"), "{message}");
+        // sc-24110: the wording names the ORDERED CONDITIONING LIST, not `referenceAssetIds`.
+        // The count is over the flattened list — source, mask and references together — so naming
+        // a single carrier would send the caller to trim a field that may not be the one over
+        // budget, or that may be empty while the request is still eleven images.
+        assert!(
+            message.contains("ordered conditioning list"),
+            "the refusal must name what is actually counted: {message}"
+        );
+        assert!(
+            message.contains("source, mask and references together"),
+            "…and spell out which carriers that is: {message}"
+        );
     }
 
     #[test]

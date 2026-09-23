@@ -349,8 +349,12 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 ///     job would be silently rendered as something else (the sc-5968 class of defect);
 ///   * a malformed carrier — fails closed, never "not supplied".
 ///
-/// `maskAssetId` is NOT refused any more, and that is the point of the story: a mask on this model
-/// is an ORDINARY ordered reference the prompt names, never `Conditioning::Mask`. See
+/// `maskAssetId` is NOT refused, and that is the point of the story: a mask on this model is an
+/// ORDINARY ordered reference the prompt names, never `Conditioning::Mask`. Note this is admitted
+/// for DIRECT API CALLERS AND WORKFLOW REPLAY, not for the Image Editor — the Editor gates its
+/// mask tool on `image_inpaint`, which this model deliberately does not declare, so its UI never
+/// produces a `maskAssetId` for 2.1 at all. A carrier the product cannot currently emit still has
+/// to route correctly when an API client, a saved recipe or a shared workflow supplies one. See
 /// [`qwen_image_2_1_reference_ids`] for the order both backends and the worker read.
 ///
 /// `loras` is deliberately NOT inspected. The engine refuses adapters with a typed `Unsupported`,
@@ -361,8 +365,9 @@ pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool 
     // sc-24113 (#2916) landed a version of this predicate that refused `maskAssetId` outright. That
     // is over-refusal against the S3 contract: 2.1 has no mask TENSOR, but a mask IMAGE is an
     // ordinary ordered reference the prompt names ("use the second image as the mask") — the
-    // engine's own refusal text says so. Refusing it here would leave the Image Editor's existing
-    // mask output with no route at all on this model. What #2916 was right about is that
+    // engine's own refusal text says so. The carrier is admitted for DIRECT API CALLERS AND
+    // WORKFLOW REPLAY; the Image Editor gates its own mask tool on `image_inpaint`, which this
+    // model does not declare, so no UI path produces one here. What #2916 was right about is that
     // `Conditioning::Mask` must never be SENT; that is enforced where the conditioning list is
     // built, not by dropping the carrier at the door.
     if !matches!(

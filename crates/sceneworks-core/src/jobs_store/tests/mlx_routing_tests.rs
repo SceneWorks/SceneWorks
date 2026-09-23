@@ -547,9 +547,11 @@ fn qwen_image_2_1_routes_text_to_image_and_ordered_references_to_mlx() {
     // reasoning behind it was right and the conclusion was one step too far: 2.1 has no mask
     // TENSOR, which is why `Conditioning::Mask` must never be SENT, but a mask IMAGE is an
     // ordinary ordered reference the prompt names ("use the second image as a mask") — the
-    // engine's own refusal text says exactly that. Dropping the carrier at the door would have
-    // left the Image Editor's existing mask output with no route on this model at all. The
-    // never-send-a-Mask half is enforced where the conditioning list is BUILT, in the worker.
+    // engine's own refusal text says exactly that. The carrier is admitted for DIRECT API CALLERS
+    // AND WORKFLOW REPLAY; the Image Editor gates its own mask tool on `image_inpaint`, which this
+    // model does not declare, so no UI path produces one here. Dropping it at the door would make
+    // a legal API request unroutable. The never-send-a-Mask half is enforced where the
+    // conditioning list is BUILT, in the worker.
     //
     // What remains: there is no strict-control tier for pose/ControlNet to reach, and a malformed
     // carrier fails closed rather than being read as "not supplied".
@@ -674,6 +676,38 @@ fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
             "c".to_owned(),
             "single".to_owned(),
         ]),
+    );
+
+    // DEDUPED by asset id, first occurrence winning — and this is correctness, not tidiness. The
+    // web's `editReferenceIds` leads `referenceAssetIds` with the working image while
+    // `buildEditJobBody` ALSO sets `sourceAssetId`, so the ordinary Image-Editor payload names the
+    // same asset twice. On this engine every entry costs one of the model's slots and gets its own
+    // number in the prompt template, so a duplicate silently burns a slot AND renumbers every
+    // reference after it — and it inflates the count the cap is measured against.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "A",
+            "referenceAssetIds": ["A", "B"]
+        }))),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+        "the duplicated working image must occupy ONE slot, at its first position"
+    );
+    // Across every carrier, not just source-vs-plural.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "sourceAssetId": "A",
+            "maskAssetId": "A",
+            "referenceAssetIds": ["B", "A", "B"],
+            "referenceAssetId": "B"
+        }))),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+    );
+    // Distinct ids are never collapsed — the dedupe must not be a `sort`/`unique` in disguise.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&object(json!({
+            "referenceAssetIds": ["b", "a", "c", "a"]
+        }))),
+        Some(vec!["b".to_owned(), "a".to_owned(), "c".to_owned()]),
     );
 
     // Swapping two submitted references changes the list — the property the worker payload test

@@ -801,7 +801,7 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     only `resident` is implemented (2 coordinates: one tier x text_to_image x {none, lora}) and the
     other four rungs are Missing.
 
-    Previously: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
+    Before that: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
     bf16 artifact with no `variant`, so it contributes exactly five NEW lanes
     (`qwen_image_2_1:mlx:<rung>`) and moves nothing else. Its provider publishes no
     memory-strategy ladder at this pin, so only `resident` is implemented (2 coordinates: the

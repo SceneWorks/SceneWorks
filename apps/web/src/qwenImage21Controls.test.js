@@ -176,6 +176,40 @@ describe("ordered references (sc-24113)", () => {
     expect(maxReferencesForModel({ limits: { maxReferenceAssets: 0 } }, 4)).toBe(0);
   });
 
+  // sc-24110: the picker has to be REACHABLE, not just correctly bounded.
+  //
+  // `maxReferencesForModel` above says how many references the rail accepts; this says whether the
+  // rail is rendered at all. ImageEditor gates it on `ui.multiReference` and ImageStudio gates the
+  // plural `referenceAssetIds` payload on the same flag, so without it the 1-10 ordered references
+  // this model is built around were reachable only by driving the API directly, while the shipped
+  // prompt guide documented them. Asserted against the SHIPPED manifest and the fallback catalog
+  // together, because a flag in one and not the other is a pre-catalog UI that differs from the
+  // post-catalog one.
+  it("opens the reference picker for this model, on both catalogs, at the declared cap", () => {
+    const entry = manifestEntry(QWEN_IMAGE_2_1_MODEL_ID);
+
+    expect(entry.ui.multiReference, "manifest opens the picker").toBe(true);
+    expect(seed.ui.multiReference, "fallback catalog opens it too").toBe(true);
+
+    // The cap the rail uses comes from the same manifest key the enqueue gate and the worker read.
+    expect(maxReferencesForModel(entry, 4)).toBe(10);
+    expect(maxReferencesForModel(seed, 4)).toBe(10);
+
+    // `img2img` stays UNDECLARED on both, and that is a decision rather than an omission: that flag
+    // opens the Studio's single-source flow whose whole control is `advanced.strength`, and
+    // upstream's condition images have NO strength - the engine refuses one and the API 400s it at
+    // enqueue, so the slider would advertise a knob every render rejects. The single-reference case
+    // is the ordered list with one entry, which is the same engine call.
+    expect(entry.ui.img2img, "manifest must not offer a strength slider").toBeUndefined();
+    expect(seed.ui.img2img, "nor may the fallback catalog").toBeUndefined();
+
+    // And the capability the Editor gates its MASK tool on is absent, so no inpaint UI appears:
+    // this model has no mask tensor, and a mask travels as an ordinary ordered reference.
+    expect(entry.capabilities).toContain("edit_image");
+    expect(entry.capabilities).not.toContain("image_inpaint");
+    expect(seed.capabilities).not.toContain("image_inpaint");
+  });
+
   it("shows the 1-based ordinal the engine's template uses", () => {
     expect(referenceOrdinalLabel(0)).toBe("Image 1");
     expect(referenceOrdinalLabel(1)).toBe("Image 2");

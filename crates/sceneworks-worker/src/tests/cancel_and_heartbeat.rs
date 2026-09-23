@@ -181,23 +181,32 @@ async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_termina
     );
 }
 
-/// sc-24110 — the same acknowledgement on the EDIT route, on both lanes.
+/// sc-24110 — the same acknowledgement for an EDIT-shaped request.
 ///
-/// Worth stating separately from the text-to-image sibling above rather than trusting that the
-/// carrier is shape-agnostic. An edit request costs far more per step than a t2i one (ten
-/// references are ~41k prefix tokens re-encoded EVERY step, with no KV cache), so it is precisely
-/// the shape a user is most likely to cancel and the one where freeing the worker row early would
-/// hurt most — the next queued job would claim a GPU still grinding through a 10-reference prefix.
+/// ⚠️ **Lane-agnostic, and named so.** `begin_image_cancel`'s `backend` argument is a LABEL that
+/// rides the streamed result; it selects no code path, so running this twice with "mlx" and
+/// "candle" would exercise one implementation and claim two. Both values are still passed, because
+/// the label is part of the payload a client reads, but the coverage this gives is "the
+/// acknowledgement is correct for an edit-shaped request", not "both backends were exercised". The
+/// per-lane behaviour that IS distinct — which route claims the job — is pinned by
+/// `resolve_candle_image_route_*` and the core lane table.
 ///
-/// Both modes the edit route serves are exercised, because `ImagePlan` and the acknowledgement
-/// payload are built from the request and a mode that failed to carry the model or the batch total
-/// would renumber the gallery mid-cancel.
+/// Worth stating separately from the text-to-image sibling above rather than trusting the carrier
+/// is shape-agnostic: an edit request costs far more per step than a t2i one (ten references are
+/// ~41k prefix tokens re-encoded EVERY step, with no KV cache), so it is precisely the shape a user
+/// is most likely to cancel and the one where freeing the worker row early would hurt most — the
+/// next queued job would claim a GPU still grinding through a 10-reference prefix.
+///
+/// Both conditioned modes are exercised, because `ImagePlan` and the acknowledgement payload are
+/// built from the request and a mode that failed to carry the model or the batch total would
+/// renumber the gallery mid-cancel. PROGRESS on the edit route is covered separately, by
+/// `image_jobs::tests::qwen_image_2_1_edit_reports_progress_and_stops_on_cancel`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[tokio::test]
-async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally_on_both_lanes() {
+async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally() {
     for (backend, mode, payload) in [
         (
             "mlx",
