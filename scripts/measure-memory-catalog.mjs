@@ -1247,8 +1247,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // upstream `Qwen/Qwen-Image-2.1` snapshot at its OWN root (the converter refuses to emit a `bf16/`
   // copy) — hence `layout: "flat"` on that tier alone. Both lanes load the same three roots (the
   // Candle port binds the MLX-packed tiers through `AdaptLinear::linear_detect_gs`), mirroring the
-  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are `pendingArtifact` until the
-  // epic's terminal upload pins them, which `resolveArtifactRoot` reports rather than probing.
+  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are published (sc-24114, @1691de01…)
+  // and resolve like any pinned row; a `pendingArtifact` row would be reported by
+  // `resolveArtifactRoot` rather than probed.
   qwen_image_2_1: {
     env: "QWEN_IMAGE_2_1", repo: "SceneWorks/qwen-image-2-1-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat" } },

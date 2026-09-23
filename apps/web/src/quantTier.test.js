@@ -818,13 +818,11 @@ describe("qwen_image_2_1 tier surface", () => {
   // OFFER: every tier the catalog advertises, which is what the Model Manager's download panel
   // renders with a per-tier button. `shouldShowTierPicker` is the GENERATION-time selector, and it
   // opens only once more than one tier is actually INSTALLED — there is nothing to choose between
-  // otherwise. So while q8/q4 are pending the offer is all three and the selector is closed, and
-  // the moment the artifacts land and a second tier installs the selector opens with no further
-  // code change. The "AFTER THE UPLOAD" case below is that statement made executable.
+  // otherwise. The q8/q4 artifacts are published (sc-24114), so against the SHIPPED entry the
+  // offer is all three and, with them installed, the selector is open.
   it("offers all three tiers", () => {
     expect(allPossibleTiers(qwenImage21)).toEqual(["q4", "q8", "bf16"]);
-    // Only one tier is installable today, so there is nothing to select between yet.
-    expect(shouldShowTierPicker(qwenImage21)).toBe(false);
+    expect(shouldShowTierPicker(qwenImage21)).toBe(true);
   });
 
   it("offers the same three tiers on a Windows/CUDA host", () => {
@@ -840,12 +838,19 @@ describe("qwen_image_2_1 tier surface", () => {
     }
   });
 
-  it("counts only the published tier as INSTALLED while q8/q4 are pending", () => {
-    // The tier axis is real before the artifacts are; `installedTiers` reads install state, so it
-    // must show only what can actually be loaded. When the terminal story pins the revisions this
-    // becomes all three — which is what the next case asserts, from the SAME entry.
-    expect(installedTiers(qwenImage21)).toEqual(["bf16"]);
-    const pending = qwenImage21.variants.filter((variant) => variant.pendingArtifact);
+  it("counts only the published tier as INSTALLED when q8/q4 are pending", () => {
+    // The sc-24112 PENDING shape, re-imposed on the shipped entry (the shipped catalog left it at
+    // sc-24114): the tier axis is real before the artifacts are, and `installedTiers` reads install
+    // state, so it must show only what can actually be loaded.
+    const pendingShape = projectTierShapes({
+      ...entry,
+      downloads: entry.downloads.map((download) =>
+        download.variant === "bf16" ? download : { ...download, pendingArtifact: true },
+      ),
+    });
+    expect(installedTiers(pendingShape)).toEqual(["bf16"]);
+    expect(shouldShowTierPicker(pendingShape)).toBe(false);
+    const pending = pendingShape.variants.filter((variant) => variant.pendingArtifact);
     expect(pending.map((variant) => variant.variant)).toEqual(["q8", "q4"]);
     expect(pending.every((variant) => variant.installState === "pending")).toBe(true);
     // A pending tier carries no per-tier delete: there is nothing on disk to reclaim.
@@ -854,17 +859,15 @@ describe("qwen_image_2_1 tier surface", () => {
     // `Qwen/Qwen-Image-2.1` — q8/q4 live in the SceneWorks re-host — so that repo's snapshot IS
     // the tier and the per-tier delete reclaims it on its own (sc-24112 review: 30.86 GiB that was
     // otherwise unreclaimable short of deleting the model).
-    const bf16 = qwenImage21.variants.find((variant) => variant.variant === "bf16");
+    const bf16 = pendingShape.variants.find((variant) => variant.variant === "bf16");
     expect(bf16.tierDeletable).toBe(true);
   });
 
   it("AFTER THE UPLOAD: all three tiers install, and each reclaims on its own", () => {
-    // The same entry with the pending flags dropped — i.e. exactly what the terminal story leaves
-    // behind. The picker shape must not need a second edit to catch up.
-    const published = projectTierShapes({
-      ...entry,
-      downloads: entry.downloads.map(({ pendingArtifact: _pendingArtifact, ...download }) => download),
-    });
+    // LIVE since sc-24114: the SHIPPED entry, unmodified — the q8/q4 rows pin the published
+    // re-host revision and carry no `pendingArtifact`.
+    expect(entry.downloads.some((download) => download.pendingArtifact === true)).toBe(false);
+    const published = qwenImage21;
     expect(installedTiers(published)).toEqual(["q4", "q8", "bf16"]);
     // …and with three installed tiers the generation-time selector opens, on both platforms.
     expect(shouldShowTierPicker(published)).toBe(true);
@@ -900,7 +903,8 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   const entry = manifestById.get("qwen_image_2_1");
   // Catalog-shaped: the manifest `mlx`/`candle` blocks pass through verbatim, and each tier row
   // carries its footprint and download size, exactly as the /models projection emits them.
-  function catalogModel({ published = false } = {}) {
+  // `pendingPacked` re-imposes the sc-24112 PENDING shape on q8/q4; the shipped entry is published.
+  function catalogModel({ pendingPacked = false } = {}) {
     return {
       id: entry.id,
       mlx: entry.mlx,
@@ -910,7 +914,8 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
       variants: entry.downloads
         .filter((download) => download.coRequisite !== true && download.variant)
         .map((download) => {
-          const pending = !published && download.pendingArtifact === true;
+          const pending =
+            download.pendingArtifact === true || (pendingPacked && download.variant !== "bf16");
           return {
             variant: download.variant,
             pendingArtifact: pending,
@@ -927,7 +932,7 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   // *Mutation that reds this:* dropping the per-tier floor veto from `tierFits` — the Candle lane
   // has no measured row, so bf16 then reads "unknown ⇒ fits" on a 32 GB card.
   it("tells a 32 GB host that q4 fits and bf16 does not, on both lanes", () => {
-    const model = catalogModel({ published: true });
+    const model = catalogModel();
     for (const backend of ["mlx", "candle"]) {
       const options = { model, backend };
       expect(tierFits(variantOf(model, "q4"), 32, options), `${backend} q4`).toBe(true);
@@ -944,7 +949,7 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   // installed; `installedFloorHostGb` → the installed tiers' floors once one is).
   // *Mutation that reds this:* either call site passing no tier — both then quote the scalar 45.
   it("labels the Simple Model Manager row with the floor of the tier it would run", () => {
-    const published = catalogModel({ published: true });
+    const published = catalogModel();
     const withInstalled = (tiers) => ({
       ...published,
       installState: "installed",
@@ -975,13 +980,13 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   });
   it("quotes the floor of a tier the user can actually install, not the whole model's scalar", () => {
     // While q8/q4 are pending only bf16 installs, so "can this machine run it" is bf16's floor.
-    const pending = catalogModel();
+    const pending = catalogModel({ pendingPacked: true });
     expect(lightestInstallableTier(pending)).toBe("bf16");
     expect(blanketFloorGb(pending, "mlx", lightestInstallableTier(pending))).toBe(
       entry.mlx.minMemoryGbByTier.bf16,
     );
-    // After the upload the same call quotes q4's — far below the scalar every caller used to show.
-    const published = catalogModel({ published: true });
+    // Published (the shipped entry), the same call quotes q4's — far below the scalar every caller used to show.
+    const published = catalogModel();
     expect(lightestInstallableTier(published)).toBe("q4");
     for (const backend of ["mlx", "candle"]) {
       const floor = blanketFloorGb(published, backend, lightestInstallableTier(published));

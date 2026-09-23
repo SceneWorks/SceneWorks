@@ -28424,12 +28424,9 @@ mod qwen_image_2_1_tiers {
     const UPSTREAM_REPO: &str = "Qwen/Qwen-Image-2.1";
     const UPSTREAM_REVISION: &str = "790c92633540aa0cb11d9abf19eb46d861714758";
     const REHOST_REPO: &str = "SceneWorks/qwen-image-2-1-mlx";
-    /// A stand-in for the revision the epic's TERMINAL story pins once the tiers are uploaded. The
-    /// shipped catalog carries the null SHA until then, so a test that wants an INSTALLED packed
-    /// tier has to supply one — which is itself the point: with the shipped placeholder there is
-    /// nothing to install, and `pending_tiers_resolve_to_nothing_rather_than_a_missing_directory`
-    /// asserts exactly that.
-    const REHOST_REVISION_AFTER_UPLOAD: &str = "1111111111111111111111111111111111111111";
+    /// The revision the q8/q4 tiers were PUBLISHED at (sc-24114). The shipped catalog pins it, and
+    /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
+    const REHOST_REVISION: &str = "1691de01c24a070131e0a28bf4c065fd027f4fe9";
 
     fn isolate_hf_cache() -> crate::test_env::EnvVars {
         crate::test_env::EnvVars::set(&[
@@ -28439,47 +28436,154 @@ mod qwen_image_2_1_tiers {
         ])
     }
 
-    /// Stage a loadable `transformer/` under one snapshot, in the sharded diffusers shape the
-    /// resolver probes for.
-    fn stage_tier(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) {
+    fn tier_root(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) -> PathBuf {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)
             .expect("repo cache path resolves")
             .join("snapshots")
             .join(revision);
-        let root = match subdir {
+        match subdir {
             Some(name) => snapshot.join(name),
             None => snapshot,
-        };
-        let transformer = root.join("transformer");
-        std::fs::create_dir_all(&transformer).expect("create transformer dir");
-        std::fs::write(
-            transformer.join("diffusion_pytorch_model.safetensors.index.json"),
-            b"{}",
-        )
-        .expect("write shard index");
+        }
     }
 
-    /// The shipped `qwen_image_2_1` entry, with the packed rows' placeholder revision replaced by
-    /// `REHOST_REVISION_AFTER_UPLOAD` and their `pendingArtifact` flag dropped — i.e. the entry
-    /// exactly as the terminal story will leave it. Derived from the real catalog rather than
-    /// hand-written, so a catalog change that breaks the layout breaks these tests too.
+    /// Stage a loadable `transformer/` under one snapshot, in the layout that tier really ships:
+    /// the upstream bf16 ROOT as the sharded diffusers tree (index + shards), a packed q8/q4
+    /// SUBDIR exactly as `convert::prequantize_turnkey` writes and the Hub now serves it — ONE
+    /// `transformer/model.safetensors`, NO shard index, and a `config.json` carrying the
+    /// `quantization` marker.
+    fn stage_tier(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) {
+        let transformer = tier_root(data_dir, repo, revision, subdir).join("transformer");
+        std::fs::create_dir_all(&transformer).expect("create transformer dir");
+        match subdir {
+            None => std::fs::write(
+                transformer.join("diffusion_pytorch_model.safetensors.index.json"),
+                b"{}",
+            )
+            .expect("write shard index"),
+            Some(_) => {
+                std::fs::write(transformer.join("model.safetensors"), b"packed")
+                    .expect("write packed transformer");
+                std::fs::write(
+                    transformer.join("config.json"),
+                    br#"{"quantization":{"bits":8,"group_size":64}}"#,
+                )
+                .expect("write packed marker");
+            }
+        }
+    }
+
+    /// The shipped entry, which since sc-24114 IS the published catalog: the packed rows carry the
+    /// real re-host revision and no `pendingArtifact` flag.
     fn entry_after_upload() -> serde_json::Map<String, Value> {
+        shipped_qwen_2_1_entry()
+    }
+
+    /// The same entry with the packed rows put back into the sc-24112 PENDING shape (null-SHA
+    /// placeholder + `pendingArtifact`), for the guard that must keep an unpublished tier inert.
+    fn pending_entry() -> serde_json::Map<String, Value> {
         let mut entry = shipped_qwen_2_1_entry();
-        let downloads = entry
+        for download in entry
             .get_mut("downloads")
             .and_then(Value::as_array_mut)
-            .expect("downloads array");
-        for download in downloads {
+            .expect("downloads array")
+        {
             let object = download.as_object_mut().expect("download object");
             if object.get("repo").and_then(Value::as_str) == Some(REHOST_REPO) {
                 object.insert(
                     "revision".to_owned(),
-                    Value::String(REHOST_REVISION_AFTER_UPLOAD.to_owned()),
+                    Value::String("0000000000000000000000000000000000000000".to_owned()),
                 );
-                object.remove("pendingArtifact");
+                object.insert("pendingArtifact".to_owned(), Value::Bool(true));
+                object.remove("default");
             }
         }
         entry
+    }
+
+    /// sc-24114 — the shipped catalog pins the PUBLISHED re-host: both packed rows carry the real
+    /// revision and no `pendingArtifact` flag. Fail-closed against a placeholder creeping back.
+    ///
+    /// *Mutation that reds this:* restoring the null SHA (or `pendingArtifact`) on either row.
+    #[test]
+    fn the_shipped_catalog_pins_the_published_rehost() {
+        let entry = shipped_qwen_2_1_entry();
+        let rows: Vec<&Value> = entry["downloads"]
+            .as_array()
+            .expect("downloads array")
+            .iter()
+            .filter(|download| download["repo"] == REHOST_REPO)
+            .collect();
+        assert_eq!(rows.len(), 2, "q8 and q4");
+        for row in rows {
+            assert_eq!(row["revision"], REHOST_REVISION, "{row}");
+            assert!(row.get("pendingArtifact").is_none(), "{row}");
+        }
+    }
+
+    /// sc-24114 (feature-end finding) — the PUBLISHED packed layout is seen as installed. The
+    /// converter writes `transformer/model.safetensors` + a `quantization` marker and no diffusers
+    /// shard index; the probe used to demand `diffusion_pytorch_model.safetensors[.index.json]`, so
+    /// an installed q8/q4 answered "not installed" on an explicit pick and a default fell to bf16.
+    ///
+    /// *Mutation that reds this:* reverting `qwen_image_2_1_has_loadable_transformer` to the
+    /// dense-only probe (the `packed` arm dropped).
+    #[test]
+    fn the_published_packed_layout_is_seen_as_installed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        let q8 = tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        assert!(
+            !q8.join("transformer/diffusion_pytorch_model.safetensors.index.json")
+                .exists()
+                && !q8
+                    .join("transformer/diffusion_pytorch_model.safetensors")
+                    .exists(),
+            "precondition: the packed tier carries no diffusers-named transformer file"
+        );
+
+        // bf16 is the upstream snapshot ROOT.
+        let (bf16, tier) =
+            resolved_with_tier(data.path(), &entry, Some(0)).expect("bf16 installed");
+        assert_eq!(tier, "bf16");
+        assert!(bf16.ends_with(UPSTREAM_REVISION), "{}", bf16.display());
+        // The packed q8 is installed — explicitly and as the unselected default.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(8)),
+            Some((q8.clone(), "q8"))
+        );
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None),
+            Some((q8, "q8"))
+        );
+        // q4 is not on disk: an explicit pick is refused, never substituted.
+        let error = super::super::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &request(&entry, Some(4)),
+        )
+        .expect_err("q4 is not installed")
+        .to_string();
+        assert!(error.contains("tier q4 is not installed"), "{error}");
+        // A dense bit width is bf16, not q8.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(16)).map(|(_, tier)| tier),
+            Some("bf16")
+        );
+
+        // A `model.safetensors` WITHOUT the `quantization` marker is not a packed tier.
+        let q4 =
+            tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4")).join("transformer");
+        std::fs::create_dir_all(&q4).expect("create q4 transformer");
+        std::fs::write(q4.join("model.safetensors"), b"x").expect("write q4 weights");
+        std::fs::write(q4.join("config.json"), b"{}").expect("write unmarked config");
+        assert!(super::super::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &request(&entry, Some(4)),
+        )
+        .is_err());
     }
 
     fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
@@ -28551,18 +28655,8 @@ mod qwen_image_2_1_tiers {
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q8"),
-        );
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q4"),
-        );
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
 
         let bf16 = resolved(data.path(), &entry, Some(0)).expect("bf16 installed");
         assert!(
@@ -28605,12 +28699,7 @@ mod qwen_image_2_1_tiers {
         let entry = entry_after_upload();
         // Only bf16 and q4 on disk; the q8 default must land on bf16, not on q4.
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q4"),
-        );
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
         let fallback = resolved(data.path(), &entry, None).expect("something is installed");
         assert!(
             fallback.ends_with(UPSTREAM_REVISION),
@@ -28632,12 +28721,7 @@ mod qwen_image_2_1_tiers {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q4"),
-        );
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
         for (bits, tier) in [(8, "q8"), (0, "bf16")] {
             let answer = super::super::qwen_image_2_1_tier_dir(
                 &settings(data.path()),
@@ -28695,18 +28779,8 @@ mod qwen_image_2_1_tiers {
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q8"),
-        );
-        stage_tier(
-            data.path(),
-            REHOST_REPO,
-            REHOST_REVISION_AFTER_UPLOAD,
-            Some("q4"),
-        );
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
         for (bits, tier) in [
             (16, "bf16"),
             (32, "bf16"),
@@ -28724,9 +28798,9 @@ mod qwen_image_2_1_tiers {
         }
     }
 
-    /// THE SHIPPED CATALOG, unmodified: the packed tiers carry the null-SHA placeholder and
-    /// `pendingArtifact`, so they resolve to NOTHING even with a directory staged at that
-    /// revision. A pending tier must never point the loader anywhere: the unselected default lands
+    /// A PENDING catalog (the sc-24112 shape, which the shipped catalog left at sc-24114): the
+    /// packed tiers carry the null-SHA placeholder and `pendingArtifact`, so they resolve to
+    /// NOTHING even with a directory staged at that revision. A pending tier must never point the loader anywhere: the unselected default lands
     /// on the only real tier, and an explicit pick of a pending tier is a refusal, not a load.
     ///
     /// *Mutation that reds this:* dropping the `is_pending_artifact_download` guard — the null SHA
@@ -28735,7 +28809,7 @@ mod qwen_image_2_1_tiers {
     fn pending_tiers_resolve_to_nothing_rather_than_a_missing_directory() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
-        let entry = shipped_qwen_2_1_entry();
+        let entry = pending_entry();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
         // Stage a q4 tree under the PLACEHOLDER revision. Only the pending guard stops this being
         // resolved, which is what makes the assertion meaningful.
@@ -28748,7 +28822,7 @@ mod qwen_image_2_1_tiers {
         let default = resolved(data.path(), &entry, None).expect("bf16 is installed");
         assert!(
             default.ends_with(UPSTREAM_REVISION),
-            "the default against the shipped (pending) catalog must land on the only real tier, \
+            "the default against a pending catalog must land on the only real tier, \
              not resolve the placeholder revision: {}",
             default.display()
         );
@@ -28762,8 +28836,7 @@ mod qwen_image_2_1_tiers {
         );
     }
 
-    /// THE SHIPPED CATALOG with bf16 staged — the only installable tier today — must be priced and
-    /// loaded AS bf16. Its directory is the upstream snapshot root, whose basename is a commit SHA,
+    /// THE SHIPPED CATALOG with only bf16 staged must be priced and loaded AS bf16. Its directory is the upstream snapshot root, whose basename is a commit SHA,
     /// so the basename reader alone answers `None` and every consumer used to fall back to the
     /// request/manifest default (`mlx.quantize: 8` ⇒ "q8"): the Candle gate priced it at q8's floor
     /// and Candle sent `LoadSpec.quantize = Q8` against a dense root, which the provider refuses; MLX
@@ -28831,12 +28904,7 @@ mod qwen_image_2_1_tiers {
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
         for tier in ["q8", "q4"] {
-            stage_tier(
-                data.path(),
-                REHOST_REPO,
-                REHOST_REVISION_AFTER_UPLOAD,
-                Some(tier),
-            );
+            stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some(tier));
         }
         for (bits, expected) in [(0, "bf16"), (8, "q8"), (4, "q4")] {
             let (dir, tier) =

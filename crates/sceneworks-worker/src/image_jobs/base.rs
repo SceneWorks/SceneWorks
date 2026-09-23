@@ -2273,16 +2273,7 @@ fn qwen_image_2_1_tier_dir(
         .transpose()?;
     let installed = |tier: &'static str| -> Option<(PathBuf, &'static str)> {
         let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
-        // The same "has a loadable backbone" probe the shared resolver applies, spelled for this
-        // family's diffusers layout: a sharded `transformer/` with its index, or a single file.
-        let transformer = dir.join("transformer");
-        let loadable = transformer
-            .join("diffusion_pytorch_model.safetensors.index.json")
-            .is_file()
-            || transformer
-                .join("diffusion_pytorch_model.safetensors")
-                .is_file();
-        loadable.then_some((dir, tier))
+        qwen_image_2_1_has_loadable_transformer(&dir).then_some((dir, tier))
     };
     if let Some(tier) = explicit {
         if let Some(resolved) = installed(tier) {
@@ -2313,6 +2304,34 @@ fn qwen_image_2_1_tier_dir(
             .filter(|tier| *tier != default)
             .find_map(installed)
     }))
+}
+
+/// The "has a loadable backbone" probe the shared resolver applies, spelled for BOTH layouts this
+/// family ships (sc-24114):
+///
+/// * the upstream diffusers bf16 snapshot — a sharded `transformer/` with its index, or one
+///   `diffusion_pytorch_model.safetensors`;
+/// * a packed q8/q4 tier as the engine's `convert::prequantize_turnkey` writes it — ONE
+///   `transformer/model.safetensors` (the sharded index is deliberately absent) beside a
+///   `config.json` carrying the `quantization` marker the engine's packed-detect reads.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_has_loadable_transformer(dir: &Path) -> bool {
+    let transformer = dir.join("transformer");
+    let dense = transformer
+        .join("diffusion_pytorch_model.safetensors.index.json")
+        .is_file()
+        || transformer
+            .join("diffusion_pytorch_model.safetensors")
+            .is_file();
+    let packed = transformer.join("model.safetensors").is_file()
+        && std::fs::read_to_string(transformer.join("config.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|config| config.get("quantization").is_some_and(Value::is_object));
+    dense || packed
 }
 
 /// The tier a resolved directory IS, reading the request's catalog entry when the basename is not

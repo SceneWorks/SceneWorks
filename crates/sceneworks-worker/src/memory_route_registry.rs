@@ -10373,4 +10373,53 @@ mod tests {
             }
         }
     }
+
+    /// SC-24114: when resident does NOT fit, the fit gate (`decide_residency_for_spec`) hands the
+    /// declaration a `Sequential` spec. With no MLX `staged_residency` row that decision must pass
+    /// through un-refused and still `Sequential` — the declaration neither blocks the staged load
+    /// nor quietly flips it back to resident — even when the provider-implements predicate answers
+    /// false for every candidate.
+    ///
+    /// *Mutation that reds this:* the declaration refusing (or re-residenting) a spec it has no
+    /// staged row for.
+    #[test]
+    fn shipped_qwen_image_2_1_mlx_declaration_passes_the_fit_gates_sequential_decision() {
+        let manifest = shipped_model("qwen_image_2_1");
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::EditImage, 4),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 10),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1")
+                    .with_offload_policy(OffloadPolicy::Sequential);
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    Some(mode),
+                    &manifest,
+                    spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| false,
+                );
+                assert_ne!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+                assert_eq!(
+                    evaluated.offload_policy,
+                    OffloadPolicy::Sequential,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+            }
+        }
+    }
 }

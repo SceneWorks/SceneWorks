@@ -206,12 +206,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
-  // Re-pinned by sc-24113 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
-  // re-recorded when the catalog gained the two optional Qwen-Image 2.1 prompt rewriters. The
-  // Illustrious file censuses below are the real subject of this test and did NOT move — which is
-  // the point of asserting them beside the digest.
+  // Re-pinned by sc-24114 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
+  // re-recorded when the Qwen-Image 2.1 q8/q4 re-host was published. The Illustrious file
+  // censuses below are the real subject of this test and did NOT move — which is the point of
+  // asserting them beside the digest.
   assert.equal(current.downloadEvidenceSha256,
-    "256ac78b96aa9efbe19d6db8d43bcafa54efedbf4a3653886b9b39487808fc93");
+    "f896987f2671f72444aaa9e17c530e807f3182dee682b2e387c24835d3f48169");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
