@@ -18762,6 +18762,7 @@ mod tests {
             "z_image_turbo",
             "z_image_turbo_control",
             "qwen_image",
+            "qwen_image_2_1",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -18910,6 +18911,7 @@ mod tests {
             "z_image_turbo",
             "z_image_turbo_control",
             "qwen_image",
+            "qwen_image_2_1",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -18981,9 +18983,8 @@ mod tests {
         // itself — rather than restated, so this cannot drift from the assertions above.
         let mut unclassified: Vec<&str> = crate::engines::MODEL_TABLE
             .iter()
-            // Not registered by this pin: nothing to classify yet. (`qwen_image_2_1` is here until
-            // the epic's terminal pin bump — at which point this loop starts demanding its
-            // classification, which is the point.)
+            // Not registered by this pin: nothing to classify yet. The moment a provider registers,
+            // this loop demands its classification, which is the point.
             .filter(|row| crate::engines::mlx_model(row.sceneworks_id).is_some())
             .map(|row| row.engine_id)
             .filter(|engine_id| {

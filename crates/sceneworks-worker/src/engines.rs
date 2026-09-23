@@ -1880,8 +1880,7 @@ mod tests {
             // comparing this literal with itself. What closes that is
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
-            // equals this value. Until the pin carries the provider that check is inert for this
-            // id, because the engine does not resolve and the guard skips it.
+            // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -1927,8 +1926,7 @@ mod tests {
             // comparing this literal with itself. What closes that is
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
-            // equals this value. Until the pin carries the provider that check is inert for this
-            // id, because the engine does not resolve and the guard skips it.
+            // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.

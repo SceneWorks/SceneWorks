@@ -7308,6 +7308,10 @@ fn take_prompt_enhancement_fact(
 /// (no-ControlNet) Z-Image reference-without-pose path, reusing the same engine img2img the
 /// strict-pose tier already drives. `None` → plain txt2img. `enhance` carries the optional
 /// caption-upsampling settings (sc-6135; only FLUX.2-dev acts on them).
+///
+/// Production renders go through [`generate_one_on_surface`]; this RGB-surface form is the one the
+/// engine smokes drive.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn generate_one(
     generator: &dyn Generator,
@@ -7348,7 +7352,88 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
+    generate_one_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        prompt_enhancement,
+        preview,
+        &LaneRgbaSurface::default(),
+        cancel,
+        on_progress,
+    )
+}
+
+/// The four-channel surface of one generic-lane render (sc-24111 / sc-24113 S4 contract).
+///
+/// `Default` is the historical three-channel lane, byte-identical: no reference carries alpha and
+/// the request asks for `OutputChannels::Rgb`. Only a model whose descriptor advertises
+/// `supports_alpha_output` / `ReferenceRgba` (Qwen-Image 2.1) ever gets a non-default value.
+#[derive(Default)]
+pub(crate) struct LaneRgbaSurface<'a> {
+    /// The alpha plane of each `multi_references` entry, positionally; `None` (or a missing entry)
+    /// is an ordinary RGB reference. An entry that carries one is sent as
+    /// `Conditioning::ReferenceRgba`, UN-flattened, because the VAE encodes all four channels.
+    pub(crate) multi_reference_alpha: &'a [Option<image::GrayImage>],
+    /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
+    /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
+    pub(crate) output_channels: gen_core::OutputChannels,
+}
+
+/// [`generate_one`] with an explicit [`LaneRgbaSurface`].
+#[allow(clippy::too_many_arguments)]
+fn generate_one_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let conditioning = build_lane_conditioning_with_alpha(
+        reference,
+        multi_references,
+        surface.multi_reference_alpha,
+        edit_mask,
+    );
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -7367,6 +7452,7 @@ fn generate_one(
         text_style_gain,
         memory,
         conditioning,
+        output_channels: surface.output_channels,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
@@ -7381,6 +7467,15 @@ fn generate_one(
         .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
+            let image = images
+                .pop()
+                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
+        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
+        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
+        GenerationOutput::ImagesRgba(mut images) => {
             let image = images
                 .pop()
                 .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
@@ -7438,16 +7533,30 @@ fn resolve_hires_fix_plan(
 /// The conditioning one generic-lane render carries. Split out of [`generate_one`] so
 /// [`lane_reference_count`] — the count the backend request scope grades the request against — can be
 /// tested against the conditioning this lane REALLY sends rather than against a restatement of it.
+#[cfg(test)]
 fn build_lane_conditioning(
     reference: Option<&(Image, f32)>,
     multi_references: &[Image],
+    edit_mask: Option<&Image>,
+) -> Vec<Conditioning> {
+    build_lane_conditioning_with_alpha(reference, multi_references, &[], edit_mask)
+}
+
+/// [`build_lane_conditioning`] where the ordered `multi_references` may carry alpha planes
+/// (Qwen-Image 2.1, sc-24110/sc-24113). With no alpha anywhere it is exactly
+/// [`build_lane_conditioning`]; otherwise the ordered list is built per entry by
+/// [`build_ordered_reference_conditioning`].
+fn build_lane_conditioning_with_alpha(
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    multi_reference_alpha: &[Option<image::GrayImage>],
     edit_mask: Option<&Image>,
 ) -> Vec<Conditioning> {
     // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
     // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
     // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
     let mut conditioning = if !multi_references.is_empty() {
-        build_reference_conditioning(multi_references)
+        build_ordered_reference_conditioning(multi_references, multi_reference_alpha)
     } else {
         match reference {
             Some((image, strength)) => vec![Conditioning::Reference {
@@ -7567,8 +7676,78 @@ fn generate_one_with_hires(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    generate_one_with_hires_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        hires_first_pass_memory,
+        memory_strategy_context,
+        hires_first_pass_memory_context,
+        enhance,
+        hires_fix,
+        preview,
+        prompt_enhancement,
+        &LaneRgbaSurface::default(),
+        cancel,
+        on_progress,
+    )
+}
+
+/// [`generate_one_with_hires`] with an explicit [`LaneRgbaSurface`].
+///
+/// The disposable Hires.fix BASE pass always decodes RGB: it only exists to become the
+/// three-channel img2img reference of the refinement pass. The surface's `output_channels` applies
+/// to the pass that is persisted.
+#[allow(clippy::too_many_arguments)]
+fn generate_one_with_hires_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    hires_fix: Option<HiresFixPlan>,
+    preview: gen_core::PreviewSink,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
     let Some(hires) = hires_fix else {
-        return generate_one(
+        return generate_one_on_surface(
             generator,
             prompt,
             width,
@@ -7592,6 +7771,7 @@ fn generate_one_with_hires(
             enhance,
             prompt_enhancement,
             preview,
+            surface,
             cancel,
             on_progress,
         );
@@ -7623,7 +7803,11 @@ fn generate_one_with_hires(
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
-    let (base_width, base_height, base_pixels) = generate_one(
+    let base_surface = LaneRgbaSurface {
+        multi_reference_alpha: surface.multi_reference_alpha,
+        output_channels: gen_core::OutputChannels::Rgb,
+    };
+    let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
         prompt,
         width,
@@ -7647,6 +7831,7 @@ fn generate_one_with_hires(
         &PromptEnhance::default(),
         gen_core::PromptEnhancementSink::default(),
         preview.clone(),
+        &base_surface,
         cancel,
         &mut first_progress,
     )?;
@@ -7672,7 +7857,11 @@ fn generate_one_with_hires(
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
     };
-    generate_one(
+    let refine_surface = LaneRgbaSurface {
+        multi_reference_alpha: &[],
+        output_channels: surface.output_channels,
+    };
+    generate_one_on_surface(
         generator,
         prompt,
         hires.width,
@@ -7696,6 +7885,7 @@ fn generate_one_with_hires(
         enhance,
         prompt_enhancement,
         preview,
+        &refine_surface,
         cancel,
         &mut second_progress,
     )
@@ -7737,7 +7927,7 @@ pub(crate) fn load_reference_image(
 }
 
 /// How a reference that CARRIES an alpha channel is reduced to the 3-channel `gen_core::Image`
-/// every engine at this pin takes (sc-24113).
+/// every RGB-only engine takes (sc-24113).
 ///
 /// A PARITY knob, not a quality one, and both answers are correct — for different upstream
 /// pipelines:
@@ -7756,10 +7946,9 @@ pub(crate) fn load_reference_image(
 /// colour it was authored with. A blanket change of this default would therefore move every
 /// existing model silently rather than loudly — which is exactly what the first cut of sc-24113 did.
 ///
-/// Note for sc-24110 (S3-SW), which owns the 2.1 reference carrier: once
-/// `Conditioning::ReferenceRgba` lands, an alpha-carrying 2.1 reference travels UN-FLATTENED with
-/// all four channels reaching the VAE, and this policy governs only the composited copy the vision
-/// tower gets. The parameter is left in place for that call site.
+/// Qwen-Image 2.1 does not flatten here at all: an alpha-carrying 2.1 reference travels UN-FLATTENED
+/// as `Conditioning::ReferenceRgba` (its RGB via `Truncate`, which is the straight colour, plus its
+/// own alpha plane), and the engine composites the vision tower's copy itself.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -7771,10 +7960,10 @@ pub(crate) enum FlattenPolicy {
     Truncate,
     /// Composite straight alpha over opaque white — the S4 `to_rgb_over_white()` semantics.
     ///
-    /// Constructed only by tests at this pin: `qwen_image_2_1` has no worker-side reference route
-    /// until the terminal bump, so there is no production caller to pass it yet (item 8d of the
-    /// `PENDING_PIN_ENGINE_IDS` checklist). The variant exists now so the parity DECISION is made
-    /// and tested once, rather than under time pressure when sc-24110's route lands.
+    /// Constructed only by tests: the one lane whose engine consumes a white composite
+    /// (`qwen_image_2_1`'s vision tower) builds that copy engine-side from the un-flattened
+    /// `Conditioning::ReferenceRgba`, so no production caller flattens over white. Kept so the
+    /// parity decision stays stated and tested beside the default it contrasts with.
     #[allow(dead_code)]
     OverWhite,
 }
@@ -7846,31 +8035,6 @@ pub(crate) fn load_reference_image_with(
         height: rgb.height(),
         pixels: rgb.into_raw(),
     })
-}
-
-/// Whether the asset [`load_reference_image`] would load carries its own alpha channel (sc-24113).
-///
-/// The input to [`crate::qwen_alpha::reference_conditioning_kind`]: an alpha-carrying reference
-/// belongs in `Conditioning::ReferenceRgba`, an ordinary one in `Conditioning::Reference`. Read
-/// from the DECODED image's colour type rather than guessed from the file extension — a PNG with
-/// no alpha channel is an ordinary reference.
-///
-/// Unused at this pin for the same reason [`crate::qwen_alpha::reference_conditioning_kind`] is:
-/// `qwen_image_2_1` has no worker-side edit route until the terminal pin bump, so nothing asks the
-/// question yet. Kept because the ANSWER — read the decoded colour type, not the extension — is the
-/// part that would otherwise be re-derived wrongly when that route lands.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-#[allow(dead_code)]
-pub(crate) fn reference_carries_alpha(
-    data_dir: &Path,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &Path,
-) -> WorkerResult<bool> {
-    Ok(load_reference_alpha(data_dir, project_id, asset_id, project_path)?.is_some())
 }
 
 /// The alpha plane of the same asset [`load_reference_image`] loads, or `None` when it has none
@@ -8250,6 +8414,88 @@ fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
+/// The ordered reference list where entries may carry their own alpha (S4 contract, sc-24111).
+///
+/// With no alpha anywhere this IS [`build_reference_conditioning`], byte for byte. Otherwise every
+/// entry is emitted individually and in order — `Conditioning::Reference` for an RGB entry,
+/// `Conditioning::ReferenceRgba` for one that carries alpha — because a `MultiReference` holds only
+/// RGB images and flattening an alpha-carrying reference would send a DIFFERENT request (the VAE
+/// encodes all four channels; the vision tower's white composite is engine-internal). The engine
+/// numbers `Reference` / `ReferenceRgba` / `MultiReference` entries in one ordered sequence, so the
+/// per-entry form keeps every reference's slot. Strength is `None`: upstream's condition images
+/// have none, and a provider without img2img strength requires it unset.
+fn build_ordered_reference_conditioning(
+    references: &[Image],
+    alpha: &[Option<image::GrayImage>],
+) -> Vec<Conditioning> {
+    if !alpha.iter().any(Option::is_some) {
+        return build_reference_conditioning(references);
+    }
+    references
+        .iter()
+        .enumerate()
+        .map(|(slot, image)| match alpha.get(slot).and_then(Option::as_ref) {
+            None => Conditioning::Reference {
+                image: image.clone(),
+                strength: None,
+            },
+            Some(plane) => Conditioning::ReferenceRgba {
+                image: rgba_reference(image, plane),
+                strength: None,
+            },
+        })
+        .collect()
+}
+
+/// Interleave an RGB engine image with its (same-geometry) alpha plane into a straight-alpha
+/// `RgbaImage`. The plane is fitted alongside the image by [`fit_alpha_plane`], so a geometry
+/// mismatch here is a programming error; it is resampled defensively rather than misaligned.
+fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImage {
+    let resized;
+    let plane = if plane.dimensions() == (image.width, image.height) {
+        plane
+    } else {
+        resized = image::imageops::resize(
+            plane,
+            image.width,
+            image.height,
+            image::imageops::FilterType::Triangle,
+        );
+        &resized
+    };
+    let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
+    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+        pixels.extend_from_slice(rgb);
+        pixels.push(*a);
+    }
+    gen_core::RgbaImage {
+        width: image.width,
+        height: image.height,
+        pixels,
+    }
+}
+
+/// Fit an alpha plane to `width`×`height` with EXACTLY the geometry [`fit_engine_image`] gives the
+/// RGB it belongs to: the plane is replicated into three identical channels and run through the
+/// same [`fit_rgb`], whose per-channel resampling makes the result the plane's own fit. The
+/// letterbox of `pad`/`outpaint` comes out `A = 0` — transparent, which is what an area the source
+/// never covered is.
+fn fit_alpha_plane(
+    plane: &image::GrayImage,
+    width: u32,
+    height: u32,
+    mode: &str,
+) -> image::GrayImage {
+    let replicated = image::RgbImage::from_fn(plane.width(), plane.height(), |x, y| {
+        let a = plane.get_pixel(x, y).0[0];
+        image::Rgb([a, a, a])
+    });
+    let fitted = fit_rgb(&replicated, width, height, mode);
+    image::GrayImage::from_fn(fitted.width(), fitted.height(), |x, y| {
+        image::Luma([fitted.get_pixel(x, y).0[0]])
+    })
+}
+
 /// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
 /// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
@@ -8433,20 +8679,11 @@ fn resolve_qwen_image_2_1_edit(
         // `FlattenPolicy::Truncate`, named EXPLICITLY rather than taken from the default
         // (sc-24110 answering the note on [`FlattenPolicy`]).
         //
-        // `OverWhite` is the composited copy 2.1's VISION tower consumes — and SceneWorks never
-        // produces that copy. The engine takes ONE ordered list of RGB8 images and does its own
-        // single LANCZOS fit feeding both the Qwen3-VL processor and the VAE (S3 contract), so the
-        // vision-tower composite is engine-internal and there is no call site here where those
-        // semantics apply. Passing `OverWhite` would be claiming to have done work this side does
-        // not do.
-        //
-        // The choice is also inert TODAY: the two policies are identical on an opaque image, and an
-        // alpha-carrying reference never reaches a flatten at all — `build_qwen_image_2_1_conditioning`
-        // refuses it below, because its carrier (`Conditioning::ReferenceRgba`) is not in the pinned
-        // `gen_core`. Naming it anyway is what keeps 2.1 pinned if that default is ever flipped, and
-        // it is the line that changes when the RGBA carrier lands: an alpha-carrying reference will
-        // then travel UN-FLATTENED with all four channels reaching the VAE, and this policy will
-        // govern only the composited copy — exactly as [`FlattenPolicy`]'s note describes.
+        // Truncation drops the fourth byte and keeps the STRAIGHT RGB, which is exactly the colour
+        // half of `Conditioning::ReferenceRgba`: an alpha-carrying reference travels UN-FLATTENED,
+        // RGB + its own alpha plane, and the engine composites the vision-tower copy over white
+        // itself (S4 contract). `OverWhite` would bake that composite into the colour the VAE
+        // encodes — a different request. On an opaque reference the two policies are identical.
         let source = load_reference_image_with(
             &settings.data_dir,
             &request.project_id,
@@ -8455,8 +8692,10 @@ fn resolve_qwen_image_2_1_edit(
             FlattenPolicy::Truncate,
         )?;
         // sc-24111's lane, reused verbatim: the same asset, read through the same
-        // `safe_project_path` confinement, for its alpha plane alone.
-        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?;
+        // `safe_project_path` confinement, for its alpha plane alone — fitted with EXACTLY the
+        // geometry the RGB gets, so the two halves of an RGBA reference stay aligned.
+        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?
+            .map(|plane| fit_alpha_plane(&plane, request.width, request.height, &request.fit_mode));
         references.push(QwenImage21Reference {
             image: fit_engine_image(source, request.width, request.height, &request.fit_mode)?,
             alpha,
@@ -8479,12 +8718,9 @@ fn resolve_qwen_image_2_1_edit(
 /// * Strength is always `None` — upstream's condition images have no strength, and the engine
 ///   refuses anything but an unset-or-1.0 value.
 ///
-/// An alpha-carrying reference is `Conditioning::ReferenceRgba`, which **does not exist in the
-/// pinned `gen_core`** — it arrives with inference PR #1009 (S4 contract). See
-/// [`qwen_image_2_1_rgba_reference_is_pending_the_pin`] for the placeholder that deletes itself the
-/// moment it does. Until then this refuses, loudly and by name: flattening the alpha away would
-/// send a DIFFERENT request than the one the user composed, and that silent substitution is exactly
-/// what the S4 contract forbids.
+/// * An alpha-carrying reference → `Conditioning::ReferenceRgba`, UN-flattened (S4 contract): the
+///   VAE encodes all four channels, so flattening it would send a DIFFERENT request. A list with
+///   any such entry is emitted per entry, in order ([`build_ordered_reference_conditioning`]).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8492,50 +8728,39 @@ fn resolve_qwen_image_2_1_edit(
 fn build_qwen_image_2_1_conditioning(
     references: &[QwenImage21Reference],
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The per-entry classification is `qwen_alpha::reference_conditioning_kind` (sc-24113), so both
-    // halves of the epic name the carrier the same way and a rename is one line. What it returns
-    // for an alpha-carrying entry is `ReferenceRgba`, a variant the PINNED `gen_core` does not
-    // have — so that answer is a refusal here rather than a construction.
-    //
-    // Note the interaction with #2916's `load_reference_image`, which now composites alpha over
-    // white instead of truncating it: that composite is right for every engine that takes RGB, and
-    // WRONG for 2.1's VAE, which wants all four channels (S4). It never reaches the VAE on this
-    // route, because an alpha-carrying reference is refused below before any conditioning is built.
-    if let Some(slot) = references.iter().position(|entry| entry.alpha.is_some()) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "qwen_image_2_1: reference {} carries an alpha channel, so it belongs in a \
-             Conditioning::{} — a carrier the pinned inference build does not have yet (it arrives \
-             with the engine's RGBA story). Flatten the image over a background yourself if that is \
-             the render you want; this route will not substitute one silently, because the VAE \
-             encodes all four channels and a flattened reference is a DIFFERENT request.",
-            slot + 1,
-            crate::qwen_alpha::reference_conditioning_kind(true)
-        )));
+    let images: Vec<Image> = references.iter().map(|entry| entry.image.clone()).collect();
+    let alpha: Vec<Option<image::GrayImage>> =
+        references.iter().map(|entry| entry.alpha.clone()).collect();
+    let conditioning = build_ordered_reference_conditioning(&images, &alpha);
+    // The per-entry classification is `qwen_alpha::reference_conditioning_kind` (sc-24113), so
+    // both halves of the epic name the carrier the same way. Asserted rather than assumed: the
+    // builder above and the classifier must never disagree about what an entry became.
+    if conditioning.len() == references.len() {
+        for (entry, built) in references.iter().zip(&conditioning) {
+            let built_kind = match built {
+                Conditioning::ReferenceRgba { .. } => crate::qwen_alpha::CONDITIONING_REFERENCE_RGBA,
+                _ => "Reference",
+            };
+            if built_kind != crate::qwen_alpha::reference_conditioning_kind(entry.alpha.is_some()) {
+                return Err(WorkerError::Engine(format!(
+                    "qwen_image_2_1: reference conditioning disagrees with its classification \
+                     ({built_kind})"
+                )));
+            }
+        }
     }
-    debug_assert!(
-        references
-            .iter()
-            .all(|entry| crate::qwen_alpha::reference_conditioning_kind(entry.alpha.is_some())
-                == "Reference"),
-        "every surviving reference must classify as a plain Reference"
-    );
-    let images: Vec<Image> = references
-        .iter()
-        .map(|entry| entry.image.clone())
-        .collect::<Vec<_>>();
-    Ok(build_reference_conditioning(&images))
+    Ok(conditioning)
 }
 
 /// The ordered condition images a Qwen-Image 2.1 edit contributes to the generic lane's
-/// `edit_refs` slot — resolved, validated, and in request order.
+/// `edit_refs` slot, with each one's fitted alpha plane (`None` for an opaque asset) — resolved,
+/// validated, and in request order.
 ///
-/// [`build_qwen_image_2_1_conditioning`] is run here, on the REAL references, and its answer
-/// discarded: the generic lane rebuilds the identical list from these images through
-/// `build_lane_conditioning` (pinned by
-/// `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`), so what this call is for is
-/// its REFUSALS — the alpha-carrying reference that has no pinned conditioning kind. Running it
-/// here means that refusal happens before any weights are loaded, next to the asset reads that
-/// produced it, rather than as a render failure.
+/// The generic lane rebuilds the conditioning from these through
+/// [`build_lane_conditioning_with_alpha`], which is pinned against
+/// [`build_qwen_image_2_1_conditioning`] by `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`.
+/// The builder is still run here, on the REAL references, so a classification disagreement fails
+/// before any weights are loaded.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8544,10 +8769,13 @@ fn resolve_qwen_image_2_1_edit_images(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
-) -> WorkerResult<Vec<Image>> {
+) -> WorkerResult<(Vec<Image>, Vec<Option<image::GrayImage>>)> {
     let references = resolve_qwen_image_2_1_edit(request, settings, project_path)?;
     build_qwen_image_2_1_conditioning(&references)?;
-    Ok(references.into_iter().map(|entry| entry.image).collect())
+    Ok(references
+        .into_iter()
+        .map(|entry| (entry.image, entry.alpha))
+        .unzip())
 }
 
 /// Refuse a Qwen-Image 2.1 render whose generic-lane slots carry anything but the ordered
@@ -9427,6 +9655,8 @@ async fn generate_stream(
     // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
     // source followed by every optional reference in client order. Both thread through `generate_one`
     // as `Reference` (one) / `MultiReference` (many), never the single img2img-init slot.
+    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
     let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
@@ -9436,7 +9666,9 @@ async fn generate_stream(
         // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
         // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
         // and the ordering + the never-a-Mask guarantee live in the resolver.
-        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
+        let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
+        edit_ref_alpha = alpha;
+        images
     } else {
         Vec::new()
     };
@@ -9446,6 +9678,13 @@ async fn generate_stream(
         identity_init.as_ref(),
         ideogram_edit_mask.as_ref(),
     )?;
+    // The S4 four-channel surface (sc-24113): the transparency toggle resolved against the engine's
+    // own `supports_alpha_output` (refused by name when it cannot serve it) and assigned onto the
+    // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
+    // alpha — for every model but Qwen-Image 2.1.
+    let rgba_output_channels = crate::qwen_alpha::request_output_channels(
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+    );
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
@@ -9898,7 +10137,7 @@ async fn generate_stream(
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                        generate_one_with_hires(
+                        generate_one_with_hires_on_surface(
                             generator,
                             &prompt,
                             width,
@@ -9925,6 +10164,10 @@ async fn generate_stream(
                             hires_fix,
                             preview.clone(),
                             prompt_enhancement.for_prompt(&prompt),
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &edit_ref_alpha,
+                                output_channels: rgba_output_channels,
+                            },
                             &cancel,
                             on_progress,
                         )
@@ -11869,6 +12112,8 @@ async fn generate_candle_stream(
     };
     // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
     // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
+    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
     let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
@@ -11877,7 +12122,9 @@ async fn generate_candle_stream(
         // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
         // because the Candle port registers the same engine id and declares the same
         // `Reference` + `MultiReference` conditioning. One request contract, two backends.
-        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
+        let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
+        edit_ref_alpha = alpha;
+        images
     } else if is_sensenova_candle_model(&request.model)
         && matches!(request.mode.as_str(), "edit_image" | "character_image")
     {
@@ -11889,6 +12136,13 @@ async fn generate_candle_stream(
     // twin of the MLX call. `edit_reference` is this lane's single-reference (img2img-init) slot
     // and `edit_mask` its mask slot; both must stay empty for 2.1.
     guard_qwen_image_2_1_lane_slots(request, edit_reference.as_ref(), edit_mask.as_ref())?;
+    // The S4 four-channel surface (sc-24113): the transparency toggle resolved against the engine's
+    // own `supports_alpha_output` (refused by name when it cannot serve it) and assigned onto the
+    // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
+    // alpha — for every model but Qwen-Image 2.1.
+    let rgba_output_channels = crate::qwen_alpha::request_output_channels(
+        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+    );
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
     }
@@ -13352,7 +13606,7 @@ async fn generate_candle_stream(
                 work,
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                    generate_one_with_hires(
+                    generate_one_with_hires_on_surface(
                         generator,
                         &prompt,
                         width,
@@ -13393,6 +13647,10 @@ async fn generate_candle_stream(
                         hires_fix,
                         preview.clone(),
                         prompt_enhancement.for_prompt(&prompt),
+                        &LaneRgbaSurface {
+                            multi_reference_alpha: &edit_ref_alpha,
+                            output_channels: rgba_output_channels,
+                        },
                         &cancel,
                         on_progress,
                     )

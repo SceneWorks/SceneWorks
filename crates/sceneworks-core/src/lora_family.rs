@@ -614,8 +614,10 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // re-declare it, but the family default shouldn't claim what it can't do.
         ("image", "z-image") => vec!["text_to_image"],
         ("image", "qwen-image") => vec!["text_to_image"],
-        // Qwen-Image 2.1 (sc-24108): text-to-image only at this pin. Edit conditioning is a
-        // later slice, so the family default must not claim it.
+        // Qwen-Image 2.1 (sc-24108): the family DEFAULT stays text-to-image. The builtin entry
+        // declares its reference/edit operations itself, but the worker keys that route on the
+        // builtin id `qwen_image_2_1` (`is_qwen_image_2_1_edit`), so a custom model on this family
+        // has no edit route and its default must not claim one.
         ("image", "qwen-image-2-1") => vec!["text_to_image"],
         // Qwen Image, Lens, Chroma, imported SDXL, and imported Mage-Flow have no distinct
         // style-variation execution mode. Their builtin entries and imported-family defaults must

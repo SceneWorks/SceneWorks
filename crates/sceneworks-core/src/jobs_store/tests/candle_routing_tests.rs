@@ -267,6 +267,21 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             character("qwen_image_2_1"),
             CandleImageLane::QwenImage21Edit,
         ),
+        // The `image_to_image` operation: a mode-less request carrying one reference. MLX claims it
+        // (the predicate is mode-independent), so Candle must too — the lane is keyed on the ordered
+        // reference list, never on `mode`.
+        (
+            reference("qwen_image_2_1"),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "text_to_image",
+                "referenceAssetIds": ["ref_1", "ref_2"]
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
         (
             json!({
                 "model": "qwen_image_2_1",

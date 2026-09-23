@@ -1931,7 +1931,10 @@ fn conditioning_payload(
             job_type = kind;
             payload = character;
         }
-        "reference" => {
+        // `referenceRgba` (sc-24111 S4, Qwen-Image 2.1) is not a different SceneWorks request: the
+        // alpha is a property of the referenced ASSET, and the worker picks the carrier from the
+        // decoded image. So its canonical probe is the ordinary reference request.
+        "reference" | "referenceRgba" => {
             if job_type != JobType::ImageEdit {
                 payload["referenceAssetId"] = Value::String("probe".to_owned());
             }

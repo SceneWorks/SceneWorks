@@ -584,8 +584,10 @@ const RULES: &[MemoryRouteRule] = &[
     // `memoryRouteWitnesses` for this provider are exactly three — one per tier, `text_to_image` /
     // `none` / `plain`. Declaring an edit coordinate here would advertise a memory route the
     // provider refuses at `safety_check`, which is a worse failure than the consumer fallback an
-    // unmatched edit gets today. Widen this the moment that gate does — checklist item 9 in
-    // `tests/gpu_and_manifest.rs` is where the bump is told to re-read it.
+    // unmatched edit gets today. Widen this the moment that gate does. Re-read against the
+    // terminal pin (inference b12c632b4): both providers' `safety_check` still admit
+    // `MemoryMode::TextToImage` alone, and the dumped `memoryRouteWitnesses` are still exactly the
+    // three `text_to_image` / `none` / `plain` rows, one per tier.
     //
     // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
     // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not

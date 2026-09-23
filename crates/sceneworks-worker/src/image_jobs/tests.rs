@@ -9389,74 +9389,112 @@ fn qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder() {
     }
 }
 
-/// PENDING_PIN placeholder (sc-24110) — RGBA reference conditioning.
+/// sc-24110 / sc-24113 — an alpha-carrying reference travels as `Conditioning::ReferenceRgba`,
+/// UN-flattened, in its own ordered slot.
 ///
-/// `Conditioning::ReferenceRgba` does not exist in ANY inference revision available to this branch:
-/// it arrives with the engine's RGBA story (S4 contract), which is not on the epic's feature branch
-/// yet. So an alpha-carrying reference has no conditioning kind to become, and the worker refuses
-/// it by name rather than flattening it over a background — flattening is explicitly a DIFFERENT
-/// request, and substituting one silently is what the contract forbids.
-///
-/// **Not a standing bypass.** The assertion below states that the pinned `gen_core` does NOT expose
-/// the kind. The moment a pin bump carries it, this test goes RED and the only way to make it green
-/// is to delete it and give `build_qwen_image_2_1_conditioning` its `ReferenceRgba` arm — which is
-/// what re-arms the real contract. The steady state is that this test does not exist.
+/// The VAE encodes all four channels (S4 contract), so flattening the alpha away would send a
+/// DIFFERENT request. The mixed list is emitted per entry — a `MultiReference` holds only RGB — and
+/// the generic lane (what actually RUNS) must build exactly what the dedicated builder builds.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn qwen_image_2_1_rgba_reference_is_pending_the_pin() {
-    let kinds = format!("{:?}", gen_core::ConditioningKind::Reference);
-    assert!(
-        !format!("{kinds:?}").contains("ReferenceRgba"),
-        "sanity: this probe is about the ENUM, not this value"
-    );
-    // The real statement: nothing in the pinned crate names the variant. `ConditioningKind` is a
-    // plain C-like enum, so its `Debug` output over every kind the descriptor can advertise is a
-    // faithful census of what the pin exposes.
-    let advertised: Vec<String> = crate::engines::MODEL_TABLE
-        .iter()
-        .filter_map(|row| crate::engines::mlx_model(row.sceneworks_id))
-        .flat_map(|model| model.descriptor.capabilities.conditioning.clone())
-        .map(|kind| format!("{kind:?}"))
-        .collect();
-    assert!(
-        !advertised.iter().any(|kind| kind == "ReferenceRgba"),
-        "a pinned engine now advertises ReferenceRgba — the pin bump landed. DELETE this test and \
-         give `build_qwen_image_2_1_conditioning` its RGBA arm (S4: the VAE encode takes all four \
-         channels, the vision tower gets the image composited over white, and an RGB reference is \
-         the A=255 case)."
-    );
+fn qwen_image_2_1_alpha_reference_travels_as_reference_rgba_in_its_slot() {
+    // The pinned provider must actually declare the carrier this builds, on the registered
+    // descriptor — otherwise the engine would refuse the request by name.
+    let model = crate::engines::mlx_model("qwen_image_2_1").expect("2.1 is registered");
+    assert!(model
+        .descriptor
+        .capabilities
+        .conditioning
+        .contains(&gen_core::ConditioningKind::ReferenceRgba));
 
-    // Until then the refusal is the behavior, and it names the slot so the caller can find it.
-    let alpha_at_slot_2 = vec![
+    let rgb = stub_rgb8(2, 1, 1);
+    let mut plane = image::GrayImage::new(2, 1);
+    plane.put_pixel(0, 0, image::Luma([0]));
+    plane.put_pixel(1, 0, image::Luma([200]));
+    let references = vec![
         QwenImage21Reference {
             image: gen_core::Image {
-                width: 8,
-                height: 8,
-                pixels: stub_rgb8(8, 8, 1),
+                width: 2,
+                height: 1,
+                pixels: stub_rgb8(2, 1, 7),
             },
             alpha: None,
         },
         QwenImage21Reference {
             image: gen_core::Image {
-                width: 8,
-                height: 8,
-                pixels: stub_rgb8(8, 8, 2),
+                width: 2,
+                height: 1,
+                pixels: rgb.clone(),
             },
-            alpha: Some(image::GrayImage::new(8, 8)),
+            alpha: Some(plane.clone()),
         },
     ];
-    let error = build_qwen_image_2_1_conditioning(&alpha_at_slot_2)
-        .expect_err("an alpha-carrying reference has no pinned conditioning kind")
-        .to_string();
-    assert!(error.contains("reference 2"), "{error}");
-    assert!(error.contains("alpha"), "{error}");
-    assert!(
-        error.contains("ReferenceRgba"),
-        "the refusal must name the carrier the reference belongs in: {error}"
+    let conditioning =
+        build_qwen_image_2_1_conditioning(&references).expect("an RGBA reference is buildable");
+    assert_eq!(conditioning.len(), 2, "one ordered entry per reference");
+    match &conditioning[0] {
+        Conditioning::Reference { strength, .. } => assert_eq!(*strength, None),
+        other => panic!("slot 1 is opaque and must stay a plain Reference: {other:?}"),
+    }
+    match &conditioning[1] {
+        Conditioning::ReferenceRgba { image, strength } => {
+            assert_eq!(*strength, None);
+            assert_eq!((image.width, image.height), (2, 1));
+            // Straight RGB kept intact under A=0 — never composited, never zeroed.
+            assert_eq!(
+                image.pixels,
+                vec![rgb[0], rgb[1], rgb[2], 0, rgb[3], rgb[4], rgb[5], 200]
+            );
+        }
+        other => panic!("slot 2 carries alpha and must be ReferenceRgba: {other:?}"),
+    }
+
+    // The path that RUNS builds the identical list.
+    let images: Vec<gen_core::Image> = references.iter().map(|r| r.image.clone()).collect();
+    let alpha: Vec<Option<image::GrayImage>> = references.iter().map(|r| r.alpha.clone()).collect();
+    assert_eq!(
+        format!("{conditioning:?}"),
+        format!(
+            "{:?}",
+            build_lane_conditioning_with_alpha(None, &images, &alpha, None)
+        )
     );
+    // The image-conditioning count the request scope grades against is unchanged: one per entry.
+    assert_eq!(lane_reference_count(false, images.len(), false), 2);
+}
+
+/// The alpha plane of a 2.1 reference is fitted with EXACTLY the geometry its RGB gets, so the two
+/// halves of a `ReferenceRgba` stay aligned; a letterbox the source never covered is transparent.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_alpha_plane_is_fitted_with_its_images_geometry() {
+    let plane = image::GrayImage::from_fn(8, 4, |x, _| image::Luma([if x < 4 { 0 } else { 255 }]));
+    for mode in ["crop", "pad", "stretch"] {
+        let fitted = fit_alpha_plane(&plane, 8, 8, mode);
+        assert_eq!(fitted.dimensions(), (8, 8), "{mode}");
+        let replicated = gen_core::Image {
+            width: 8,
+            height: 4,
+            pixels: plane.as_raw().iter().flat_map(|a| [*a, *a, *a]).collect(),
+        };
+        let rgb_fit = fit_engine_image(replicated, 8, 8, mode).expect("fit");
+        let expected: Vec<u8> = rgb_fit.pixels.chunks_exact(3).map(|p| p[0]).collect();
+        assert_eq!(
+            fitted.as_raw(),
+            &expected,
+            "{mode}: alpha and RGB geometry diverged"
+        );
+    }
+    // `pad` letterboxes an 8x4 source into 8x8: the bars above and below are A=0.
+    let padded = fit_alpha_plane(&plane, 8, 8, "pad");
+    assert_eq!(padded.get_pixel(7, 0).0[0], 0);
+    assert_eq!(padded.get_pixel(7, 4).0[0], 255);
 }
 
 /// sc-24110 — the never-a-Mask guarantee on the path that actually RUNS.
@@ -11065,40 +11103,12 @@ fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
         &[("bernini_image", CandleImageRoute::Bernini)];
     const BESPOKE_BUILTIN_MODELS: &[&str] = &["bernini_image"];
 
-    // Candle-routed ids whose provider crate the CURRENTLY PINNED `runtime-cuda` composition does
-    // not link yet, because it arrives with this epic's terminal pin bump. The SceneWorks half of
-    // Qwen-Image 2.1 (sc-24108 MLX / sc-24109 Candle) lands on the epic branch BEFORE the one pin
-    // bump FEATURE_DEVELOPMENT invariant 5 allows, so for the length of the epic the route exists
-    // and the engine does not. This is the candle twin of `PENDING_PIN_ENGINE_IDS` in
-    // `gpu_and_manifest.rs`.
-    //
-    // NOT a standing bypass. The assertion right below flips the statement around and requires the
-    // id to genuinely FAIL to resolve, so the moment the pin carries `candle-gen-qwen-image-2-1`
-    // this test goes red and the id must be deleted from this list — which is what re-arms the
-    // real parity check for it. The steady state is an empty slice.
-    const PENDING_PIN_CANDLE_MODELS: &[&str] = &["qwen_image_2_1"];
-
     let mut settings = Settings::from_env();
     settings.backend_candle_enabled = true;
 
     let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
-    for &pending in PENDING_PIN_CANDLE_MODELS {
-        assert!(
-            scheduler_models.contains(&pending),
-            "{pending} is listed as pending-pin but is no longer candle-routed — drop the entry",
-        );
-        assert!(
-            !scheduler_models_without_native_candle_generator(&[pending], BESPOKE_BUILTIN_MODELS)
-                .is_empty(),
-            "{pending} now resolves to a linked Candle image generator — the pin bump landed, so \
-             remove it from PENDING_PIN_CANDLE_MODELS and let the parity check cover it",
-        );
-    }
-
-    let mut exempt: Vec<&str> = BESPOKE_BUILTIN_MODELS.to_vec();
-    exempt.extend_from_slice(PENDING_PIN_CANDLE_MODELS);
     assert_eq!(
-        scheduler_models_without_native_candle_generator(scheduler_models, &exempt),
+        scheduler_models_without_native_candle_generator(scheduler_models, BESPOKE_BUILTIN_MODELS),
         Vec::<&str>::new(),
         "every generic scheduler-routed id must resolve through MODEL_TABLE to a linked Candle image \
          generator; route membership alone is not proof that the worker can render it",
@@ -13237,7 +13247,9 @@ fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_reque
     let asset_id = asset["id"].as_str().unwrap().to_owned();
 
     assert!(
-        reference_carries_alpha(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap(),
+        load_reference_alpha(&settings.data_dir, &project.id, &asset_id, &project_path)
+            .unwrap()
+            .is_some(),
         "the fixture genuinely carries alpha, or this test proves nothing"
     );
 
@@ -13296,8 +13308,9 @@ fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_reque
         .unwrap();
     let opaque_id = opaque_asset["id"].as_str().unwrap().to_owned();
     assert!(
-        !reference_carries_alpha(&settings.data_dir, &project.id, &opaque_id, &project_path)
+        load_reference_alpha(&settings.data_dir, &project.id, &opaque_id, &project_path)
             .unwrap()
+            .is_none()
     );
     let opaque_default =
         load_reference_image(&settings.data_dir, &project.id, &opaque_id, &project_path).unwrap();

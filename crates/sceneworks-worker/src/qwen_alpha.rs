@@ -46,20 +46,15 @@
 //! and `A=0` does NOT zero RGB, so a consumer that must flatten has to COMPOSITE, never drop the
 //! fourth byte.
 //!
-//! # What is real today and what is not
+//! # Where each half lands
 //!
-//! Real today: the user-facing toggle, the prompt-convention pairing, validation, the refusal when
-//! the engine cannot serve it, the round-trip through the job payload, and the whole egress path
-//! that turns four channels into a transparent PNG.
-//!
-//! Not real until the epic's terminal pin bump: the request field reaching the provider. This
-//! branch pins an inference revision that predates S4, so the pinned `Capabilities` has no
-//! `supports_alpha_output` member and the pinned `GenerationRequest` no `output_channels` field.
-//! [`engine_advertises_alpha_output`] therefore answers from a pinned id list rather than by
-//! reading the descriptor; that function's BODY is the one-line swap, and its callers, its tests
-//! and its refusal text are already written against the final meaning.
-
-use std::collections::BTreeMap;
+//! The toggle is resolved against the engine's own descriptor
+//! ([`engine_advertises_alpha_output`]), validated and refused by name when the engine cannot serve
+//! it, round-tripped through the recipe ([`record_requested_channels`]), and assigned onto the
+//! engine request as `gen_core::OutputChannels::Rgba` ([`request_output_channels`]). The generic
+//! image lane then receives `GenerationOutput::ImagesRgba`, and the egress path types those four
+//! channels as an RGBA PNG. An alpha-carrying reference travels as `Conditioning::ReferenceRgba`
+//! (see `image_jobs::build_qwen_image_2_1_conditioning`).
 
 use serde_json::{Map, Value};
 
@@ -106,30 +101,28 @@ pub(crate) const CHANNELS_RGB: u8 = 3;
 /// Native transparency — four channels, straight through to an RGBA PNG.
 pub(crate) const CHANNELS_RGBA: u8 = 4;
 
-/// SceneWorks model ids known to decode to four channels at THIS pin.
+/// Does the engine a SceneWorks model id resolves to advertise alpha output?
 ///
-/// Keyed on the SceneWorks catalog id rather than the engine id because that is what the request
-/// carries at the funnel this is checked from. For `qwen_image_2_1` the two are the same string.
-///
-/// This list is the stand-in for a descriptor read, and it exists for exactly one reason: the
-/// inference revision this branch pins predates `mlx-gen-qwen-image-2-1`, so there is no
-/// `Capabilities::supports_alpha_output` to read and no provider to read it from. Writing a
-/// hand-list is honest about that; silently defaulting to "everything supports it" would not be.
-///
-/// At the epic's terminal pin bump [`engine_advertises_alpha_output`] becomes the descriptor read
-/// and this constant goes away. Until then a model added here without an RGBA VAE would produce a
-/// three-channel buffer and the egress path would simply type it `Rgb` — a wrong toggle, not a
-/// crash.
-const PINNED_ALPHA_CAPABLE_ENGINES: &[&str] = &["qwen_image_2_1"];
-
-/// Does this engine advertise alpha output?
-///
-/// ⚠️ **THE ONE-LINE SWAP.** At the terminal pin bump the body becomes
-/// `descriptor.capabilities.supports_alpha_output` and the signature takes the resolved descriptor
-/// instead of the id. Every caller, test and message below is already written against that
-/// meaning.
+/// Read from the REGISTERED descriptor, never from a hand-list: a model id that resolves to no
+/// linked engine (an unregistered id, or a build with no engine backend at all) cannot emit alpha,
+/// so it answers `false` and a transparency request against it is refused by name.
 pub(crate) fn engine_advertises_alpha_output(model_id: &str) -> bool {
-    PINNED_ALPHA_CAPABLE_ENGINES.contains(&model_id)
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        crate::engines::mlx_model(model_id)
+            .is_some_and(|model| model.descriptor.capabilities.supports_alpha_output)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = model_id;
+        false
+    }
 }
 
 /// Did the user ask for a transparent background?
@@ -206,28 +199,20 @@ pub(crate) fn output_channels_variant(channels: u8) -> &'static str {
     }
 }
 
-/// The engine-request fragment for a resolved output surface, as a name→value map.
+/// The `gen_core::OutputChannels` a resolved channel count assigns onto the engine request.
 ///
-/// Returns an EMPTY map for [`CHANNELS_RGB`] rather than `{output_channels: "rgb"}`: `Rgb` IS the
-/// contract's default, so an opaque render must put nothing new on the wire and every existing
-/// lane stays byte-identical.
-///
-/// Returned as a map rather than set directly on `GenerationRequest` because the pinned request
-/// struct has no `output_channels` field yet (see the module docs). At the pin bump the call site
-/// assigns `gen_core::OutputChannels::Rgba` instead of merging this — the DECISION this computes
-/// does not change either way.
-// Unused OUTSIDE tests at this pin, and deliberately kept: it is the computed value the pin bump
-// assigns to the engine request, and the one place the field name meets its variant.
-#[allow(dead_code)]
-pub(crate) fn output_channels_request_fragment(channels: u8) -> BTreeMap<&'static str, Value> {
-    let mut fragment = BTreeMap::new();
-    if channels != CHANNELS_RGB {
-        fragment.insert(
-            REQUEST_OUTPUT_CHANNELS,
-            Value::from(output_channels_variant(channels)),
-        );
+/// [`CHANNELS_RGB`] is `OutputChannels::Rgb`, the contract's `Default`, so an opaque render puts
+/// nothing new on the wire and every existing lane stays byte-identical.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn request_output_channels(channels: u8) -> gen_core::OutputChannels {
+    if channels == CHANNELS_RGBA {
+        gen_core::OutputChannels::Rgba
+    } else {
+        gen_core::OutputChannels::Rgb
     }
-    fragment
 }
 
 /// Which conditioning carrier a reference image belongs in.
@@ -243,11 +228,8 @@ pub(crate) fn output_channels_request_fragment(channels: u8) -> BTreeMap<&'stati
 /// alpha channel is an ordinary reference, and an opaque alpha channel is still alpha as far as the
 /// carrier is concerned — `A=255` is byte-identical through the RGBA path, so classifying by
 /// CHANNELS rather than by content keeps the choice total and cheap.
-// sc-24110 gave this its call site: `image_jobs::build_qwen_image_2_1_conditioning` classifies
-// every resolved reference through this function, so the two halves of the story cannot drift on
-// what an alpha-carrying reference becomes. The `ReferenceRgba` ARM still cannot be CONSTRUCTED —
-// the variant is not in the pinned `gen_core` — so that is what the builder refuses on, by name,
-// rather than flattening; see `qwen_image_2_1_rgba_reference_is_pending_the_pin`.
+// `image_jobs::build_qwen_image_2_1_conditioning` classifies every resolved reference through this
+// function, so the two halves of the epic cannot drift on what an alpha-carrying reference becomes.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -302,6 +284,11 @@ mod tests {
         }
     }
 
+    // Read from the REGISTERED descriptor, so it needs a linked engine backend.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn transparency_on_an_alpha_capable_engine_resolves_to_four_channels() {
         let advanced = advanced(json!({ "transparentBackground": true }));
@@ -323,20 +310,29 @@ mod tests {
         assert!(message.contains(DESCRIPTOR_ALPHA_CAPABILITY), "{message}");
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn an_opaque_render_puts_nothing_new_on_the_wire() {
-        assert!(output_channels_request_fragment(CHANNELS_RGB).is_empty());
+        // `Rgb` is the contract's Default, so the request an opaque render builds is unchanged.
+        assert_eq!(
+            request_output_channels(CHANNELS_RGB),
+            gen_core::OutputChannels::default()
+        );
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn a_transparent_render_carries_the_rgba_variant_not_a_channel_count() {
-        // `output_channels` is an ENUM (`OutputChannels { Rgb, Rgba }`), not a number. Sending 4
-        // would not deserialize; sending "rgb" would be a no-op field the contract already defaults.
-        let fragment = output_channels_request_fragment(CHANNELS_RGBA);
-        assert_eq!(fragment.len(), 1);
+        // `output_channels` is an ENUM (`OutputChannels { Rgb, Rgba }`), not a number.
         assert_eq!(
-            fragment.get(REQUEST_OUTPUT_CHANNELS),
-            Some(&Value::from("rgba"))
+            request_output_channels(CHANNELS_RGBA),
+            gen_core::OutputChannels::Rgba
         );
         assert_eq!(output_channels_variant(CHANNELS_RGBA), OUTPUT_CHANNELS_RGBA);
         assert_eq!(output_channels_variant(CHANNELS_RGB), OUTPUT_CHANNELS_RGB);
@@ -362,6 +358,10 @@ mod tests {
         assert!(raw_settings.is_empty());
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn a_transparency_request_round_trips_through_the_recipe() {
         // This is what makes a re-run reproduce a cut-out instead of quietly re-rendering it
@@ -385,35 +385,35 @@ mod tests {
         );
     }
 
-    /// [`PINNED_ALPHA_CAPABLE_ENGINES`] must be SELF-DELETING, not a standing bypass.
-    ///
-    /// The hand-list stands in for `descriptor.capabilities.supports_alpha_output`, and it is
-    /// justified by exactly one fact: the pinned inference revision predates the 2.1 provider, so
-    /// the engine does not resolve and there is no descriptor to read. That fact has an expiry —
-    /// the epic's terminal pin bump — and a bypass that outlives its reason is how a temporary
-    /// allow-list becomes permanent.
-    ///
-    /// So this asserts the JUSTIFICATION rather than the list: `qwen_image_2_1` does not resolve
-    /// through the MLX registry. The moment the bump lands it will, this test reds, and the failure
-    /// says what to do. Same shape and the same self-deleting contract as `PENDING_PIN_ENGINE_IDS`
-    /// in `crate::tests::gpu_and_manifest` (#2909), whose checklist enumerates this and the three
-    /// other sc-24113 seams that unwind together.
-    #[cfg(target_os = "macos")]
+    /// The capability is the DESCRIPTOR's answer on every registered engine, not a hand-list:
+    /// exactly the engines whose descriptor sets `supports_alpha_output` resolve to four channels,
+    /// and `qwen_image_2_1` is among them at the pinned inference revision.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
-    fn the_pinned_alpha_capability_list_expires_with_the_pin_that_justifies_it() {
-        for id in PINNED_ALPHA_CAPABLE_ENGINES {
-            assert!(
-                crate::engines::mlx_model(id).is_none(),
-                "{id} now resolves through the registry, so its descriptor can be read directly. \
-                 The pin bump landed: replace `engine_advertises_alpha_output`'s body with \
-                 `descriptor.capabilities.{DESCRIPTOR_ALPHA_CAPABILITY}`, delete \
-                 PINNED_ALPHA_CAPABLE_ENGINES, and work the rest of the sc-24113 checklist in \
-                 PENDING_PIN_ENGINE_IDS (the ReferenceRgba carrier and the recipe-only \
-                 output-channels stamp)."
+    fn alpha_capability_is_read_from_every_registered_descriptor() {
+        let mut capable = Vec::new();
+        for row in crate::engines::MODEL_TABLE {
+            let Some(model) = crate::engines::mlx_model(row.sceneworks_id) else {
+                continue;
+            };
+            assert_eq!(
+                engine_advertises_alpha_output(row.sceneworks_id),
+                model.descriptor.capabilities.supports_alpha_output,
+                "{}",
+                row.sceneworks_id
             );
+            if model.descriptor.capabilities.supports_alpha_output {
+                capable.push(row.sceneworks_id);
+            }
         }
-        // Anti-collapse: an emptied list would make the loop vacuous and silently disarm this.
-        assert_eq!(PINNED_ALPHA_CAPABLE_ENGINES, &["qwen_image_2_1"]);
+        assert!(
+            capable.contains(&"qwen_image_2_1"),
+            "the pinned 2.1 provider advertises alpha output: {capable:?}"
+        );
+        assert!(!engine_advertises_alpha_output("no_such_model_xyz"));
     }
 
     #[test]

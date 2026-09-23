@@ -1741,18 +1741,24 @@ pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// carrying 1..=10 ordered condition images.
 ///
 /// Deliberately DELEGATES to [`qwen_image_2_1_mlx_eligible`] instead of restating it. The Candle
-/// port registers the same engine id, the same `Reference` + `MultiReference` conditioning, the
-/// same 10-image cap and the same refusal of pose/control carriers — there is exactly ONE request
-/// contract for this model, so a second copy of the predicate could only ever drift from it. The
-/// only thing this wrapper adds is the `mode` narrowing: the plain text-to-image arm of that
-/// predicate belongs to the generic candle txt2img gate (which already claims 2.1 t2i off-Mac), so
-/// this bespoke lane must claim the CONDITIONED shapes only, or it would swallow every t2i job and
-/// bypass `CANDLE_IMAGE_CHECKS`'s LoRA and quant-tier refusals for them.
+/// port registers the same engine id, the same `Reference` + `ReferenceRgba` + `MultiReference`
+/// conditioning, the same 10-image cap and the same refusal of pose/control carriers — there is
+/// exactly ONE request contract for this model, so a second copy of the predicate could only ever
+/// drift from it. The only thing this wrapper adds is the CONDITIONED narrowing: the plain
+/// text-to-image arm of that predicate (an empty ordered list) belongs to the generic candle
+/// txt2img gate, which already claims 2.1 t2i off-Mac and applies `CANDLE_IMAGE_CHECKS`'s LoRA and
+/// quant-tier refusals to it.
+///
+/// The narrowing is on the ordered REFERENCE LIST, never on `mode` — exactly like the MLX predicate
+/// and the worker's `is_qwen_image_2_1_edit`. Upstream has no mode axis: a non-empty list IS the
+/// edit call. A mode-keyed narrowing (what this used to be) left a `text_to_image` request carrying
+/// a `referenceAssetId` — the manifest's `image_to_image` operation — unclaimable off-Mac while the
+/// Mac claimed it, which the backend capability matrix at the terminal pin surfaced as three
+/// MLX-only cells (`image_to_image`, `reference`, `referenceRgba`) with no exception behind them.
 pub(crate) fn qwen_image_2_1_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    matches!(
-        payload.get("mode").and_then(Value::as_str),
-        Some("edit_image" | "character_image")
-    ) && qwen_image_2_1_mlx_eligible(payload)
+    qwen_image_2_1_mlx_eligible(payload)
+        && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
+            .is_some_and(|ids| !ids.is_empty())
 }
 
 /// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic

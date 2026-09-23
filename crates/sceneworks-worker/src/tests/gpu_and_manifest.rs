@@ -408,9 +408,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux_dev", true, false),
         ("qwen_image", true, true),
         // Qwen-Image 2.1 (sc-24108): a true-CFG family — the engine takes a real negative branch
-        // and a `true_cfg` scale. Listed here so the count guard below still covers every row, but
-        // its descriptor cannot be read until the epic's terminal pin bump carries
-        // `mlx-gen-qwen-image-2-1` (see PENDING_PIN_ENGINE_IDS).
+        // and a `true_cfg` scale.
         ("qwen_image_2_1", true, true),
         ("qwen_image_edit", true, true),
         ("qwen_image_edit_2509", true, true),
@@ -521,97 +519,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit", true, true),
         ("mage_flow_edit_turbo", false, false),
     ];
-    // MODEL_TABLE rows whose engine the CURRENTLY PINNED `runtime-macos` bundle does not register,
-    // because the provider crate arrives with this epic's terminal pin bump (sc-24108: the
-    // SceneWorks half of Qwen-Image 2.1 lands on the epic branch before the one pin bump that
-    // FEATURE_DEVELOPMENT invariant 5 allows, so for the length of the epic the row exists and the
-    // engine does not).
-    //
-    // This is NOT an allowance for a broken mapping. The loop below asserts that every id named
-    // here genuinely fails to resolve, so the moment the pin carries the provider this test goes
-    // RED and the id must be deleted from this list — which is what re-arms the descriptor-drift
-    // assertions for it. The steady state is an empty slice.
-    //
-    // DELETING THE ROW IS NOT THE WHOLE JOB. Seven things are inert while the providers are
-    // absent, and the pin bump owns all of them (sc-24108 review + sc-24109; the terminal story
-    // carries them). Items 1–5 are the MLX half; 6–7 are the Candle half:
-    //
-    //   1. this list — remove `"qwen_image_2_1"`, which re-arms the guidance / negative-prompt
-    //      descriptor-drift assertions below;
-    //   2. `crates/sceneworks-worker/src/mlx_fit_gate.rs` — add it to the staged-residency sweep in
-    //      `engine_engages_staged_residency_is_derived_from_the_registered_capability` (the S1
-    //      contract declares `supports_sequential_offload`); that test's completeness loop fails
-    //      closed the moment the engine registers, so it will demand this;
-    //   3. `config/backend-capabilities/matrix.json` — re-dump via
-    //      `cargo run -p sceneworks-core --bin dump-backend-capability-matrix`. It currently records
-    //      `text_to_image` as `mlx: false, candle: false` with empty `precisionTier` /
-    //      `guidanceMethod` axes, because those cells are derived from a descriptor that is not
-    //      there;
-    //   4. `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
-    //      — regenerate with `(cd apps/web && npm run gen:preview-support)`. The id has NO row today,
-    //      which reads as "unknown" rather than the engine's real `supports_preview: false`;
-    //   5. `config/engine-capabilities/capabilities.mlx.json` (and `runtime/`) — re-dump on the macOS
-    //      lane. A new engine id cannot appear in a dump taken at the old pin, and the file must
-    //      never be hand-authored.
-    //   6. (sc-24109) `crates/sceneworks-worker/src/image_jobs/tests.rs` — remove
-    //      `"qwen_image_2_1"` from `PENDING_PIN_CANDLE_MODELS` in
-    //      `every_scheduler_routed_candle_image_has_a_native_worker_route`. That list is this one's
-    //      candle twin and is self-deleting the same way: it asserts the id does NOT resolve to a
-    //      linked candle image generator, so it goes red on the windows-candle lane at the bump.
-    //   7. (sc-24109) `config/engine-capabilities/capabilities.candle.json` — re-dump on a
-    //      Linux/Windows lane (it CANNOT be produced on macOS), then run
-    //      `scripts/generate-manifest-memory-declarations.mjs` so the manifest's `candle` block
-    //      gains its generated `memoryStrategyContract`. Until then the candle route reports the
-    //      consumer fallback and `candle.minMemoryGb` is its only memory claim. The windows-candle
-    //      lane's `compare-engine-capability-facts` is what forces this: a fresh dump that carries
-    //      the new provider will not match the checked-in one.
-    //
-    //   8. (sc-24113) `crates/sceneworks-worker/src/qwen_alpha.rs` — the S4 RGBA contract lands with
-    //      the same bump, and FOUR seams there are staged behind it. Each is written against the
-    //      final meaning, so the bump is a body swap rather than a redesign:
-    //        a. `PINNED_ALPHA_CAPABLE_ENGINES` — delete it and make
-    //           `engine_advertises_alpha_output` read
-    //           `descriptor.capabilities.supports_alpha_output`, taking the resolved descriptor
-    //           instead of the id. Self-deleting like this list:
-    //           `the_pinned_alpha_capability_list_expires_with_the_pin_that_justifies_it` asserts
-    //           the id does NOT resolve, so it reds here at the bump.
-    //        b. `resolve_output_channels`'s stamp is RECIPE-ONLY today
-    //           (`image_jobs.rs`'s `write_image_asset` records what was asked for; nothing reaches
-    //           the provider). Assign `gen_core::OutputChannels::Rgba` on the request instead —
-    //           `output_channels_request_fragment` already computes the decision.
-    //        c. `reference_conditioning_kind` + `image_jobs/base.rs`'s `reference_carries_alpha`
-    //           have no call site because 2.1 has no worker-side edit route yet. sc-24110 (S3-SW)
-    //           owns that route and wires them: an alpha-carrying reference travels as
-    //           `Conditioning::ReferenceRgba`, UN-flattened.
-    //        d. `load_reference_image_with`'s `FlattenPolicy` — pass `OverWhite` from the 2.1 path
-    //           for the vision-tower copy. The default stays `Truncate`; every pre-2.1 lane is at
-    //           upstream `convert("RGB")` parity and must not move.
-    //   9. (sc-24112) `crates/sceneworks-worker/src/memory_route_registry.rs` — the two
-    //      `qwen_image_2_1` rules are registered ALREADY (MLX + Candle, `BF16_Q4_Q8`, `TEXT_ONLY`,
-    //      `PLAIN`), but nothing in that file's tests forces them, so re-read them against the
-    //      pinned descriptor at the bump: confirm the provider still declares exactly those tiers
-    //      and still refuses every adapter, and narrow the rows if it does not.
-    //
-    // …and then `npm run generate:memory-matrix` + `npm run generate:memory-anchors`, because (2),
-    // (5) and (7) move the matrix's inputs.
-    //
-    // SEPARATELY FROM THE PIN — the epic's TERMINAL story owns the tier upload, which is what
-    // turns sc-24112's DECLARED q8/q4 tiers into installable ones. That is not a pin-bump item and
-    // must not be folded into one; `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
-    // in `tests/test_builtin_manifest_audit.py` is its fail-closed guard and names the exact steps.
-    const PENDING_PIN_ENGINE_IDS: &[&str] = &["qwen_image_2_1"];
-
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
     for (id, guidance, negative) in expected {
-        if PENDING_PIN_ENGINE_IDS.contains(id) {
-            assert!(
-                mlx_model(id).is_none(),
-                "{id} now resolves through the registry — the pin bump landed, so remove it from \
-                 PENDING_PIN_ENGINE_IDS and let its descriptor-derived flags be checked"
-            );
-            continue;
-        }
         let m = mlx_model(id).unwrap_or_else(|| panic!("{id} resolves through the registry"));
         assert_eq!(
             m.supports_guidance(),

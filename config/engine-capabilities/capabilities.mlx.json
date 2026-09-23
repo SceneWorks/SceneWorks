@@ -15485,6 +15485,27 @@
       "loadProfile": "lora"
     },
     {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
       "provider": "qwen_image_edit",
       "tier": "bf16",
       "mode": "text_to_image",
