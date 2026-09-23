@@ -576,9 +576,16 @@ const RULES: &[MemoryRouteRule] = &[
     // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
     // tier either provider can serve.
     //
-    // `TEXT_ONLY`: the entry's `capabilities` is `["text_to_image"]` and both arms refuse every
-    // conditioning carrier. Reference conditioning is sc-24110's, and this row must not advertise
-    // an edit coordinate ahead of the route that serves it.
+    // `TEXT_ONLY`, and this is the one field that is NOT simply the catalog's answer. The entry's
+    // `capabilities` gained `edit_image` / `image_to_image` with sc-24110, so the REQUEST route
+    // serves edits — but the provider's own `memory_strategy::safety_check` still opens with
+    // `if !matches!(context.mode, MemoryMode::TextToImage) { return Err(...) }`, so the MEMORY
+    // route admits text-to-image alone. Verified against the pinned-at-#1007 descriptor: its
+    // `memoryRouteWitnesses` for this provider are exactly three — one per tier, `text_to_image` /
+    // `none` / `plain`. Declaring an edit coordinate here would advertise a memory route the
+    // provider refuses at `safety_check`, which is a worse failure than the consumer fallback an
+    // unmatched edit gets today. Widen this the moment that gate does — checklist item 9 in
+    // `tests/gpu_and_manifest.rs` is where the bump is told to re-read it.
     //
     // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
     // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not

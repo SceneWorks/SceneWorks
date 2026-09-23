@@ -776,14 +776,20 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
 
     Last moved: sc-24112 gives `qwen_image_2_1` a real TIER AXIS — bf16/q8/q4 `variant` rows on
     both backends, where sc-24108/sc-24109 had one untagged artifact. `tiersFor` unions the
-    declared download variants, so the entry's tier axis goes 1 -> 3 and EVERY ONE of its ten lanes
-    multiplies by exactly 3: `resident` 4 -> 12 implemented, the other four rungs 4 -> 12 missing,
-    on each backend. Nothing else moves and no other model is touched: the multiplier is the tier
-    axis alone, the mode/overlay cross-product is unchanged (text_to_image x {none, lora}), and no
-    rung's CLASSIFICATION changes — the ladder is still unpublished on both lanes until the epic's
-    terminal pin bump re-dumps the capability files, so the new coordinates are Missing for the
-    same reason the old ones were. The per-tier memory floors this story adds ride
-    `minMemoryGbByTier`, which the matrix does not read, so they move nothing here.
+    declared download variants, so the entry's tier axis goes 1 -> 3 and every one of its ten lanes
+    multiplies by 3.
+
+    The same branch carries sc-24113/sc-24110, which widen the entry's `capabilities` from
+    `["text_to_image"]` to `["text_to_image", "image_to_image", "edit_image"]`, so the MODE axis
+    goes 2 -> 3 on top of that. The two multipliers compose: 4 -> 12 (tiers) -> 18 (modes) per
+    lane, i.e. `resident` 4 -> 18 implemented and each of the other four rungs 4 -> 18 missing, on
+    each backend. 18 = 3 tiers x 3 modes x {none, lora}.
+
+    No other model is touched and no rung's CLASSIFICATION changes: the ladder is still unpublished
+    on both lanes until the epic's terminal pin bump re-dumps the capability files, so the new
+    coordinates are Missing for exactly the reason the old ones were. The per-tier memory floors
+    ride `minMemoryGbByTier`, which the matrix does not read, so they move nothing here; nor does
+    the `admissionGeometry` block.
 
     Previously: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
     `candle_routed: true` + the manifest `candle` block), so the entry contributes five NEW lanes

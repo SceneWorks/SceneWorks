@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ce2a2d8bada4ea6a709e6f51429efe0a429a6e852dd99cd46b105aadc597c678",
+    "sceneWorksRevision": "source-tree:9770fad0969cdb3d5498f405e3ca6c77ec88e9f062f0377d6b73cdd20d0cdf53",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6afe2b9d6361f579365f6f39f5307a1d886b263129c26b9d5cb817fa53f180d6"
+        "sha256": "4d25e3288c9884e36b0f6385779e10761dc234f218b954821f829429eb7b9cb4"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -13,11 +13,11 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "d3f6d5b013206b36ad6c7240a98c7efd6aef522fa67e518e134b3b5870803c99"
+        "sha256": "c4fdb98b178b77df2919e5524a6ee819303324e8d5c68575b8d6a06f8ea736eb"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "5da1d068a1d2270166743c75429d5610ef3139a23b48bfee08eb10018ab9d3d9"
+        "sha256": "52315302216fc57ac8c0b5bde1ef40802c453249f9dd2b365e03dc784df33024"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6dbcf5da5499b55c417d42ec114fccb498cc4d2b42cb8647e57f5eda42331396"
+        "sha256": "d4c595c7fbc2190b171acc889242ec1dd268ecfd80725debaf0481305c62c1e5"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "266e77a82e1393447c29e7350b65081c3a521ee6a62fa4bc7a4a2ff1d82916a0"
+        "sha256": "43948846d37d635d98abbaaa07671067636ae7bf3e51ddf9bc9b23ddc6856d76"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "4e30a94f9f76297541b3c014bb887364032e396fa4b5810e19db1a3135362e8a"
+        "sha256": "3d6fc4bc254586cbf03a769f772861bf557622fa0439599c4c875085038646de"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 54,
       "video": 11
     },
-    "cells": 9510,
+    "cells": 9570,
     "publishedCells": 3810,
-    "elidedCells": 5700,
+    "elidedCells": 5760,
     "elidedByState": {
-      "Implemented": 1202,
-      "Missing": 4498
+      "Implemented": 1214,
+      "Missing": 4546
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 47,
@@ -2938,6 +2938,7 @@
             "q8"
           ],
           "modes": [
+            "edit_image",
             "image_to_image",
             "text_to_image"
           ],
@@ -2960,6 +2961,7 @@
             "q8"
           ],
           "modes": [
+            "edit_image",
             "image_to_image",
             "text_to_image"
           ],
@@ -15677,120 +15679,120 @@
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 18,
+      "implemented": 18,
       "states": {
-        "Implemented": 12
+        "Implemented": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
-      "implemented": 12,
+      "elided": 18,
+      "implemented": 18,
       "states": {
-        "Implemented": 12
+        "Implemented": 18
       }
     },
     {
       "modelId": "qwen_image_2_1",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 12,
+      "coordinates": 18,
       "published": 0,
-      "elided": 12,
+      "elided": 18,
       "implemented": 0,
       "states": {
-        "Missing": 12
+        "Missing": 18
       }
     },
     {
