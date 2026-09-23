@@ -322,6 +322,46 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     expect(setEditPrompt).toHaveBeenCalledWith("correct the colors of this photo");
   });
 
+  // sc-24114: the editor exposes the Studio's transparency toggle for an alpha-capable model, and
+  // offers the prompt wording when it is on. *Mutation that reds this:* removing the toggle.
+  it("offers the transparency toggle and prompt hint for an alpha-capable edit model", async () => {
+    const setEditTransparent = vi.fn();
+    const setEditPrompt = vi.fn();
+    const alphaModel = { id: "qwen_image_2_1", name: "Qwen Image 2.1", supportsAlphaOutput: true };
+    await act(async () =>
+      root.render(
+        <ImageEditorEditPanel
+          scope={editScope({
+            editModel: alphaModel.id,
+            editModels: [alphaModel],
+            selectedEditModel: alphaModel,
+            editPrompt: "remove the background",
+            editTransparent: true,
+            setEditTransparent,
+            setEditPrompt,
+          })}
+        />,
+      ),
+    );
+    const toggle = container.querySelector(".transparency-toggle input");
+    expect(toggle?.checked).toBe(true);
+    await act(async () => toggle.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(setEditTransparent).toHaveBeenCalledWith(false);
+    const hint = container.querySelector(".transparency-prompt-hint button");
+    await act(async () => hint.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(setEditPrompt.mock.calls.at(-1)[0]).toContain("The background is transparent.");
+
+    const opaqueModel = { id: "flux2_dev", name: "FLUX.2" };
+    await act(async () =>
+      root.render(
+        <ImageEditorEditPanel
+          scope={editScope({ editModel: opaqueModel.id, editModels: [opaqueModel], selectedEditModel: opaqueModel })}
+        />,
+      ),
+    );
+    expect(container.querySelector(".transparency-toggle")).toBeNull();
+  });
+
   // sc-24110: the SHIPPED Qwen Image 2.1 entry must open the reference rail, at its declared cap.
   // `multiRefCapable` / `maxEditReferences` are derived exactly as ImageEditor.jsx derives them
   // (`ui.multiReference`, `maxReferencesForModel(model, MAX_EDIT_REFERENCES)`), from the manifest
@@ -348,7 +388,12 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(eight)} />));
     expect(addButton(), "the reference rail is rendered for this model").not.toBeNull();
     expect(addButton().disabled, "eight references + the working image is nine of ten").toBe(false);
-    expect(container.querySelector(".ie-ref-ordinal")?.textContent).toBe("Image 1");
+    // sc-24114: the working image leads the ordered list the edit sends, so it is "Image 1" and
+    // the first ATTACHED reference is "Image 2" — the numbering the engine's template uses.
+    // *Mutation that reds this:* labelling attached references `referenceOrdinalLabel(index)`.
+    const ordinals = [...container.querySelectorAll(".ie-ref-ordinal")].map((node) => node.textContent);
+    expect(ordinals).toEqual(["Image 1", ...eight.map((_, index) => `Image ${index + 2}`)]);
+    expect(container.querySelector(".ie-ref-working .ie-ref-ordinal")?.textContent).toBe("Image 1");
 
     const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
     await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));

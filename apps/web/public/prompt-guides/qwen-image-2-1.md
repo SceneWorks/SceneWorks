@@ -78,6 +78,13 @@ is a different request, not a cosmetic change. Refer to them the way you would i
 
 > Put the jacket from the second image on the person in the first image.
 
+In the Image Editor the picture you are editing is always **image 1**, and the references you attach
+start at image 2 — the reference rail shows each one's number.
+
+Each picture takes **one slot**: attaching the same image twice (for example, attaching the picture
+you are editing as a reference as well) still gives it a single number, and every later reference
+keeps its place. The ten-image limit counts distinct images.
+
 Because everything is a reference, the workflows that need special tooling elsewhere are just things
 you say:
 
@@ -93,7 +100,8 @@ To mark a region, draw straight **onto the reference** with the Image Editor's p
 attaching it, then name the marking in the prompt ("the red outline", "the green box"). A mask is
 not a special input here — it is another picture you describe.
 
-Each reference is fitted to about 1024 px and re-encoded on **every step**, so ten references cost
+Each reference keeps its own shape — it is never cropped to your output's aspect — and is scaled to
+about 1024 px and re-encoded on **every step**, so ten references cost
 noticeably more than two. Attach what the instruction actually refers to.
 
 ## Transparent backgrounds

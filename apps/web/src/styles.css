@@ -10490,6 +10490,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .ie-ref-move:first-of-type { left: -8px; }
 .ie-ref-move:nth-of-type(2) { right: -8px; }
 .ie-ref-move:disabled { opacity: 0.35; cursor: default; }
+.ie-ref-working { background: var(--ie-surface2); border-style: dashed; }
+.ie-ref-working-label { font-size: 9px; line-height: 1.1; text-align: center; padding: 0 3px 12px; color: var(--ie-muted); }
 /* The thumbnail is the positioning context for all four overlay controls, and it must not clip the
    ones that sit outside its box. `.ie-ref` above sets `overflow: hidden` for the image's rounded
    corners, which would also clip the move/remove buttons, so the image is clipped instead. */

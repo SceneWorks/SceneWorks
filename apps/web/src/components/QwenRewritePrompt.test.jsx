@@ -199,13 +199,13 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
     expect(container.textContent).toContain("image 2");
   });
 
-  it("offers the download when the checkpoint is missing, and says the model works without it", async () => {
-    const onDownloadRewriteModel = vi.fn(async () => ({ id: "job_1" }));
+  // sc-24114: no in-panel download (the panel never shows for a missing rewriter); the race where
+  // it is uninstalled between render and click points at the Models screen instead.
+  it("points a vanished checkpoint at the Models screen, and says the model works without it", async () => {
     render(
       <QwenRewritePromptControl
         modelId="qwen_image_2_1"
         onApply={() => {}}
-        onDownloadRewriteModel={onDownloadRewriteModel}
         prompt="a cinematic harbour"
         rewriteModel={{
           installState: "missing",
@@ -223,9 +223,8 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
     // The copy has to say the image model is unaffected — "no degraded path" means the user is
     // never led to believe generation needs this.
     expect(container.textContent).toContain("generates");
-    expect(container.textContent).toContain("18.8 GB");
-    await act(async () => buttonByText(container, "Download rewriter").click());
-    expect(onDownloadRewriteModel).toHaveBeenCalled();
+    expect(container.textContent).toContain("Models screen");
+    expect(buttonByText(container, "Download rewriter")).toBeFalsy();
   });
 
   it("surfaces a failure instead of offering an empty rewrite to Apply", async () => {
