@@ -8289,13 +8289,14 @@ fn build_qwen_image_2_1_conditioning(
 /// The ordered condition images a Qwen-Image 2.1 edit contributes to the generic lane's
 /// `edit_refs` slot — resolved, validated, and in request order.
 ///
-/// [`build_qwen_image_2_1_conditioning`] is run here, on the REAL references, and its answer
-/// discarded: the generic lane rebuilds the identical list from these images through
-/// `build_lane_conditioning` (pinned by
-/// `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`), so what this call is for is
-/// its REFUSALS — the alpha-carrying reference that has no pinned conditioning kind. Running it
-/// here means that refusal happens before any weights are loaded, next to the asset reads that
-/// produced it, rather than as a render failure.
+/// [`build_qwen_image_2_1_conditioning`] is the ONE source of truth for what this route sends: its
+/// answer is unpacked here into the lane's `edit_refs` slot, and `build_lane_conditioning` re-wraps
+/// those images into exactly that answer (`Reference` for one, `MultiReference` for many — pinned
+/// by `qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder`). So the builder's refusals
+/// (the alpha-carrying reference with no pinned kind) AND its shape are what reach the engine, and
+/// a builder that ever emitted anything else — a `Mask` above all — is refused here rather than
+/// silently dropped. Running it here also means a refusal happens before any weights are loaded,
+/// next to the asset reads that produced it, rather than as a render failure.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8306,8 +8307,68 @@ fn resolve_qwen_image_2_1_edit_images(
     project_path: &Path,
 ) -> WorkerResult<Vec<Image>> {
     let references = resolve_qwen_image_2_1_edit(request, settings, project_path)?;
-    build_qwen_image_2_1_conditioning(&references)?;
-    Ok(references.into_iter().map(|entry| entry.image).collect())
+    let mut images = Vec::with_capacity(references.len());
+    for conditioning in build_qwen_image_2_1_conditioning(&references)? {
+        match conditioning {
+            Conditioning::Reference {
+                image,
+                strength: None,
+            } => images.push(image),
+            Conditioning::MultiReference { images: ordered } => images.extend(ordered),
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "qwen_image_2_1: the ordered conditioning list may carry only strength-less \
+                     reference images, but the builder produced {other:?}"
+                )))
+            }
+        }
+    }
+    Ok(images)
+}
+
+/// Everything the generic MLX lane conditions one render on, resolved once per job: the
+/// per-family slots from [`resolve_generic_lane_conditioning`] plus the registry editors' ordered
+/// `edit_refs` (Boogu, Mage, Qwen-Image 2.1).
+///
+/// Split out of [`generate_stream`] (sc-24110) so the conditioning a job REALLY sends is testable
+/// without weights: [`generate_one`] assembles `build_lane_conditioning(identity_init, &edit_refs,
+/// mask)` from exactly this tuple, so a test that resolves it for a real on-disk payload is looking
+/// at the live path, not at a restatement of it.
+#[cfg(target_os = "macos")]
+fn resolve_generic_lane_inputs(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    has_reference: bool,
+) -> WorkerResult<(LaneConditioning, Vec<Image>)> {
+    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter,
+    // Kolors img2img, Ideogram edit + mask), resolved once — same predicate order + per-family
+    // values as the historical inline 5-way match, table-ized into one resolver (sc-8828, F-026).
+    // The strict-pose ControlNet / edit tiers divert earlier in `resolve_image_route`.
+    let lane = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
+    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
+    // source followed by every optional reference in client order. Both thread through
+    // `generate_one` as `Reference` (one) / `MultiReference` (many), never the img2img-init slot.
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
+        // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
+        // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
+        // and the ordering + the never-a-Mask guarantee live in the resolver.
+        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
+    } else {
+        Vec::new()
+    };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs.
+    guard_qwen_image_2_1_lane_slots(
+        request,
+        lane.identity_init.as_ref(),
+        lane.ideogram_edit_mask.as_ref(),
+    )?;
+    Ok((lane, edit_refs))
 }
 
 /// Refuse a Qwen-Image 2.1 render whose generic-lane slots carry anything but the ordered
@@ -9174,38 +9235,17 @@ async fn generate_stream(
         .reference_asset_id
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
-    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter, Kolors
-    // img2img, Ideogram edit + mask), resolved once — same predicate order + per-family values as the
-    // historical inline 5-way match, now table-ized into one resolver (sc-8828, F-026). The strict-pose
-    // ControlNet / edit tiers divert earlier in `resolve_image_route`.
-    let LaneConditioning {
-        identity_init,
-        flux_ip_dir,
-        flux_true_cfg,
-        ideogram_edit_mask,
-    } = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
-    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
-    // source followed by every optional reference in client order. Both thread through `generate_one`
-    // as `Reference` (one) / `MultiReference` (many), never the single img2img-init slot.
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else if is_qwen_image_2_1_edit(request) {
-        // Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
-        // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
-        // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
-        // and the ordering + the never-a-Mask guarantee live in the resolver.
-        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
-    } else {
-        Vec::new()
-    };
-    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs.
-    guard_qwen_image_2_1_lane_slots(
-        request,
-        identity_init.as_ref(),
-        ideogram_edit_mask.as_ref(),
-    )?;
+    // The per-family slots + the registry editors' ordered `edit_refs`, resolved once — see
+    // `resolve_generic_lane_inputs`, which is also what the sc-24110 live-path tests drive.
+    let (
+        LaneConditioning {
+            identity_init,
+            flux_ip_dir,
+            flux_true_cfg,
+            ideogram_edit_mask,
+        },
+        edit_refs,
+    ) = resolve_generic_lane_inputs(request, settings, project_path, has_reference)?;
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
@@ -11402,6 +11442,94 @@ async fn gate_with_evict_reclaim<D>(
     Ok((reclaimed, reclaimed_budget))
 }
 
+/// Everything the generic Candle lane conditions one render on, resolved once per job: the
+/// single-reference (img2img-init) slot + its strength, the inpaint-mask slot, and the registry
+/// editors' ordered `edit_refs` — the candle twin of `resolve_generic_lane_inputs`.
+///
+/// In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
+/// (+ optional `Mask` for Ideogram) + strength once, seed-independent. Both families edit on the
+/// SAME engine as their T2I (no separate bespoke stream), so the generic lane resolves the source
+/// here. `resolve_ideogram_edit` / `resolve_boogu_edit` return `None` for a non-edit (T2I) job, and
+/// each is gated to its family so a stray job reaching this generic lane is untouched. Boogu has no
+/// mask (the `boogu_image_edit` descriptor accepts only `Reference`). Other candle edit families
+/// (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before this dispatch).
+///
+/// Split out of [`generate_candle_stream`] (sc-24110) so the conditioning a job REALLY sends is
+/// testable without weights — `generate_one` assembles `build_lane_conditioning` from exactly this
+/// tuple.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::type_complexity)]
+fn resolve_candle_lane_inputs(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    is_ideogram: bool,
+) -> WorkerResult<(Option<(Image, f32)>, Option<Image>, Vec<Image>)> {
+    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
+            })?;
+        let reference = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            reference_id,
+            project_path,
+        )?;
+        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
+        (
+            Some((
+                reference,
+                zimage_identity_candle_strength(request).expect("checked above"),
+            )),
+            None,
+        )
+    } else if is_ideogram {
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => (Some((source, strength)), mask),
+            None => (None, None),
+        }
+    } else if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
+        // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
+        (resolve_zimage_edit_init(request, settings, project_path)?, None)
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        (
+            resolve_candle_kolors_edit_init(request, settings, project_path)?,
+            None,
+        )
+    } else {
+        (None, None)
+    };
+    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
+    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
+    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
+        resolve_boogu_edit(request, settings, project_path)?
+    } else if is_mage_edit_model(&request.model) {
+        resolve_mage_edit(request, settings, project_path)?
+    } else if is_qwen_image_2_1_edit(request) {
+        // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
+        // because the Candle port registers the same engine id and declares the same
+        // `Reference` + `MultiReference` conditioning. One request contract, two backends.
+        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
+    } else if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        resolve_sensenova_candle_edit(request, settings, project_path)?
+    } else {
+        Vec::new()
+    };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs — the candle
+    // twin of the MLX call. `edit_reference` is this lane's single-reference (img2img-init) slot
+    // and `edit_mask` its mask slot; both must stay empty for 2.1.
+    guard_qwen_image_2_1_lane_slots(request, edit_reference.as_ref(), edit_mask.as_ref())?;
+    Ok((edit_reference, edit_mask, edit_refs))
+}
+
 /// Windows/CUDA registry-generator path (sc-3675 SDXL, generalized in sc-5096). This is the Candle
 /// sibling of [`generate_stream`], driving the same neutral streaming harness
 /// (`start_cached_gen_stream` → `generate_one` → `consume_gen_events`) for base generation and the
@@ -11573,77 +11701,10 @@ async fn generate_candle_stream(
             .collect()
     };
     let total = work.len();
-    // In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
-    // (+ optional `Mask` for Ideogram) + strength once, seed-independent — the candle sibling of the MLX
-    // `generate_stream` edit path. Both families edit on the SAME engine as their T2I (no separate bespoke
-    // stream), so the generic lane resolves the source here. `resolve_ideogram_edit` / `resolve_boogu_edit`
-    // return `None` for a non-edit (T2I) job, and each is gated to its family so a stray job reaching this
-    // generic lane is untouched. Boogu has no mask (the `boogu_image_edit` descriptor accepts only
-    // `Reference` — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent).
-    // Other candle edit families (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before
-    // this dispatch).
-    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
-        let reference_id = request
-            .reference_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
-            })?;
-        let reference = load_reference_image(
-            &settings.data_dir,
-            &request.project_id,
-            reference_id,
-            project_path,
-        )?;
-        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
-        (
-            Some((
-                reference,
-                zimage_identity_candle_strength(request).expect("checked above"),
-            )),
-            None,
-        )
-    } else if is_ideogram {
-        match resolve_ideogram_edit(request, settings, project_path)? {
-            Some((source, strength, mask)) => (Some((source, strength)), mask),
-            None => (None, None),
-        }
-    } else if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
-        // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
-        // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
-        (resolve_zimage_edit_init(request, settings, project_path)?, None)
-    } else if request.model == "kolors" && request.mode == "edit_image" {
-        (
-            resolve_candle_kolors_edit_init(request, settings, project_path)?,
-            None,
-        )
-    } else {
-        (None, None)
-    };
-    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
-    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else if is_qwen_image_2_1_edit(request) {
-        // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
-        // because the Candle port registers the same engine id and declares the same
-        // `Reference` + `MultiReference` conditioning. One request contract, two backends.
-        resolve_qwen_image_2_1_edit_images(request, settings, project_path)?
-    } else if is_sensenova_candle_model(&request.model)
-        && matches!(request.mode.as_str(), "edit_image" | "character_image")
-    {
-        resolve_sensenova_candle_edit(request, settings, project_path)?
-    } else {
-        Vec::new()
-    };
-    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs — the candle
-    // twin of the MLX call. `edit_reference` is this lane's single-reference (img2img-init) slot
-    // and `edit_mask` its mask slot; both must stay empty for 2.1.
-    guard_qwen_image_2_1_lane_slots(request, edit_reference.as_ref(), edit_mask.as_ref())?;
+    // The single-reference + mask slots and the registry editors' ordered `edit_refs`, resolved once
+    // — see `resolve_candle_lane_inputs`, which is also what the sc-24110 live-path test drives.
+    let (edit_reference, edit_mask, edit_refs) =
+        resolve_candle_lane_inputs(request, settings, project_path, is_ideogram)?;
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
     }

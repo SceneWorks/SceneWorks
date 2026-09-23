@@ -9,6 +9,11 @@ import {
   useStableImageEditorToolPanelScope,
 } from "./ImageEditorToolPanel.jsx";
 import { EDIT_PROMPT_TEMPLATES } from "../../data/editPromptTemplates.js";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import JSON5 from "json5";
+import { maxReferencesForModel } from "../../imageReferenceLimits.js";
 
 let container;
 let root;
@@ -315,5 +320,38 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(setEditPrompt).toHaveBeenCalledWith("correct the colors of this photo");
+  });
+
+  // sc-24110: the SHIPPED Qwen Image 2.1 entry must open the reference rail, at its declared cap.
+  // `multiRefCapable` / `maxEditReferences` are derived exactly as ImageEditor.jsx derives them
+  // (`ui.multiReference`, `maxReferencesForModel(model, MAX_EDIT_REFERENCES)`), from the manifest
+  // on disk — so dropping the flag, or the `limits.maxReferenceAssets` key, hides or re-caps it.
+  it("opens the ordered reference rail for Qwen Image 2.1 with room for nine references beside the working image", async () => {
+    const manifest = JSON5.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../config/manifests/builtin.models.jsonc"), "utf8"),
+    );
+    const qwen = manifest.models.find((entry) => entry.id === "qwen_image_2_1");
+    const scopeFor = (refAssetIds) =>
+      editScope({
+        editModel: qwen.id,
+        editModels: [qwen],
+        selectedEditModel: qwen,
+        multiRefCapable: Boolean(qwen.ui?.multiReference),
+        // The fallback (ImageEditor's MAX_EDIT_REFERENCES, 4) applies only to a model with no
+        // declared cap — importing it here would pull the canvas stack into jsdom.
+        maxEditReferences: maxReferencesForModel(qwen, 4),
+        refAssetIds,
+      });
+    const addButton = () => container.querySelector(".ie-ref-add");
+
+    const eight = Array.from({ length: 8 }, (_, index) => `ref_${index}`);
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(eight)} />));
+    expect(addButton(), "the reference rail is rendered for this model").not.toBeNull();
+    expect(addButton().disabled, "eight references + the working image is nine of ten").toBe(false);
+    expect(container.querySelector(".ie-ref-ordinal")?.textContent).toBe("Image 1");
+
+    const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
+    expect(addButton().disabled, "nine references + the working image is the cap of ten").toBe(true);
   });
 });

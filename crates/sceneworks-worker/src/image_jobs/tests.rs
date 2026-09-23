@@ -9236,6 +9236,15 @@ fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
             worker, router,
             "the worker renders a different ordered list than the router validated: {payload}"
         );
+        // …and the worker's EDIT-ROUTE predicate claims exactly what the router claims. This is
+        // the gate `generate_stream` / `generate_candle_stream` / the candle route resolver branch
+        // on: a mode gate here would leave a mode-less or `image_generation` payload with its
+        // references on the plain text-to-image path, silently dropped.
+        assert_eq!(
+            is_qwen_image_2_1_edit(&request(payload.clone())),
+            !router.is_empty(),
+            "the worker's edit predicate disagrees with the router's claim: {payload}"
+        );
     }
 
     // The two properties above, stated as VALUES rather than only as agreement — agreement alone
@@ -9520,71 +9529,450 @@ fn qwen_image_2_1_lane_slots_refuse_a_mask_or_a_strength_bearing_reference() {
     }
 }
 
-/// The ORDINAL of each reference in the conditioning the worker emits — not only in the id list.
-///
-/// The id order is upstream of the render, but what the engine actually numbers is the images in
-/// the emitted `MultiReference`. This walks the whole path — ids → resolved references → emitted
-/// conditioning — and pins that the source lands at `<image1>` and the mask at `<image2>`, which is
-/// exactly the position the engine's own refusal text tells a caller to name ("use the second image
-/// as the mask"). A resolver that emitted the right ids but assembled them in another order would
-/// pass every other test here and render a different picture.
+/// The solid colour of each fixture asset, in the ORDER the engine must number them: the source
+/// (`<image1>`), the mask as an ordinary reference (`<image2>`), then the submitted reference.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-#[test]
-fn qwen_image_2_1_emits_the_source_at_ordinal_one_and_the_mask_at_ordinal_two() {
-    // Each stub carries a distinct seed, so an image's identity is readable from its bytes and the
-    // assertion is about WHICH image landed where, not merely how many did.
-    let ids = ["src", "mask", "ref-a"];
-    let references: Vec<QwenImage21Reference> = ids
-        .iter()
-        .enumerate()
-        .map(|(index, _)| QwenImage21Reference {
-            image: gen_core::Image {
-                width: 8,
-                height: 8,
-                pixels: stub_rgb8(8, 8, index as i64 + 1),
-            },
-            alpha: None,
-        })
-        .collect();
+const QWEN_EDIT_FIXTURE_COLOURS: [[u8; 3]; 3] = [[200, 30, 30], [250, 250, 250], [30, 30, 200]];
 
-    // The id order the resolver would have produced for this payload, re-derived rather than
-    // restated, so the two cannot drift.
-    assert_eq!(
-        qwen_image_2_1_reference_ids(&request(json!({
-            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
-            "sourceAssetId": "src", "maskAssetId": "mask", "referenceAssetIds": ["ref-a"]
-        }))),
-        ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+/// sc-24110 — a real project holding three solid-colour PNGs, so the LIVE lane resolvers read real
+/// assets through the real `ProjectStore` + `safe_project_path` confinement, and each image's
+/// identity stays readable from its bytes after the lane's geometry fit.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct QwenImage21EditFixture {
+    _data: tempfile::TempDir,
+    settings: Settings,
+    project_path: PathBuf,
+    project_id: String,
+    /// Source, mask, reference — the order of [`QWEN_EDIT_FIXTURE_COLOURS`].
+    ids: Vec<String>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl QwenImage21EditFixture {
+    fn new() -> Self {
+        let data = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env();
+        settings.data_dir = data.path().to_path_buf();
+        let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("sc24110-qwen-image-2-1-edit").unwrap();
+        let project_path = PathBuf::from(&project.path);
+        let mut ids = Vec::new();
+        for (index, colour) in QWEN_EDIT_FIXTURE_COLOURS.iter().enumerate() {
+            let file = data.path().join(format!("qwen-edit-{index}.png"));
+            image::RgbImage::from_pixel(16, 16, image::Rgb(*colour))
+                .save(&file)
+                .unwrap();
+            let asset = store
+                .import_asset(
+                    &project.id,
+                    sceneworks_core::project_store::UploadAsset {
+                        filename: format!("qwen-edit-{index}.png"),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: file,
+                        source_asset_id: None,
+                        provenance: None,
+                    },
+                )
+                .unwrap();
+            ids.push(asset["id"].as_str().unwrap().to_owned());
+        }
+        Self {
+            _data: data,
+            settings,
+            project_path,
+            project_id: project.id,
+            ids,
+        }
+    }
+
+    /// The ordinary Image-Editor edit payload plus a mask. The web names the working image TWICE —
+    /// in `sourceAssetId` and at the head of `referenceAssetIds` — so this is also the dedupe case.
+    fn edit_request(&self) -> ImageRequest {
+        request(json!({
+            "projectId": self.project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "use the second image as the mask",
+            "width": 64,
+            "height": 64,
+            "count": 2,
+            "sourceAssetId": self.ids[0],
+            "maskAssetId": self.ids[1],
+            "referenceAssetIds": [self.ids[0], self.ids[2]],
+        }))
+    }
+}
+
+/// The centre pixel of an RGB8 engine image — the fixture colours are solid, so this names WHICH
+/// asset an emitted image is, whatever the lane's fit did to its edges.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_edit_centre_rgb(image: &Image) -> [u8; 3] {
+    let offset = (((image.height / 2) * image.width + image.width / 2) * 3) as usize;
+    [
+        image.pixels[offset],
+        image.pixels[offset + 1],
+        image.pixels[offset + 2],
+    ]
+}
+
+/// Assert on the conditioning a lane EMITS for the fixture's edit: one ordered `MultiReference`
+/// whose images are the source at `<image1>`, the mask at `<image2>` and the reference at
+/// `<image3>` — the duplicated working image occupying ONE slot — and no `Conditioning::Mask`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_edit_emits_the_ordered_list(emitted: &[Conditioning], lane: &str) {
+    assert!(
+        !emitted
+            .iter()
+            .any(|conditioning| matches!(conditioning, Conditioning::Mask { .. })),
+        "{lane}: a Conditioning::Mask reached a 2.1 render — the engine refuses that kind by name"
     );
-
-    match build_qwen_image_2_1_conditioning(&references)
-        .expect("three RGB references")
-        .as_slice()
-    {
-        [gen_core::Conditioning::MultiReference { images }] => {
-            assert_eq!(images.len(), 3, "one ordered list, three images");
+    match emitted {
+        [Conditioning::MultiReference { images }] => {
+            let centres: Vec<[u8; 3]> = images.iter().map(qwen_edit_centre_rgb).collect();
             assert_eq!(
-                images[0].pixels,
-                stub_rgb8(8, 8, 1),
-                "the SOURCE must be <image1> — the picture the edit is about"
-            );
-            assert_eq!(
-                images[1].pixels,
-                stub_rgb8(8, 8, 2),
-                "the MASK must be <image2>, which is the ordinal the engine's own refusal text \
-                 tells the caller to name (\"use the second image as the mask\")"
-            );
-            assert_eq!(
-                images[2].pixels,
-                stub_rgb8(8, 8, 3),
-                "submitted references follow, in submitted order"
+                centres,
+                QWEN_EDIT_FIXTURE_COLOURS.to_vec(),
+                "{lane}: the source must be <image1> and the mask <image2> (the ordinal the \
+                 engine's own refusal text tells the caller to name), the reference <image3>, and \
+                 the working image named twice must occupy ONE slot"
             );
         }
-        other => panic!("expected one ordered MultiReference, got {other:?}"),
+        other => panic!("{lane}: expected one ordered MultiReference, got {other:?}"),
     }
+}
+
+/// sc-24110 — the never-a-Mask guarantee and the reference ORDINALS, on the MLX path that RUNS.
+///
+/// This drives `resolve_generic_lane_inputs` — the exact call `generate_stream` makes — against a
+/// real on-disk source + mask + reference edit, then assembles the conditioning through
+/// `build_lane_conditioning`, which is what `generate_one` sends. So the mask slot, the
+/// img2img-init slot, the ordered list and the emitted ordinals are all read off the live path,
+/// not off a builder whose answer the lane could ignore.
+///
+/// Armed against: adding `"qwen_image_2_1"` to the Ideogram mask arm of
+/// `resolve_generic_lane_conditioning` (the lane then refuses — the guard — and, with the guard
+/// also removed, emits a `Mask` the assertion names); restoring the mode gate or dropping the
+/// dedupe in the resolver; and reordering source/mask.
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_lane_emits_source_then_mask_as_references_and_never_a_mask() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+
+    let (lane, edit_refs) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves a source + mask + reference edit");
+    assert!(
+        lane.ideogram_edit_mask.is_none(),
+        "the mask slot must stay EMPTY for 2.1 — a mask is an ordinary ordered reference"
+    );
+    assert!(
+        lane.identity_init.is_none(),
+        "the img2img-init slot carries a strength, which 2.1 refuses"
+    );
+
+    let emitted = build_lane_conditioning(
+        lane.identity_init.as_ref(),
+        &edit_refs,
+        lane.ideogram_edit_mask.as_ref(),
+    );
+    assert_qwen_edit_emits_the_ordered_list(&emitted, "mlx");
+
+    // ONE source of truth: what the lane emits IS the dedicated builder's answer for the same
+    // resolved references.
+    let references = resolve_qwen_image_2_1_edit(&edit, &fixture.settings, &fixture.project_path)
+        .expect("resolved references");
+    assert_eq!(
+        format!("{emitted:?}"),
+        format!(
+            "{:?}",
+            build_qwen_image_2_1_conditioning(&references).expect("RGB references")
+        ),
+        "the live lane must send exactly what build_qwen_image_2_1_conditioning builds"
+    );
+    // …and the count the request scope grades against is the three it really carries.
+    assert_eq!(
+        lane_reference_count(lane.identity_init.is_some(), edit_refs.len(), false),
+        3
+    );
+}
+
+/// sc-24110 — the candle twin of the live-path test above: `resolve_candle_lane_inputs` is the
+/// exact call `generate_candle_stream` makes. Compiled by `rust:check:candle`; it RUNS only on a
+/// candle test lane (a Mac cannot run candle-gated tests).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_lane_emits_source_then_mask_as_references_and_never_a_mask() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+
+    let (edit_reference, edit_mask, edit_refs) =
+        resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live candle lane resolves a source + mask + reference edit");
+    assert!(
+        edit_mask.is_none(),
+        "the candle mask slot must stay EMPTY for 2.1"
+    );
+    assert!(
+        edit_reference.is_none(),
+        "the candle img2img-init slot carries a strength, which 2.1 refuses"
+    );
+    let emitted = build_lane_conditioning(edit_reference.as_ref(), &edit_refs, edit_mask.as_ref());
+    assert_qwen_edit_emits_the_ordered_list(&emitted, "candle");
+}
+
+/// A generator that behaves like a real denoise under a user cancel: it reports a step, keeps
+/// working long enough for the worker's 2-second cancel poll to come due, reports another step,
+/// and then stops only when the request's OWN cancel flag is tripped. It records every request it
+/// receives, so a test can read the conditioning the engine was really handed.
+#[cfg(target_os = "macos")]
+struct CancelAwareEditProbe {
+    probe: HiresProbeGenerator,
+    /// Each received request's conditioning + cancel flag. NOT the whole `GenerationRequest`: its
+    /// preview / prompt-enhancement sinks hold senders of the job's event channel, so keeping a
+    /// clone alive would stop the consumer's channel from ever closing.
+    received: std::sync::Mutex<Vec<(Vec<Conditioning>, CancelFlag)>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Generator for CancelAwareEditProbe {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.probe.descriptor()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        Ok(None)
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        self.received
+            .lock()
+            .unwrap()
+            .push((req.conditioning.clone(), req.cancel.clone()));
+        on_progress(Progress::Step {
+            current: 1,
+            total: 40,
+        });
+        // Past the consumer's 2-second cancel-poll throttle, so the NEXT step is a poll point.
+        std::thread::sleep(Duration::from_millis(2_300));
+        on_progress(Progress::Step {
+            current: 2,
+            total: 40,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !req.cancel.is_cancelled() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if req.cancel.is_cancelled() {
+            return Err(gen_core::Error::Canceled);
+        }
+        Ok(GenerationOutput::Images(vec![Image {
+            width: req.width,
+            height: req.height,
+            pixels: vec![0; (req.width * req.height * 3) as usize],
+        }]))
+    }
+}
+
+/// sc-24110 — PROGRESS and CANCEL on the Qwen-Image 2.1 EDIT route, end to end on the MLX lane.
+///
+/// Every stage here is the production one except the engine: the conditioning comes from
+/// `resolve_generic_lane_inputs` over real assets; the batch runs on
+/// `drive_gen_items_scored_reported` (the carrier `generate_stream` uses) through
+/// `generate_one_with_hires` (the call `generate_stream` makes, which assembles the
+/// `GenerationRequest`); and the events are consumed by `consume_gen_events` against a stub API
+/// that reports a user cancel. So the assertions are on what the API was actually told:
+///
+/// 1. a NON-terminal `generating` progress tick for the edit render (the reviewer's gap: no edit
+///    route had a progress test on either lane);
+/// 2. then the NON-terminal "Cancelling…" acknowledgement, with the job's cancel flag reaching the
+///    engine request — the denoise stops, not just the UI;
+/// 3. then the terminal `canceled`, and image 2 never starts.
+///
+/// And the request the engine received is the EDIT one (the ordered list, source first, no Mask),
+/// so this cannot pass by ticking a text-to-image render.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_cancel() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+    let (lane, edit_refs) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves the edit");
+
+    let (base_url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
+    let mut settings = crate::tests::test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(crate::tests::job_snapshot_json("job-1", true))
+        .expect("job snapshot deserializes");
+    let plan = ImagePlan::with_count(&edit, 2, None);
+    let cancel = CancelFlag::new();
+    let generator = Arc::new(CancelAwareEditProbe {
+        probe: HiresProbeGenerator::new(),
+        received: Default::default(),
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
+    let task_generator = Arc::clone(&generator);
+    let task_cancel = cancel.clone();
+    let blocking = tokio::task::spawn_blocking(move || {
+        drive_gen_items_scored_reported(
+            tx,
+            [11_i64, 12],
+            move |_index, seed, preview, prompt_enhancement, on_progress| {
+                let (width, height, pixels) = generate_one_with_hires(
+                    task_generator.as_ref(),
+                    "use the second image as the mask",
+                    64,
+                    64,
+                    seed,
+                    40,
+                    None,
+                    None,
+                    lane.identity_init.as_ref(),
+                    &edit_refs,
+                    lane.ideogram_edit_mask.as_ref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &PromptEnhance::default(),
+                    None,
+                    preview,
+                    prompt_enhancement.for_prompt("use the second image as the mask"),
+                    &task_cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, width, height, pixels, None)))
+            },
+        )
+    });
+
+    let mut asset_writes = Vec::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        consume_gen_events(
+            &api,
+            &settings,
+            &job,
+            &plan,
+            &fixture.project_path,
+            "mlx",
+            "mlx_qwen_2_1",
+            &serde_json::Map::new(),
+            2,
+            rx,
+            cancel.clone(),
+            blocking,
+            &mut asset_writes,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the edit render never finished: {:#?}",
+            posts.lock().expect("posts lock")
+        )
+    });
+    assert!(
+        matches!(outcome, Err(WorkerError::Canceled(_))),
+        "a user-cancelled edit ends as Canceled, got {outcome:?}"
+    );
+
+    let posts = posts.lock().expect("posts lock").clone();
+    let message = |post: &Value| post["message"].as_str().unwrap_or_default().to_owned();
+    let generating = posts
+        .iter()
+        .position(|post| message(post).contains("step 1/40"))
+        .unwrap_or_else(|| panic!("the edit render must report its first step: {posts:#?}"));
+    assert_eq!(
+        (
+            posts[generating]["status"].as_str(),
+            posts[generating]["stage"].as_str()
+        ),
+        (Some("running"), Some("generating")),
+        "the progress tick must be NON-terminal: {posts:#?}"
+    );
+    let acknowledged = posts
+        .iter()
+        .position(|post| message(post).contains("Cancelling"))
+        .unwrap_or_else(|| panic!("the cancel must be acknowledged: {posts:#?}"));
+    assert!(
+        acknowledged > generating,
+        "the acknowledgement follows the tick: {posts:#?}"
+    );
+    assert_eq!(
+        posts[acknowledged]["status"], "running",
+        "the acknowledgement stays NON-terminal until the denoise actually stops"
+    );
+    let last = posts.last().expect("posts");
+    assert_eq!(
+        last["status"], "canceled",
+        "the terminal canceled lands last, once the render has stopped: {posts:#?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post["status"] == "canceled")
+            .count(),
+        1,
+        "exactly one terminal write: {posts:#?}"
+    );
+
+    let received = generator.received.lock().unwrap();
+    assert_eq!(
+        received.len(),
+        1,
+        "image 2 must never start after the cancel — it would re-encode the whole reference prefix"
+    );
+    let (conditioning, request_cancel) = &received[0];
+    assert!(
+        request_cancel.is_cancelled(),
+        "the job's cancel flag must be the one the engine request carries"
+    );
+    assert_qwen_edit_emits_the_ordered_list(conditioning, "mlx engine request");
 }
 
 #[cfg(target_os = "macos")]
@@ -21460,105 +21848,6 @@ mod preview_stream_tests {
             }
         }
         assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
-    }
-    /// sc-24110 — PROGRESS on the Qwen-Image 2.1 EDIT route, and the cancel that stops it.
-    ///
-    /// The cancel-acknowledgement test in `tests::cancel_and_heartbeat` covers the API write; this
-    /// covers the other half, which nothing else did: that an edit-shaped render actually TICKS.
-    /// Both lanes' streams drive their batch through this one `drive_gen_items` carrier, so it is
-    /// where an edit render's progress and cancellation really happen — and the carrier is the same
-    /// for text-to-image, which is exactly why this has to assert the EDIT shape reached it rather
-    /// than trusting shape-independence.
-    ///
-    /// So the producer here is handed the conditioning the edit route really builds — the ordered
-    /// `MultiReference` from `build_qwen_image_2_1_conditioning` — and asserts on it before
-    /// reporting a step. A carrier that dropped the references, or a builder that emitted a `Mask`,
-    /// fails inside the producer rather than silently reporting progress for a render that is no
-    /// longer the requested one.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    #[test]
-    fn qwen_image_2_1_edit_reports_progress_and_stops_on_cancel() {
-        use std::cell::RefCell;
-
-        // The ordered list a source + mask + one reference edit resolves to.
-        let references: Vec<QwenImage21Reference> = (1..=3)
-            .map(|seed| QwenImage21Reference {
-                image: gen_core::Image {
-                    width: 8,
-                    height: 8,
-                    pixels: stub_rgb8(8, 8, seed),
-                },
-                alpha: None,
-            })
-            .collect();
-        let conditioning =
-            build_qwen_image_2_1_conditioning(&references).expect("three RGB references");
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
-        let cancel = gen_core::CancelFlag::new();
-        let observed = cancel.clone();
-        let invoked: RefCell<Vec<usize>> = RefCell::new(Vec::new());
-
-        drive_gen_items(tx, [0_usize, 1, 2], |index, _item, _preview, progress| {
-            invoked.borrow_mut().push(index);
-            if observed.is_cancelled() {
-                return Ok(None);
-            }
-            // The conditioning this render carries is the EDIT one, not a text-to-image empty.
-            match conditioning.as_slice() {
-                [gen_core::Conditioning::MultiReference { images }] => {
-                    assert_eq!(images.len(), 3, "the ordered list reached the render");
-                }
-                other => panic!("the edit route must send one ordered MultiReference: {other:?}"),
-            }
-            assert!(
-                !conditioning
-                    .iter()
-                    .any(|c| matches!(c, gen_core::Conditioning::Mask { .. })),
-                "a Conditioning::Mask reached a render this engine would refuse"
-            );
-            // 40 steps is 2.1's own DEFAULT_STEPS, so the denominator is the edit route's.
-            progress(Progress::Step {
-                current: 1,
-                total: 40,
-            });
-            cancel.cancel();
-            Ok(Some((70_i64 + index as i64, 8, 8, stub_rgb8(8, 8, 1))))
-        })
-        .expect("a cancelled batch is not an error — it stops early and reports what it produced");
-
-        assert_eq!(
-            *invoked.borrow(),
-            vec![0, 1],
-            "the producer runs for image 0, then for the image that observes the cancel, and then \
-             NOT AT ALL — an invocation for index 2 would mean the cancel merely skipped one image \
-             while the batch kept re-encoding a ten-reference prefix on the GPU"
-        );
-
-        // A NON-TERMINAL progress tick is the thing this test exists for: the edit route reports.
-        match rx
-            .try_recv()
-            .expect("the edit render reports its first step")
-        {
-            GenEvent::Step {
-                index,
-                current,
-                total,
-            } => assert_eq!((index, current, total), (0, 1, 40)),
-            other => panic!("expected a step event, got {}", gen_event_name(&other)),
-        }
-        match rx.try_recv().expect("image 0 completes") {
-            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
-            other => panic!("expected an image event, got {}", gen_event_name(&other)),
-        }
-        assert!(
-            rx.try_recv().is_err(),
-            "images 1 and 2 must produce NO further events — above all not an Image the consumer \
-             would persist and count toward a completed set"
-        );
     }
 
     /// sc-24109: progress and cancellation on the lane Qwen-Image 2.1 renders on off-Mac.

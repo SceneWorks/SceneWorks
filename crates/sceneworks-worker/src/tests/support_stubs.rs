@@ -230,7 +230,7 @@ async fn heartbeat_stub(
     Json(worker_snapshot_json(&worker_id)).into_response()
 }
 
-fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {
+pub(crate) fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {
     json!({
         "id": job_id,
         "type": "lora_import",
@@ -342,7 +342,7 @@ async fn spawn_cancel_tick_stub(state: CancelTickStubState) -> String {
     format!("http://{address}")
 }
 
-fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
+pub(crate) fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
     Settings {
         api_url: "http://127.0.0.1:8000".to_owned(),
         access_token: None,
