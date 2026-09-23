@@ -5957,7 +5957,9 @@ mod tests {
     /// 40 GB A100. It is the WRONG answer for tiers whose weights are 16.33 and 9.78 GiB.
     ///
     /// The floors are DERIVED, not measured, and stated in GiB because `VramBudget.free_gb` is GiB
-    /// (`gpu::nvidia_vram_budget_gb` divides MiB by 1024): `ceil(derived resident peak GiB × 1.25)`.
+    /// (`gpu::nvidia_vram_budget_gb` divides MiB by 1024): `ceil(max over the presets of (resident +
+    /// transient) GiB × 1.25)`. On CUDA the transient is the untiled decode tail's 3 structural
+    /// full-res maps, linear in area, so the largest-area preset 2400×1792 binds at 6.92 GiB.
     /// The ×1.25 is deliberately NOT the `peak + HEADROOM_GB` this gate applies to a MEASURED row:
     /// the engine's peak is a structural count that its own doc says omits allocator slack, graph
     /// retention and kernel workspace, so a derived number carries a proportional margin until the
@@ -5987,12 +5989,14 @@ mod tests {
 
         // Each installable tier resolves its OWN derived floor, with no headroom added on top —
         // these are already-padded floors, and padding them again is the double-charge that makes
-        // a per-tier floor read as a measured peak. The rule is recomputed from the engine's
-        // derived peaks (b12c632b4 `memory_strategy::derived`) rather than restated.
+        // a per-tier floor read as a measured peak. The rule is recomputed from the derived
+        // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
+        // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
+        // rather than restated.
         for (tier, peak_gib) in [
-            ("bf16", 28.61 + 6.75),
-            ("q8", 16.33 + 6.75),
-            ("q4", 9.78 + 6.75),
+            ("bf16", 28.61 + 6.92),
+            ("q8", 16.33 + 6.92),
+            ("q4", 9.78 + 6.92),
         ] {
             let floor = (peak_gib * 1.25_f64).ceil();
             assert_eq!(

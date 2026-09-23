@@ -3517,20 +3517,46 @@
       // asset-facts + generic-headroom estimate path where the safety margin applies. The epic's
       // TERMINAL measurement story owns the real anchor; nothing here is it.
       //
-      // The ladder, at the 2048-square default preset, in GiB:
+      // The ladder, in GiB (resident weights and the activation columns at the 2048-square
+      // default preset; the floor column at the preset that binds it):
       //
-      //   tier | tower  | DiT   | VAE  | resident | staged floor | activation       | peak
-      //        |        |       |      | (all 3)  | max(tower,   | untiled / 512-64 | resident /
-      //        |        |       |      |          |  DiT+VAE)    | bounded decode   | bounded
-      //   -----+--------+-------+------+----------+--------------+------------------+------------
-      //   bf16 | 14.10  | 13.25 | 1.26 |  28.61   |    14.51     |  6.75 / 1.66     | 35.36 / 16.17
-      //   q8   |  8.03  |  7.04 | 1.26 |  16.33   |     8.30     |  6.75 / 1.66     | 23.08 /  9.96
-      //   q4   |  4.80  |  3.73 | 1.26 |   9.78   |     4.99     |  6.75 / 1.66     | 16.54 /  6.65
+      //   tier | tower  | DiT   | VAE  | resident | staged floor | activation @2048^2  | floor peak
+      //        |        |       |      | (all 3)  | max(tower,   | untiled / bounded   | (default path,
+      //        |        |       |      |          |  DiT+VAE)    | 25 maps / 512-64    |  2400x1792)
+      //   -----+--------+-------+------+----------+--------------+---------------------+-----------
+      //   bf16 | 14.10  | 13.25 | 1.26 |  28.61   |    14.51     |  56.25 / 6.06       |   34.99
+      //   q8   |  8.03  |  7.04 | 1.26 |  16.33   |     8.30     |  56.25 / 6.06       |   22.71
+      //   q4   |  4.80  |  3.73 | 1.26 |   9.78   |     4.99     |  56.25 / 6.06       |   16.16
       //
       // The VAE is dense f32 at every tier (all-conv, no group-quantizable 2-D leaf) and the
       // activation transient is tier-INDEPENDENT (bf16 activations over packed weights), which is
-      // why only the two packable components move. At the largest-AREA preset (2400x1792, not the
-      // square default) the transient is 6.92 untiled / 1.70 bounded.
+      // why only the two packable components move.
+      //
+      // WHY THE UNTILED COLUMN IS 56.25 AND NOT A "3 LIVE MAPS" 6.75 (inference PR #1029). MLX does
+      // not execute synchronously: its eval loop keeps up to 10 Metal command buffers in flight
+      // ahead of the GPU (`MAX_ACTIVE_TASKS`, mlx/transforms.cpp), every full-res decoder op at a
+      // preset is its own command buffer, and an in-flight op pins its input and output map until
+      // it retires. The untiled decode's live set is therefore the 3 structural maps plus 2 maps for
+      // each of the 10 in-flight ops and the one being scheduled — 25 full-res 144-channel f32
+      // maps, 2.25 GiB each at 2048^2 — and the campaign measured exactly that (a 56.63 GiB
+      // transient; a 109.85 GB footprint once the unbounded allocator pool kept it).
+      //
+      // So the provider decodes BOUNDED BY DEFAULT (512 tile / 64 overlap) wherever tiling saves
+      // memory: the untiled and bounded transients meet at exactly 512^2, so every area above
+      // 512^2 — every shipped preset and the fitted-1024^2 reference grid — decodes bounded, and
+      // only at or below 512^2 does the single pass run. The bounded path's peak is the decode
+      // HEAD, not the tiles: the mid-block's single-head global attention (head_dim 1152, past the
+      // fused SDPA kernel) materialises 6 [tokens, tokens] f32 matrices under the same pipelining
+      // (6.0 GiB at 2048^2, 6.31 at 2400x1792), plus the RGBA f32 output canvas. The provider also
+      // installs per-request MLX cache/memory limits so the footprint tracks the derived budget.
+      //
+      // Because the head term is quadratic in tokens, the default-path peak is monotonic in AREA
+      // and the largest-area preset (2400x1792 / 1792x2400), NOT the 2048-square default, binds.
+      // The engine publishes that maximum as `derived::default_path_peak_max_bytes(tier)`:
+      // resident + default-path activation at `derived::default_path_peak_max_preset()`, which the
+      // engine tests is >= every preset's default-path peak. (Off-preset, the admissible 2752^2
+      // square is higher — `admissible_square_peak_bytes`, bf16 48.29 GiB — and the floor rule
+      // stays on the presets, as it always was.)
       //
       // The staged floor is `max(tower, DiT + VAE)` and NEVER the sum: `Residency::from_policy`
       // loads the Qwen3 tower, encodes, DROPS it, then loads the DiT and VAE. That is the whole
@@ -3541,21 +3567,22 @@
       // because every consumer's budget is GiB (`VramBudget.free_gb` divides nvidia-smi MiB by
       // 1024; the web compares against the host's reported memory the same way):
       //
-      //   floor = ceil(resident peak at the 2048-square default, in GiB, x 1.25)
+      //   floor = ceil(derived::default_path_peak_max_bytes(tier), in GiB, x 1.25)
       //
-      //   bf16  35.36 GiB x1.25 = 44.20 -> 45
-      //   q8    23.08 GiB x1.25 = 28.85 -> 29   admits an RTX 5090 (31.84 GiB) and an A100-40GB
-      //   q4    16.54 GiB x1.25 = 20.68 -> 21   admits a 24 GB card as well
+      //   bf16  34.98 GiB x1.25 = 43.73 -> 44
+      //   q8    22.71 GiB x1.25 = 28.38 -> 29   admits a 32 GB Mac
+      //   q4    16.16 GiB x1.25 = 20.20 -> 21   admits a 24 GB Mac as well
       //
       // Why x1.25 and not the `measured peak + HEADROOM_GB` (2 GiB) this repo applies to a
       // `vramGbByTier` row: these peaks are DERIVED, and the engine's own doc says its transient is
-      // a structural count that omits allocator slack, MLX graph retention and kernel workspace. A
-      // derived number carries a proportional margin; a measured one carries the fixed headroom.
-      // When the terminal measurement story lands real rows they win ahead of these floors and get
-      // the ordinary `+ HEADROOM_GB`. (An earlier revision applied x1.25 to the peak in DECIMAL GB,
-      // giving 48/31/23 — which refused a real 5090 once a compositor held 0.84 GiB.)
+      // a structural count that omits allocator slack and kernel workspace (the bounded tile term
+      // is documented err-low where it binds, below 2048^2). A derived number carries a
+      // proportional margin; a measured one carries the fixed headroom. When the terminal
+      // measurement story lands real rows they win ahead of these floors and get the ordinary
+      // `+ HEADROOM_GB`. (An earlier revision applied x1.25 to the peak in DECIMAL GB, giving
+      // 48/31/23 — which refused a real 5090 once a compositor held 0.84 GiB.)
       //
-      // The scalar `minMemoryGb` is the densest tier's floor, 45: the conservative fallback for any
+      // The scalar `minMemoryGb` is the densest tier's floor, 44: the conservative fallback for any
       // tier key not in the map (today, `nvfp4`). Falling through to a light tier's floor for an
       // unknown tier would be a PERMISSIVE under-prediction, which admits a load that OOMs.
       //
@@ -3564,7 +3591,7 @@
       // a floor the UI quotes must be one the product stands behind. On MLX `minMemoryGbByTier` is
       // `advisory` (schema: no MLX runtime gate reads it — the MLX fit gate admits from the
       // provider's own memory model); it is PINNED to that same provider model by
-      // `qwen_image_2_1_mlx_floors_are_derived_from_the_linked_provider`. The Candle keys are
+      // `qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`. The Candle keys are
       // `binding` and consumed by `vram_gate::predicted_peak_gb`
       // (`qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`).
       //
@@ -3575,8 +3602,8 @@
       // `parseRequestContextLanes`), and the Candle rows carry the same predicate so a reference
       // request has a declaration rather than `NoRelevantDeclaration`.
       "mlx": {
-        "minMemoryGb": 45,
-        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
+        "minMemoryGb": 44,
+        "minMemoryGbByTier": { "bf16": 44, "q8": 29, "q4": 21 },
         // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
         // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
         // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
@@ -3632,15 +3659,22 @@
       // there would pad it twice AND, via the sibling `measured` flag, file it as evidence.
       // Nothing about 2.1 has been measured on any CUDA host, so `vramGbByTier` stays ABSENT.
       //
-      // Derived candle floors, in GiB (the ladder and the `ceil(peak GiB x 1.25)` rule — and why it
-      // is not `peak + HEADROOM_GB` — are documented in full above the `mlx` block; the two lanes
-      // share one derivation because they hold the same bytes resident):
-      //   bf16 45 — resident peak 35.36 GiB at 2048^2
-      //   q8   29 — resident peak 23.08 GiB  → admits an RTX 5090 (31.84 GiB total) and an A100-40GB
-      //   q4   21 — resident peak 16.54 GiB  → admits a 24 GB card as well
+      // Derived candle floors, in GiB. The weights column and the x1.25 margin (and why it is not
+      // `peak + HEADROOM_GB`) are documented above the `mlx` block; the rule is the same on both
+      // lanes — floor = ceil(max over the presets of (resident + transient), in GiB, x 1.25) — but
+      // the candle TRANSIENT is not the MLX one. The candle crate owns no activation table; CUDA
+      // executes synchronously (no 10-deep command-buffer run-ahead, no pooled reuse cache) and the
+      // candle provider's default decode stays UNTILED, so its peak transient is the decode tail's 3
+      // structural full-res maps (3 x 144 x H x W x 4 B), not MLX's 25 pipelined maps. That term is
+      // linear in area, so the largest-area preset, 2400x1792, binds: 6.92 GiB. The synchronous
+      // denoise and the decode head's [tokens, tokens] attention stay below it at every preset
+      // (even six f32 score matrices are 6.31 GiB at 2400x1792).
+      //   bf16 45 — 28.61 + 6.92 = 35.53 GiB x1.25 = 44.41
+      //   q8   30 — 16.33 + 6.92 = 23.25 GiB x1.25 = 29.07 → admits an A100-40GB, and an RTX 5090
+      //                                                        (31.84 GiB) with <= 1.84 GiB held
+      //   q4   21 —  9.78 + 6.92 = 16.70 GiB x1.25 = 20.88 → admits a 24 GB card
       // The scalar `minMemoryGb` is bf16's 45, the conservative fallback for a tier key with no row
       // (today `nvfp4`): falling through to a light tier's floor would be a PERMISSIVE
-      // under-prediction, and an under-prediction admits a load that OOMs.
       // under-prediction, and an under-prediction admits a load that OOMs.
       //
       // Deliberately ABSENT, each for its own reason:
@@ -3658,7 +3692,7 @@
       //   the `memoryStrategyContract` below is the request-owned declaration instead (sc-24114).
       "candle": {
         "minMemoryGb": 45,
-        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
+        "minMemoryGbByTier": { "bf16": 45, "q8": 30, "q4": 21 },
         // SC-24114: the exact request-owned Candle declaration — the same rows as the MLX block
         // (same provider contract, same one memory mode), so an `edit_image` / `image_to_image` /
         // `character_image` request has a declaration instead of `NoRelevantDeclaration`. The
@@ -27384,7 +27418,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "0d82d4c8254d3fb9e037b3b0857d6fa89e447161d37d6aaa840e66e76ee28f61",
+              "sha256": "40ac1791e716bd7bb215d85d33fe701230310c82b84321eb5c9f06374a11185d",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27403,13 +27437,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 251466,
-                  "sha256": "ce4d13aeb6db2ee6d959a28ab90bc9226dc09d17a1d1a8ef74b132a313f3d401"
+                  "byteSize": 251788,
+                  "sha256": "337bb3b086e2b2043fb7e1672262d69d83295b008a858e2c2ede8b78a41315fa"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "6702e38037eba395c6c1365503bcc51c9e9f62b7acf7e9a1826ee918e867d834"
+                  "sha256": "97e099232b150eac3bc75df948d31bfc9d940f16e8f64b65ac54657dc2679a04"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -27434,7 +27468,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8876,
-                  "sha256": "62c95ca2fb1776542b82357c92e7d7c867adb1e9f94295aa08432bb0e438e328"
+                  "sha256": "e4a84ddb3ff587798da7d6889c5375570dbc3f61758bf5f466c8d404a5046733"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -27478,13 +27512,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 243261,
-                  "sha256": "fd05194396f386968f6aa76e5985341ed1af25c3504f4783dce46d88c41dddc9"
+                  "byteSize": 243813,
+                  "sha256": "3f6edc609661f27bea90e0eeaf672abd3ee68390824a67e622e312509da441b2"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
-                  "byteSize": 20515,
-                  "sha256": "5985fbd86d6f8a41d5d6f22f3faf8b16af871ff2ac7a64544bafee79e8c98ba9"
+                  "byteSize": 20546,
+                  "sha256": "bb083b916766c135ee0fcd11ac0f08be0179de32488eea476dfd8282b9bc3ea0"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_admission.rs",

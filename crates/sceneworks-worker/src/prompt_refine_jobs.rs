@@ -1370,6 +1370,9 @@ pub(crate) async fn run_prompt_refine_job(
         // that carry their own projector, so `None` preserves the existing behaviour.
         projector_source: None,
         quantize: None,
+        // Keep the backend's CUDA-graph default (candle-llm: off unless `CANDLE_LLM_CUDA_GRAPHS`),
+        // the load this code has always performed.
+        cuda_graphs: None,
     };
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
     // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
@@ -3708,6 +3711,7 @@ mod tests {
                 source: dir.path().to_string_lossy().into_owned(),
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &reqs,
         )
@@ -3745,6 +3749,7 @@ mod tests {
             source: dir.path().to_string_lossy().into_owned(),
             projector_source: None,
             quantize: None,
+            cuda_graphs: None,
         };
         let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .err()
@@ -3838,6 +3843,7 @@ mod tests {
             source: dir.path().to_string_lossy().into_owned(),
             projector_source: None,
             quantize: None,
+            cuda_graphs: None,
         };
 
         // (1) Selection: the worker's image_caption resolution requirements (JSON constraint only)
@@ -3930,6 +3936,7 @@ mod tests {
             source: dir.path().to_string_lossy().into_owned(),
             projector_source: None,
             quantize: None,
+            cuda_graphs: None,
         };
 
         // The worker's image_describe resolution requirements: no constraint, no vision filter.
@@ -4038,6 +4045,7 @@ mod tests {
                 source: snapshot,
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &reqs,
         )
@@ -4112,6 +4120,7 @@ mod tests {
                 source: snapshot,
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &reqs,
         )
@@ -4188,6 +4197,7 @@ mod tests {
                 source: snapshot,
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &reqs,
         )
@@ -4254,6 +4264,7 @@ mod tests {
                 source: weights_dir.to_string_lossy().into_owned(),
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &ModelRequirements::from_request(&request),
         )
@@ -4333,6 +4344,7 @@ mod tests {
                 source: weights_dir.to_string_lossy().into_owned(),
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &ModelRequirements::from_request(&request),
         )
@@ -4433,6 +4445,7 @@ mod tests {
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
                 quantize: None,
+                cuda_graphs: None,
                 // The PE checkpoints carry their vision tower inside the snapshot (`model.visual.*`),
                 // like every other `qwen3_5` wrapper, so there is no separate projector to point at.
                 projector_source: None,
@@ -4694,6 +4707,7 @@ mod tests {
                 source: weights_dir.to_string_lossy().into_owned(),
                 projector_source: None,
                 quantize: None,
+                cuda_graphs: None,
             },
             &reqs,
         )

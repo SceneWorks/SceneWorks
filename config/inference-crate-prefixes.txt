@@ -25,6 +25,7 @@ crates/contracts/core-llm
 crates/contracts/core-llm/core-llm-testkit
 crates/contracts/gen-core
 crates/contracts/gen-core-testkit
+crates/kernels/candle-quant-kernels
 crates/llm/candle-llm
 crates/llm/mlx-llm
 crates/llm/mlx-llm/server

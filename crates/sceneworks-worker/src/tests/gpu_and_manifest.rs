@@ -3066,7 +3066,7 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
 /// The consequence this guards is not a rounding error, it is a product decision. With NO `candle`
 /// block `predicted_peak_gb` returns `None` and the fit gate is skipped entirely; with one, a tier
 /// resolves to a floor and the gate REFUSES the load pre-flight below it. The floors are DERIVED
-/// in GiB — the unit `VramBudget.free_gb` is in — as `ceil(resident peak GiB x 1.25)`, so a real
+/// in GiB — the unit `VramBudget.free_gb` is in — as `ceil(peak GiB x 1.25)`, so on Candle a real
 /// RTX 5090 (31.84 GiB) and A100-40GB (39.5 GiB) admit q8 and a 24 GB card admits q4. Neither may
 /// drift silently in either direction.
 #[test]
@@ -3077,37 +3077,48 @@ fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() 
         .find(|model| model["id"] == "qwen_image_2_1")
         .expect("qwen_image_2_1 is in the shipped catalog");
 
-    // BOTH lanes carry the same ladder, because both hold the same bytes resident. They are equal
-    // by shared derivation, not because one was copied from the other — which is why the loop
-    // below asserts the same numbers against each block rather than asserting the blocks are equal.
+    // One rule on both lanes — floor = ceil(max over the presets of (resident + transient) GiB x
+    // 1.25) — but NOT the same transient (inference #1029). MLX's decode is priced at 25 pipelined
+    // maps and runs bounded by default above 512^2; its floors come from the provider's
+    // `default_path_peak_max_bytes` and are pinned to that accessor by
+    // `qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source` (macOS). The candle crate
+    // publishes no derived table (it defers to the MLX crate's, which the candle lane does not
+    // link), so the Candle floors — `binding` — are pinned HERE as literals with their arithmetic.
     for backend in ["mlx", "candle"] {
         let block = entry.get(backend).unwrap_or_else(|| {
             panic!("the {backend} block must exist; without it the {backend} floor is unstated")
         });
-        assert_eq!(
-            block["minMemoryGb"], 45,
-            "{backend}: the SCALAR is the densest tier's floor, the conservative fallback for any \
-             tier with no row (today `nvfp4`). Lowering it to a lighter tier's floor would \
-             under-predict an unlisted tier, and an under-prediction admits a load that OOMs"
-        );
         let by_tier = block
             .get("minMemoryGbByTier")
             .unwrap_or_else(|| panic!("{backend}: sc-24112 declares a per-tier floor"));
-        for (tier, floor) in [("bf16", 45), ("q8", 29), ("q4", 21)] {
-            assert_eq!(
-                by_tier[tier], floor,
-                "{backend}/{tier}: DERIVED as ceil(resident peak at the 2048-square default in GiB \
-                 x 1.25) — bf16 35.36 GiB, q8 23.08 GiB, q4 16.54 GiB; changing a number here \
-                 changes which cards are refused"
-            );
-        }
         assert_eq!(
             by_tier.as_object().map(serde_json::Map::len),
             Some(3),
             "{backend}: a row for a tier the catalog does not ship would gate a tier nobody can \
              select, and a missing row silently falls through to the conservative scalar"
         );
-        assert_eq!(by_tier["bf16"], block["minMemoryGb"]);
+        assert_eq!(
+            by_tier["bf16"], block["minMemoryGb"],
+            "{backend}: the SCALAR is the densest tier's floor, the conservative fallback for any \
+             tier with no row (today `nvfp4`). Lowering it to a lighter tier's floor would \
+             under-predict an unlisted tier, and an under-prediction admits a load that OOMs"
+        );
+    }
+    // Candle: CUDA runs synchronously with an untiled default decode, so the peak transient is the
+    // decode tail's 3 structural full-res maps, 3 x 144 x H x W x 4 B, linear in area — the
+    // largest-area preset 2400x1792 binds at 6.92 GiB. Resident (MLX crate's parameter-count
+    // table): bf16 28.61, q8 16.33, q4 9.78 GiB.
+    //   bf16 28.61 + 6.92 = 35.53 x 1.25 = 44.41 -> 45
+    //   q8   16.33 + 6.92 = 23.25 x 1.25 = 29.07 -> 30
+    //   q4    9.78 + 6.92 = 16.70 x 1.25 = 20.88 -> 21
+    let candle = &entry["candle"];
+    assert_eq!(candle["minMemoryGb"], 45);
+    for (tier, floor) in [("bf16", 45), ("q8", 30), ("q4", 21)] {
+        assert_eq!(
+            candle["minMemoryGbByTier"][tier], floor,
+            "candle/{tier}: DERIVED as ceil((resident + 3-map transient at 2400x1792) GiB x 1.25); \
+             changing a number here changes which cards are refused"
+        );
     }
 
     assert!(
@@ -3214,8 +3225,9 @@ fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
 /// * the Candle keys (`binding`) are CONSUMED by the pre-load gate: `vram_gate::predicted_peak_gb`
 ///   answers each tier's `candle.minMemoryGbByTier` row and falls back to `candle.minMemoryGb`;
 /// * the MLX keys (`advisory` — no MLX runtime gate reads a manifest floor; the fit gate admits from
-///   the provider's own memory model) are DERIVED FROM that same provider model: `ceil(resident
-///   peak GiB x 1.25)` at the default preset, per tier, and the scalar is the densest tier's floor;
+///   the provider's own memory model) are DERIVED FROM that same provider model: `ceil(default-path
+///   peak GiB x 1.25)` maximised over the preset table (`derived::default_path_peak_max_bytes`),
+///   per tier, and the scalar is the densest tier's floor;
 /// * no other floor key exists on either lane — a staged floor no worker path applies (the MLX
 ///   contract declares no staged row) was removed rather than kept as UI-only decoration.
 ///
@@ -3260,38 +3272,42 @@ fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
         crate::vram_gate::predicted_peak_gb(&entry, "nvfp4"),
         entry["candle"]["minMemoryGb"].as_f64()
     );
-    // MLX: derived from the linked provider's memory model (the fit gate's own source).
+    // MLX: derived from the linked provider's memory model (the fit gate's own source) — the
+    // default-path peak maximised over the preset table (`derived::default_path_peak_max_bytes`:
+    // resident + bounded-decode activation at the largest-area preset), per tier.
     #[cfg(target_os = "macos")]
     {
         use runtime_macos::providers::qwen_image_2_1 as provider;
         const GIB: f64 = (1_u64 << 30) as f64;
         let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
-        let default = provider::config::PRESETS[0];
-        let mut checked = 0;
-        for row in provider::memory_strategy::derived::table() {
-            if (row.preset.width, row.preset.height) != (default.width, default.height) {
-                continue;
-            }
-            let tier = match row.tier {
+        for tier in provider::quant::Tier::ALL {
+            let name = match tier {
                 provider::quant::Tier::Bf16 => "bf16",
                 provider::quant::Tier::Q8 => "q8",
                 provider::quant::Tier::Q4 => "q4",
             };
+            let peak = provider::memory_strategy::derived::default_path_peak_max_bytes(tier);
             assert_eq!(
-                entry["mlx"]["minMemoryGbByTier"][tier].as_u64(),
-                Some(floor(row.resident_peak_bytes())),
-                "mlx.minMemoryGbByTier.{tier} is ceil(resident peak GiB x 1.25) at the default preset"
+                entry["mlx"]["minMemoryGbByTier"][name].as_u64(),
+                Some(floor(peak)),
+                "mlx.minMemoryGbByTier.{name} is ceil(default-path peak max GiB x 1.25)"
             );
-            if tier == "bf16" {
+            if tier == provider::quant::Tier::Bf16 {
                 assert_eq!(
                     entry["mlx"]["minMemoryGb"].as_u64(),
-                    Some(floor(row.resident_peak_bytes())),
+                    Some(floor(peak)),
                     "the MLX scalar is the densest tier's derived floor"
                 );
             }
-            checked += 1;
         }
-        assert_eq!(checked, 3, "one row per shipped tier at the default preset");
+        assert_eq!(
+            entry["mlx"]["minMemoryGbByTier"]
+                .as_object()
+                .expect("per-tier map")
+                .len(),
+            provider::quant::Tier::ALL.len(),
+            "one floor per shipped tier"
+        );
     }
 }
 

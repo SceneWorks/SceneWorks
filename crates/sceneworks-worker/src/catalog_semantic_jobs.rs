@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "47dba52983ab763d42f966048656586b0d104c0c";
+pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "ffea1439fbf24eb3887861e300037f8b510878cd";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -682,6 +682,9 @@ async fn generate_vision_json(
         // the load this code has always performed — it does not turn vision off.
         projector_source: None,
         quantize: None,
+        // Keep the backend's CUDA-graph default (candle-llm: off unless `CANDLE_LLM_CUDA_GRAPHS`),
+        // the load this code has always performed.
+        cuda_graphs: None,
     };
     let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
     let generation = crate::refine_model_cache::with_cached_refiner(

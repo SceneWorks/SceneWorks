@@ -4099,24 +4099,34 @@ def test_qwen_image_2_1_tier_download_sizes_are_measured_from_the_published_blob
 def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
     """The per-tier floors the fit gates admit against, and the rule that produced them.
 
-    `ceil(derived resident peak at the 2048-square default, in GiB, x 1.25)` — one rule applied
-    three times, in GiB because every consumer budget is GiB (`VramBudget.free_gb` divides
-    nvidia-smi MiB by 1024). x1.25 rather than the `+ HEADROOM_GB` a MEASURED row gets, because
-    the engine's peak is a structural derivation that omits allocator slack.
+    `ceil(max over the presets of (resident + transient), in GiB, x 1.25)` — one rule on both lanes,
+    in GiB because every consumer budget is GiB (`VramBudget.free_gb` divides nvidia-smi MiB by
+    1024). x1.25 rather than the `+ HEADROOM_GB` a MEASURED row gets, because the engine's peak is
+    a structural derivation that omits allocator slack. The largest-area preset, 2400x1792, binds
+    on both lanes; the TRANSIENT differs (inference #1029):
 
-    *Mutation that reds this:* restating a floor in decimal GB (the pre-fix 48/31/23), or dropping
-    the margin to `peak + 2`.
+    * MLX: bounded decode by default above 512^2, so the peak is the decode head's attention plus
+      the RGBA canvas — `derived::default_path_peak_max_bytes` = resident + 6.37 GiB.
+    * Candle: synchronous and untiled, so the decode tail's 3 structural full-res maps,
+      3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB.
+
+    *Mutation that reds this:* restating a floor in decimal GB (the pre-fix 48/31/23), dropping
+    the margin to `peak + 2`, or pricing either lane at the 2048-square default.
     """
     qwen = _qwen_image_2_1_entry()
-    # Derived resident peaks (GiB) at 2048²: resident weights + the tier-independent 6.75 GiB
-    # activation transient (inference b12c632b4 `memory_strategy::derived`). Stated here as the
-    # INPUT to the rule, so the rule is checked and not just its outputs.
-    peaks_gib = {"bf16": 28.61 + 6.75, "q8": 16.33 + 6.75, "q4": 9.78 + 6.75}
+    # Derived peaks (GiB) at 2400x1792, stated here as the INPUT to the rule, so the rule is
+    # checked and not just its outputs. Resident weights: bf16 28.61, q8 16.33, q4 9.78 (the MLX
+    # crate's parameter-count table; the Rust test pins the MLX side to the accessor itself).
+    mlx_transient = 34.98 - 28.61  # default_path_peak_max_bytes(bf16) - resident(bf16)
+    peaks_gib = {
+        "mlx": {"bf16": 28.61 + mlx_transient, "q8": 16.33 + mlx_transient, "q4": 9.78 + mlx_transient},
+        "candle": {"bf16": 28.61 + 6.92, "q8": 16.33 + 6.92, "q4": 9.78 + 6.92},
+    }
     for backend in ("mlx", "candle"):
         block = qwen[backend]
         by_tier = block["minMemoryGbByTier"]
         assert set(by_tier) == {"bf16", "q8", "q4"}
-        for tier, peak in peaks_gib.items():
+        for tier, peak in peaks_gib[backend].items():
             derived = math.ceil(peak * 1.25)
             assert by_tier[tier] == derived, (
                 f"{backend}/{tier}: {by_tier[tier]} must be ceil({peak:.2f} GiB x 1.25) = {derived}"
