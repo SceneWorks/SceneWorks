@@ -774,7 +774,19 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24112's integration on the epic's terminal pin (inference b12c632b4), where
+    Last moved: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
+    request-owned `memoryStrategyContract` on BOTH lanes whose `modes` cover the reference faces
+    (`edit_image` / `image_to_image`, plus `character_image` which the catalog axis does not
+    carry) as well as `text_to_image`, all over `none`. Three `qwen_image_2_1` lanes move and
+    nothing else — each to 9 implemented of 18 (3 tiers x 3 catalog modes x `none`; the `lora`
+    half stays missing because the provider refuses adapters):
+    * `candle:staged_residency` and `candle:bounded_decode` 3 -> 9 — the declaration now covers
+      the reference modes, where the generated block covered `text_to_image` alone.
+    * `mlx:bounded_decode` 0 -> 9 — the MLX block now declares the rung. `mlx:staged_residency`
+      does NOT move: it stays the fit gate's staged sweep (18), and the MLX block deliberately
+      declares no staged row (an MLX staged row forces every load onto `Sequential`).
+
+    Previously: sc-24112's integration on the epic's terminal pin (inference b12c632b4), where
     the 2.1 providers register on both lanes. Three `qwen_image_2_1` lanes move and nothing else:
     * `mlx:staged_residency` 0 -> 18 implemented — the engine now registers, its descriptor
       advertises sequential offload, and it joined the fit gate's staged-residency sweep (the

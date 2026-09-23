@@ -2222,7 +2222,8 @@ pub(crate) fn resolve_weights_dir(
 ///
 /// Resolution:
 ///
-/// * an EXPLICIT `advanced.mlxQuantize` (`<= 0` ⇒ bf16, `1..=4` ⇒ q4, else q8) is honoured exactly
+/// * an EXPLICIT `advanced.mlxQuantize` (`<= 0` or `>= 9` ⇒ bf16, `1..=4` ⇒ q4, `5..=8` ⇒ q8) is
+///   honoured exactly
 ///   or refused: a pick whose tier is not installed is a typed error naming the tier, never a
 ///   silent substitution of another one (the FLUX.1 Candle precedent,
 ///   `candle_flux1_packed_requested_tier`). The Studio only sends a tier it resolved from the
@@ -2232,8 +2233,10 @@ pub(crate) fn resolve_weights_dir(
 ///   q4 while a denser tier is on disk.
 ///
 /// A tier is "installed" when its resolved directory holds a loadable `transformer/`. With nothing
-/// installed at all this answers `None` for either kind of request, so the caller's ordinary
-/// "install the model" path owns that error rather than blaming a tier.
+/// installed at all an UNSELECTED request answers `None`, so the caller's ordinary "install the
+/// model" path owns that error; an EXPLICIT pick with nothing installed is the install error itself
+/// (sc-24114) — answering `None` there let the caller fall back to the default snapshot directory,
+/// which loads a bf16 root that may not hold a `transformer/` at all instead of saying "install".
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2245,7 +2248,8 @@ fn qwen_image_2_1_tier_dir(
     const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
     let tier_for_bits = |bits: i64| -> &'static str {
         match bits {
-            bits if bits <= 0 => "bf16",
+            // A dense bit width (16 = bf16, 32 = f32) is the unquantized tier, never q8 (sc-24114).
+            bits if bits <= 0 || bits >= 9 => "bf16",
             bits if bits <= 4 => "q4",
             _ => "q8",
         }
@@ -2285,7 +2289,11 @@ fn qwen_image_2_1_tier_dir(
             return Ok(Some(resolved));
         }
         if TIERS.into_iter().all(|other| installed(other).is_none()) {
-            return Ok(None);
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} is not installed on this machine (no tier is on disk, so tier {tier} cannot \
+                 load). Install it in Model Manager, then retry.",
+                request.model
+            )));
         }
         return Err(WorkerError::InvalidPayload(format!(
             "{} tier {tier} is not installed; install it or pick an installed tier \
@@ -8448,8 +8456,8 @@ fn build_ordered_reference_conditioning(
 }
 
 /// Interleave an RGB engine image with its (same-geometry) alpha plane into a straight-alpha
-/// `RgbaImage`. The plane is fitted alongside the image by [`fit_alpha_plane`], so a geometry
-/// mismatch here is a programming error; it is resampled defensively rather than misaligned.
+/// `RgbaImage`. The plane is decoded from the same asset as the image, so a geometry mismatch here
+/// is a programming error; it is resampled defensively rather than misaligned.
 fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImage {
     let resized;
     let plane = if plane.dimensions() == (image.width, image.height) {
@@ -8495,27 +8503,6 @@ fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, ima
         },
         plane,
     ))
-}
-
-/// Fit an alpha plane to `width`×`height` with EXACTLY the geometry [`fit_engine_image`] gives the
-/// RGB it belongs to: the plane is replicated into three identical channels and run through the
-/// same [`fit_rgb`], whose per-channel resampling makes the result the plane's own fit. The
-/// letterbox of `pad`/`outpaint` comes out `A = 0` — transparent, which is what an area the source
-/// never covered is.
-fn fit_alpha_plane(
-    plane: &image::GrayImage,
-    width: u32,
-    height: u32,
-    mode: &str,
-) -> image::GrayImage {
-    let replicated = image::RgbImage::from_fn(plane.width(), plane.height(), |x, y| {
-        let a = plane.get_pixel(x, y).0[0];
-        image::Rgb([a, a, a])
-    });
-    let fitted = fit_rgb(&replicated, width, height, mode);
-    image::GrayImage::from_fn(fitted.width(), fitted.height(), |x, y| {
-        image::Luma([fitted.get_pixel(x, y).0[0]])
-    })
 }
 
 /// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
@@ -8664,11 +8651,15 @@ fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
     ids
 }
 
-/// Resolve those ids into fitted engine images, each with the alpha plane its asset carried.
+/// Resolve those ids into engine images at their NATIVE geometry, each with the alpha plane its
+/// asset carried (same geometry as the RGB it belongs to).
 ///
-/// Every reference is fitted to the request geometry the same way the other registry editors fit
-/// theirs; the engine then does its own 1024-px vision/VAE fit per reference (S3 contract), so this
-/// fit is about the SceneWorks lane's geometry contract, not about the engine's preprocessing.
+/// Unlike the other registry editors, NOTHING here fits a reference to the output W×H (sc-24114).
+/// Upstream never crops or letterboxes a condition image: the engine fits each reference itself,
+/// aspect-preserved, onto its ~1024²-area 32-px grid (S3 contract), and that one resize feeds both
+/// the vision tower and the VAE. A worker-side `fit_engine_image` to the OUTPUT aspect ran first
+/// and so centre-cropped (default `fitMode: "crop"`) or black-letterboxed every portrait reference
+/// in a landscape request before the engine ever saw it — a different request from upstream's.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8714,12 +8705,11 @@ fn resolve_qwen_image_2_1_edit(
             FlattenPolicy::Truncate,
         )?;
         // sc-24111's lane, reused verbatim: the same asset, read through the same
-        // `safe_project_path` confinement, for its alpha plane alone — fitted with EXACTLY the
-        // geometry the RGB gets, so the two halves of an RGBA reference stay aligned.
-        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?
-            .map(|plane| fit_alpha_plane(&plane, request.width, request.height, &request.fit_mode));
+        // `safe_project_path` confinement, for its alpha plane alone. Neither half is resampled,
+        // so the plane is aligned with the RGB by construction (both are the decoded asset).
+        let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?;
         references.push(QwenImage21Reference {
-            image: fit_engine_image(source, request.width, request.height, &request.fit_mode)?,
+            image: source,
             alpha,
         });
     }
@@ -8775,7 +8765,7 @@ fn build_qwen_image_2_1_conditioning(
 }
 
 /// The ordered condition images a Qwen-Image 2.1 edit contributes to the generic lane's
-/// `edit_refs` slot, with each one's fitted alpha plane (`None` for an opaque asset) — resolved,
+/// `edit_refs` slot, with each one's alpha plane (`None` for an opaque asset) — resolved,
 /// validated, and in request order.
 ///
 /// [`build_qwen_image_2_1_conditioning`] is the ONE source of truth for what this route sends: its

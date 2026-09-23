@@ -5832,8 +5832,8 @@ fn run_turnkey_still(request: &Value) -> Result<Value, String> {
 
     let lifecycle_blocker = if arm.provider == QWEN_IMAGE_2_1_PROVIDER {
         concat!(
-            "the pinned Qwen-Image 2.1 MLX crate opens no memory-strategy request scope for the ",
-            "resident anchor composition and exposes no calibration fault-injection site, so the ",
+            "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope ",
+            "(registered_begin_request) but exposes no calibration fault-injection site, so the ",
             "scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator ",
             "cleanup bounds are attested in quality and diagnostics instead"
         )

@@ -25,16 +25,11 @@ import { Icon } from "./Icons.jsx";
 //   generic refiner has an autoStart mode for its prompt-tool tile; deliberately not mirrored,
 //   because an automatic rewrite is exactly what the story forbids.)
 // * With no rewriter installed there is no degraded path — the affordance is not rendered at all
-//   (the caller gates on `installed`), and this component's missing-model branch exists only for
-//   the race where a checkpoint is uninstalled between render and click.
-
-// Humanize a byte count to a "18.8 GB" label; null when the size is unknown.
-function formatGb(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return null;
-  }
-  return `${(bytes / 1e9).toFixed(1)} GB`;
-}
+//   (the caller gates on `installed`). The only way to reach a missing checkpoint from here is the
+//   race where it is uninstalled between render and click; the worker then fails with "not
+//   cached", and the control says so and points at the Models screen. There is deliberately no
+//   in-panel download (sc-24114): the panel is never shown for a missing rewriter, so a download
+//   button here was unreachable.
 
 // The worker fast-fails with "…snapshot is not cached…" when the checkpoint is absent. Prefer the
 // catalog install state when the entry is supplied; fall back to the message otherwise.
@@ -59,9 +54,8 @@ export function QwenRewritePromptControl({
   // straight to its resolution control. Optional — a caller with no resolution control (the Image
   // Editor, whose geometry comes from the working image) simply omits it and the offer is hidden.
   onApplyResolution,
-  // The catalog entry for whichever rewriter this request will select, plus its downloader.
+  // The catalog entry for whichever rewriter this request will select.
   rewriteModel,
-  onDownloadRewriteModel,
 }) {
   const [status, setStatus] = useState("idle"); // idle | loading | review | error
   // The suggestion, held as EDITABLE state. Seeded from the model's reply and then owned by the
@@ -69,25 +63,13 @@ export function QwenRewritePromptControl({
   const [draft, setDraft] = useState("");
   const [suggestion, setSuggestion] = useState(null);
   const [error, setError] = useState("");
-  const [downloadRequested, setDownloadRequested] = useState(false);
   const controllerRef = useRef(null);
 
   const trimmed = (prompt ?? "").trim();
   const busy = status === "loading";
   const disabled = busy || !trimmed || typeof rewritePrompt !== "function";
   const modelMissing = status === "error" && isModelMissing(rewriteModel, error);
-  const installState = rewriteModel?.installState;
   const editing = referenceAssetIds.length > 0;
-
-  // When the checkpoint finishes downloading (a catalog refresh flips installState), clear the
-  // missing-model error so the user can retry without reopening the panel.
-  useEffect(() => {
-    if (installState === "installed" && downloadRequested) {
-      setDownloadRequested(false);
-      setStatus((current) => (current === "error" ? "idle" : current));
-      setError((current) => (current ? "" : current));
-    }
-  }, [installState, downloadRequested]);
 
   useEffect(
     () => () => {
@@ -130,19 +112,6 @@ export function QwenRewritePromptControl({
     }
   }
 
-  async function handleDownloadModel() {
-    if (typeof onDownloadRewriteModel !== "function") return;
-    try {
-      const job = await onDownloadRewriteModel();
-      if (job) {
-        setDownloadRequested(true);
-      }
-    } catch (err) {
-      setError(err?.message || "Could not start the rewriter download.");
-    }
-  }
-
-  const sizeLabel = formatGb(rewriteModel?.downloadSizeBytes);
   const modelName = rewriteModel?.name || "Qwen Image 2.1 Prompt Rewriter";
   // Offer the aspect change only when the reply actually named a preset. An edit rewrite that set
   // `ratioFollow` instead has no ratio to offer, and an unrecognised ratio was dropped worker-side
@@ -182,28 +151,10 @@ export function QwenRewritePromptControl({
       ) : null}
 
       {status === "error" && modelMissing ? (
-        <div className="refine-missing-model" role="alert">
-          {downloadRequested ? (
-            <p className="refine-error">
-              Downloading the rewriter… track progress on the Models screen, then try again.
-            </p>
-          ) : (
-            <>
-              <p className="refine-error">
-                The {editing ? "editing" : "text-to-image"} rewriter
-                {sizeLabel ? ` (${sizeLabel})` : ""} isn’t installed yet. Qwen Image 2.1 generates
-                normally without it.
-              </p>
-              {typeof onDownloadRewriteModel === "function" ? (
-                <button className="secondary-action" onClick={handleDownloadModel} type="button">
-                  Download rewriter
-                </button>
-              ) : (
-                <p className="refine-error">Open the Models screen to download “{modelName}”.</p>
-              )}
-            </>
-          )}
-        </div>
+        <p className="refine-error" role="alert">
+          The {editing ? "editing" : "text-to-image"} rewriter isn’t installed. Qwen Image 2.1
+          generates normally without it — open the Models screen to download “{modelName}”.
+        </p>
       ) : status === "error" ? (
         <p className="refine-error" role="alert">
           {error}

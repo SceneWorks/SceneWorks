@@ -251,8 +251,9 @@ const seededFallbackModels = [
       requiresDimensionsMultipleOf: 32,
       maxReferenceAssets: 10,
       hardMinSteps: 2,
-      samplers: ["default"],
-      schedulers: ["default"],
+      // sc-24114: the curated menu both providers publish — mirrors the manifest.
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
     },
     defaults: {
       resolution: "2048x2048",

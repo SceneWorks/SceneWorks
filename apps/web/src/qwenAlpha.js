@@ -116,6 +116,50 @@ export function transparencyPromptSuggestion(prompt, transparentBackground) {
   return `${trimmed}${separator}${TRANSPARENCY_PROMPT_HINT}`;
 }
 
+// Does this encoded image carry an alpha channel? (sc-24114)
+//
+// Read off the container HEADER, not the pixels, so it is exact and cheap: a PNG is alpha-bearing
+// when its IHDR colour type is 4 (grey + alpha) or 6 (RGBA), or when it carries a `tRNS`
+// transparency chunk (palette / keyed transparency); a WebP when its VP8X flags set the alpha bit
+// or its lossless VP8L header sets the alpha hint. Everything else (JPEG, a malformed header) is
+// opaque. The Image Editor uses it to default the transparency toggle ON for an RGBA source, so an
+// AI edit of a cut-out keeps its cut-out instead of flattening to RGB.
+export function imageBytesCarryAlpha(bytes) {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes ?? []);
+  const ascii = (offset, length) =>
+    String.fromCharCode(...data.subarray(offset, offset + length));
+  const u32 = (offset) =>
+    ((data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]) >>> 0;
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (data.length >= 33 && PNG.every((byte, index) => data[index] === byte)) {
+    const colourType = data[25];
+    if (colourType === 4 || colourType === 6) return true;
+    let offset = 8;
+    while (offset + 8 <= data.length) {
+      const length = u32(offset);
+      const type = ascii(offset + 4, 4);
+      if (type === "tRNS") return true;
+      if (type === "IDAT" || type === "IEND") return false;
+      offset += 12 + length;
+    }
+    return false;
+  }
+  if (data.length >= 30 && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP") {
+    const chunk = ascii(12, 4);
+    if (chunk === "VP8X") return (data[20] & 0x10) !== 0;
+    if (chunk === "VP8L") return (data[24] & 0x10) !== 0;
+    return false;
+  }
+  return false;
+}
+
+// The Image Editor's effective transparency for an edit (sc-24114): the user's explicit toggle
+// when they have touched it since opening the image, else ON exactly when the working image
+// carries alpha — so an AI edit of an RGBA source keeps its alpha by default.
+export function editTransparencyFor(choice, workingHasAlpha) {
+  return typeof choice === "boolean" ? choice : workingHasAlpha === true;
+}
+
 // Read the toggle back out of a stored recipe / `advanced` block.
 //
 // Anything that is not boolean `true` is off. A toggle that arrives malformed from an old recipe or

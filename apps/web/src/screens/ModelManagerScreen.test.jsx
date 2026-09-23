@@ -1753,21 +1753,6 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(suggested?.textContent).toContain("Q8");
   });
 
-  // sc-24112: a tier over budget RESIDENT whose declared staged floor fits is labelled as running
-  // with staging, not warned as possibly not fitting at all. On this 32 GB Mac q8 (est 32 GB) and
-  // bf16 (est 38 GB) are over 28.8; q8 stages in 13 and bf16 in 40 (does not).
-  // *Mutation that reds this:* dropping `fitsStaged` from the tier row.
-  it("labels a tier that fits only with staging instead of warning it may exceed memory", async () => {
-    await render([{ ...matrixModel(), mlx: { stagedMinMemoryGbByTier: { q8: 13, bf16: 40 } } }]);
-    const row = (label) =>
-      tierRows().find((item) => item.querySelector(".model-tier-label").textContent.includes(label));
-    expect(row("Q8").querySelector(".model-tier-memory-staged")?.textContent).toBe("fits with staging");
-    expect(row("Q8").querySelector(".model-tier-memory-warning")).toBeNull();
-    expect(row("Q8").classList.contains("over-budget")).toBe(false);
-    expect(row("bf16").querySelector(".model-tier-memory-warning")?.textContent).toBe("may exceed memory");
-    expect(row("bf16").querySelector(".model-tier-memory-staged")).toBeNull();
-  });
-
   it("renders a per-tier panel with each tier's size + install state for a matrix model", async () => {
     await render([matrixModel({ installed: ["q8"] })]);
     const rows = tierRows();

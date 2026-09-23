@@ -282,6 +282,15 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             }),
             CandleImageLane::QwenImage21Edit,
         ),
+        // sc-24114: the same operation under its own `image_to_image` mode.
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "image_to_image",
+                "referenceAssetId": "ref_1"
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
         (
             json!({
                 "model": "qwen_image_2_1",

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:172701fde6040bdac31e0c4ddf33db70c7c4261b1383028b4f0bb895fdbb9fad",
+    "sceneWorksRevision": "source-tree:a1267cccc57a01b6fdbdc7c10a89ea7b064f17b49f2e36f4b3c4977b515be35f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "5f5415495a83a34864144d1a2dc2ced7d2db35106d26c77e8f18144cf1c6158c"
+        "sha256": "c3c3f761d06358f9109253a616f1e21be2847e6736a443ae089d72caa7ebf218"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -17,7 +17,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "52315302216fc57ac8c0b5bde1ef40802c453249f9dd2b365e03dc784df33024"
+        "sha256": "a773a90dabc859003c460c5b0cc305fda2e39a3585c4a7caa73d13c33e9b328d"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "efc11c7b8caf48f970e79276c75defbf904a54746ed85f335f6ef2b69f5d527b"
+        "sha256": "14ff8e13a950f915f65cd27ec3e23e3ea0eb2ab43df205c2d38f707196d9be37"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -61,7 +61,7 @@
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "43948846d37d635d98abbaaa07671067636ae7bf3e51ddf9bc9b23ddc6856d76"
+        "sha256": "674fe8cc959c81c02dac810331a43bddcbe96673c750030dab620247ec590666"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -141,8 +141,8 @@
     "publishedCells": 3810,
     "elidedCells": 5760,
     "elidedByState": {
-      "Implemented": 1238,
-      "Missing": 4522
+      "Implemented": 1259,
+      "Missing": 4501
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 48,
@@ -15694,25 +15694,25 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 3,
+      "implemented": 9,
       "states": {
-        "Implemented": 3,
-        "Missing": 15
+        "Implemented": 9,
+        "Missing": 9
       },
       "implementedBy": {
         "tier": {
-          "bf16": 1,
-          "q4": 1,
-          "q8": 1
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
-          "edit_image": 0,
-          "image_to_image": 0,
+          "edit_image": 3,
+          "image_to_image": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 3
+          "none": 9
         }
       }
     },
@@ -15747,25 +15747,25 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 3,
+      "implemented": 9,
       "states": {
-        "Implemented": 3,
-        "Missing": 15
+        "Implemented": 9,
+        "Missing": 9
       },
       "implementedBy": {
         "tier": {
-          "bf16": 1,
-          "q4": 1,
-          "q8": 1
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
         },
         "mode": {
-          "edit_image": 0,
-          "image_to_image": 0,
+          "edit_image": 3,
+          "image_to_image": 3,
           "text_to_image": 3
         },
         "overlay": {
           "lora": 0,
-          "none": 3
+          "none": 9
         }
       }
     },
@@ -15788,9 +15788,26 @@
       "coordinates": 18,
       "published": 0,
       "elided": 18,
-      "implemented": 0,
+      "implemented": 9,
       "states": {
-        "Missing": 18
+        "Implemented": 9,
+        "Missing": 9
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 3,
+          "q4": 3,
+          "q8": 3
+        },
+        "mode": {
+          "edit_image": 3,
+          "image_to_image": 3,
+          "text_to_image": 3
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 9
+        }
       }
     },
     {

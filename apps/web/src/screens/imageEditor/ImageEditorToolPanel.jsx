@@ -4,6 +4,11 @@ import { assetDisplayUrl } from "../../components/assetMedia.jsx";
 // sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
 // payload builder and the tests all agree on what "reference 2" means.
 import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
+import {
+  TRANSPARENCY_PROMPT_HINT,
+  showTransparencyToggle,
+  transparencyPromptSuggestion,
+} from "../../qwenAlpha.js";
 
 let renderObserverForTests = null;
 
@@ -45,7 +50,7 @@ function samePanelProps(previous, next) {
 }
 
 export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
+  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
   const renderPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -81,6 +86,37 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
           {/* Built-in edit recipes — the same five the studios offer, so the two Edit
               surfaces stay in step. Each REPLACES the instruction (see the module note). */}
           <EditPromptTemplates label="" onApply={setEditPrompt} variant="editor" />
+          {/* sc-24114 — transparency on the editor's edit lane, the same adapter the Studio uses.
+              Shown only for an alpha-capable model; defaults ON when the working image carries
+              alpha (the editor passes that in as the initial value), so an AI edit of a cut-out
+              stays a cut-out. The model has no transparency MODE — the prompt asks for it, which
+              is why the hint below offers the model card's wording as an editable button. */}
+          {showTransparencyToggle(selectedEditModel) ? (
+            <label
+              className="checkline transparency-toggle"
+              title="Keep the model's alpha channel instead of compositing the edit onto white, so a cut-out stays a cut-out. Ask for a transparent background in the instruction; this keeps it."
+            >
+              <input
+                checked={Boolean(editTransparent)}
+                onChange={(event) => setEditTransparent(event.target.checked)}
+                type="checkbox"
+              />
+              Transparent background (RGBA)
+            </label>
+          ) : null}
+          {showTransparencyToggle(selectedEditModel) &&
+          transparencyPromptSuggestion(editPrompt, editTransparent) ? (
+            <p className="transparency-prompt-hint ie-note">
+              This model has no transparency mode — ask for it in the instruction.{" "}
+              <button
+                className="hero-link"
+                onClick={() => setEditPrompt(transparencyPromptSuggestion(editPrompt, editTransparent))}
+                type="button"
+              >
+                Add “{TRANSPARENCY_PROMPT_HINT}”
+              </button>
+            </p>
+          ) : null}
         </div>
 
         {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
@@ -330,16 +366,25 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
                   * the arrows move a reference, because the only way to reorder before this was to
                     remove everything and re-add it in the right order. */}
             <div className="ie-refs">
+              {/* sc-24114: the WORKING image is the first ordered entry the edit sends
+                  (`editReferenceIds` leads with it), so it IS "Image 1" in the prompt's terms and
+                  the attached references start at "Image 2". Shown as a fixed tile so the user sees
+                  the whole ordered list the engine numbers. */}
+              <div className="ie-ref ie-ref-working" title="The image you are editing is always first">
+                <span className="ie-ref-working-label">Working image</span>
+                <span className="ie-ref-ordinal">{referenceOrdinalLabel(0)}</span>
+              </div>
               {refAssetIds.map((id, index) => {
                 const asset = imageAssets.find((item) => item.id === id);
+                const ordinal = referenceOrdinalLabel(index + 1);
                 return (
                   <div className="ie-ref" key={id}>
                     {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
                     <span className="ie-ref-ordinal" title="References are sent in this order">
-                      {referenceOrdinalLabel(index)}
+                      {ordinal}
                     </span>
                     <button
-                      aria-label={`Move ${referenceOrdinalLabel(index)} earlier`}
+                      aria-label={`Move ${ordinal} earlier`}
                       className="ie-ref-move"
                       disabled={index === 0}
                       onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index - 1))}
@@ -348,7 +393,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
                       ‹
                     </button>
                     <button
-                      aria-label={`Move ${referenceOrdinalLabel(index)} later`}
+                      aria-label={`Move ${ordinal} later`}
                       className="ie-ref-move"
                       disabled={index === refAssetIds.length - 1}
                       onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index + 1))}

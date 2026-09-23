@@ -3284,8 +3284,8 @@
         // `SceneWorks/qwen-image-2-1-mlx` with `q8/` and `q4/` subdirs, each a complete
         // `from_snapshot`-loadable tree in the released layout (model_index.json + processor/ +
         // scheduler/ + text_encoder/ + transformer/ + vae/) whose two packable components are
-        // already affine-quantized at group 64, plus a `SHA256SUMS` manifest of everything the
-        // converter wrote and the upstream LICENSE/README. Produced by
+        // already affine-quantized at group 64, plus the `CHANGES.md` change record (§3(b)) and a
+        // `SHA256SUMS` manifest of everything the converter wrote, and the upstream LICENSE/README. Produced by
         // `mlx-gen-qwen-image-2-1`'s `convert::prequantize_turnkey`, which is byte-reproducible and
         // byte-identical to `mlx_rs::ops::quantize` over the bf16 source. There is no `bf16/`
         // subdir: the converter refuses to emit one, because the dense tier IS the upstream
@@ -3294,8 +3294,9 @@
         // ⚠️ REDISTRIBUTION. Unlike the ungated upstream pull above, these two ARE a SceneWorks
         // re-host of Qwen-RESEARCH-licensed weights, so §3 is triggered and its three obligations
         // travel IN the artefact: each tier subdir carries a copy of the Agreement (LICENSE), a
-        // README marking the files that were changed (the two quantized components, with the tier
-        // and group size), and the verbatim attribution notice. `licenseNotice`/`licenseUrl` below
+        // `CHANGES.md` change record marking the files that were changed (the two quantized
+        // components, with the tier and group size) — the §3(b) record the converter writes beside
+        // its `SHA256SUMS` — and the verbatim attribution notice. `licenseNotice`/`licenseUrl` below
         // apply to all three tiers, and `requiresLicenseAcknowledgment` gates every one of them —
         // the sc-24109 accept is per MODEL, not per artifact, so a q4 install cannot skip it.
         // `nonCommercial: true` keeps `scripts/check-no-nc-weights.mjs` fatal on any build that
@@ -3383,7 +3384,7 @@
       // Transcribed from the LICENSE file beside the pinned weights ("Qwen RESEARCH LICENSE
       // AGREEMENT", release date 2026-09-20); the clause-by-clause evidence is
       // inference:docs/licensing/sc-24108-qwen-research-licence-evidence.md.
-      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a record of exactly which files were changed, and the attribution notice above inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, and the attribution notice above inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
       // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs): "Non-Commercial"
       // is §1(i) of the agreement above, so a build that ever embedded these weights must fail.
       "nonCommercial": true,
@@ -3466,12 +3467,14 @@
         // (`create_image_job`); it was video-only before, and this is the first image model to
         // declare a sampling floor.
         "hardMinSteps": 2,
-        // The engine runs one flow-match Euler loop (`run_flow_sampler` over the dynamic-shift
-        // exponential schedule) and exposes no curated solver menu at this pin, so the menu is the
-        // engine-default sentinel alone. Advertising the full diffusers flow menu here would be a
-        // knob the worker silently falls back from (sc-7127).
-        "samplers": ["default"],
-        "schedulers": ["default"]
+        // The curated solver menu BOTH providers publish (`curated_sampler_names()` /
+        // `curated_scheduler_names()`: 10 samplers and 8 schedulers in both runtime capability
+        // dumps), and both pipelines honour `req.sampler` / `req.scheduler` (sc-24114). Declared
+        // exactly as the dumps state it, the way the other curated flow models do; `"default"` is
+        // the engine's own flow-match Euler over its dynamic-shift schedule. The worker's manifest ⊆
+        // engine drift guard keeps this list honest, and the API refuses an off-menu name.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
       },
       // The engine refuses adapters outright at this pin (`supports_lora`/`supports_lokr` false,
       // typed Unsupported), so there is no LoRA family to advertise and the Studio's LoRA rail
@@ -3579,37 +3582,54 @@
       // tier key not in the map (today, `nvfp4`). Falling through to a light tier's floor for an
       // unknown tier would be a PERMISSIVE under-prediction, which admits a load that OOMs.
       //
-      // `stagedMinMemoryGbByTier` (MLX only) is the same rule over the STAGED request peak — the
-      // engine's `bounded_peak_bytes`: the staged weight floor `max(tower, DiT + VAE)` plus the
-      // 512/64 bounded-decode transient, the configuration a memory-constrained host runs:
+      // There is deliberately NO staged-floor key (sc-24114 removed `stagedMinMemoryGbByTier`): the
+      // MLX contract below declares no staged row, so no worker path ever applied that number, and
+      // a floor the UI quotes must be one the product stands behind. On MLX `minMemoryGbByTier` is
+      // `advisory` (schema: no MLX runtime gate reads it — the MLX fit gate admits from the
+      // provider's own memory model); it is PINNED to that same provider model by
+      // `qwen_image_2_1_mlx_floors_are_derived_from_the_linked_provider`. The Candle keys are
+      // `binding` and consumed by `vram_gate::predicted_peak_gb`
+      // (`qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`).
       //
-      //   bf16  14.51 + 1.66 = 16.17 GiB x1.25 = 20.21 -> 21
-      //   q8     8.30 + 1.66 =  9.96 GiB x1.25 = 12.45 -> 13
-      //   q4     4.99 + 1.66 =  6.65 GiB x1.25 =  8.31 ->  9
-      //
-      // DERIVED, like everything in this block. The Model Manager reads it only when no tier fits
-      // resident, and then suggests the LIGHTEST tier that fits staged — so a 24 GB Mac, which no
-      // tier fits resident on the footprint estimate, is pointed at q4 rather than at nothing.
-      //
-      // NO `calibrations` on either lane (nothing has been measured). The Candle block carries the
-      // `memoryStrategyContract` GENERATED from the engine-capability dump at the terminal pin. The
-      // MLX block carries none: this route's rules are non-legacy, so an MLX declaration row must
-      // carry a provider-owned `requestContexts` predicate that no dump publishes, and
-      // scripts/generate-manifest-memory-declarations.mjs skips such lanes rather than write a row
-      // the runtime would read as malformed (see `parseRequestContextLanes`). The MLX route is the
-      // consumer fallback until one is hand-authored, like every other non-legacy MLX lane the
-      // reconciliation report lists.
+      // NO `calibrations` on either lane (nothing has been measured). BOTH blocks carry a
+      // HAND-AUTHORED, request-owned `memoryStrategyContract` (sc-24114): this route's MLX rules are
+      // non-legacy, so every MLX row must carry a provider-owned `requestContexts` predicate that no
+      // dump publishes (scripts/generate-manifest-memory-declarations.mjs skips such lanes, see
+      // `parseRequestContextLanes`), and the Candle rows carry the same predicate so a reference
+      // request has a declaration rather than `NoRelevantDeclaration`.
       "mlx": {
         "minMemoryGb": 45,
         "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
-        "stagedMinMemoryGbByTier": { "bf16": 21, "q8": 13, "q4": 9 },
         // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
         // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
         // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
         // changes nothing today and states the fact where a reader looks for it. There is no
         // `minQualityTier` floor: all three tiers are honest whole-pipeline tiers here (no dense
         // component is held above the selection), so nothing needs clamping up.
-        "quantize": 8
+        "quantize": 8,
+        // SC-24114: the exact request-owned MLX declaration. This lane's route rules are
+        // non-legacy, so every row MUST carry `requestContexts` (a row without one fails the load
+        // closed) and the generator cannot project one — it is hand-authored, from the provider's
+        // own contract at the pin: Resident / StagedResidency / BoundedDecode implemented,
+        // BoundedAttention and BoundedTransformerResidency structurally not applicable; decode
+        // tiles 768/640/512/384/256 at overlap 64 (default 512). Every public mode maps onto the
+        // provider's ONE memory mode, `text_to_image`, which prices 0..=10 ordered references as
+        // extra joint-sequence blocks (`expected_provider_mode`).
+        //
+        // Deliberately NO `staged_residency` row on this lane. An MLX staged row authorizes the
+        // load as `Eligible + Sequential` UNCONDITIONALLY (`evaluate_declared_mlx_load_shape_for_
+        // request`), and this provider's `Sequential` policy drops and reloads the language tower
+        // on EVERY request — so declaring it would slow every Mac that fits resident. Staging stays
+        // what the fit gate chooses when resident does not fit (`decide_residency_for_spec`, the
+        // descriptor's `supports_sequential_offload`), and no staged floor is advertised for it.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
       },
       // sc-24109/sc-24112 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same seven
       // presets and same true-CFG request contract as MLX; only the tensor backend differs. As of
@@ -3657,44 +3677,29 @@
       //   SEPARATE declaration from the MLX one, read separately; the two are not merged into a
       //   per-model-id list, which is what
       //   `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them` pins.
-      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` — hand-written claims; the
-      //   `memoryStrategyContract` below is instead GENERATED from
-      //   `config/engine-capabilities/capabilities.candle.json` (re-dumped on the windows-candle
-      //   lane at the terminal pin) by scripts/generate-manifest-memory-declarations.mjs.
+      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` — legacy hand-written claims;
+      //   the `memoryStrategyContract` below is the request-owned declaration instead (sc-24114).
       "candle": {
         "minMemoryGb": 45,
         "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
-        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
-        // Engine-derived rung x tier coverage for qwen_image_2_1.
-        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
-        // hand edits inside this region are overwritten.
+        // SC-24114: the exact request-owned Candle declaration — the same rows as the MLX block
+        // (same provider contract, same one memory mode), so an `edit_image` / `image_to_image` /
+        // `character_image` request has a declaration instead of `NoRelevantDeclaration`. The
+        // generator appends its engine-coverage rows after these; on Candle a row without
+        // `requestContexts` is inert to request matching.
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "qwen_image_2_1",
           "implementations": [
-            {
-              "rung": "staged_residency",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["text_to_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_2_1"
-            },
-            {
-              "rung": "bounded_decode",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["text_to_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_2_1"
-            }
+            {"rung":"resident","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
           ]
         }
-        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Qwen Image 2.1",
-        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a record of what was changed.",
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A 20B single-stream flow-matching transformer over a 64-channel latent with a Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
         "recommendedFor": ["text_to_image", "edit_image"],
         // Multi-image reference editing (sc-24110). The Image Editor gates its reference picker on
         // this flag, and the Image Studio its plural `referenceAssetIds` payload — so without it
@@ -27402,7 +27407,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "df066e2b49a704158be7b2c45377053790d35e35f74d7952c939d14dfe5d10fb",
+              "sha256": "81b442cff2de766920853f1aa4e970455309db4eef56accfce06c837ed0d7d18",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27421,13 +27426,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 251450,
-                  "sha256": "32c1d34553dca75ce8ee00120818f456153a6baaeeb4a659d221c085ee7a759f"
+                  "byteSize": 251466,
+                  "sha256": "e1e9215b1c12eccefdb0af4ffe8d26aa07e4eeac28545a64f046b278fb7bc55f"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "d422d92229fd0d3ce2f1202085dc54b4c924e3e04c81530849c5169c150438cf"
+                  "sha256": "94d28f95f889218a5c3d2a729823ec8db654b93f82ae60a2dbbf8df1f5f21e67"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -27436,8 +27441,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 134816,
-                  "sha256": "1cc6f998773fa7b60de271973cfd950781cb1c7a2ca03f0e53ad22d634489be0"
+                  "byteSize": 135325,
+                  "sha256": "6795856b217fc457236ea01e1e79c5f65f7766424a5d9a1b1abb2e125b5f7ad8"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -27452,7 +27457,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8876,
-                  "sha256": "0b79256666c46f42ea0924fae1c773c595c23ad53b2e631008aa3aeec8f41165"
+                  "sha256": "52b7db428859906fb2f07b7990ff556305b95087a0fb9969f4dbdc55efca13cd"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -27521,8 +27526,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 148325,
-                  "sha256": "3c4e23764bc0a94ff3dacdfd5a060682e2a85225282464dca0eb44d88613a37a"
+                  "byteSize": 147353,
+                  "sha256": "321eb8f2fe37645316b97ad26c9765a50c6fa237b1ac9e60a8f7a70436658287"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

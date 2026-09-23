@@ -11884,6 +11884,123 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     );
 }
 
+/// sc-24114: the declared sampler / scheduler MENU is enforced at image enqueue. Qwen-Image 2.1's
+/// providers publish a curated solver menu and honour it; a name on no lane's menu would be silently
+/// dropped back to the engine default by the worker, so it is a 400 naming the menu. A member is
+/// admitted verbatim, and a model that declares no menu is untouched.
+#[tokio::test]
+async fn image_sampler_off_the_models_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "menuless_image",
+              "name": "Menuless",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/menuless", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Menuless" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": {
+                "samplers": ["default", "euler", "er_sde"],
+                "schedulers": ["default", "karras", "beta57"]
+              },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Sampler Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let post = |model: &'static str, advanced: Value| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse",
+            "advanced": advanced
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    let (status, body) = post(
+        "qwen_image_2_1",
+        json!({ "sampler": "er_sde", "scheduler": "beta57" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a menu member is admitted: {body}"
+    );
+    assert_eq!(body["payload"]["advanced"]["sampler"], "er_sde");
+
+    for advanced in [
+        json!({ "sampler": "dpmpp_3m" }),
+        json!({ "scheduler": "polyexponential" }),
+    ] {
+        let (status, body) = post("qwen_image_2_1", advanced.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{advanced} is off the menu: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1") && detail.contains("does not offer"),
+            "{detail}"
+        );
+    }
+
+    let (status, body) = post("menuless_image", json!({ "sampler": "dpmpp_3m" })).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "no declared menu ⇒ untouched: {body}"
+    );
+}
+
 /// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
 /// the ORDERED reference ceiling and the FREE-SIZE envelope.
 ///

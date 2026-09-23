@@ -222,6 +222,28 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     expect(labels).not.toContain("6");
   });
 
+  // sc-24114 — "preserve existing Qwen models as separate choices": the native-envelope surface is
+  // 2.1's, so the older Qwen entries render in Simple exactly as before — the historical [1,2,4,6]
+  // ladder and no Advanced fold — even though they declare `limits.count`.
+  // *Mutation that reds this:* reading `limits.count` / rendering the fold for every model.
+  it("leaves the existing Qwen models' Simple surface as it was", async () => {
+    for (const id of ["qwen_image", "qwen_image_edit_2511"]) {
+      const legacy = {
+        ...manifestModels.find((model) => model.id === id),
+        installState: "installed",
+        usable: true,
+      };
+      window.localStorage.clear();
+      await openImage(baseContext({ imageModels: [legacy], models: [legacy] }));
+      const chips = [...container.querySelectorAll(".su-chips")]
+        .find((node) => node.getAttribute("aria-label") === "Variations")
+        ?.querySelectorAll(".su-chip");
+      expect([...chips].map((chip) => chip.textContent.trim()), id).toEqual(["1", "2", "4", "6"]);
+      expect(advanced(), id).toBeNull();
+      await act(async () => root.render(null));
+    }
+  });
+
   it("sends the advanced knobs through the same builder the full studio uses", async () => {
     const context = await openImage();
     await openAdvanced();

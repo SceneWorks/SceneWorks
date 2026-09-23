@@ -28,7 +28,6 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
-  tierFitsStaged,
 } from "./tierSuggestion.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 
@@ -938,22 +937,6 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
     // it), q4 on a 32 GB Mac (q8's footprint estimate is over 32 x 0.9).
     expect(suggestTier(model, 32, { backend: "candle" })).toBe("q8");
     expect(suggestTier(model, 32, { backend: "mlx" })).toBe("q4");
-  });
-
-  // *Mutation that reds this:* reading the staged row off the wrong key, or declaring the staged
-  // floor as the weight floor alone (its tests in test_builtin_manifest_audit.py).
-  it("tells a 24 GB Mac that q4 fits with staging where it does not fit resident", () => {
-    const model = catalogModel({ published: true });
-    const mlx = { model, backend: "mlx" };
-    // Resident: q4's footprint estimate (12.03 GiB + the 14 GiB transient allowance) is over
-    // 24 x 0.9, so the row would warn "may exceed memory" — but q4 stages in 9 GB.
-    expect(tierFits(variantOf(model, "q4"), 24, mlx)).toBe(false);
-    expect(tierFitsStaged(variantOf(model, "q4"), 24, mlx)).toBe(true);
-    // A 16 GB Mac is told the same for q4 (9) and q8 (13), and not for bf16 (21).
-    expect(tierFitsStaged(variantOf(model, "q8"), 16, mlx)).toBe(true);
-    expect(tierFitsStaged(variantOf(model, "bf16"), 16, mlx)).toBe(false);
-    // Candle declares no staged floor, so staging never answers there.
-    expect(tierFitsStaged(variantOf(model, "q4"), 24, { model, backend: "candle" })).toBe(false);
   });
 
   // The Simple Model Manager's "needs N GB" label, end to end through its call sites

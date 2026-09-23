@@ -86,7 +86,7 @@ describe("modelLicenseRows", () => {
 
     const row = modelLicenseRows(bundledLicenses).find((entry) => entry.id === "qwen-image-2-1");
     expect(row).toBeTruthy();
-    expect(row.license).toBe("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(row.license).toBe("Qwen Research License Agreement");
     expect(row.badge.label).toBe("Non-commercial");
   });
 
@@ -117,7 +117,7 @@ describe("modelLicenseRows", () => {
       (entry) => entry.id === "qwen-image-2-1-pe",
     );
     expect(row).toBeTruthy();
-    expect(row.license).toBe("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(row.license).toBe("Qwen Research License Agreement");
     expect(row.badge.label).toBe("Non-commercial");
 
     // A SEPARATE row from the weights — different repositories, different purpose — so the About

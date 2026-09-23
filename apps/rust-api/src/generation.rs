@@ -239,6 +239,15 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
+        // worker silently falls back from, so it is refused here, naming the menu.
+        if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {
+            if let Some(message) = sceneworks_core::video_request::image_sampling_knob_error(
+                &model_id, advanced, entry,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The model's declared ORDERED reference ceiling, `limits.maxReferenceAssets`
         // (sc-24113 introduced the key and this call; sc-24110 corrected what is counted).
         //

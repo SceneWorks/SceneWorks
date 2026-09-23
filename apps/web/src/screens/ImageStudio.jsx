@@ -3341,9 +3341,6 @@ export function ImageStudio() {
                       // drives, and only ever with a value that menu already offers — accepting it
                       // is indistinguishable from the user picking it by hand.
                       onApplyResolution={setResolution}
-                      onDownloadRewriteModel={
-                        qwenRewriteModel ? () => createModelDownloadJob(qwenRewriteModel) : undefined
-                      }
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       // The ORDERED list the render will condition on. Same array, same order —

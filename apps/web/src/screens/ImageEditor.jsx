@@ -129,6 +129,7 @@ import {
   useStableImageEditorToolPanelScope,
 } from "./imageEditor/ImageEditorToolPanel.jsx";
 import { EditorLoraPanel } from "./imageEditor/EditorLoraPanel.jsx";
+import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
 const UPSCALE_ENGINE_DESC = {
   "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
@@ -1388,6 +1389,12 @@ export function ImageEditor() {
   // working size) and how to fill it (crop trims, pad bars, outpaint generates).
   const [editAspect, setEditAspect] = useState("match");
   const [editFitMode, setEditFitMode] = useState("crop");
+  // Transparency on the edit lane (sc-24114). `null` = follow the working image: ON when it
+  // carries alpha, so an AI edit of an RGBA source keeps its alpha. An explicit toggle wins until
+  // the next image is opened.
+  const [workingHasAlpha, setWorkingHasAlpha] = useState(false);
+  const [editTransparentChoice, setEditTransparentChoice] = useState(null);
+  const editTransparent = editTransparencyFor(editTransparentChoice, workingHasAlpha);
 
   // Detail enhance (sc-2438): tile-ControlNet refine over the working image. Backbone
   // (SDXL/RealVisXL) + strength (the "detail amount" — higher invents more texture) +
@@ -2145,6 +2152,15 @@ export function ImageEditor() {
         // showing. Whether those bytes carry a recipe is NOT decided here — `workflow` is a
         // starting state and the effect below asks the one reader.
         const opened = await describeOpenedImage(blob, source?.name);
+        // sc-24114: whether the ORIGINAL bytes carry alpha — defaults the edit's transparency.
+        let hasAlpha = false;
+        try {
+          hasAlpha = imageBytesCarryAlpha(new Uint8Array(await blob.arrayBuffer()));
+        } catch {
+          hasAlpha = false;
+        }
+        setWorkingHasAlpha(hasAlpha);
+        setEditTransparentChoice(null);
         const preparedSource = {
           ...source,
           ...(prepared.downscaled ? { editorDownscaled: prepared.downscaled } : null),
@@ -3039,6 +3055,10 @@ export function ImageEditor() {
           requestedGpu,
           sourceAssetId: scratch.id,
           maskAssetId: maskScratch?.id,
+          // sc-24114: keep the alpha channel on an alpha-capable model when asked (or when the
+          // working image carries alpha and the user has not turned it off).
+          transparentBackground: editTransparent,
+          modelEntry: selectedEditModel,
           // Multi-reference edit (sc-6107): lead with the working scratch image, then the user's
           // references. Only for a multiReference model with at least one attached reference.
           referenceAssetIds:
@@ -3508,6 +3528,8 @@ export function ImageEditor() {
     maskSource,
     maskSubTool,
     multiRefCapable,
+    editTransparent,
+    setEditTransparent: setEditTransparentChoice,
     onTransformSlider,
     ratioKey,
     refAssetIds,

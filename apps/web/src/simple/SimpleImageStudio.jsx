@@ -14,6 +14,9 @@ import {
   buildSimpleImageRequest,
   referenceStrengthFor,
   resolveSimpleTier,
+  simpleNativeControls,
+  simpleRewriteReferenceIds,
+  simpleRewriteResolutionTarget,
   workerAdvertises,
 } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
@@ -79,7 +82,6 @@ export function SimpleImageStudio() {
     loras = [],
     jobs = [],
     createLoraDownloadJob,
-    createModelDownloadJob,
     qwenRewritePrompt,
     activeProject,
   } = useAppContext();
@@ -228,7 +230,11 @@ export function SimpleImageStudio() {
   // hardcoded [1,2,4,6] to every model, so Qwen-Image 2.1, whose engine takes 8, could not be given
   // 8 and every model was offered a 6 that nothing declares. Absent ⇒ the historical ladder, so no
   // other model moves.
+  // sc-24114: only for a model with the native-envelope surface (`simpleNativeControls`) — every
+  // other model keeps the historical ladder, since `limits.count` was never read here before.
+  const nativeControls = simpleNativeControls(selectedModel);
   const variationOptions = useMemo(() => {
+    if (!simpleNativeControls(selectedModel)) return asChipOptions(DEFAULT_VARIATION_OPTIONS);
     const declared = selectedModel?.limits?.count;
     const usable = Array.isArray(declared)
       ? declared.filter((value) => Number.isInteger(value) && value > 0)
@@ -271,11 +277,12 @@ export function SimpleImageStudio() {
   // disagree about what is legal. For a model that declares nothing this is the blanket
   // 256-4096 with no stride, exactly as before.
   const dimensionConstraints = modelDimensionConstraints(selectedModel);
+  // A sticky free size typed on a native-surface model must not ride onto a model without the fold.
   const dimensionEval = evaluateModelDimensions({
     model: selectedModel,
     resolution,
-    widthOverride,
-    heightOverride,
+    widthOverride: nativeControls ? widthOverride : "",
+    heightOverride: nativeControls ? heightOverride : "",
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
 
@@ -288,10 +295,12 @@ export function SimpleImageStudio() {
 
   // sc-24113 — which Qwen rewriter this request selects, and whether it is installed. Selected by
   // the REQUEST (a reference attached means the editing half) and never by a picker, exactly as in
-  // the advanced studio. Simple arms at most one reference, so the list is 0 or 1 long.
+  // the advanced studio. sc-24114: the rewriter reads the SAME ordered list the render conditions
+  // on (up to the model's cap), so its `<imageN>` numbering names the pictures actually sent.
   const qwenRewriteReferenceIds = useMemo(
-    () => (referenceAssetId ? [referenceAssetId] : []),
-    [referenceAssetId],
+    () =>
+      simpleRewriteReferenceIds({ supportsOrderedReferences, orderedReferenceIds, referenceAssetId }),
+    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
   );
   const qwenRewriteModel = useMemo(() => {
     if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
@@ -393,10 +402,11 @@ export function SimpleImageStudio() {
         referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
         // The advanced fold's knobs. Empty string means "the model default", exactly as the full
         // studio's overrides do, so an untouched control adds nothing to the payload.
-        steps,
-        seed,
-        negativePrompt: supportsNegativePrompt ? negativePrompt : "",
-        guidance: supportsGuidance ? guidance : "",
+        // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
+        steps: nativeControls ? steps : "",
+        seed: nativeControls ? seed : "",
+        negativePrompt: nativeControls && supportsNegativePrompt ? negativePrompt : "",
+        guidance: nativeControls && supportsGuidance ? guidance : "",
         width: dimensionEval.width,
         height: dimensionEval.height,
         supportsImg2img,
@@ -492,11 +502,20 @@ export function SimpleImageStudio() {
             modelId={model}
             onApply={setPrompt}
             onApplyResolution={(value) => {
-              if (resolutions.includes(value)) setResolution(value);
+              // sc-24114: never silently ignored — a preset the chips offer is selected, anything
+              // else lands as the free size in the (opened) Advanced fold, like the classic studio.
+              const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
+              if (!target) return;
+              if (target.resolution) {
+                setResolution(target.resolution);
+                setWidthOverride("");
+                setHeightOverride("");
+                return;
+              }
+              setWidthOverride(target.widthOverride);
+              setHeightOverride(target.heightOverride);
+              setAdvancedOpen(true);
             }}
-            onDownloadRewriteModel={
-              qwenRewriteModel ? () => createModelDownloadJob(qwenRewriteModel) : undefined
-            }
             projectId={activeProject?.id ?? ""}
             prompt={prompt}
             referenceAssetIds={qwenRewriteReferenceIds}
@@ -641,6 +660,7 @@ export function SimpleImageStudio() {
           default. Simple's contract is a reduced SURFACE, not a reduced payload (simpleJobs.js runs
           the same builder the full studio does), so the right shape for "this model declares these
           controls" is one fold rather than eight more rows in the settings bar. */}
+      {nativeControls ? (
       <details
         className="su-advanced"
         onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
@@ -784,6 +804,7 @@ export function SimpleImageStudio() {
           </div>
         </div>
       </details>
+      ) : null}
 
       <StyleStrip onChange={setStyleId} value={styleId} />
 

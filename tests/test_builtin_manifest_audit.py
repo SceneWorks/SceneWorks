@@ -4134,25 +4134,14 @@ def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
         assert key not in qwen["mlx"], f"mlx.{key} is a measured-evidence key"
 
 
-def test_qwen_image_2_1_declares_derived_staged_floors_on_mlx():
-    """The MLX STAGED floor per tier — the same x1.25 rule over the engine's `bounded_peak_bytes`
-    (staged weight floor `max(tower, DiT + VAE)` + the 512/64 bounded-decode transient) — so a
-    host no tier fits RESIDENT is still told which tier runs staged. Derived, like the resident
-    floors; Candle declares none (its gate has no staged floor key).
-
-    *Mutation that reds this:* using the staged WEIGHT floor alone (14.51 / 8.30 / 4.99), which
-    omits the decode transient every staged request still pays.
+def test_qwen_image_2_1_advertises_no_staged_floor():
+    """sc-24114: no worker path applies a declared staged floor (the MLX contract declares no staged
+    row), so the catalog advertises none on either lane — a floor the UI quotes must be one some
+    consumer stands behind.
     """
     qwen = _qwen_image_2_1_entry()
-    staged_weight_floor_gib = {"bf16": 14.51, "q8": 8.30, "q4": 4.99}
-    bounded_decode_gib = 1.66
-    staged = qwen["mlx"]["stagedMinMemoryGbByTier"]
-    for tier, weights in staged_weight_floor_gib.items():
-        assert staged[tier] == math.ceil((weights + bounded_decode_gib) * 1.25), tier
-        assert staged[tier] < qwen["mlx"]["minMemoryGbByTier"][tier], (
-            f"{tier}: staging must sit below the resident floor or it states nothing"
-        )
-    assert "stagedMinMemoryGbByTier" not in qwen["candle"]
+    for backend in ("mlx", "candle"):
+        assert "stagedMinMemoryGbByTier" not in qwen[backend], backend
 
 
 def test_qwen_image_2_1_pending_tiers_are_still_the_placeholder_tripwire():

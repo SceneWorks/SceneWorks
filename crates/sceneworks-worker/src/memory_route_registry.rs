@@ -475,6 +475,18 @@ const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
 ];
 const QWEN_EDIT_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
+/// SC-24114: Qwen-Image 2.1 serves ONE upstream call — an empty ordered reference list is
+/// text-to-image, a non-empty one is the edit — under four public modes.
+/// The provider's `MAX_REFERENCE_IMAGES` — this module compiles on every target, so it is restated
+/// here and pinned against the linked provider by
+/// `qwen_image_2_1_reference_bound_matches_the_linked_provider`.
+pub(crate) const QWEN_IMAGE_2_1_MAX_REFERENCES: u32 = 10;
+const QWEN_IMAGE_2_1_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::ImageToImage,
+    MemoryRouteMode::CharacterImage,
+];
 const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::EditImage,
     MemoryRouteMode::CharacterImage,
@@ -576,18 +588,19 @@ const RULES: &[MemoryRouteRule] = &[
     // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
     // tier either provider can serve.
     //
-    // `TEXT_ONLY`, and this is the one field that is NOT simply the catalog's answer. The entry's
-    // `capabilities` gained `edit_image` / `image_to_image` with sc-24110, so the REQUEST route
-    // serves edits — but the provider's own `memory_strategy::safety_check` still opens with
-    // `if !matches!(context.mode, MemoryMode::TextToImage) { return Err(...) }`, so the MEMORY
-    // route admits text-to-image alone. Verified against the pinned-at-#1007 descriptor: its
-    // `memoryRouteWitnesses` for this provider are exactly three — one per tier, `text_to_image` /
-    // `none` / `plain`. Declaring an edit coordinate here would advertise a memory route the
-    // provider refuses at `safety_check`, which is a worse failure than the consumer fallback an
-    // unmatched edit gets today. Widen this the moment that gate does. Re-read against the
-    // terminal pin (inference b12c632b4): both providers' `safety_check` still admit
-    // `MemoryMode::TextToImage` alone, and the dumped `memoryRouteWitnesses` are still exactly the
-    // three `text_to_image` / `none` / `plain` rows, one per tier.
+    // `QWEN_IMAGE_2_1_MODES` — every PUBLIC mode the request route serves (sc-24114): text-to-image
+    // and the three conditioned faces of the SAME upstream call (`edit_image`, `image_to_image`,
+    // `character_image`). Before sc-24114 this was `TEXT_ONLY`, which left every reference request
+    // with no declaration at all (candle: `NoRelevantDeclaration`), so the terminal campaign and
+    // the admission path could only ever see text-to-image.
+    //
+    // The provider's `memory_strategy::safety_check` admits `MemoryMode::TextToImage` and PRICES
+    // references there (each one an extra `REFERENCE_FIT_TOKENS` joint-sequence block, bounded by
+    // `MAX_REFERENCE_IMAGES`) — there is no separate provider edit mode. So the manifest's
+    // `requestContexts` map every public mode onto `providerMode: "text_to_image"`, and
+    // [`expected_provider_mode`] states that mapping for this provider: the public coordinate
+    // (what the matrix and the campaign key on) stays the request's own mode, while the provider
+    // receives the one mode it implements.
     //
     // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
     // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
@@ -601,7 +614,7 @@ const RULES: &[MemoryRouteRule] = &[
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
+        modes: QWEN_IMAGE_2_1_MODES,
         load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: false,
@@ -610,7 +623,7 @@ const RULES: &[MemoryRouteRule] = &[
         backend: MemoryRouteBackend::Candle,
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
+        modes: QWEN_IMAGE_2_1_MODES,
         load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: false,
@@ -1763,6 +1776,15 @@ fn expected_provider_mode(
     context: MemoryRouteRequestContext,
 ) -> &'static str {
     match (runtime_provider, context.mode) {
+        // SC-24114: Qwen-Image 2.1's provider implements ONE memory mode and prices the ordered
+        // reference list inside it (0..=MAX_REFERENCE_IMAGES extra joint-sequence blocks).
+        (
+            "qwen_image_2_1",
+            MemoryRouteMode::TextToImage
+            | MemoryRouteMode::EditImage
+            | MemoryRouteMode::ImageToImage
+            | MemoryRouteMode::CharacterImage,
+        ) if context.reference_count <= QWEN_IMAGE_2_1_MAX_REFERENCES => "text_to_image",
         ("qwen_image_edit", MemoryRouteMode::EditImage)
             if (1..=5).contains(&context.reference_count) =>
         {
@@ -10178,5 +10200,177 @@ mod tests {
                 has_phases: false,
             },
         ));
+    }
+
+    /// SC-24114: every public mode Qwen-Image 2.1 serves reaches the provider's ONE memory mode,
+    /// across the whole 0..=MAX_REFERENCE_IMAGES range, and nothing past it does.
+    #[test]
+    fn qwen_image_2_1_public_modes_map_onto_the_providers_one_memory_mode() {
+        for mode in QWEN_IMAGE_2_1_MODES {
+            for reference_count in 0..=QWEN_IMAGE_2_1_MAX_REFERENCES {
+                let context = MemoryRouteRequestContext {
+                    mode: *mode,
+                    reference_count,
+                    use_pid: false,
+                    has_phases: false,
+                };
+                assert_eq!(
+                    expected_provider_mode("qwen_image_2_1", context),
+                    "text_to_image",
+                    "{mode:?} with {reference_count} references"
+                );
+            }
+        }
+        // Both lanes witness every public mode (the terminal campaign and the matrix key on them).
+        // Spelled out rather than read from `QWEN_IMAGE_2_1_MODES`, so narrowing that constant
+        // back to text-to-image reds here.
+        let witnesses = deferred_route_witnesses();
+        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+            for mode in &[
+                MemoryRouteMode::TextToImage,
+                MemoryRouteMode::EditImage,
+                MemoryRouteMode::ImageToImage,
+                MemoryRouteMode::CharacterImage,
+            ] {
+                assert!(
+                    witnesses.iter().any(|row| row.backend == backend
+                        && row.provider == "qwen_image_2_1"
+                        && row.mode == *mode),
+                    "{backend:?} must witness qwen_image_2_1 {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// SC-24114: a Candle Qwen-Image 2.1 REFERENCE request has a declaration. Before the
+    /// request-owned rows it was `NoRelevantDeclaration` for every edit / image-to-image /
+    /// character request; now the shipped manifest applies one exact row and hands the provider
+    /// `text_to_image`.
+    ///
+    /// *Mutation that reds this:* removing `requestContexts` from the shipped Candle rows (→
+    /// `NoRelevantDeclaration`), or dropping `edit_image` from their `modes` (→ `Refused`).
+    #[test]
+    fn shipped_qwen_image_2_1_candle_reference_requests_are_declared() {
+        let manifest = shipped_model("qwen_image_2_1");
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::TextToImage, 1),
+            (MemoryRouteMode::EditImage, 1),
+            (MemoryRouteMode::EditImage, 10),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 3),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1");
+                let declared = declared_candle_request_strategy_contract_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    &manifest,
+                    &spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| Some(staged_contract("qwen_image_2_1")),
+                );
+                let provider_mode = match declared {
+                    DeclaredCandleStrategyContract::Applied { provider_mode, .. } => provider_mode,
+                    DeclaredCandleStrategyContract::NoRelevantDeclaration => {
+                        panic!("{tier} {mode:?} x{reference_count}: NoRelevantDeclaration")
+                    }
+                    DeclaredCandleStrategyContract::Refused => {
+                        panic!("{tier} {mode:?} x{reference_count}: Refused")
+                    }
+                };
+                assert_eq!(provider_mode, "text_to_image");
+            }
+        }
+        // Past the provider's bound there is no declaration to apply.
+        let spec =
+            LoadSpec::new(WeightsSource::Dir("q8".into())).with_resolved_route("qwen_image_2_1");
+        assert!(!matches!(
+            declared_candle_request_strategy_contract_with(
+                "qwen_image_2_1",
+                Some("q8"),
+                &manifest,
+                &spec,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: QWEN_IMAGE_2_1_MAX_REFERENCES + 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_| Some(staged_contract("qwen_image_2_1")),
+            ),
+            DeclaredCandleStrategyContract::Applied { .. }
+        ));
+    }
+
+    /// SC-24114: the restated reference bound is the linked provider's own.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_reference_bound_matches_the_linked_provider() {
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        use runtime_cuda::providers::qwen_image_2_1 as provider;
+        #[cfg(target_os = "macos")]
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        assert_eq!(
+            QWEN_IMAGE_2_1_MAX_REFERENCES as usize,
+            provider::config::MAX_REFERENCE_IMAGES
+        );
+    }
+
+    /// SC-24114: the shipped MLX Qwen-Image 2.1 declaration is request-owned (every row carries
+    /// `requestContexts`, as a non-legacy MLX lane requires) and does NOT force every load onto the
+    /// provider's `Sequential` policy — which drops and reloads the language tower per request.
+    /// A reference request stays on the caller's own load policy and is never refused.
+    ///
+    /// *Mutation that reds this:* adding an MLX `staged_residency` row (→ `Eligible + Sequential`
+    /// for every load), or removing `requestContexts` from an MLX row (→ `Refused`).
+    #[test]
+    fn shipped_qwen_image_2_1_mlx_declaration_is_request_owned_and_never_forces_staging() {
+        let manifest = shipped_model("qwen_image_2_1");
+        let rows = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("the MLX lane declares its contract");
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|row| row.get("requestContexts").is_some()),
+            "a non-legacy MLX lane reads a row without requestContexts as malformed"
+        );
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::EditImage, 4),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 10),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1");
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    Some(mode),
+                    &manifest,
+                    spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| true,
+                );
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::NotEvaluated,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+                assert_eq!(evaluated.offload_policy, OffloadPolicy::Resident);
+            }
+        }
     }
 }

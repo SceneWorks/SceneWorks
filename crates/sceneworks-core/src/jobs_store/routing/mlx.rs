@@ -370,9 +370,19 @@ pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool 
     // model does not declare, so no UI path produces one here. What #2916 was right about is that
     // `Conditioning::Mask` must never be SENT; that is enforced where the conditioning list is
     // built, not by dropping the carrier at the door.
+    // `image_to_image` (sc-24114) is the manifest's declared single-reference operation, and in
+    // upstream terms it is simply a 1-reference edit — the same ordered-list call. Leaving it off
+    // this list made a declared capability unroutable on BOTH lanes (candle delegates here), and
+    // the gap reason then blamed pose/strict-control for a plain reference request.
     if !matches!(
         payload.get("mode").and_then(Value::as_str),
-        None | Some("image_generation" | "text_to_image" | "edit_image" | "character_image")
+        None | Some(
+            "image_generation"
+                | "text_to_image"
+                | "image_to_image"
+                | "edit_image"
+                | "character_image"
+        )
     ) {
         return false;
     }

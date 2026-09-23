@@ -683,7 +683,7 @@ describe("SimpleModelManager license gate (sc-17227)", () => {
 
     const note = container.querySelector(".su-license-note");
     expect(note).toBeTruthy();
-    expect(note.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(note.textContent).toContain("Qwen Research License Agreement");
     expect(note.textContent).toContain("Non-commercial");
     expect(note.querySelector("a").getAttribute("href")).toBe(QWEN_2_1.licenseUrl);
     const disclosure = note.querySelector("details");

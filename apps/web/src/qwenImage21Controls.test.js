@@ -20,7 +20,10 @@ import {
   showTransparencyToggle,
   transparencyAdvanced,
   transparencyRequested,
+  imageBytesCarryAlpha,
+  editTransparencyFor,
 } from "./qwenAlpha.js";
+import { buildEditJobBody } from "./imageJobs.js";
 import {
   maxReferencesForModel,
   moveReference,
@@ -395,5 +398,77 @@ describe("the ordered-reference rail (sc-24113)", () => {
     expect(actionsFor(2)[1].props.disabled).toBe(true);
     expect(actionsFor(1)[0].props.disabled).toBe(false);
     expect(actionsFor(1)[1].props.disabled).toBe(false);
+  });
+});
+
+// sc-24114 — transparency on the Image Editor's edit lane.
+describe("editor transparency (sc-24114)", () => {
+  const png = (colourType, chunks = []) => {
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const chunk = (type, data) => {
+      const length = data.length;
+      bytes.push((length >>> 24) & 255, (length >>> 16) & 255, (length >>> 8) & 255, length & 255);
+      for (const ch of type) bytes.push(ch.charCodeAt(0));
+      bytes.push(...data, 0, 0, 0, 0);
+    };
+    chunk("IHDR", [0, 0, 0, 1, 0, 0, 0, 1, 8, colourType, 0, 0, 0]);
+    for (const [type, data] of chunks) chunk(type, data);
+    chunk("IDAT", [0]);
+    chunk("IEND", []);
+    return new Uint8Array(bytes);
+  };
+
+  // *Mutation that reds this:* dropping the colour-type 6 arm, or the tRNS scan.
+  it("reads alpha off the PNG / WebP header", () => {
+    expect(imageBytesCarryAlpha(png(6))).toBe(true);
+    expect(imageBytesCarryAlpha(png(4))).toBe(true);
+    expect(imageBytesCarryAlpha(png(2))).toBe(false);
+    expect(imageBytesCarryAlpha(png(3, [["tRNS", [0]]]))).toBe(true);
+    expect(imageBytesCarryAlpha(png(3))).toBe(false);
+    const webp = (chunk, flagOffset, flag) => {
+      const data = new Uint8Array(32);
+      data.set([..."RIFF"].map((c) => c.charCodeAt(0)), 0);
+      data.set([..."WEBP"].map((c) => c.charCodeAt(0)), 8);
+      data.set([...chunk].map((c) => c.charCodeAt(0)), 12);
+      data[flagOffset] = flag;
+      return data;
+    };
+    expect(imageBytesCarryAlpha(webp("VP8X", 20, 0x10))).toBe(true);
+    expect(imageBytesCarryAlpha(webp("VP8X", 20, 0))).toBe(false);
+    expect(imageBytesCarryAlpha(new Uint8Array([0xff, 0xd8, 0xff]))).toBe(false);
+  });
+
+  // *Mutation that reds this:* defaulting to OFF regardless of the working image's alpha.
+  it("defaults the edit's transparency to the working image's alpha until the user toggles it", () => {
+    expect(editTransparencyFor(null, true)).toBe(true);
+    expect(editTransparencyFor(null, false)).toBe(false);
+    expect(editTransparencyFor(false, true)).toBe(false);
+    expect(editTransparencyFor(true, false)).toBe(true);
+  });
+
+  // *Mutation that reds this:* dropping the transparentBackground arm from buildEditJobBody.
+  it("buildEditJobBody carries transparentBackground only for an alpha-capable model", () => {
+    const qwen = fallbackModels.find((model) => model.id === QWEN_IMAGE_2_1_MODEL_ID);
+    const base = {
+      project: { id: "p" },
+      requestedGpu: null,
+      sourceAssetId: "src",
+      model: qwen.id,
+      prompt: "cut out the subject",
+      seed: null,
+      width: 1024,
+      height: 1024,
+    };
+    expect(
+      buildEditJobBody({ ...base, transparentBackground: true, modelEntry: qwen }).advanced,
+    ).toEqual({ transparentBackground: true });
+    expect(buildEditJobBody({ ...base, transparentBackground: false, modelEntry: qwen }).advanced).toEqual({});
+    expect(
+      buildEditJobBody({
+        ...base,
+        transparentBackground: true,
+        modelEntry: { id: "flux2_dev" },
+      }).advanced,
+    ).toEqual({});
   });
 });

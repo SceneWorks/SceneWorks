@@ -3161,3 +3161,181 @@ fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
     assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2752 * 1536);
     assert!(geometry["maxPresetArea"].as_u64().expect("area") > 2048 * 2048);
 }
+
+/// sc-24114 — the reference cap and the admission envelope, read FROM THE LINKED PROVIDER rather
+/// than restated as literals. `limits.maxReferenceAssets` (the enqueue + worker cap) and every
+/// `admissionGeometry` field must equal the pinned engine's own `MAX_REFERENCE_IMAGES` /
+/// `memory_strategy::admission_geometry()` on the lane that links it, so a pin that moves the
+/// engine's bound reds here instead of leaving the catalog gating a bound the engine no longer has.
+///
+/// *Mutation that reds this:* editing `maxReferenceAssets` or any `admissionGeometry` value in the
+/// manifest (or an engine bump that moves the provider's constant without a catalog edit).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    use runtime_cuda::providers::qwen_image_2_1 as provider;
+
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let engine = provider::memory_strategy::admission_geometry();
+    assert_eq!(
+        entry["limits"]["maxReferenceAssets"].as_u64(),
+        Some(provider::config::MAX_REFERENCE_IMAGES as u64),
+        "limits.maxReferenceAssets is the engine's MAX_REFERENCE_IMAGES"
+    );
+    let geometry = &entry["admissionGeometry"];
+    for (key, value) in [
+        ("maxSide", u64::from(engine.max_side)),
+        ("maxPresetArea", engine.max_preset_area),
+        ("maxTargetImageTokens", engine.max_target_image_tokens),
+        ("maxReferenceImages", u64::from(engine.max_reference_images)),
+        ("tokensPerMaxReference", engine.tokens_per_max_reference),
+        ("maxJointTokens", engine.max_joint_tokens),
+        ("pixelsPerToken", engine.pixels_per_token),
+        ("maxBatch", u64::from(engine.max_batch)),
+    ] {
+        assert_eq!(
+            geometry[key].as_u64(),
+            Some(value),
+            "admissionGeometry.{key} must mirror the linked provider's admission_geometry()"
+        );
+    }
+}
+
+/// sc-24114 — every memory FLOOR key the UI reads for `qwen_image_2_1` has a worker source, so none
+/// is dead:
+///
+/// * the Candle keys (`binding`) are CONSUMED by the pre-load gate: `vram_gate::predicted_peak_gb`
+///   answers each tier's `candle.minMemoryGbByTier` row and falls back to `candle.minMemoryGb`;
+/// * the MLX keys (`advisory` — no MLX runtime gate reads a manifest floor; the fit gate admits from
+///   the provider's own memory model) are DERIVED FROM that same provider model: `ceil(resident
+///   peak GiB x 1.25)` at the default preset, per tier, and the scalar is the densest tier's floor;
+/// * no other floor key exists on either lane — a staged floor no worker path applies (the MLX
+///   contract declares no staged row) was removed rather than kept as UI-only decoration.
+///
+/// *Mutation that reds this:* re-adding `mlx.stagedMinMemoryGbByTier`; editing any floor value;
+/// or `predicted_peak_gb` no longer reading `candle.minMemoryGbByTier`.
+#[test]
+fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+    for backend in ["mlx", "candle"] {
+        let floors: std::collections::BTreeSet<&str> = entry[backend]
+            .as_object()
+            .expect("backend block")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.contains("MemoryGb"))
+            .collect();
+        assert_eq!(
+            floors,
+            ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
+            "{backend}: every floor key must have a worker source"
+        );
+    }
+    // Candle: consumed by the gate, row by row, with the scalar as the unlisted-tier fallback.
+    // `vram_gate` compiles on the candle build only, so this half runs on the windows-candle lane.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(&entry, tier),
+            entry["candle"]["minMemoryGbByTier"][tier].as_f64(),
+            "candle/{tier}"
+        );
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert_eq!(
+        crate::vram_gate::predicted_peak_gb(&entry, "nvfp4"),
+        entry["candle"]["minMemoryGb"].as_f64()
+    );
+    // MLX: derived from the linked provider's memory model (the fit gate's own source).
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        const GIB: f64 = (1_u64 << 30) as f64;
+        let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
+        let default = provider::config::PRESETS[0];
+        let mut checked = 0;
+        for row in provider::memory_strategy::derived::table() {
+            if (row.preset.width, row.preset.height) != (default.width, default.height) {
+                continue;
+            }
+            let tier = match row.tier {
+                provider::quant::Tier::Bf16 => "bf16",
+                provider::quant::Tier::Q8 => "q8",
+                provider::quant::Tier::Q4 => "q4",
+            };
+            assert_eq!(
+                entry["mlx"]["minMemoryGbByTier"][tier].as_u64(),
+                Some(floor(row.resident_peak_bytes())),
+                "mlx.minMemoryGbByTier.{tier} is ceil(resident peak GiB x 1.25) at the default preset"
+            );
+            if tier == "bf16" {
+                assert_eq!(
+                    entry["mlx"]["minMemoryGb"].as_u64(),
+                    Some(floor(row.resident_peak_bytes())),
+                    "the MLX scalar is the densest tier's derived floor"
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "one row per shipped tier at the default preset");
+    }
+}
+
+/// sc-24114 — `qwen_image_2_1`'s sampler / scheduler menu is EXACTLY what the linked provider
+/// publishes (`curated_sampler_names()` / `curated_scheduler_names()`), plus the `"default"`
+/// sentinel. The drift guard in `engines.rs` only proves manifest ⊆ engine; this pins the other
+/// direction for this model, because the review finding was a menu that under-declared a solver set
+/// both pipelines honour.
+///
+/// *Mutation that reds this:* restoring `"samplers": ["default"]` (or dropping any curated name).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
+    use std::collections::BTreeSet;
+    let registration = crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is registered on this lane");
+    let capabilities = (registration.descriptor)().capabilities;
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    for (key, engine) in [
+        ("samplers", &capabilities.samplers),
+        ("schedulers", &capabilities.schedulers),
+    ] {
+        let declared: BTreeSet<String> = entry["limits"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("limits.{key} is declared"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "default")
+            .map(str::to_owned)
+            .collect();
+        let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
+        assert!(!published.is_empty(), "the provider publishes a curated {key} menu");
+        assert_eq!(declared, published, "limits.{key} must be the provider's curated menu");
+        assert!(
+            entry["limits"][key]
+                .as_array()
+                .is_some_and(|names| names.first() == Some(&Value::from("default"))),
+            "limits.{key} leads with the engine-default sentinel"
+        );
+    }
+}
