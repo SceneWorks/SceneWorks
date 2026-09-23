@@ -2265,6 +2265,12 @@ mod tests {
         assert!(task.done_message().contains("review"));
     }
 
+    // `refine_result` exists only on a backend build; this gate was on this test before sc-24113's
+    // tests were inserted above it and captured it.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
         let result = refine_result(

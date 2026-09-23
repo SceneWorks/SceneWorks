@@ -75,6 +75,12 @@ pub(crate) const OUTPUT_CHANNELS_RGBA: &str = "rgba";
 ///
 /// Sending such a reference flattened to RGB is a DIFFERENT request, not a lossy version of the
 /// same one, because the VAE encodes all four channels.
+// Read only by `reference_conditioning_kind`, whose callers are backend lanes.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) const CONDITIONING_REFERENCE_RGBA: &str = "ReferenceRgba";
 
 /// The `advanced` key the Studio/Editor set when the user turns the transparency toggle on.
@@ -231,6 +237,7 @@ pub(crate) fn request_output_channels(channels: u8) -> gen_core::OutputChannels 
 // `image_jobs::build_qwen_image_2_1_conditioning` classifies every resolved reference through this
 // function, so the two halves of the epic cannot drift on what an alpha-carrying reference becomes.
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]

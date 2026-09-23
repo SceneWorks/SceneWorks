@@ -200,7 +200,7 @@ async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_termina
 /// Both conditioned modes are exercised, because `ImagePlan` and the acknowledgement payload are
 /// built from the request and a mode that failed to carry the model or the batch total would
 /// renumber the gallery mid-cancel. PROGRESS on the edit route is covered separately, by
-/// `image_jobs::tests::qwen_image_2_1_edit_reports_progress_and_stops_on_cancel`.
+/// `image_jobs::tests::qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_cancel`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -410,7 +410,7 @@ fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+pub(crate) async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
     async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
