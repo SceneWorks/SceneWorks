@@ -421,6 +421,25 @@ mod tests {
             "the pinned 2.1 provider advertises alpha output: {capable:?}"
         );
         assert!(!engine_advertises_alpha_output("no_such_model_xyz"));
+
+        // The catalog's `supportsAlphaOutput` (what the web reads to offer the toggle) is a
+        // hand-written MIRROR of this descriptor bit, so it is held to it here: a model whose
+        // manifest offers the toggle must resolve to an engine that can serve it, and vice versa.
+        for entry in crate::tests::builtin_models_manifest() {
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if crate::engines::mlx_model(id).is_none() {
+                continue;
+            }
+            let declared = entry.get("supportsAlphaOutput").and_then(Value::as_bool) == Some(true);
+            assert_eq!(
+                declared,
+                engine_advertises_alpha_output(id),
+                "{id}: manifest supportsAlphaOutput disagrees with the descriptor's \
+                 supports_alpha_output"
+            );
+        }
     }
 
     #[test]

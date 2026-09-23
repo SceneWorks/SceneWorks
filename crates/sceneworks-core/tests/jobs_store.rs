@@ -4507,15 +4507,28 @@ fn candle_claims_qwen_image_2_1_text_to_image_off_mac() {
         "an off-Mac worker must claim a plain Qwen Image 2.1 txt2img job (sc-24109)"
     );
 
-    // A conditioned request is still refused — 2.1 declares an empty conditioning set on BOTH
-    // backends — and it is refused for the CARRIER, not for a platform boundary that no longer
-    // exists, so the reason names something the user can act on.
+    // A reference-conditioned request is claimed too (sc-24110): the Candle port declares the same
+    // `Reference` / `ReferenceRgba` / `MultiReference` conditioning as MLX, and the lane is keyed
+    // on the ordered reference list, never the mode — so the manifest's `image_to_image` shape (a
+    // plain request carrying a `referenceAssetId`) is claimed off-Mac exactly as on a Mac.
     let conditioned = job_of(
         &store,
         JobType::ImageGenerate,
         json!({ "model": "qwen_image_2_1", "prompt": "p", "referenceAssetId": "ref_1" }),
     );
-    let reason = candle_supported(&conditioned).unwrap_err();
+    assert!(
+        candle_supported(&conditioned).is_ok(),
+        "an off-Mac worker must claim a reference-conditioned Qwen Image 2.1 job"
+    );
+
+    // A carrier 2.1 does not declare (a pose set) is still refused — for the CARRIER, not for a
+    // platform boundary that no longer exists, so the reason names something the user can act on.
+    let posed = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    let reason = candle_supported(&posed).unwrap_err();
     assert_eq!(reason.model.as_deref(), Some("qwen_image_2_1"));
     let message = reason.candle_error_message();
     assert!(message.starts_with("candle_unsupported:"));

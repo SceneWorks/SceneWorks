@@ -7311,7 +7311,7 @@ fn take_prompt_enhancement_fact(
 ///
 /// Production renders go through [`generate_one_on_surface`]; this RGB-surface form is the one the
 /// engine smokes drive.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 fn generate_one(
     generator: &dyn Generator,
