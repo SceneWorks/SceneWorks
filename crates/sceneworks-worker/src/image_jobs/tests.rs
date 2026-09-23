@@ -9477,35 +9477,6 @@ fn qwen_image_2_1_alpha_reference_travels_as_reference_rgba_in_its_slot() {
 
 /// The alpha plane of a 2.1 reference is fitted with EXACTLY the geometry its RGB gets, so the two
 /// halves of a `ReferenceRgba` stay aligned; a letterbox the source never covered is transparent.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-#[test]
-fn qwen_image_2_1_alpha_plane_is_fitted_with_its_images_geometry() {
-    let plane = image::GrayImage::from_fn(8, 4, |x, _| image::Luma([if x < 4 { 0 } else { 255 }]));
-    for mode in ["crop", "pad", "stretch"] {
-        let fitted = fit_alpha_plane(&plane, 8, 8, mode);
-        assert_eq!(fitted.dimensions(), (8, 8), "{mode}");
-        let replicated = gen_core::Image {
-            width: 8,
-            height: 4,
-            pixels: plane.as_raw().iter().flat_map(|a| [*a, *a, *a]).collect(),
-        };
-        let rgb_fit = fit_engine_image(replicated, 8, 8, mode).expect("fit");
-        let expected: Vec<u8> = rgb_fit.pixels.chunks_exact(3).map(|p| p[0]).collect();
-        assert_eq!(
-            fitted.as_raw(),
-            &expected,
-            "{mode}: alpha and RGB geometry diverged"
-        );
-    }
-    // `pad` letterboxes an 8x4 source into 8x8: the bars above and below are A=0.
-    let padded = fit_alpha_plane(&plane, 8, 8, "pad");
-    assert_eq!(padded.get_pixel(7, 0).0[0], 0);
-    assert_eq!(padded.get_pixel(7, 4).0[0], 255);
-}
-
 /// sc-24110 — the never-a-Mask guarantee on the path that actually RUNS.
 ///
 /// `build_qwen_image_2_1_conditioning` states the contract, but what `generate_one` sends is
@@ -9874,6 +9845,203 @@ fn qwen_image_2_1_live_candle_lane_emits_source_then_mask_as_references_and_neve
         edit_mask.as_ref(),
     );
     assert_qwen_edit_emits_the_ordered_list(&emitted, "candle");
+}
+
+/// sc-24114 — a Qwen-Image 2.1 reference reaches the conditioning list at its NATIVE geometry.
+///
+/// Upstream never crops or letterboxes a condition image; the engine fits each one itself,
+/// aspect-preserved, onto its ~1024²-area grid. So a PORTRAIT reference (and its alpha plane) in a
+/// 16:9 request must arrive un-resampled — not centre-cropped to 16:9 by the default
+/// `fitMode: "crop"`, and not letterboxed by `pad`.
+///
+/// Armed against: restoring `fit_engine_image(source, request.width, request.height, …)` (and the
+/// matching alpha fit) in `resolve_qwen_image_2_1_edit` — the emitted dims become 64×36.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_portrait_reference_request(
+    fit_mode: &str,
+) -> (QwenImage21EditFixture, ImageRequest) {
+    let fixture = QwenImage21EditFixture::new();
+    let store = ProjectStore::new(fixture.settings.data_dir.clone(), "worker");
+    let file = fixture._data.path().join("qwen-edit-portrait.png");
+    // 12×20 portrait, left half transparent — so the plane's geometry is checkable too.
+    image::RgbaImage::from_fn(12, 20, |x, _| {
+        image::Rgba([90, 60, 200, if x < 6 { 0 } else { 255 }])
+    })
+    .save(&file)
+    .unwrap();
+    let portrait = store
+        .import_asset(
+            &fixture.project_id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "qwen-edit-portrait.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let edit = request(json!({
+        "projectId": fixture.project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "place the person from <image2> into <image1>",
+        "width": 64,
+        "height": 36,
+        "fitMode": fit_mode,
+        "sourceAssetId": fixture.ids[0],
+        "referenceAssetIds": [portrait["id"].as_str().unwrap()],
+    }));
+    (fixture, edit)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, fit_mode: &str) {
+    match emitted {
+        [Conditioning::Reference { image: source, .. }, Conditioning::ReferenceRgba {
+            image: portrait, ..
+        }] => {
+            assert_eq!(
+                (source.width, source.height),
+                (16, 16),
+                "{lane}/{fit_mode}: the square source must keep its native 16×16"
+            );
+            assert_eq!(
+                (portrait.width, portrait.height),
+                (12, 20),
+                "{lane}/{fit_mode}: the portrait reference was fitted to the 16:9 output — \
+                 upstream never crops or letterboxes a condition image"
+            );
+            // The plane is the asset's own, unresampled: columns 0..6 transparent, 6..12 opaque.
+            for (index, pixel) in portrait.pixels.chunks_exact(4).enumerate() {
+                let expected = if index % 12 < 6 { 0 } else { 255 };
+                assert_eq!(
+                    pixel[3], expected,
+                    "{lane}/{fit_mode}: alpha misaligned at {index}"
+                );
+            }
+        }
+        other => panic!("{lane}/{fit_mode}: expected [Reference, ReferenceRgba], got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_lane_sends_references_at_native_geometry() {
+    for fit_mode in ["crop", "pad", "stretch"] {
+        let (fixture, edit) = qwen_image_2_1_portrait_reference_request(fit_mode);
+        let (lane, edit_refs, edit_ref_alpha) =
+            resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live MLX lane resolves a portrait reference");
+        let emitted = build_lane_conditioning_with_alpha(
+            lane.identity_init.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            lane.ideogram_edit_mask.as_ref(),
+        );
+        assert_qwen_image_2_1_native_geometry(&emitted, "mlx", fit_mode);
+    }
+}
+
+/// The candle twin: `resolve_candle_lane_inputs` is the call `generate_candle_stream` makes. Runs
+/// on a candle test lane only.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_lane_sends_references_at_native_geometry() {
+    for fit_mode in ["crop", "pad", "stretch"] {
+        let (fixture, edit) = qwen_image_2_1_portrait_reference_request(fit_mode);
+        let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+            resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live candle lane resolves a portrait reference");
+        let emitted = build_lane_conditioning_with_alpha(
+            edit_reference.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            edit_mask.as_ref(),
+        );
+        assert_qwen_image_2_1_native_geometry(&emitted, "candle", fit_mode);
+    }
+}
+
+/// sc-24114 — the declared `image_to_image` operation under its own mode is a 1-reference edit in
+/// upstream terms: the lane emits exactly ONE strength-less `Conditioning::Reference` (never the
+/// img2img-init slot, which carries a strength 2.1 refuses).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_image_to_image_request(fixture: &QwenImage21EditFixture) -> ImageRequest {
+    request(json!({
+        "projectId": fixture.project_id,
+        "model": "qwen_image_2_1",
+        "mode": "image_to_image",
+        "prompt": "the same scene at dusk",
+        "width": 64,
+        "height": 64,
+        "referenceAssetId": fixture.ids[2],
+    }))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_image_2_1_one_reference(emitted: &[Conditioning], lane: &str) {
+    match emitted {
+        [Conditioning::Reference {
+            image,
+            strength: None,
+        }] => assert_eq!(
+            qwen_edit_centre_rgb(image),
+            QWEN_EDIT_FIXTURE_COLOURS[2],
+            "{lane}: the one reference must be the submitted asset"
+        ),
+        other => panic!("{lane}: image_to_image must emit exactly one Reference, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_image_to_image_emits_one_reference() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = qwen_image_2_1_image_to_image_request(&fixture);
+    // The predicate both lanes divert on (the MLX generic arm, the candle `QwenImage21Edit` route).
+    assert!(is_qwen_image_2_1_edit(&edit));
+    let (lane, edit_refs, edit_ref_alpha) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves an image_to_image request");
+    let emitted = build_lane_conditioning_with_alpha(
+        lane.identity_init.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        lane.ideogram_edit_mask.as_ref(),
+    );
+    assert_qwen_image_2_1_one_reference(&emitted, "mlx");
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_image_to_image_emits_one_reference() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = qwen_image_2_1_image_to_image_request(&fixture);
+    // The predicate both lanes divert on (the MLX generic arm, the candle `QwenImage21Edit` route).
+    assert!(is_qwen_image_2_1_edit(&edit));
+    let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+        resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live candle lane resolves an image_to_image request");
+    let emitted = build_lane_conditioning_with_alpha(
+        edit_reference.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        edit_mask.as_ref(),
+    );
+    assert_qwen_image_2_1_one_reference(&emitted, "candle");
 }
 
 /// A generator that behaves like a real denoise under a user cancel: it reports a step, keeps
@@ -28490,15 +28658,70 @@ mod qwen_image_2_1_tiers {
         );
     }
 
-    /// Nothing installed ⇒ `None` for a selection or none, which the caller turns into the ordinary
-    /// default-snapshot path and, from there, an actionable "install it" error — not a tier
-    /// refusal, and never a directory that does not exist.
+    /// Nothing installed: an UNSELECTED request answers `None` (the caller's ordinary "install the
+    /// model" path), but an EXPLICIT pick is the install error itself (sc-24114) — never `None`,
+    /// which let the caller fall back to the default snapshot directory and load a bf16 root that
+    /// may hold no `transformer/` at all.
+    ///
+    /// *Mutation that reds this:* restoring `return Ok(None)` in the explicit arm's
+    /// nothing-installed branch.
     #[test]
-    fn nothing_installed_resolves_to_nothing() {
+    fn nothing_installed_is_none_unselected_and_an_install_error_when_explicit() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
-        assert_eq!(resolved(data.path(), &entry_after_upload(), Some(4)), None);
         assert_eq!(resolved(data.path(), &entry_after_upload(), None), None);
+        for bits in [0, 4, 8, 16] {
+            let error = super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry_after_upload(), Some(bits)),
+            )
+            .expect_err("an explicit pick with nothing installed is the install error")
+            .to_string();
+            assert!(
+                error.contains("is not installed on this machine")
+                    && error.contains("Install it in Model Manager"),
+                "{bits}: {error}"
+            );
+        }
+    }
+
+    /// A dense bit width is the UNQUANTIZED tier (sc-24114): `mlxQuantize: 16` (bf16) or 32 must
+    /// resolve bf16, never q8 — only `1..=4` is q4 and `5..=8` q8.
+    ///
+    /// *Mutation that reds this:* the pre-fix `_ => "q8"` catch-all for every bit count above 4.
+    #[test]
+    fn a_dense_bit_width_selects_bf16_not_q8() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(
+            data.path(),
+            REHOST_REPO,
+            REHOST_REVISION_AFTER_UPLOAD,
+            Some("q8"),
+        );
+        stage_tier(
+            data.path(),
+            REHOST_REPO,
+            REHOST_REVISION_AFTER_UPLOAD,
+            Some("q4"),
+        );
+        for (bits, tier) in [
+            (16, "bf16"),
+            (32, "bf16"),
+            (9, "bf16"),
+            (8, "q8"),
+            (5, "q8"),
+            (4, "q4"),
+            (0, "bf16"),
+        ] {
+            assert_eq!(
+                resolved_with_tier(data.path(), &entry, Some(bits)).map(|(_, tier)| tier),
+                Some(tier),
+                "mlxQuantize {bits}"
+            );
+        }
     }
 
     /// THE SHIPPED CATALOG, unmodified: the packed tiers carry the null-SHA placeholder and

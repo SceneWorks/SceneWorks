@@ -606,6 +606,10 @@ fn qwen_image_2_1_routes_an_ordered_reference_edit_to_mlx() {
         // A MASK is an ordinary ordered reference on this model, never `Conditioning::Mask` —
         // 2.1 has no mask tensor and performs no inpainting. Claiming it is the whole point.
         json!({ "mode": "edit_image", "sourceAssetId": "src_1", "maskAssetId": "mask_1" }),
+        // sc-24114: the declared `image_to_image` operation under its OWN mode — a 1-reference
+        // edit in upstream terms. The mode allowlist refused it on both lanes.
+        json!({ "mode": "image_to_image", "referenceAssetId": "ref_1" }),
+        json!({ "mode": "image_to_image", "sourceAssetId": "src_1" }),
     ] {
         assert!(
             qwen_image_2_1_mlx_eligible(&object(payload.clone())),

@@ -295,9 +295,9 @@ pub fn ordered_image_reference_error(
 ) -> Option<String> {
     let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
-    if !matches!(mode, "edit_image" | "character_image") {
-        return None;
-    }
+    // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
+    // a CONDITIONED mode exactly like the edit modes (it needs at least one reference).
+    let conditioned_mode = matches!(mode, "edit_image" | "character_image" | "image_to_image");
     let Some(ids) = ordered_image_reference_ids(payload) else {
         return Some(format!(
             "{model}: one of sourceAssetId / maskAssetId / referenceAssetId / referenceAssetIds is \
@@ -306,12 +306,18 @@ pub fn ordered_image_reference_error(
         ));
     };
     if ids.is_empty() {
+        if !conditioned_mode {
+            // A plain text-to-image request: nothing to condition on, nothing to judge.
+            return None;
+        }
         return Some(format!(
             "{model} conditions on an ordered list of 1 to {cap} reference images, but this \
              {mode} request supplies none. Add at least one reference, or send a text-to-image \
              request instead."
         ));
     }
+    // A non-empty list IS the conditioning call whatever the mode says (the router claims it
+    // mode-independently), so a strength is refused on every mode that carries references.
     ordered_image_reference_strength_error(model, payload)
 }
 
@@ -475,5 +481,42 @@ mod tests {
         let bogus =
             ImageRequest::from_payload(&payload(json!({ "projectId": "p", "fitMode": "weird" })));
         assert_eq!(bogus.fit_mode, "crop");
+    }
+
+    /// sc-24114: `image_to_image` is the declared single-reference face of the ordered-list call,
+    /// so it is judged exactly like the edit modes — no references is a 400 — and a strength is
+    /// refused on EVERY mode that carries references, because the router claims a non-empty list
+    /// mode-independently (a `text_to_image` + `referenceAssetId` request is the same engine call).
+    #[test]
+    fn ordered_reference_shape_gate_covers_image_to_image_and_every_referenced_mode() {
+        let entry = payload(json!({ "limits": { "maxReferenceAssets": 10 } }));
+        let check =
+            |body: Value| ordered_image_reference_error("qwen_image_2_1", &payload(body), &entry);
+
+        let empty = check(json!({ "mode": "image_to_image" }));
+        assert!(
+            empty
+                .as_deref()
+                .is_some_and(|m| m.contains("supplies none")),
+            "{empty:?}"
+        );
+        assert_eq!(
+            check(json!({ "mode": "image_to_image", "referenceAssetId": "r" })),
+            None
+        );
+        for mode in ["image_to_image", "text_to_image", "image_generation"] {
+            let refused = check(json!({
+                "mode": mode, "referenceAssetId": "r", "advanced": { "strength": 0.4 }
+            }));
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|m| m.contains("no strength")),
+                "{mode}: {refused:?}"
+            );
+        }
+        // A plain text-to-image request is untouched.
+        assert_eq!(check(json!({ "mode": "text_to_image" })), None);
+        assert_eq!(check(json!({ "advanced": { "strength": 0.4 } })), None);
     }
 }

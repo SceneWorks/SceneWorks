@@ -23,7 +23,7 @@ import { safeExternalUrl } from "../urls.js";
 // "whenever the model carries licence terms", which is the AC — shown before download (the gate)
 // AND in model details (this row).
 //
-// `licenseName` is the human label ("Qwen RESEARCH LICENSE AGREEMENT"). The catalog does not carry
+// `licenseName` is the human label ("Qwen Research License Agreement"). The catalog does not carry
 // one per model, so callers pass what they have and it falls back to a neutral phrase rather than
 // inventing a licence name.
 export function ModelLicenseSummary({

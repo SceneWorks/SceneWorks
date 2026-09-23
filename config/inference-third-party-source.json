@@ -1,5 +1,5 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision b12c632b (inference feature/sc-24107-qwen-image-2-1 head, merge of PR #1009 for sc-24111 \u2014 the epic's complete Qwen-Image 2.1 feature branch, stories S1-S5 plus its own main sync). The delta from the previously pinned inference main revision is that Qwen-Image 2.1 provider work: two new production crates, crates/media/mlx-gen/mlx-gen-qwen-image-2-1 and crates/media/candle-gen/candle-gen-qwen-image-2-1, contributing 13 of the 15 new provenance candidate paths, plus two pre-existing files that newly carry port markers (crates/contracts/gen-core/src/latent.rs and crates/contracts/core-llm/core-llm-testkit/src/comparison.rs). The S4 RGBA output contract adds no ported source: it is first-party contract work on gen-core and the two provider crates already counted here. No candidate path was removed and no ported-source marker was retired. Current reviewed population: 698 provenance candidates and 99 production-Rust crate prefixes. The two new crates are UNCLASSIFIED (no portedSourceAreas coverage and no crateDispositions decision) and are part of the report-only licensing worklist, not a build gate; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision b12c632b (inference feature/sc-24107-qwen-image-2-1 head, merge of PR #1009 for sc-24111 \u2014 the epic's complete Qwen-Image 2.1 feature branch, stories S1-S5 plus its own main sync). The delta from the previously pinned inference main revision is that Qwen-Image 2.1 provider work: two new production crates, crates/media/mlx-gen/mlx-gen-qwen-image-2-1 and crates/media/candle-gen/candle-gen-qwen-image-2-1, contributing 13 of the 15 new provenance candidate paths, plus two pre-existing files that newly carry port markers (crates/contracts/gen-core/src/latent.rs and crates/contracts/core-llm/core-llm-testkit/src/comparison.rs). The S4 RGBA output contract adds no ported source: it is first-party contract work on gen-core and the two provider crates already counted here. No candidate path was removed and no ported-source marker was retired. Current reviewed population: 698 provenance candidates and 99 production-Rust crate prefixes. The two new crates are classified as architecture-reimplementation-existing-terms portedSourceAreas (sc-24114), under the Qwen Research License Agreement already mapped in the About manifest; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
   "inferenceRevision": "b12c632b43ea43bcac3afdc6f881ef5d48edf37f",
   "auditDigest": "9bceeaf74b6c515dd512f66e1f75368c7fb8a5423d5bc664d29096553da3e71a",
   "artifacts": [
@@ -289,6 +289,13 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/media/candle-gen/candle-gen-qwen-image-2-1",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Qwen-Image 2.1 provider (Candle lane): an architecture reimplementation of the upstream diffusers pipeline (Qwen3-VL conditioning tower, MMDiT transformer, VAE, flow scheduler) and the SceneWorks tier converter. The applicable model terms (Qwen Research License Agreement) are mapped in the About manifest's qwen-image-2-1 component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/media/candle-gen/candle-gen-sam3",
       "pathPrefix": "crates/media/candle-gen/candle-gen-sam3/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
@@ -520,6 +527,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Qwen-Image 2.1 provider (MLX lane): an architecture reimplementation of the upstream diffusers pipeline (Qwen3-VL conditioning tower, MMDiT transformer, VAE, flow scheduler) and the SceneWorks tier converter. The applicable model terms (Qwen Research License Agreement) are mapped in the About manifest's qwen-image-2-1 component; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-sam2",

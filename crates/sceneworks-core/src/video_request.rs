@@ -1038,6 +1038,69 @@ pub fn steps_limit_error(
     })
 }
 
+/// Reject an image request whose `advanced.sampler` / `advanced.scheduler` is not on the model's
+/// declared menu, or `None` (sc-24114).
+///
+/// The menu is `limits.samplers` / `limits.schedulers` UNIONED with every per-backend override
+/// (`mlx.limits.*`, `candle.limits.*`): the API does not know which lane will claim the job, and a
+/// name that ANY lane advertises is honoured there (the worker's manifest ⊆ engine drift guard
+/// enforces that). A name NO lane advertises is one the worker would silently fall back from
+/// (`normalize_sampling_knob`, sc-7127) — the render the caller asked for never happens and the job
+/// reports success — so it is a 400 naming the menu instead.
+///
+/// Inert when the knob is absent, blank or the `"default"` sentinel (the same reading as the
+/// worker's `read_advanced_sampling_knobs`), and when the model declares no menu at all.
+pub fn image_sampling_knob_error(
+    model: &str,
+    advanced: &JsonObject,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    for (knob, menu_key) in [("sampler", "samplers"), ("scheduler", "schedulers")] {
+        let Some(requested) = advanced
+            .get(knob)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "default")
+        else {
+            continue;
+        };
+        let mut menu: Vec<&str> = Vec::new();
+        let mut declared = false;
+        let blocks = std::iter::once(Some(model_manifest_entry)).chain(
+            ["mlx", "candle"]
+                .into_iter()
+                .map(|backend| model_manifest_entry.get(backend).and_then(Value::as_object)),
+        );
+        for block in blocks.flatten() {
+            if let Some(names) = block
+                .get("limits")
+                .and_then(Value::as_object)
+                .and_then(|limits| limits.get(menu_key))
+                .and_then(Value::as_array)
+            {
+                declared = true;
+                menu.extend(names.iter().filter_map(Value::as_str));
+            }
+        }
+        if declared && !menu.contains(&requested) {
+            let mut offered: Vec<&str> =
+                menu.into_iter().filter(|name| *name != "default").collect();
+            offered.sort_unstable();
+            offered.dedup();
+            let offered = if offered.is_empty() {
+                "only its engine default".to_owned()
+            } else {
+                offered.join(", ")
+            };
+            return Some(format!(
+                "{model} does not offer the {knob} \"{requested}\" (it offers {offered}). Pick one \
+                 of those, or send \"default\"."
+            ));
+        }
+    }
+    None
+}
+
 /// The clip length used when neither the caller nor the model's manifest entry names one — the
 /// historical blanket, kept for models that declare no `defaults.duration`.
 const DEFAULT_DURATION: f32 = 6.0;
@@ -2238,10 +2301,72 @@ mod tests {
                 "requiresDimensionsMultipleOf": 32,
                 "maxReferenceAssets": 10,
                 "hardMinSteps": 2,
-                "samplers": ["default"],
-                "schedulers": ["default"]
+                "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m",
+                             "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+                "schedulers": ["default", "normal", "simple", "karras", "exponential",
+                               "sgm_uniform", "beta", "ddim_uniform", "beta57"]
             }
         }))
+    }
+
+    /// sc-24114: the sampler / scheduler menu is enforced at enqueue — a name no lane advertises
+    /// is a 400 naming the menu; a member, the `"default"` sentinel, a blank, and a model that
+    /// declares no menu are all untouched. A per-backend override's names count too.
+    #[test]
+    fn image_sampling_knob_error_enforces_the_declared_menu() {
+        let entry = qwen_image_2_1_limits();
+        let advanced = |value: Value| payload(value);
+        for ok in [
+            json!({}),
+            json!({ "sampler": "default", "scheduler": "default" }),
+            json!({ "sampler": "  " }),
+            json!({ "sampler": "er_sde", "scheduler": "beta57" }),
+            json!({ "sampler": "dpmpp_2m", "scheduler": "karras" }),
+        ] {
+            assert_eq!(
+                image_sampling_knob_error("qwen_image_2_1", &advanced(ok.clone()), &entry),
+                None,
+                "{ok}"
+            );
+        }
+        let refused = image_sampling_knob_error(
+            "qwen_image_2_1",
+            &advanced(json!({ "sampler": "made_up" })),
+            &entry,
+        )
+        .expect("an off-menu sampler is refused");
+        assert!(
+            refused.contains("\"made_up\"") && refused.contains("er_sde"),
+            "{refused}"
+        );
+        assert!(image_sampling_knob_error(
+            "qwen_image_2_1",
+            &advanced(json!({ "scheduler": "made_up" })),
+            &entry
+        )
+        .is_some());
+        // Undeclared menu ⇒ inert.
+        assert_eq!(
+            image_sampling_knob_error(
+                "m",
+                &advanced(json!({ "sampler": "x" })),
+                &payload(json!({}))
+            ),
+            None
+        );
+        // A per-backend override contributes its names (the API does not know the lane).
+        let split = payload(json!({
+            "limits": { "samplers": ["default"] },
+            "candle": { "limits": { "samplers": ["default", "euler"] } }
+        }));
+        assert_eq!(
+            image_sampling_knob_error("m", &advanced(json!({ "sampler": "euler" })), &split),
+            None
+        );
+        assert!(
+            image_sampling_knob_error("m", &advanced(json!({ "sampler": "heun" })), &split)
+                .is_some()
+        );
     }
 
     #[test]
