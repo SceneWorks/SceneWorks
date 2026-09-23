@@ -3405,12 +3405,8 @@
         // its [32, 2752] envelope.
         //
         // `shipped_image_geometry_is_within_the_pinned_engine_envelope` re-checks both against the
-        // PINNED descriptor — but ONLY on a lane that links the provider, and it skips any id whose
-        // engine does not resolve. The SceneWorks branch pins an inference revision that predates
-        // `mlx-gen-qwen-image-2-1`, so for the length of the epic these buckets are checked against
-        // the engine NOWHERE in CI; they were verified by hand against a local build at the
-        // provider's own revision, and the epic's terminal pin bump is what puts them under the
-        // guard for real.
+        // PINNED descriptor on every lane that links the provider — which, since the epic's
+        // terminal pin (inference b12c632b4), is both.
         "resolutions": [
           "2048x2048",
           "2400x1792",
@@ -3595,11 +3591,14 @@
       // resident, and then suggests the LIGHTEST tier that fits staged — so a 24 GB Mac, which no
       // tier fits resident on the footprint estimate, is pointed at q4 rather than at nothing.
       //
-      // Still NO `calibrations` and NO `memoryStrategyContract` on either lane: the provider's
-      // ladder declaration reaches SceneWorks only through the pin-bound engine-capability dumps,
-      // which cannot be hand-authored and cannot be produced at this branch's pin. Until the epic's
-      // terminal pin bump both routes stay the consumer fallback (the spec is handed to the engine
-      // unshaped), exactly as `ideogram_4` did on MLX before its ladder landed.
+      // NO `calibrations` on either lane (nothing has been measured). The Candle block carries the
+      // `memoryStrategyContract` GENERATED from the engine-capability dump at the terminal pin. The
+      // MLX block carries none: this route's rules are non-legacy, so an MLX declaration row must
+      // carry a provider-owned `requestContexts` predicate that no dump publishes, and
+      // scripts/generate-manifest-memory-declarations.mjs skips such lanes rather than write a row
+      // the runtime would read as malformed (see `parseRequestContextLanes`). The MLX route is the
+      // consumer fallback until one is hand-authored, like every other non-legacy MLX lane the
+      // reconciliation report lists.
       "mlx": {
         "minMemoryGb": 45,
         "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
@@ -3658,16 +3657,40 @@
       //   SEPARATE declaration from the MLX one, read separately; the two are not merged into a
       //   per-model-id list, which is what
       //   `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them` pins.
-      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` / `memoryStrategyContract` —
-      //   the contract block is GENERATED from `config/engine-capabilities/capabilities.candle.json`
-      //   by scripts/generate-manifest-memory-declarations.mjs, and that dump can only be produced
-      //   on a Linux/Windows lane at a pin that carries the provider. This branch pins inference
-      //   0b084cbf, which does not, so there is nothing to generate from and a hand-written block
-      //   would be an unsourced claim. The route reports the consumer fallback until the epic's
-      //   terminal pin bump re-dumps the file.
+      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` — hand-written claims; the
+      //   `memoryStrategyContract` below is instead GENERATED from
+      //   `config/engine-capabilities/capabilities.candle.json` (re-dumped on the windows-candle
+      //   lane at the terminal pin) by scripts/generate-manifest-memory-declarations.mjs.
       "candle": {
         "minMemoryGb": 45,
-        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 }
+        "minMemoryGbByTier": { "bf16": 45, "q8": 29, "q4": 21 },
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for qwen_image_2_1.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_2_1"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_2_1"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Qwen Image 2.1",
@@ -27379,7 +27402,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "2e1af9fa110192148f2997adb5c6a6d26ee122fbadd793ccbe0af0c9c2c735f8",
+              "sha256": "df066e2b49a704158be7b2c45377053790d35e35f74d7952c939d14dfe5d10fb",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27448,8 +27471,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 143597,
-                  "sha256": "d69a30e6d6c296df0982bf2f669048eaf37423612fde9221d23dd983da6801b4"
+                  "byteSize": 143423,
+                  "sha256": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
@@ -27458,8 +27481,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 148074,
-                  "sha256": "ca20088fe6461932833835d33ed0d761265213f5902b5417a525fb4cf5dce9a0"
+                  "byteSize": 148393,
+                  "sha256": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",

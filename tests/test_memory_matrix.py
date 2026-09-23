@@ -774,7 +774,18 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24112 gives `qwen_image_2_1` a real TIER AXIS — bf16/q8/q4 `variant` rows on
+    Last moved: sc-24112's integration on the epic's terminal pin (inference b12c632b4), where
+    the 2.1 providers register on both lanes. Three `qwen_image_2_1` lanes move and nothing else:
+    * `mlx:staged_residency` 0 -> 18 implemented — the engine now registers, its descriptor
+      advertises sequential offload, and it joined the fit gate's staged-residency sweep (the
+      generator's MLX authority), so every coordinate of the lane is implemented.
+    * `candle:staged_residency` and `candle:bounded_decode` 0 -> 3 implemented (15 still missing) —
+      the Candle block gained the `memoryStrategyContract` generated from the re-dumped
+      `capabilities.candle.json`, which declares exactly `text_to_image` x `none` x {bf16,q8,q4}.
+    The MLX block declares no contract (a non-legacy MLX lane needs hand-authored
+    `requestContexts`), so no MLX rung beyond staged residency moves.
+
+    Previously: sc-24112 gives `qwen_image_2_1` a real TIER AXIS — bf16/q8/q4 `variant` rows on
     both backends, where sc-24108/sc-24109 had one untagged artifact. `tiersFor` unions the
     declared download variants, so the entry's tier axis goes 1 -> 3 and every one of its ten lanes
     multiplies by 3.

@@ -161,6 +161,10 @@
       "candle": true,
       "mlx": true
     },
+    "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
     "qwen_image_edit": {
       "mlx": true
     },
