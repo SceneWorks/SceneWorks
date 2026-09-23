@@ -719,6 +719,10 @@ fn finish_planning_operation(
                 .unwrap_or_default();
             operation.candidate_plan = Some(artifacts.plan);
             operation.compiled = Some(artifacts.compiled);
+            // sc-24029: the artifacts are ready AND something is less than asked for (a shot whose
+            // rewrite was discarded for running out of output budget). Carried on a "ready"
+            // operation so the reviewer sees it beside the candidate rather than only in a log.
+            operation.findings = artifacts.findings;
             operation.detail = Some(
                 "Candidate ready. Review it, then explicitly replace the current edited plan."
                     .to_owned(),

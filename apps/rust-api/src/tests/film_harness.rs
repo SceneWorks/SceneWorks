@@ -15,6 +15,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::Request;
 use parking_lot::Mutex;
+use sceneworks_core::film_compile::InsertedTextPlacement;
 use sceneworks_core::film_plan::{RunOutcome, RunRecord, RunState, ShotOutcome};
 use sceneworks_core::film_workspace::FilmDraft;
 use serde_json::{json, Value};
@@ -175,6 +176,7 @@ async fn api_startup_adopts_a_surviving_workers_exact_film_job_without_redispatc
     draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
     draft.production_plan.shots[0].prompt =
         "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     harness
         .state
         .project_store
@@ -329,6 +331,7 @@ async fn api_startup_leaves_a_cleanly_released_failed_run_for_explicit_resume() 
     draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
     draft.production_plan.shots[0].prompt =
         "A courier crosses a quiet workshop carrying a red parcel.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     harness
         .state
         .project_store
@@ -420,6 +423,7 @@ async fn completion_assembles_one_stable_clip_without_dispatching_an_export() {
     let harness = Harness::start(true, vec![]).await;
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-draft", "Manual film");
     draft.production_plan.shots[0].prompt = "a courier crosses a quiet workshop".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     draft.production_plan.shots[0].beat = "The courier crosses the workshop".to_owned();
     let document_dir = harness.temp_dir.path().join("reference-free-film");
     std::fs::create_dir_all(&document_dir).expect("document directory");
@@ -507,6 +511,16 @@ async fn long_legal_asset_identity_is_tagged_through_real_routes_without_losing_
     pack["references"][0]["role"] = json!(first_role);
     let mut second = pack["references"][0].clone();
     second["role"] = json!(second_role);
+    // Its OWN plate, copied beside the first. This test is about the LENGTH of the ids the harness
+    // stamps onto real assets, so it needs two assets; two roles on one file would be one asset
+    // under one `<Picture N>` (sc-24024), which `film_harness_anchoring.rs` covers on purpose.
+    let plate_dir = pack_path.parent().unwrap().join("references");
+    std::fs::copy(
+        plate_dir.join("workshop_plate.png"),
+        plate_dir.join("workshop_plate_b.png"),
+    )
+    .expect("the second plate copies");
+    second["file"] = json!("references/workshop_plate_b.png");
     pack["references"].as_array_mut().unwrap().push(second);
     let sound = ffmpeg_reachable();
     if sound {
@@ -726,6 +740,7 @@ async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_com
     );
     let mut draft = FilmDraft::manual_one_shot("project-film", "film-preflight", "Preflight");
     draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     let selected = vec!["SH010".to_owned()];
 
     let ready = film_harness::preflight_documents(
@@ -750,6 +765,7 @@ async fn film_document_preflight_compiles_selected_shots_and_rejects_a_stale_com
     let compiled = ready.compiled.unwrap();
     draft.production_plan.shots[0].prompt =
         "The edited prompt must invalidate the compile.".to_owned();
+    draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
     let stale = film_harness::preflight_documents(
         &transport,
         &draft.production_plan,
@@ -995,6 +1011,10 @@ pub(crate) struct WorkerScript {
     /// Reply for the per-shot prompt-refinement (the ordinary rewrite task). `{prompt}` is replaced
     /// by the shot's own prompt.
     pub(crate) refine_template: Option<String>,
+    /// sc-24029: the `generation.finishReason` the fake refine result reports. `None` reports
+    /// `"stop"`, exactly as the real worker does for a decode that ended on EOS; `Some("length")`
+    /// is the truncated-but-non-empty rewrite the planner must refuse.
+    pub(crate) refine_finish_reason: Option<String>,
     /// sc-23404: fail every `audio_generate` job — the "the TTS model refused / fell over" path.
     pub(crate) audio_fails: bool,
     /// sc-23404: never complete an `audio_generate` job (honouring a cancel), so a test can spend
@@ -1926,6 +1946,13 @@ async fn run_fake_refine_job(
             .unwrap_or_else(|| "{prompt}".to_owned())
             .replace("{prompt}", &prompt)
     };
+    // The real worker records how the decode ENDED on the success result too (sc-24029), because
+    // a rewrite that stopped on `length` is non-empty and therefore completes normally.
+    let finish_reason = script
+        .lock()
+        .refine_finish_reason
+        .clone()
+        .unwrap_or_else(|| "stop".to_owned());
     post_progress(
         app,
         job_id,
@@ -1934,6 +1961,11 @@ async fn run_fake_refine_job(
             "message": "fake refine done", "workerId": WORKER_ID, "backend": "mlx",
             "result": {
                 "originalPrompt": prompt, "refinedPrompt": refined,
+                "generation": {
+                    "finishReason": finish_reason,
+                    "usage": { "promptTokens": 900, "generatedTokens": 1536 },
+                    "maxNewTokens": 1536
+                },
                 "executionIdentity": {
                     "provider": "native", "model": "fixture/model-keyed-refiner",
                     "backend": "fixture", "thinkingMode": "disabled"
@@ -2355,6 +2387,7 @@ impl Harness {
                 "targetDurationSeconds": 5.1667,
                 "startState": "before",
                 "endState": "after",
+                "audio": "Room tone, no music.",
                 "conditioning": { "mode": "text_to_video" },
                 // Every shot binds at least one approved role (sc-22713): the pack below approves
                 // exactly one, and these shots are about the workshop.
@@ -2363,7 +2396,7 @@ impl Harness {
             })
         };
         let plan = json!({
-            "schemaVersion": 2,
+            "schemaVersion": sceneworks_core::film_plan::PLAN_SCHEMA_VERSION,
             "id": "budget-fixture",
             "version": 1,
             "title": "Budget fixture",
@@ -2375,7 +2408,7 @@ impl Harness {
             ],
         });
         let pack = json!({
-            "schemaVersion": 1,
+            "schemaVersion": sceneworks_core::film_plan::REFERENCE_PACK_SCHEMA_VERSION,
             "id": "budget-refs",
             "version": 1,
             "references": [
@@ -3130,11 +3163,45 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
         .iter()
         .find(|reference| reference.role == "courier")
         .expect("courier imported");
+    // sc-24026, on the DISPATCH the run actually made: the plan the run read, so the expected tail
+    // is derived from the same document the compile was driven from rather than restated here.
+    let dispatched_plan = sceneworks_core::film_plan::read_plan_file(&options.plan_path)
+        .expect("the run's plan re-reads");
+
     for shot in &record.shots {
         let attempt = shot.attempts.last().expect("an attempt");
         let job_id = attempt.job_id.clone().expect("job id");
         let (status, job) = request_job(&harness, &job_id).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+
+        // EVERY shot, on BOTH partitions: the body that came off the route ends with this shot's
+        // own `Audio:` sentence. Asserted on the job payload rather than on `compiled.json`
+        // because the document is only a promise — this is the text the engine was handed.
+        let planned = dispatched_plan
+            .shots
+            .iter()
+            .find(|planned| planned.id == shot.shot_id)
+            .expect("every dispatched shot is a shot of the plan");
+        let prompt = job["payload"]["prompt"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+        let audio = format!(
+            "Audio: {}",
+            sceneworks_core::film_compile::normalized_description(&planned.audio)
+        );
+        let tail = match planned.dialogue_clip {
+            Some(_) => format!(
+                "{audio} {}",
+                sceneworks_core::film_compile::NO_SPEECH_SENTENCE
+            ),
+            None => audio,
+        };
+        assert!(
+            prompt.ends_with(&tail),
+            "{}: the dispatched prompt must end with {tail:?}: {prompt:?}",
+            shot.shot_id
+        );
+
         match shot.shot_id.as_str() {
             "SH010" => {
                 assert_eq!(job["payload"]["model"], "minimax_h3_ref");
@@ -3143,6 +3210,55 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
                     job["payload"]["referenceAssetIds"],
                     json!([courier.asset_id, location.asset_id]),
                     "the reference assets ride the payload in role order"
+                );
+                // sc-24023, on the DISPATCH the run actually made: `ensure_shot_records` resolved
+                // the conditioning, `work_attempt` posted `to_job_body_with`, and this is the body
+                // that came back off the route. The prompt in it must bind each role to the
+                // `<Picture N>` whose N is that role's 1-based position in the SAME payload's
+                // `referenceAssetIds` — the engine labels the supplied images positionally, so a
+                // sentence naming the wrong number renders a confidently wrong shot and no
+                // validator, record or reviewer downstream can tell.
+                let prompt = job["payload"]["prompt"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a dispatched prompt: {}", job["payload"]));
+                let dispatched = job["payload"]["referenceAssetIds"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("dispatched assets: {}", job["payload"]));
+                let mut cursor = 0usize;
+                for (index, (role, asset_id)) in [
+                    ("courier", &courier.asset_id),
+                    ("workshop_location", &location.asset_id),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let number = index + 1;
+                    assert_eq!(
+                        dispatched[index],
+                        json!(asset_id),
+                        "{role} is dispatched at position {number} of {dispatched:?}"
+                    );
+                    // Anchored on the whole sentence opening and scanned forward, so a phrase
+                    // occurring inside a pack description cannot stand in for the binding itself
+                    // and the sentences must also come out in picture order.
+                    let phrase = format!("{} is the ", role.replace(['_', '-'], " "));
+                    let role_at = prompt[cursor..]
+                        .find(&phrase)
+                        .map(|at| at + cursor)
+                        .unwrap_or_else(|| panic!("{phrase:?} is never said in {prompt:?}"));
+                    cursor = prompt[role_at..]
+                        .find(&format!("<Picture {number}>"))
+                        .map(|at| at + role_at)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{phrase:?} must be bound to <Picture {number}>, the position \
+                                 {role}'s asset takes in {dispatched:?}: {prompt:?}"
+                            )
+                        });
+                }
+                assert!(
+                    !prompt.contains("<Picture 3>"),
+                    "the dispatched prompt names a picture this shot never sends: {prompt:?}"
                 );
                 assert_eq!(attempt.resolved_model_id, "minimax_h3_ref");
                 // sc-23402 short edge: this plan names none, so nothing is dispatched and the
@@ -3503,16 +3619,27 @@ async fn reference_counts_are_refused_against_the_resolved_partitions_limits() {
     // them is a BINDABLE kind, so the count is the only thing wrong with the plan — a `plate` here
     // would be refused on its kind instead and the count would never be reached.
     let roles: Vec<String> = (0..10).map(|index| format!("extra_prop_{index}")).collect();
+    // Each on its OWN plate: `maxReferenceAssets` bounds the IMAGES a request supplies, so ten
+    // roles over one file would be one image and inside the cap (sc-24024). The files are copies
+    // of the shipped plate under ten names, so `validate_reference_pack_files` can stat them.
     let pack = harness.edited_pack(|pack| {
         let references = pack["references"].as_array_mut().expect("references");
         for role in 0..10 {
             references.push(json!({
                 "role": format!("extra_prop_{role}"),
                 "kind": "prop",
-                "file": "references/workshop_plate.png"
+                "file": format!("references/extra_prop_{role}.png")
             }));
         }
     });
+    let plate_dir = pack.parent().unwrap().join("references");
+    for role in 0..10 {
+        std::fs::copy(
+            plate_dir.join("workshop_plate.png"),
+            plate_dir.join(format!("extra_prop_{role}.png")),
+        )
+        .expect("the extra plates copy");
+    }
     let plan = harness.mixed_partition_plan(|plan| {
         plan["shots"][0]["conditioning"]["referenceRoles"] = json!(roles);
     });
@@ -3687,8 +3814,12 @@ async fn a_shot_filtered_run_does_not_demand_an_unselected_partitions_weights() 
     );
 }
 
-/// `GET /api/v1/jobs/{id}`, for the assertions above.
-async fn request_job(harness: &Harness, job_id: &str) -> (axum::http::StatusCode, Value) {
+/// `GET /api/v1/jobs/{id}`, for the assertions above and for the epic's acceptance tests, which
+/// read the body the route actually received rather than the one a compiled request would build.
+pub(crate) async fn request_job(
+    harness: &Harness,
+    job_id: &str,
+) -> (axum::http::StatusCode, Value) {
     request(
         harness.app.clone(),
         "GET",
@@ -7319,7 +7450,7 @@ fn draft_shot(id: &str, beat_id: &str) -> Value {
         "targetDurationSeconds": 5.1667,
         "startState": "the workshop before this shot",
         "endState": "the workshop after this shot",
-        "sound": "room tone, distant birds",
+        "audio": "Room tone, distant birds. No music.",
         "conditioning": { "mode": "text_to_video" },
         "seed": 22713,
         "continuityRoles": beat_roles(beat_id)
@@ -7501,12 +7632,32 @@ async fn the_brief_produces_a_plan_the_existing_controller_accepts_unchanged() {
         assert_eq!(request["durationSeconds"], 5.1667);
         assert_eq!(request["mode"], "text_to_video");
         assert_eq!(request["promptSource"], "refined");
+        // The refinement produced the dispatched prompt — CONTAINED rather than leading it, because
+        // since sc-24025 the compiler's identity text leads every shot that names a continuity
+        // role it does not bind, and these shots bind nothing at all. What must still hold is that
+        // the refiner's own words survive and that everything ahead of them is recorded inserted
+        // text rather than something nobody wrote.
+        let prompt = request["prompt"].as_str().unwrap();
+        let refined_at = prompt
+            .find("integrated_multimodal_description:")
+            .unwrap_or_else(|| {
+                panic!("the H3 refinement produced the dispatched prompt: {request}")
+            });
+        let leading: String = request["insertedText"]
+            .as_array()
+            .expect("insertedText is recorded")
+            .iter()
+            .filter(|piece| piece["kind"] == "continuity_description")
+            .map(|piece| piece["text"].as_str().unwrap_or_default().to_owned())
+            .collect();
         assert!(
-            request["prompt"]
-                .as_str()
-                .unwrap()
-                .starts_with("integrated_multimodal_description:"),
-            "the H3 refinement produced the dispatched prompt: {request}"
+            !leading.is_empty(),
+            "these shots lock continuity roles: {request}"
+        );
+        assert_eq!(
+            prompt[..refined_at].trim(),
+            leading.trim(),
+            "only the compiler's own identity text precedes the refined prompt: {request}"
         );
         assert!(request.get("negativePrompt").is_none(), "{request}");
         assert!(
@@ -7694,7 +7845,7 @@ async fn the_planner_binds_approved_roles_on_every_shot_when_the_pack_has_refere
         .map(|payload| payload["prompt"].as_str().unwrap_or_default().to_owned())
         .expect("a planning job was created");
     assert!(
-        request.contains("at most 9 reference roles"),
+        request.contains("at most 9 reference IMAGES"),
         "the cap is the REFERENCE partition's maxReferenceAssets, not the base entry's 0: {request}"
     );
     assert!(
@@ -8180,9 +8331,35 @@ async fn the_plan_is_editable_between_generation_and_dispatch_and_a_stale_compil
     .await
     .expect("the edited plan recompiles");
     let first = &artifacts.compiled.requests[0];
+    // Verbatim and intact. NOT `starts_with`: since sc-24025 the compiler's identity text leads a
+    // shot that names continuity roles it does not bind, and `--no-refine` promises the authored
+    // text is untouched, not that nothing the compiler owns is written around it. So everything
+    // ahead of the authored text must be RECORDED inserted text — `contains` alone would permit
+    // arbitrary unattributed prose, which is precisely what `--no-refine` forbids.
+    const AUTHORED: &str = "A hand-written prompt the planner never wrote.";
+    let authored_at = first
+        .prompt
+        .find(AUTHORED)
+        .unwrap_or_else(|| panic!("the hand-written text survives verbatim: {}", first.prompt));
+    let leading = first
+        .inserted_text
+        .iter()
+        .filter(|piece| piece.kind.placement() == InsertedTextPlacement::Leading)
+        .map(|piece| piece.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
     assert_eq!(
-        first.prompt,
-        "A hand-written prompt the planner never wrote."
+        first.prompt[..authored_at].trim(),
+        leading.trim(),
+        "only the compiler's own recorded insertions may precede the authored prompt: {}",
+        first.prompt
+    );
+    assert!(
+        first
+            .prompt
+            .ends_with("Audio: Room tone, distant birds. No music."),
+        "{}",
+        first.prompt
     );
     assert_eq!(first.duration_seconds, 8.0);
     film_harness::validate(Some(&harness.transport), &run_options)
@@ -8310,11 +8487,14 @@ async fn a_generated_plan_dispatches_its_compiled_prompts_through_the_same_run_p
             "refined"
         );
         assert_eq!(payload["advanced"]["mlxQuantize"], 4);
+        // Contained, not leading: the compiler's identity text leads these shots (sc-24025). The
+        // payload is asserted equal to `request.prompt` above, so the exact composition is already
+        // pinned; what this adds is that the REFINER's words are the ones that reached the route.
         assert!(
             payload["prompt"]
                 .as_str()
                 .unwrap()
-                .starts_with("integrated_multimodal_description:"),
+                .contains("integrated_multimodal_description:"),
             "{payload}"
         );
     }
@@ -8643,7 +8823,32 @@ async fn the_prompt_guide_reaches_the_rewrite_the_way_video_studio_sends_it() {
     assert_eq!(jobs.len(), 2, "{jobs:?}");
     // The planning turn carries no guide: its system turn is the plan contract, not prompt advice.
     assert!(jobs[0].get("guide").is_none(), "{:?}", jobs[0]);
-    assert_eq!(jobs[1]["guide"], "# H3\nWrite one paragraph.");
+    let guide = jobs[1]["guide"]
+        .as_str()
+        .expect("the rewrite carries a guide");
+    assert!(
+        guide.starts_with("# H3\nWrite one paragraph."),
+        "the model's own guide rides with the rewrite, verbatim and first: {guide:?}"
+    );
+    // And the FILM path's own rules follow it (sc-24029). The guide teaches `<Picture N>` as the
+    // way to give a reference a job, which is right for a person writing one prompt against
+    // references they chose and wrong here: the compiler assigns and writes every label AFTER the
+    // rewrite. Said in the film path's own text rather than in the worker's rewrite asset, which
+    // belongs to every caller of `prompt_refine` and is hash-pinned into the StarVector closure.
+    // LAST, so it is the last word on a subject the guide above has already spoken on.
+    assert!(
+        guide.contains("NEVER write an engine media label")
+            && guide.contains("`<Picture 1>`")
+            && guide.contains("assigned and written by the compiler AFTER your rewrite"),
+        "the film path tells the refiner not to write a label: {guide:?}"
+    );
+    assert!(
+        guide
+            .find("# Film harness rules")
+            .expect("the block is present")
+            > guide.find("Write one paragraph.").unwrap(),
+        "the film rules come after the model guide they override: {guide:?}"
+    );
 
     // A guide the caller NAMED and that is not there is an error, not a guide-less rewrite.
     let mut missing = options.clone();
@@ -9962,6 +10167,7 @@ async fn r15_api_accepted_resume_replace_and_repair_preserve_cancel_during_admis
         let mut draft = FilmDraft::manual_one_shot(&project.id, "draft_r15", "R15");
         draft.production_plan.shots[0].beat = "A courier crosses the workshop.".to_owned();
         draft.production_plan.shots[0].prompt = "A courier crosses a quiet workshop.".to_owned();
+        draft.production_plan.shots[0].audio = "Room tone. No music.".to_owned();
         harness
             .state
             .project_store
@@ -10384,4 +10590,146 @@ async fn r15_explicit_replace_and_repair_consume_only_previous_cancellation() {
         );
         assert_eq!(record.shot("SH010").unwrap().automatic_attempts(), 1);
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// sc-24029 — the feature-end review's findings
+// -------------------------------------------------------------------------------------------
+
+/// The shipped fixture plan, pack and reference plates copied somewhere editable, with a compiled
+/// document beside them that is current against both.
+///
+/// Returns the run options the CLI's `validate` takes, so the test edits a DOCUMENT and asks the
+/// real subcommand — the path a person is on when they change a pack by hand.
+fn editable_fixture_with_compiled(temp: &Path) -> RunOptions {
+    let plan_path = temp.join("plan.jsonc");
+    let pack_path = temp.join("references.jsonc");
+    std::fs::copy(Path::new(FIXTURE_DIR).join("plan.jsonc"), &plan_path).unwrap();
+    std::fs::copy(Path::new(FIXTURE_DIR).join("references.jsonc"), &pack_path).unwrap();
+    // The plates AND the sound beds: `validate_all` is given the pack's own directory, so every
+    // file the pack names has to be beside it or the refusal is about missing media rather than
+    // about the compiled document.
+    for directory in ["references", "sound"] {
+        std::fs::create_dir_all(temp.join(directory)).unwrap();
+        for entry in std::fs::read_dir(Path::new(FIXTURE_DIR).join(directory)).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), temp.join(directory).join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    let plan_bytes = std::fs::read(&plan_path).unwrap();
+    let plan = sceneworks_core::film_plan::parse_plan_document(
+        &String::from_utf8(plan_bytes.clone()).unwrap(),
+    )
+    .expect("the fixture plan parses");
+    let pack = sceneworks_core::film_plan::parse_reference_pack(
+        &std::fs::read_to_string(&pack_path).unwrap(),
+    )
+    .expect("the fixture pack parses");
+    let requests: Vec<Value> = plan
+        .shots
+        .iter()
+        .map(|shot| {
+            json!({
+                "shotId": shot.id,
+                "beat": shot.beat,
+                "mode": shot.conditioning.mode,
+                "model": plan.model.id,
+                "prompt": shot.prompt,
+                "promptSource": "authored",
+                "durationSeconds": shot.target_duration_seconds,
+                "fps": 24,
+                "width": 576,
+                "height": 320
+            })
+        })
+        .collect();
+    let compiled = json!({
+        "schemaVersion": sceneworks_core::film_compile::COMPILED_PLAN_SCHEMA_VERSION,
+        "planId": plan.id,
+        "planVersion": plan.version,
+        // The CLI hashes the plan FILE's bytes, which is the identity `validate` recomputes.
+        "planSha256": crate::film_harness::sha256_hex(&plan_bytes),
+        "referencePackId": pack.id,
+        "referencePackVersion": pack.version,
+        // The pack's identity is the PARSED pack, which is what makes the comment-only edit below
+        // a non-event and the description edit a real one.
+        "referencePackSha256":
+            sceneworks_core::film_compile::reference_pack_sha256(&pack).expect("the pack hashes"),
+        "compiledAt": "2026-09-19T00:00:00Z",
+        "model": {"id": plan.model.id, "tier": plan.model.tier, "fps": 24, "lane": "mlx"},
+        "requests": requests
+    });
+    let compiled_path = temp.join("compiled.json");
+    std::fs::write(
+        &compiled_path,
+        serde_json::to_vec_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
+
+    RunOptions {
+        plan_path,
+        reference_pack_path: pack_path,
+        compiled_path: Some(compiled_path),
+        project_id: None,
+        shot_ids: None,
+        out_dir: temp.join("out"),
+        poll_interval: Duration::from_millis(10),
+        export: false,
+        require_installed: false,
+    }
+}
+
+/// sc-24029, E5/E7. From the CLI too: a compiled document is refused once the pack DOCUMENT's
+/// description changes, and is NOT refused by a comment-only edit of the same file.
+///
+/// The pair is the whole point of hashing the parsed pack rather than the file's bytes. The CLI
+/// reads a JSONC document whose comments and spacing belong to its author, while the workspace
+/// holds a typed pack that was never a file; a byte hash would give one pack two identities and
+/// stale a compile every time somebody wrote a note in it.
+#[tokio::test]
+async fn a_pack_description_edit_stales_the_cli_compiled_document_and_a_comment_does_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let options = editable_fixture_with_compiled(temp.path());
+
+    film_harness::validate(None, &options)
+        .await
+        .expect("the untouched documents validate");
+
+    let original = std::fs::read_to_string(&options.reference_pack_path).unwrap();
+
+    // A COMMENT ONLY. Nothing the compiler reads has changed.
+    std::fs::write(
+        &options.reference_pack_path,
+        format!("// A note from whoever owns this pack.\n{original}"),
+    )
+    .unwrap();
+    film_harness::validate(None, &options)
+        .await
+        .expect("a comment is not a pack change");
+
+    // A DESCRIPTION. This is text the compiler repeats into every prompt that names the role.
+    assert!(original.contains("door camera-left."));
+    std::fs::write(
+        &options.reference_pack_path,
+        original.replace("door camera-left.", "door camera-right."),
+    )
+    .unwrap();
+    let error = film_harness::validate(None, &options)
+        .await
+        .expect_err("an edited description stales the compile");
+    let HarnessError::Validation(findings) = error else {
+        panic!("expected a validation refusal, got {error}");
+    };
+    assert!(
+        findings.iter().any(|finding| finding
+            .message
+            .contains("the reference pack changed since these requests were compiled")
+            && finding
+                .message
+                .contains("recompile, or use authored prompts")),
+        "{findings:?}"
+    );
 }

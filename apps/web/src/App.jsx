@@ -2558,7 +2558,10 @@ export function App() {
       pollJobToCompletion({
         createPath: "/api/v1/prompts/refine",
         body: { prompt, modelId, workflow, guide },
-        deadlineMs: 120000,
+        // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
+        // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
+        // old 120 s deadline could time out a decode that was still going to succeed.
+        deadlineMs: 180000,
         resolveResult: (job) => {
           const refined = job.result?.refinedPrompt;
           if (!refined) {

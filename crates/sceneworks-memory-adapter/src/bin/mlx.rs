@@ -14902,7 +14902,7 @@ fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32, bool), Str
             }
             Ok((frames, fps, audio.is_some()))
         }
-        GenerationOutput::Images(_) => {
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
             Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
         }
         GenerationOutput::Audio(_) => {
@@ -14947,7 +14947,7 @@ fn diagnostic_video_frames(
                 .transpose()?;
             Ok((frames, fps, audio))
         }
-        GenerationOutput::Images(_) => {
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
             Err(format!("{label} render returned images, not a video clip"))
         }
         GenerationOutput::Audio(_) => Err(format!(
