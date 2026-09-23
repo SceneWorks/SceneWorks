@@ -12359,8 +12359,13 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
+    // TWELVE distinct assets. The count below is over DISTINCT ids — the ordered list is deduped,
+    // because the ordinary Image-Editor payload names its working image in both `sourceAssetId` and
+    // the head of `referenceAssetIds`. A fixture whose carriers OVERLAP would therefore be counting
+    // fewer images than it names, and an "eleven" case built from overlapping slices is really a
+    // nine: it would pass against a gate that had no flattening at all.
     let mut assets: Vec<String> = Vec::new();
-    for index in 0..10 {
+    for index in 0..12 {
         let (_, asset) = request_multipart_upload(
             app.clone(),
             &format!("/api/v1/projects/{project_id}/assets"),
@@ -12384,13 +12389,13 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
         "prompt": "compose these",
         "sourceAssetId": assets[0],
         "maskAssetId": assets[1],
-        "referenceAssetIds": assets[..9]
+        "referenceAssetIds": assets[2..11]
     }))
     .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "source + mask + 9 references is eleven images in ONE ordered list: {body}"
+        "source + mask + 9 DISTINCT references is eleven images in ONE ordered list: {body}"
     );
     assert!(
         body["detail"]
@@ -12409,17 +12414,56 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
         "prompt": "compose these",
         "sourceAssetId": assets[0],
         "maskAssetId": assets[1],
-        "referenceAssetIds": assets[..8]
+        "referenceAssetIds": assets[2..10]
     }))
     .await;
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "source + mask + 8 is exactly ten: {body}"
+        "source + mask + 8 DISTINCT references is exactly ten: {body}"
     );
     assert_eq!(
         body["payload"]["maskAssetId"], assets[1],
         "the mask travels as an ordinary ordered reference — it is NOT stripped"
+    );
+
+    // ── DEDUPE, at the count the cap is measured against. This is the ORDINARY Image-Editor
+    // payload: the web leads `referenceAssetIds` with the working image and ALSO sets
+    // `sourceAssetId`, so the same asset is named twice. Counting it twice would burn one of the
+    // model's ten slots on a duplicate and renumber every reference after it — and would reject a
+    // legal ten-image edit as eleven.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4],
+                              assets[5], assets[6], assets[7], assets[8], assets[9]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the working image named twice is ONE image — ten distinct ids is at the cap, not over it: {body}"
+    );
+
+    // …and the dedupe is not a way to sneak past the cap: eleven DISTINCT ids still refuse, even
+    // when one of them is also the source.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4], assets[5],
+                              assets[6], assets[7], assets[8], assets[9], assets[10]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "eleven distinct images is still eleven: {body}"
     );
 
     // ── ZERO references on a conditioned mode.

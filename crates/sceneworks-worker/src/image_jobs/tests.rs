@@ -9146,13 +9146,25 @@ fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
         }))),
         vec!["subject".to_owned()]
     );
+    // A mode-less payload with a carrier is STILL conditioned — the list is mode-independent,
+    // exactly as the router's is. Gating it on the mode here would return empty for a job the
+    // router already claimed and drop the reference into a plain text-to-image render.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "source"
+        }))),
+        vec!["source".to_owned()]
+    );
+
+    // What DOES carry nothing: a request with no carriers at all (the text-to-image call), and any
+    // other model id — the 2512 edit ids are a different engine with their own lane.
     for payload in [
-        json!({ "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "source" }),
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
         json!({ "projectId": "p", "model": "qwen_image_edit_2511", "mode": "edit_image", "sourceAssetId": "s" }),
     ] {
         assert!(
             qwen_image_2_1_reference_ids(&request(payload.clone())).is_empty(),
-            "only a 2.1 CONDITIONED request carries this list: {payload}"
+            "{payload}"
         );
     }
 }
@@ -9192,6 +9204,29 @@ fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
             "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
             "sourceAssetId": "   ", "referenceAssetIds": ["ref-a"]
         }),
+        // MODE-INDEPENDENT. The router's list does not consult `mode` at all — an empty list IS
+        // text-to-image and a non-empty one IS the edit call — so a conditioned payload that
+        // names no mode, or names a text-to-image one, is still claimed as conditioned. A worker
+        // twin that gated on the mode would return EMPTY for these and the references would be
+        // silently dropped into a plain unconditioned render, with nothing on the API side to
+        // reject it (the enqueue gate returns early for non-conditioned modes).
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "src" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "image_generation",
+            "referenceAssetIds": ["ref-a", "ref-b"]
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "text_to_image",
+            "referenceAssetId": "ref-a"
+        }),
+        // DEDUPE, keeping the first occurrence. This is the ordinary Image-Editor payload: the web
+        // leads `referenceAssetIds` with the working image and ALSO sets `sourceAssetId`, so the
+        // same asset is named twice. Each entry costs one of the model's slots and gets its own
+        // number in the prompt template, so a duplicate is not a harmless repeat.
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "A", "referenceAssetIds": ["A", "B"]
+        }),
     ] {
         let map = payload.as_object().expect("payload object").clone();
         let router = sceneworks_core::jobs_store::qwen_image_2_1_reference_ids(&map)
@@ -9200,6 +9235,47 @@ fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
         assert_eq!(
             worker, router,
             "the worker renders a different ordered list than the router validated: {payload}"
+        );
+    }
+
+    // The two properties above, stated as VALUES rather than only as agreement — agreement alone
+    // would be satisfied by both sides being wrong in the same way.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "src"
+        }))),
+        vec!["src".to_owned()],
+        "a mode-less conditioned payload must still carry its reference"
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "A", "referenceAssetIds": ["A", "B"]
+        }))),
+        vec!["A".to_owned(), "B".to_owned()],
+        "the duplicated working image must occupy ONE slot, at its first position"
+    );
+    assert_eq!(
+        sceneworks_core::jobs_store::qwen_image_2_1_reference_ids(
+            json!({ "sourceAssetId": "A", "maskAssetId": "A", "referenceAssetIds": ["B", "A", "B"] })
+                .as_object()
+                .expect("payload object")
+        ),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+        "the router dedupes across every carrier, first occurrence winning"
+    );
+
+    // A plain text-to-image request carries nothing, and a 2512 edit id is not this route at all.
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_edit_2511", "mode": "edit_image",
+            "sourceAssetId": "src"
+        }),
+    ] {
+        assert!(
+            qwen_image_2_1_reference_ids(&request(payload.clone())).is_empty(),
+            "{payload}"
         );
     }
 }
@@ -9381,6 +9457,134 @@ fn qwen_image_2_1_rgba_reference_is_pending_the_pin() {
         error.contains("ReferenceRgba"),
         "the refusal must name the carrier the reference belongs in: {error}"
     );
+}
+
+/// sc-24110 — the never-a-Mask guarantee on the path that actually RUNS.
+///
+/// `build_qwen_image_2_1_conditioning` states the contract, but what `generate_one` sends is
+/// `build_lane_conditioning(identity_init, &edit_refs, edit_mask)` — so the builder's answer could
+/// be perfect and still be bypassed if either of the other two slots were ever populated for this
+/// model. `guard_qwen_image_2_1_lane_slots` is what closes that, and this exercises it directly
+/// rather than through a builder whose output the lane discards.
+///
+/// The mutation this is armed against: adding `"qwen_image_2_1"` to a mask-bearing arm of
+/// `resolve_generic_lane_conditioning` (or to the candle lane's `edit_mask` pair). Without the
+/// guard that change ships a `Conditioning::Mask` to an engine that refuses the kind by name, and
+/// every existing test stays green.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_lane_slots_refuse_a_mask_or_a_strength_bearing_reference() {
+    let edit = request(json!({
+        "projectId": "p",
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "sourceAssetId": "src",
+        "maskAssetId": "mask"
+    }));
+    let image = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: stub_rgb8(8, 8, 1),
+    };
+
+    // The shape the lane really produces today: both slots empty, so the ordered reference list is
+    // the whole of the conditioning.
+    guard_qwen_image_2_1_lane_slots(&edit, None, None)
+        .expect("the ordered-reference-only shape is what this route sends");
+
+    // A populated MASK slot — the mutation above — is refused by name.
+    let error = guard_qwen_image_2_1_lane_slots(&edit, None, Some(&image))
+        .expect_err("a mask slot would be sent as Conditioning::Mask");
+    let error = error.to_string();
+    assert!(error.contains("Conditioning::Mask"), "{error}");
+    assert!(error.contains("no mask tensor"), "{error}");
+
+    // A populated single-reference (img2img-init) slot carries a STRENGTH, which this engine also
+    // refuses — every 2.1 reference travels in the ordered list instead.
+    let error = guard_qwen_image_2_1_lane_slots(&edit, Some(&(image.clone(), 0.6)), None)
+        .expect_err("an img2img-init slot would be sent with a strength");
+    let error = error.to_string();
+    assert!(error.contains("strength"), "{error}");
+
+    // Every OTHER model is untouched — the guard is keyed on the id, so the Ideogram edit lane
+    // keeps sending its mask and the Z-Image lane keeps sending its init.
+    for model in ["ideogram_4", "z_image_turbo", "qwen_image_edit_2511"] {
+        let other = request(json!({
+            "projectId": "p", "model": model, "mode": "edit_image", "sourceAssetId": "src"
+        }));
+        guard_qwen_image_2_1_lane_slots(&other, Some(&(image.clone(), 0.6)), Some(&image))
+            .unwrap_or_else(|error| panic!("{model} must be unaffected: {error}"));
+    }
+}
+
+/// The ORDINAL of each reference in the conditioning the worker emits — not only in the id list.
+///
+/// The id order is upstream of the render, but what the engine actually numbers is the images in
+/// the emitted `MultiReference`. This walks the whole path — ids → resolved references → emitted
+/// conditioning — and pins that the source lands at `<image1>` and the mask at `<image2>`, which is
+/// exactly the position the engine's own refusal text tells a caller to name ("use the second image
+/// as the mask"). A resolver that emitted the right ids but assembled them in another order would
+/// pass every other test here and render a different picture.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_emits_the_source_at_ordinal_one_and_the_mask_at_ordinal_two() {
+    // Each stub carries a distinct seed, so an image's identity is readable from its bytes and the
+    // assertion is about WHICH image landed where, not merely how many did.
+    let ids = ["src", "mask", "ref-a"];
+    let references: Vec<QwenImage21Reference> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| QwenImage21Reference {
+            image: gen_core::Image {
+                width: 8,
+                height: 8,
+                pixels: stub_rgb8(8, 8, index as i64 + 1),
+            },
+            alpha: None,
+        })
+        .collect();
+
+    // The id order the resolver would have produced for this payload, re-derived rather than
+    // restated, so the two cannot drift.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "src", "maskAssetId": "mask", "referenceAssetIds": ["ref-a"]
+        }))),
+        ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+    );
+
+    match build_qwen_image_2_1_conditioning(&references)
+        .expect("three RGB references")
+        .as_slice()
+    {
+        [gen_core::Conditioning::MultiReference { images }] => {
+            assert_eq!(images.len(), 3, "one ordered list, three images");
+            assert_eq!(
+                images[0].pixels,
+                stub_rgb8(8, 8, 1),
+                "the SOURCE must be <image1> — the picture the edit is about"
+            );
+            assert_eq!(
+                images[1].pixels,
+                stub_rgb8(8, 8, 2),
+                "the MASK must be <image2>, which is the ordinal the engine's own refusal text \
+                 tells the caller to name (\"use the second image as the mask\")"
+            );
+            assert_eq!(
+                images[2].pixels,
+                stub_rgb8(8, 8, 3),
+                "submitted references follow, in submitted order"
+            );
+        }
+        other => panic!("expected one ordered MultiReference, got {other:?}"),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -12979,21 +13183,26 @@ fn qwen_edit_engine_id_maps_variants() {
     assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
 }
 
-/// sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+/// sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the DEFAULT
+/// is upstream-parity truncation.
 ///
-/// `DynamicImage::to_rgb8()` converts RGBA→RGB by dropping the fourth byte, and 2.1's alpha is
-/// STRAIGHT — `A=0` does NOT zero RGB — so a fully transparent pixel keeps whatever colour it was
-/// authored with. Truncating therefore fed the VAE a reference the user never saw: a transparent
-/// background arrived as whatever the encoder left behind, commonly black. This is the case that
-/// used to be silently wrong, so the fixture is deliberately the adversarial one — a transparent
-/// pixel whose hidden RGB is pure black, which truncation and compositing disagree about
-/// maximally.
+/// Both answers are correct for different upstream pipelines, and the distinction is invisible
+/// unless a reference genuinely carries transparency — which is why getting it wrong is silent.
+/// `to_rgb8()` drops the fourth byte exactly as `PIL.Image.convert("RGB")` does, so every edit model
+/// shipped before 2.1 (SDXL inpaint, FLUX.2 edit, Kolors IP-adapter, `qwen_image_edit_2511`) is at
+/// parity only under `Truncate`. `OverWhite` matches the S4 contract's `to_rgb_over_white()`, which
+/// is what 2.1's vision tower is fed.
 ///
-/// Also pins the OPAQUE case byte-for-byte, because a composite that is not the identity on
-/// `A=255` would silently shift every existing reference in the app.
+/// The fixture is deliberately adversarial: a fully transparent pixel whose hidden RGB is pure
+/// BLACK. 2.1's alpha is straight — `A=0` does NOT zero RGB — so the two policies disagree
+/// maximally there (`[0,0,0]` vs `[255,255,255]`) and agree exactly on the opaque pixels.
+///
+/// Flipping `FlattenPolicy`'s `#[default]` to `OverWhite` reds the truncation half below; that is
+/// the mutation this test exists to catch, because the first cut of sc-24113 composited on EVERY
+/// lane and moved every pre-2.1 model off parity without a single test noticing.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_alpha_carrying_reference_is_composited_over_white_not_truncated() {
+fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_request() {
     let data_dir = tempfile::tempdir().unwrap();
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
@@ -13032,18 +13241,75 @@ fn an_alpha_carrying_reference_is_composited_over_white_not_truncated() {
         "the fixture genuinely carries alpha, or this test proves nothing"
     );
 
-    let image =
+    // DEFAULT — what every pre-2.1 model gets. Raw RGB bytes, alpha dropped, upstream parity.
+    let truncated =
         load_reference_image(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap();
-    assert_eq!((image.width, image.height), (2, 2));
-    assert_eq!(image.pixels.len(), 2 * 2 * 3);
+    assert_eq!((truncated.width, truncated.height), (2, 2));
+    assert_eq!(truncated.pixels.len(), 2 * 2 * 3);
+    // A=0 with hidden BLACK stays black — `convert("RGB")` semantics, and the byte-for-byte
+    // behaviour SDXL inpaint / FLUX.2 edit / Kolors / qwen_image_edit_2511 are compared against.
+    assert_eq!(&truncated.pixels[0..3], &[0, 0, 0]);
+    // A=128 red keeps its raw red; the alpha byte is simply not consulted.
+    assert_eq!(&truncated.pixels[3..6], &[255, 0, 0]);
+    assert_eq!(&truncated.pixels[6..9], &[0, 255, 0]);
+    assert_eq!(&truncated.pixels[9..12], &[0, 0, 0]);
 
-    // A=0 over white is WHITE. Truncation would have produced [0, 0, 0] — the exact silent defect.
-    assert_eq!(&image.pixels[0..3], &[255, 255, 255]);
+    // The default really is `Truncate` — asserted on the enum too, so a changed `#[default]` fails
+    // here by name rather than only through the bytes above.
+    assert_eq!(FlattenPolicy::default(), FlattenPolicy::Truncate);
+
+    // OPT-IN — the S4 `to_rgb_over_white()` semantics 2.1's vision tower wants.
+    let composited = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &asset_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    // A=0 over white is WHITE — maximally different from the truncated [0, 0, 0] above.
+    assert_eq!(&composited.pixels[0..3], &[255, 255, 255]);
     // A=128 red over white: 255*128/255 + 255*127/255 = 255 red; 0*128/255 + 255*127/255 = 127.
-    assert_eq!(&image.pixels[3..6], &[255, 127, 127]);
-    // A=255 is the identity, so every already-shipped opaque reference is byte-for-byte unchanged.
-    assert_eq!(&image.pixels[6..9], &[0, 255, 0]);
-    assert_eq!(&image.pixels[9..12], &[0, 0, 0]);
+    assert_eq!(&composited.pixels[3..6], &[255, 127, 127]);
+    // A=255 is the IDENTITY under both policies, which is why an opaque reference cannot be
+    // perturbed by this choice no matter which lane loads it.
+    assert_eq!(&composited.pixels[6..9], &truncated.pixels[6..9]);
+    assert_eq!(&composited.pixels[9..12], &truncated.pixels[9..12]);
+
+    // An OPAQUE source is byte-identical under both policies — the same `to_rgb8()` call — so no
+    // existing reference in the app can move whichever policy a future caller picks.
+    let opaque_file = data_dir.path().join("opaque.png");
+    image::RgbImage::from_pixel(2, 2, image::Rgb([17, 34, 51]))
+        .save(&opaque_file)
+        .unwrap();
+    let opaque_asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "opaque.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: opaque_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let opaque_id = opaque_asset["id"].as_str().unwrap().to_owned();
+    assert!(
+        !reference_carries_alpha(&settings.data_dir, &project.id, &opaque_id, &project_path)
+            .unwrap()
+    );
+    let opaque_default =
+        load_reference_image(&settings.data_dir, &project.id, &opaque_id, &project_path).unwrap();
+    let opaque_over_white = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &opaque_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    assert_eq!(opaque_default.pixels, opaque_over_white.pixels);
 }
 
 #[cfg(target_os = "macos")]
@@ -14361,6 +14627,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: refine_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&make_request()),
@@ -21193,6 +21460,105 @@ mod preview_stream_tests {
             }
         }
         assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+    /// sc-24110 — PROGRESS on the Qwen-Image 2.1 EDIT route, and the cancel that stops it.
+    ///
+    /// The cancel-acknowledgement test in `tests::cancel_and_heartbeat` covers the API write; this
+    /// covers the other half, which nothing else did: that an edit-shaped render actually TICKS.
+    /// Both lanes' streams drive their batch through this one `drive_gen_items` carrier, so it is
+    /// where an edit render's progress and cancellation really happen — and the carrier is the same
+    /// for text-to-image, which is exactly why this has to assert the EDIT shape reached it rather
+    /// than trusting shape-independence.
+    ///
+    /// So the producer here is handed the conditioning the edit route really builds — the ordered
+    /// `MultiReference` from `build_qwen_image_2_1_conditioning` — and asserts on it before
+    /// reporting a step. A carrier that dropped the references, or a builder that emitted a `Mask`,
+    /// fails inside the producer rather than silently reporting progress for a render that is no
+    /// longer the requested one.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn qwen_image_2_1_edit_reports_progress_and_stops_on_cancel() {
+        use std::cell::RefCell;
+
+        // The ordered list a source + mask + one reference edit resolves to.
+        let references: Vec<QwenImage21Reference> = (1..=3)
+            .map(|seed| QwenImage21Reference {
+                image: gen_core::Image {
+                    width: 8,
+                    height: 8,
+                    pixels: stub_rgb8(8, 8, seed),
+                },
+                alpha: None,
+            })
+            .collect();
+        let conditioning =
+            build_qwen_image_2_1_conditioning(&references).expect("three RGB references");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
+        let cancel = gen_core::CancelFlag::new();
+        let observed = cancel.clone();
+        let invoked: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+        drive_gen_items(tx, [0_usize, 1, 2], |index, _item, _preview, progress| {
+            invoked.borrow_mut().push(index);
+            if observed.is_cancelled() {
+                return Ok(None);
+            }
+            // The conditioning this render carries is the EDIT one, not a text-to-image empty.
+            match conditioning.as_slice() {
+                [gen_core::Conditioning::MultiReference { images }] => {
+                    assert_eq!(images.len(), 3, "the ordered list reached the render");
+                }
+                other => panic!("the edit route must send one ordered MultiReference: {other:?}"),
+            }
+            assert!(
+                !conditioning
+                    .iter()
+                    .any(|c| matches!(c, gen_core::Conditioning::Mask { .. })),
+                "a Conditioning::Mask reached a render this engine would refuse"
+            );
+            // 40 steps is 2.1's own DEFAULT_STEPS, so the denominator is the edit route's.
+            progress(Progress::Step {
+                current: 1,
+                total: 40,
+            });
+            cancel.cancel();
+            Ok(Some((70_i64 + index as i64, 8, 8, stub_rgb8(8, 8, 1))))
+        })
+        .expect("a cancelled batch is not an error — it stops early and reports what it produced");
+
+        assert_eq!(
+            *invoked.borrow(),
+            vec![0, 1],
+            "the producer runs for image 0, then for the image that observes the cancel, and then \
+             NOT AT ALL — an invocation for index 2 would mean the cancel merely skipped one image \
+             while the batch kept re-encoding a ten-reference prefix on the GPU"
+        );
+
+        // A NON-TERMINAL progress tick is the thing this test exists for: the edit route reports.
+        match rx
+            .try_recv()
+            .expect("the edit render reports its first step")
+        {
+            GenEvent::Step {
+                index,
+                current,
+                total,
+            } => assert_eq!((index, current, total), (0, 1, 40)),
+            other => panic!("expected a step event, got {}", gen_event_name(&other)),
+        }
+        match rx.try_recv().expect("image 0 completes") {
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            other => panic!("expected an image event, got {}", gen_event_name(&other)),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "images 1 and 2 must produce NO further events — above all not an Image the consumer \
+             would persist and count toward a completed set"
+        );
     }
 
     /// sc-24109: progress and cancellation on the lane Qwen-Image 2.1 renders on off-Mac.

@@ -2417,7 +2417,7 @@ mod tests {
             .map(|(index, id)| {
                 let mut shot = json!({
                     "id": id, "beat": "b", "framing": "f", "prompt": "p",
-                    "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e",
+                    "targetDurationSeconds": 5.1667, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
                     "conditioning": { "mode": "text_to_video" }
                 });
                 if index > 0 {
@@ -2428,7 +2428,7 @@ mod tests {
             })
             .collect();
         serde_json::from_value(json!({
-            "schemaVersion": 2, "id": "p", "version": 1, "title": "t",
+            "schemaVersion": crate::film_plan::PLAN_SCHEMA_VERSION, "id": "p", "version": 1, "title": "t",
             "model": { "id": "minimax_h3", "tier": "q4", "resolution": "576x320" },
             "limits": { "maxRunSeconds": 10, "maxShotSeconds": 10, "maxAttemptsPerShot": 1, "maxMemoryGb": 1 },
             "shots": shots

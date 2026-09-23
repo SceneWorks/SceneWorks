@@ -385,6 +385,37 @@ mod tests {
         );
     }
 
+    /// [`PINNED_ALPHA_CAPABLE_ENGINES`] must be SELF-DELETING, not a standing bypass.
+    ///
+    /// The hand-list stands in for `descriptor.capabilities.supports_alpha_output`, and it is
+    /// justified by exactly one fact: the pinned inference revision predates the 2.1 provider, so
+    /// the engine does not resolve and there is no descriptor to read. That fact has an expiry —
+    /// the epic's terminal pin bump — and a bypass that outlives its reason is how a temporary
+    /// allow-list becomes permanent.
+    ///
+    /// So this asserts the JUSTIFICATION rather than the list: `qwen_image_2_1` does not resolve
+    /// through the MLX registry. The moment the bump lands it will, this test reds, and the failure
+    /// says what to do. Same shape and the same self-deleting contract as `PENDING_PIN_ENGINE_IDS`
+    /// in `crate::tests::gpu_and_manifest` (#2909), whose checklist enumerates this and the three
+    /// other sc-24113 seams that unwind together.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_pinned_alpha_capability_list_expires_with_the_pin_that_justifies_it() {
+        for id in PINNED_ALPHA_CAPABLE_ENGINES {
+            assert!(
+                crate::engines::mlx_model(id).is_none(),
+                "{id} now resolves through the registry, so its descriptor can be read directly. \
+                 The pin bump landed: replace `engine_advertises_alpha_output`'s body with \
+                 `descriptor.capabilities.{DESCRIPTOR_ALPHA_CAPABILITY}`, delete \
+                 PINNED_ALPHA_CAPABLE_ENGINES, and work the rest of the sc-24113 checklist in \
+                 PENDING_PIN_ENGINE_IDS (the ReferenceRgba carrier and the recipe-only \
+                 output-channels stamp)."
+            );
+        }
+        // Anti-collapse: an emptied list would make the loop vacuous and silently disarm this.
+        assert_eq!(PINNED_ALPHA_CAPABLE_ENGINES, &["qwen_image_2_1"]);
+    }
+
     #[test]
     fn the_s4_contract_names_are_the_ones_the_web_half_mirrors() {
         // The literals this module exists to centralize, transcribed from the S4 RGBA contract

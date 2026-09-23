@@ -774,7 +774,16 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
+    Last moved: sc-24110 gives `qwen_image_2_1` its reference / local-editing capability, so the
+    entry's mode axis grows from {text_to_image} to {text_to_image, edit_image} and each of its TEN
+    existing lanes (`qwen_image_2_1:{mlx,candle}:<rung>`) goes from 4 coordinates to 6 — one tier x
+    two modes x {none, lora}, plus the edit mode's own carrier. No lane is added or removed, and
+    NOTHING outside `qwen_image_2_1` moves by a single coordinate: `resident` goes 4->6 implemented
+    on both backends and the other four rungs go 4->6 Missing, because the provider still publishes
+    no memory-strategy ladder at this pin. The ladder is unchanged by this story; only how many
+    request shapes it is asked about.
+
+    Previously: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
     `candle_routed: true` + the manifest `candle` block), so the entry contributes five NEW lanes
     (`qwen_image_2_1:candle:<rung>`) and moves NOTHING else — no existing lane gained, lost or
     moved a coordinate. The Candle profile is identical to the MLX one recorded below, and for the
@@ -784,7 +793,7 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     only `resident` is implemented (2 coordinates: one tier x text_to_image x {none, lora}) and the
     other four rungs are Missing.
 
-    Previously: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
+    Before that: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
     bf16 artifact with no `variant`, so it contributes exactly five NEW lanes
     (`qwen_image_2_1:mlx:<rung>`) and moves nothing else. Its provider publishes no
     memory-strategy ladder at this pin, so only `resident` is implemented (2 coordinates: the

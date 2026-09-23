@@ -14,8 +14,10 @@
 //! rewrite rules + image/video/audio medium switch + guide assembly (`build_refine_system_prompt`, into the
 //! request `system`) and the reasoning-block / code-fence / surrounding-quote cleanup
 //! (`clean_refine_output`, over the model reply). Sampling matches the Python path (temperature 0.7,
-//! top_p 0.9, max_new_tokens 512), as does the empty-output → error behavior and the `{originalPrompt,
-//! refinedPrompt}` result shape.
+//! top_p 0.9), as does the empty-output → error behavior and the `{originalPrompt, refinedPrompt}`
+//! result shape. The output budget no longer does: the Python path's 512 tokens could not cover the
+//! `MAX_PROMPT_CHARS` contract once this task began carrying the per-shot film refine (sc-24029) —
+//! see `DEFAULT_REFINE_MAX_NEW_TOKENS`.
 
 use super::*;
 
@@ -35,24 +37,42 @@ const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
-// Output-length cap. The free-text rewrite is a one-liner (512 is ample), but the two caption tasks
-// (magic-prompt + image_caption) emit a full Ideogram JSON caption — multi-element, with bboxes,
-// #RRGGBB palettes and (since sc-8199) optional per-element palettes — which truncates well past 2048
-// tokens on busy images (sc-8210: `EOF while parsing a list` mid-`elements`). 4096 ≈ ~11.6k chars of
-// headroom; a well-formed caption emits EOS far below the cap, so a higher ceiling only rescues the
-// truncating cases. Callers may still override via the `maxNewTokens` payload field.
+// Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
+// caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element
+// palettes — which truncates well past 2048 tokens on busy images (sc-8210: `EOF while parsing a
+// list` mid-`elements`). 4096 ≈ ~11.6k chars of headroom; a well-formed caption emits EOS far below
+// the cap, so a higher ceiling only rescues the truncating cases. Callers may still override via the
+// `maxNewTokens` payload field.
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
+// The free-text rewrite was budgeted as a one-liner (512 tokens) when its only caller refined a
+// single sentence. It is now also the per-shot film refine (`film_planner.rs` sends no `task`, so a
+// shot prompt classifies as `Rewrite`), whose output contract is `MAX_PROMPT_CHARS` = 4000 chars of
+// multi-field MiniMax-H3 prose.
+//
+// Sized from MEASUREMENT, not from a nominal ratio: sc-24029's six shot rewrites at the old 512-token
+// cap emitted 1584-2922 chars (`a5-image/smoke.log` in that story's evidence dir), i.e. this
+// refiner's prose runs ~5.7 chars/token and 512 tokens tops out around 2900 chars — BELOW the
+// 4000-char contract, so a rewrite with more to say stopped on `MaxTokens` mid-sentence rather than
+// on EOS (a film shot shipped cut at 3026/4000 chars). At that measured ratio the contract needs only
+// ~700 tokens; 1536 is a little over twice that, so the contract is reachable with real headroom for
+// a denser rewrite. A rewrite that has said what it has to say still emits EOS far below the cap, so
+// this only rescues the truncating cases.
+//
+// `the_rewrite_budget_covers_the_refined_prompt_char_contract` guards it at 2.83 chars/token, which
+// is deliberately NOT the prose ratio above: it is the conservative floor the JSON-caption path
+// implies (4096 ≈ ~11.6k chars), so the assertion holds even for the densest output this task can
+// emit. 1536 clears that floor too (~4350 chars).
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 512;
+const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
 // longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
 #[cfg(any(
@@ -78,7 +98,15 @@ const DEFAULT_FILM_PLAN_MAX_NEW_TOKENS: u32 = 4096;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: RefineTask) -> u32 {
+fn resolve_max_new_tokens(
+    payload: &serde_json::Map<String, Value>,
+    task: RefineTask,
+    // sc-24113: the Qwen rewrite's budget is PER REWRITER (the two cards publish different
+    // ceilings), and which rewriter applies is a property of the REQUEST, not of the task. `None`
+    // for every other task, and for a rewrite it falls back to the smaller of the two — never to
+    // the worker's caption ceiling, which is far below either card.
+    rewriter: Option<crate::qwen_prompt_rewrite::Rewriter>,
+) -> u32 {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
@@ -87,7 +115,9 @@ fn resolve_max_new_tokens(payload: &serde_json::Map<String, Value>, task: Refine
         .unwrap_or(match task {
             RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
             RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
-            RefineTask::QwenImageRewrite => crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS,
+            RefineTask::QwenImageRewrite => rewriter
+                .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
+                .max_new_tokens(),
             RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
             RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
         })
@@ -245,6 +275,32 @@ impl RefineTask {
         }
     }
 }
+/// The image-carrier invariant the generate closure asserts, as a named predicate (sc-24113).
+///
+/// Extracted from the `debug_assert!` so it can be tested directly: the assert itself sits AFTER a
+/// provider load, so no test in this lane can reach it, and the bug it hid was a wrong predicate
+/// rather than a wrong call site.
+///
+/// **One-directional.** "Images are present ⇒ the task declares it takes them." The converse is
+/// deliberately NOT asserted: a Qwen rewrite with zero references is the legitimate text-to-image
+/// case, and it is what selects the T2I rewriter over the editing one.
+///
+/// This replaced `carries_image == is_vision_task`, which held only while the two VISION tasks were
+/// the sole image carriers. The Qwen rewrite carries images with `is_vision()` FALSE — it is driven
+/// by the user's text and merely accepts pictures — so the equality panicked every I2I rewrite in a
+/// debug build.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn image_carrier_invariant_holds(
+    carries_image: bool,
+    takes_reference_images: bool,
+) -> bool {
+    !carries_image || takes_reference_images
+}
+
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
@@ -1188,7 +1244,7 @@ pub(crate) async fn run_prompt_refine_job(
         gen_core::core_llm::ThinkingMode::Auto => "auto",
         gen_core::core_llm::ThinkingMode::Disabled => "disabled",
     };
-    let max_new_tokens = resolve_max_new_tokens(payload, task);
+    let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
     let temperature = task.temperature();
     let work_message = task.work_message();
     let done_message = task.done_message();
@@ -1309,6 +1365,10 @@ pub(crate) async fn run_prompt_refine_job(
     // `tokio::spawn` keeps the existing `CancelJoinGuard` teardown seam (sc-8804, F-003) unchanged.
     let refine_spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
+        // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
+        // Prism GGUF load. The refiners (including the vision tasks) load snapshot directories
+        // that carry their own projector, so `None` preserves the existing behaviour.
+        projector_source: None,
         quantize: None,
     };
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
@@ -1316,7 +1376,11 @@ pub(crate) async fn run_prompt_refine_job(
     // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture
     // set minimal.
     let emits_json = task.emits_json();
-    let is_vision_task = task.is_vision();
+    // sc-24113: the blocking closure's image invariant is "this task DECLARES it takes reference
+    // images", not "this task is a vision task" — the Qwen rewrite carries images while
+    // `is_vision()` is false. Copied out as a bool for the same reason `emits_json` is: so the
+    // closure's capture set stays minimal and names no enum.
+    let takes_reference_images = task.takes_reference_images();
     // Resolution requirements (see the sc-8105 note below): JSON-emitting tasks still select a
     // provider that supports JSON constraints, preserving the existing provider/cache identity.
     // After load, [`json_decode_constraint`] decides whether to apply the mask to this decode: an
@@ -1442,7 +1506,19 @@ pub(crate) async fn run_prompt_refine_job(
                 // — `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
                 // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
                 // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
-                debug_assert!(carries_image == is_vision_task);
+                //
+                // sc-24113 widened this from `carries_image == is_vision_task`. That equality was true
+                // only while the VISION tasks were the sole image carriers; the Qwen rewrite carries
+                // images with `is_vision()` FALSE (it is driven by the user's text and merely accepts
+                // pictures), so the old form panicked every I2I rewrite in a debug build. The invariant
+                // that actually holds — and the one worth asserting — is the one-directional implication:
+                // if images are present, the task must be one that declares it takes them. The converse
+                // is deliberately NOT asserted, because a rewrite with zero references is the legitimate
+                // text-to-image case.
+                debug_assert!(image_carrier_invariant_holds(
+                    carries_image,
+                    takes_reference_images
+                ));
                 emit_event(
                     "prompt_refine_load_complete",
                     json!({ "jobId": job_id, "engine": engine_label }),
@@ -1457,8 +1533,19 @@ pub(crate) async fn run_prompt_refine_job(
                 // dropped (the consumer loop returned early on a POST failure / 409): trip the engine flag
                 // so generation bails instead of running unheard (sc-8804, F-003 — the swallowed
                 // closed-channel leak, preserved verbatim from the old bounded-channel behavior).
+                //
+                // The same per-token callback carries the sc-24029 MLX cache bound. MLX's freed-buffer
+                // cache is PROCESS-GLOBAL, not per-thread; this callback is used because it is the
+                // only hook interleaved with the decode itself — every other seam runs before
+                // `generate` starts or after it returns, when the cache has already peaked. Side
+                // effect of that global scope: up to once per 16 streamed token events (plus once at
+                // decode end) this also discards buffers a CONCURRENT image render had cached, which
+                // that render then re-allocates. Declared BEFORE `on_event` so it outlives the borrow
+                // and its terminal clear fires after the generate below returns or errors.
+                let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                 let mut on_event = |event: StreamEvent| {
                     if let StreamEvent::Token { index, .. } = event {
+                        cache_bound.note_event();
                         if progress_tx
                             .send((index as u32 + 1, max_new_tokens))
                             .is_err()
@@ -1638,11 +1725,25 @@ pub(crate) async fn run_prompt_refine_job(
     let mut result_refined = refined.clone();
     let mut rewrite_suggestion = None;
     if let Some(rewriter) = qwen_rewriter {
+        // A budget exhausted mid-reasoning is the ONE failure worth distinguishing, because its fix
+        // is a number rather than a retry. These checkpoints reason first and emit the JSON object
+        // last, so running out loses the object entirely and the generic parse error ("did not
+        // return a JSON object") reads as a broken model. Checked BEFORE the parse, since the
+        // parse is guaranteed to fail in exactly this case and would otherwise win the report.
+        if output.finish_reason == Some(gen_core::core_llm::FinishReason::Length) {
+            return Err(WorkerError::Engine(
+                crate::qwen_prompt_rewrite::truncated_reply_error(rewriter, max_new_tokens),
+            ));
+        }
         let suggestion = crate::qwen_prompt_rewrite::parse_rewrite(&refined).map_err(|error| {
             WorkerError::Engine(format!(
                 "The Qwen Image 2.1 prompt rewriter ({}) returned output this build cannot read: \
-                 {error}",
-                rewriter.repo()
+                 {error}. The reply began: {}",
+                rewriter.repo(),
+                // Discarding the reply leaves nobody anything to act on — not the user reading the
+                // job's error, not whoever reads the log afterwards. Bounded, because a reply can
+                // be thousands of characters and an error message is not a transcript.
+                crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
             ))
         })?;
         rewrite_suggestion = Some(crate::qwen_prompt_rewrite::suggestion_result_block(
@@ -1652,6 +1753,8 @@ pub(crate) async fn run_prompt_refine_job(
         ));
         result_refined = suggestion.rewritten_prompt;
     }
+    // sc-24029 widened this to carry the finish reason, usage and the ceiling on every refine
+    // result; sc-24113 builds it eagerly so the rewrite's suggestion block can ride alongside.
     let mut result = refine_result(
         &original_prompt,
         &result_refined,
@@ -1659,6 +1762,9 @@ pub(crate) async fn run_prompt_refine_job(
         &model,
         backend,
         thinking_mode_name,
+        output.finish_reason,
+        output.usage,
+        max_new_tokens,
     );
     if let Some(block) = rewrite_suggestion {
         result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
@@ -1779,11 +1885,39 @@ fn refine_progress(
     }
 }
 
+/// How the decode ended, beside the budget it ended against (sc-24029).
+///
+/// Carried on BOTH the success and the failure result. A `Rewrite` that stops on
+/// `FinishReason::Length` is non-empty and therefore a "success" as far as this job is concerned,
+/// but its text is truncated mid-sentence — and the caller that cannot tolerate that (the film
+/// planner's per-shot rewrite, whose output feeds a compiled request) has no other way to know.
+/// Purely additive: no existing key changes shape, so every current reader is unaffected.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn generation_block(
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
+) -> Value {
+    json!({
+        "finishReason": finish_reason_name(finish_reason),
+        "usage": {
+            "promptTokens": usage.prompt_tokens,
+            "generatedTokens": usage.generated_tokens,
+        },
+        "maxNewTokens": max_new_tokens,
+    })
+}
+
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn refine_result(
     original_prompt: &str,
     refined_prompt: &str,
@@ -1791,6 +1925,9 @@ fn refine_result(
     model: &str,
     backend: &str,
     thinking_mode: &str,
+    finish_reason: Option<gen_core::core_llm::FinishReason>,
+    usage: gen_core::core_llm::Usage,
+    max_new_tokens: u32,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
@@ -1798,6 +1935,10 @@ fn refine_result(
     if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
         result.insert("thinking".to_owned(), json!(thinking));
     }
+    result.insert(
+        "generation".to_owned(),
+        generation_block(finish_reason, usage, max_new_tokens),
+    );
     result.insert(
         "executionIdentity".to_owned(),
         json!({
@@ -1870,14 +2011,7 @@ fn refine_failure_result(
     }
     result.insert(
         "generation".to_owned(),
-        json!({
-            "finishReason": finish_reason_name(finish_reason),
-            "usage": {
-                "promptTokens": usage.prompt_tokens,
-                "generatedTokens": usage.generated_tokens,
-            },
-            "maxNewTokens": max_new_tokens,
-        }),
+        generation_block(finish_reason, usage, max_new_tokens),
     );
     result.insert(
         "executionIdentity".to_owned(),
@@ -1959,6 +2093,135 @@ mod tests {
         );
     }
 
+    /// sc-24113 BLOCKER REGRESSION. The generate closure's image invariant must hold for every
+    /// task × image-presence combination the job can actually produce.
+    ///
+    /// The bug: the assert read `carries_image == is_vision_task`, an equality that was true only
+    /// while `image_caption`/`image_describe` were the sole image carriers. `QwenImageRewrite`
+    /// carries images with `is_vision()` FALSE, so **every I2I rewrite panicked in a debug build** —
+    /// and nothing caught it, because the assert sits after a provider load that no test in this
+    /// lane can reach. Hence the predicate is extracted and tested here instead.
+    ///
+    /// Restoring the equality (`carries_image == takes_reference_images`) in
+    /// `image_carrier_invariant_holds` reds the `QwenImageRewrite`-without-references row below;
+    /// restoring the original (`== is_vision()`) reds the with-references row too.
+    #[test]
+    fn the_generate_closures_image_invariant_holds_for_every_task_and_image_combination() {
+        // The property the rewrite broke, stated on its own: it takes images, and it is NOT a
+        // vision task. Both halves matter — the first is why it carries a `Content::Image`, the
+        // second is why the prompt stays required and zero references is legal.
+        assert!(RefineTask::QwenImageRewrite.takes_reference_images());
+        assert!(!RefineTask::QwenImageRewrite.is_vision());
+
+        for task in [
+            RefineTask::Rewrite,
+            RefineTask::MagicPrompt,
+            RefineTask::ImageCaption,
+            RefineTask::ImageDescribe,
+            RefineTask::FilmPlan,
+            RefineTask::QwenImageRewrite,
+        ] {
+            let takes = task.takes_reference_images();
+            // WITH images: legal exactly for a task that declares it takes them.
+            assert_eq!(
+                image_carrier_invariant_holds(true, takes),
+                takes,
+                "{task:?} with images"
+            );
+            // WITHOUT images: always legal. This is the row the old equality got wrong for the
+            // rewrite — a text-to-image rewrite carries none, and that is not a violation.
+            assert!(
+                image_carrier_invariant_holds(false, takes),
+                "{task:?} without images must never trip the assert"
+            );
+        }
+
+        // Spelled out for the one task whose two rows the two historical forms of this assert
+        // disagreed about, so a failure names the case rather than a loop index.
+        assert!(image_carrier_invariant_holds(
+            true,
+            RefineTask::QwenImageRewrite.takes_reference_images()
+        ));
+        assert!(image_carrier_invariant_holds(
+            false,
+            RefineTask::QwenImageRewrite.takes_reference_images()
+        ));
+    }
+
+    /// sc-24113 BLOCKER REGRESSION, the data half: drive the I2I rewrite's turn assembly and reply
+    /// handling with a fixture image and a fixture LLM reply.
+    ///
+    /// Everything the job does between "references resolved" and "result posted" EXCEPT the
+    /// provider call, which needs weights this lane does not run. The `Content::Image` blocks are
+    /// built from a real decoded PNG through the same `load_caption_image_ref` the job uses, so
+    /// `carries_image` is true for the same reason it is true in production — which is the
+    /// condition that used to panic.
+    #[test]
+    fn the_i2i_rewrite_path_assembles_image_turns_and_parses_a_fixture_reply() {
+        use crate::qwen_prompt_rewrite::{parse_rewrite, suggestion_result_block, Rewriter};
+        use gen_core::core_llm::{Content, Message, Role};
+
+        // Two real on-disk references, distinguishable so an ordering bug is visible.
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (index, colour) in [[200u8, 30, 30], [30, 200, 30]].into_iter().enumerate() {
+            let path = dir.path().join(format!("ref{index}.png"));
+            image::RgbImage::from_pixel(8, 8, image::Rgb(colour))
+                .save(&path)
+                .unwrap();
+            paths.push(path);
+        }
+        let image_refs: Vec<_> = paths
+            .iter()
+            .map(|path| load_caption_image_ref(path).expect("fixture reference decodes"))
+            .collect();
+        assert_eq!(image_refs.len(), 2);
+
+        // Request-shaped rewriter selection: references present ⇒ the EDITING half.
+        let rewriter = Rewriter::for_reference_count(image_refs.len());
+        assert_eq!(rewriter, Rewriter::Editing);
+
+        // The user turn the job builds: every image BEFORE the instruction text, exactly as the
+        // caption tasks do.
+        let task = RefineTask::QwenImageRewrite;
+        let mut content: Vec<Content> = image_refs.into_iter().map(Content::Image).collect();
+        content.push(Content::text("swap the backdrop".to_owned()));
+        let user = Message {
+            role: Role::User,
+            content,
+            thinking: None,
+            tool_calls: Vec::new(),
+        };
+        let carries_image = user
+            .content
+            .iter()
+            .any(|block| matches!(block, Content::Image(_)));
+
+        // THE REGRESSION: this exact pair reached the old `carries_image == is_vision_task` assert
+        // and panicked. `true, false` — images present, not a vision task.
+        assert!(carries_image);
+        assert!(!task.is_vision());
+        assert!(image_carrier_invariant_holds(
+            carries_image,
+            task.takes_reference_images()
+        ));
+
+        // The fixture reply, through the same cleanup + parse the completion arm runs.
+        let reply = "<think>Keep the courier, replace the backdrop.</think>\n\
+                     {\"rewritten_prompt\": \"Replace the grey backdrop with a sunlit alley\", \
+                     \"wh_ratio\": \"\", \"ratio_follow\": \"<image2>\"}";
+        let suggestion =
+            parse_rewrite(&clean_json_output(reply)).expect("the fixture reply parses");
+        assert_eq!(
+            suggestion.rewritten_prompt,
+            "Replace the grey backdrop with a sunlit alley"
+        );
+        let block = suggestion_result_block(&suggestion, rewriter, 2);
+        // `<image2>` is the SECOND reference the turn carried, i.e. index 1.
+        assert_eq!(block.get("followsReferenceIndex"), Some(&Value::from(1)));
+        assert_eq!(block.get("rewriter"), Some(&Value::from("i2i")));
+    }
+
     /// The rewrite's sampling and token budget are the PUBLISHED recipe, not the house defaults.
     ///
     /// Asserted through `RefineTask` (not just the constants) because the wiring is what could
@@ -1972,14 +2235,30 @@ mod tests {
             crate::qwen_prompt_rewrite::REWRITE_TEMPERATURE
         );
         assert_ne!(task.temperature(), RefineTask::Rewrite.temperature());
+        // The budget is PER REWRITER — each card's own published ceiling, not the worker's caption
+        // default. Capping below the card is not a safe economy: these checkpoints reason first and
+        // emit the JSON object last, so a budget that runs out loses the object entirely.
+        use crate::qwen_prompt_rewrite::{Rewriter, I2I_MAX_NEW_TOKENS, T2I_MAX_NEW_TOKENS};
+        assert_eq!(T2I_MAX_NEW_TOKENS, 16256);
+        assert_eq!(I2I_MAX_NEW_TOKENS, 24000);
+        assert_ne!(T2I_MAX_NEW_TOKENS, I2I_MAX_NEW_TOKENS);
         assert_eq!(
-            resolve_max_new_tokens(&serde_json::Map::new(), task),
-            crate::qwen_prompt_rewrite::REWRITE_MAX_NEW_TOKENS
+            resolve_max_new_tokens(&serde_json::Map::new(), task, Some(Rewriter::TextToImage)),
+            T2I_MAX_NEW_TOKENS
+        );
+        assert_eq!(
+            resolve_max_new_tokens(&serde_json::Map::new(), task, Some(Rewriter::Editing)),
+            I2I_MAX_NEW_TOKENS
+        );
+        // Never the caption ceiling, which is an order of magnitude below either card.
+        assert!(
+            resolve_max_new_tokens(&serde_json::Map::new(), task, None)
+                > DEFAULT_CAPTION_MAX_NEW_TOKENS
         );
         // An explicit override still wins, the same escape hatch every other task has.
         let payload = serde_json::json!({ "maxNewTokens": 256 });
         assert_eq!(
-            resolve_max_new_tokens(payload.as_object().unwrap(), task),
+            resolve_max_new_tokens(payload.as_object().unwrap(), task, Some(Rewriter::Editing)),
             256
         );
         // The progress copy says "review", not "applied" — the rewrite is a suggestion.
@@ -1995,6 +2274,12 @@ mod tests {
             "Qwen/Qwen3.6-27B",
             "mlx",
             "enabled",
+            Some(gen_core::core_llm::FinishReason::Stop),
+            gen_core::core_llm::Usage {
+                prompt_tokens: 1_024,
+                generated_tokens: 32,
+            },
+            4_096,
         );
         assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
         assert_eq!(result["thinking"], "private reasoning");
@@ -2006,6 +2291,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("private reasoning"));
+    }
+
+    /// sc-24029. A `Rewrite` that stops on `Length` is non-empty, so it completes as a SUCCESS —
+    /// and the caller that must not compile truncated prose (the film planner's per-shot rewrite)
+    /// could not tell, because `finishReason` was recorded only on the failure result. The success
+    /// result now carries the same additive `generation` object.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn a_truncated_but_non_empty_rewrite_reports_its_length_finish_on_the_success_result() {
+        use gen_core::core_llm::{FinishReason, Usage};
+
+        let result = refine_result(
+            "a courier sets a parcel down",
+            "A courier sets the parcel on the bench. overall_soundscape:\n  The only",
+            None,
+            "TheDrummer/Anubis-Mini-8B-v1",
+            "mlx",
+            "disabled",
+            Some(FinishReason::Length),
+            Usage {
+                prompt_tokens: 900,
+                generated_tokens: 1_536,
+            },
+            1_536,
+        );
+        assert_eq!(result["generation"]["finishReason"], "length");
+        assert_eq!(result["generation"]["usage"]["promptTokens"], 900);
+        assert_eq!(result["generation"]["usage"]["generatedTokens"], 1_536);
+        assert_eq!(result["generation"]["maxNewTokens"], 1_536);
+        // Additive only: the keys every existing reader uses are untouched.
+        assert_eq!(result["originalPrompt"], "a courier sets a parcel down");
+        assert!(result["refinedPrompt"].as_str().unwrap().ends_with("only"));
+        assert_eq!(result["executionIdentity"]["backend"], "mlx");
     }
 
     #[test]
@@ -2186,6 +2507,35 @@ mod tests {
         assert_eq!(RefineTask::Rewrite.done_message(), "Prompt refined.");
     }
 
+    /// sc-24029. The per-shot film refine is dispatched with no `task` field
+    /// (`film_planner.rs`), so it classifies as `Rewrite` and takes that task's budget — while the
+    /// prompt it must produce is bounded by `sceneworks_core::MAX_PROMPT_CHARS`. A budget that
+    /// cannot reach the contract truncates the rewrite mid-sentence and still reports success,
+    /// which is how a 3026/4000-char film shot prompt shipped. Asserted as the CONTRACT (budget ×
+    /// chars-per-token ≥ the char cap) rather than as a literal, so shrinking the budget or raising
+    /// the cap fails here rather than in a render.
+    #[test]
+    fn the_rewrite_budget_covers_the_refined_prompt_char_contract() {
+        // ~2.83 chars/token, from the JSON-caption path this file already states (4096 ≈ ~11.6k
+        // chars). This is a deliberately CONSERVATIVE FLOOR, not the rate this task's prose
+        // actually achieves: sc-24029 measured the refiner's shot rewrites at ~5.7 chars/token
+        // (1584-2922 chars from a 512-token budget). The floor is used here so the assertion holds
+        // even for the densest output the task can emit; the budget clears both figures.
+        const CHARS_PER_TOKEN: f64 = 11_600.0 / 4096.0;
+
+        let budget = f64::from(DEFAULT_REFINE_MAX_NEW_TOKENS);
+        let reachable_chars = budget * CHARS_PER_TOKEN;
+        let required = sceneworks_core::MAX_PROMPT_CHARS;
+
+        assert!(
+            reachable_chars >= required as f64,
+            "the Rewrite budget of {DEFAULT_REFINE_MAX_NEW_TOKENS} tokens reaches only \
+             {reachable_chars:.0} chars at {CHARS_PER_TOKEN:.2} chars/token, short of the \
+             {required}-char refined-prompt contract; a film shot rewrite would stop on MaxTokens \
+             mid-sentence instead of on EOS",
+        );
+    }
+
     #[test]
     fn resolve_max_new_tokens_defaults_and_override() {
         // Caption tasks (magic-prompt + image_caption) get the larger default so the JSON closes
@@ -2193,24 +2543,26 @@ mod tests {
         let obj = |value: serde_json::Value| value.as_object().unwrap().clone();
         for task in [RefineTask::MagicPrompt, RefineTask::ImageCaption] {
             assert_eq!(
-                resolve_max_new_tokens(&obj(serde_json::json!({})), task),
+                resolve_max_new_tokens(&obj(serde_json::json!({})), task, None),
                 4096
             );
         }
         // A whole shot plan (sc-22713) takes the same generous ceiling.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::FilmPlan),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::FilmPlan, None),
             4096
         );
         // The prose-describe task (epic 8203) gets the in-between default.
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe),
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe, None),
             1024
         );
-        // The free-text rewrite stays at the small default.
+        // The free-text rewrite carries the per-shot film refine, whose output contract is
+        // `MAX_PROMPT_CHARS` (sc-24029: 512 tokens cut a shot prompt off mid-sentence at 3026
+        // chars, because generation ended on `MaxTokens` rather than on EOS).
         assert_eq!(
-            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite),
-            512
+            resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::Rewrite, None),
+            1536
         );
         // An explicit positive override wins for any task.
         for task in [
@@ -2219,7 +2571,11 @@ mod tests {
             RefineTask::FilmPlan,
         ] {
             assert_eq!(
-                resolve_max_new_tokens(&obj(serde_json::json!({ "maxNewTokens": 6000 })), task),
+                resolve_max_new_tokens(
+                    &obj(serde_json::json!({ "maxNewTokens": 6000 })),
+                    task,
+                    None
+                ),
                 6000
             );
         }
@@ -2227,16 +2583,18 @@ mod tests {
         assert_eq!(
             resolve_max_new_tokens(
                 &obj(serde_json::json!({ "maxNewTokens": 0 })),
-                RefineTask::MagicPrompt
+                RefineTask::MagicPrompt,
+                None
             ),
             4096
         );
         assert_eq!(
             resolve_max_new_tokens(
                 &obj(serde_json::json!({ "maxNewTokens": "nope" })),
-                RefineTask::Rewrite
+                RefineTask::Rewrite,
+                None
             ),
-            512
+            1536
         );
     }
 
@@ -2552,6 +2910,52 @@ mod tests {
             assert!(refines_for_minimax_h3(Some(model_id)));
         }
         assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
+    }
+
+    /// sc-24023. The marker ban must leave the engine's OWN reference labels alone.
+    ///
+    /// `<Picture N>`, `<Audio N>` and `<Video N>` are what the H3 text encoder itself prefixes each
+    /// supplied reference with, and from sc-24023 the film compiler writes sentences that bind a
+    /// role to one of them. They look exactly like the seven dead markers — angle-bracketed
+    /// literals in the prompt — and a filter that ate them would silently unbind every reference
+    /// shot while leaving a prompt that still reads correctly to a human.
+    ///
+    /// The ban is a fixed seven-literal list, so this passes as written; the test exists because
+    /// the next person to widen that list to a pattern has to see it go red.
+    #[test]
+    fn the_marker_ban_leaves_the_engines_own_reference_labels_alone() {
+        let bound = "The courier is the person shown in <Picture 1>. The parcel is the object \
+                     shown in <Picture 2>. She speaks with the voice from <Audio 1>, moving like \
+                     <Video 1>.";
+        // Byte for byte: a prompt made only of reference labels contains no dead marker, so the
+        // filter must not touch it at all — not even the whitespace collapse.
+        assert_eq!(strip_untrained_markers(bound), bound);
+
+        // And with a dead marker mixed in, the dead one goes and the labels stay. This is the case
+        // that separates "the filter ignores these" from "the filter never ran".
+        let baited = format!("<d>[English] Delivery.</d> {bound}");
+        let stripped = strip_untrained_markers(&baited);
+        assert!(
+            first_ci(&stripped, "<d>").is_none() && first_ci(&stripped, "</d>").is_none(),
+            "the dead dialogue markers must still go: {stripped}"
+        );
+        for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+            assert!(
+                stripped.contains(label),
+                "{label} is the engine's own reference label and must survive: {stripped}"
+            );
+        }
+        assert!(stripped.contains("[English] Delivery."), "{stripped}");
+
+        // Through the real reply path for both H3 partitions, which is where a refined film prompt
+        // actually meets the ban.
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            let refined = finalize_refined_output(&baited, false, Some(model_id));
+            for label in ["<Picture 1>", "<Picture 2>", "<Audio 1>", "<Video 1>"] {
+                assert!(refined.contains(label), "{model_id}: {refined}");
+            }
+            assert!(first_ci(&refined, "<d>").is_none(), "{model_id}: {refined}");
+        }
     }
 
     #[test]
@@ -3296,6 +3700,7 @@ mod tests {
         let err = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: dir.path().to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3332,6 +3737,7 @@ mod tests {
         let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
         let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
@@ -3424,6 +3830,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
 
@@ -3515,6 +3922,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
+            projector_source: None,
             quantize: None,
         };
 
@@ -3622,6 +4030,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3695,6 +4104,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3770,6 +4180,7 @@ mod tests {
         let describer = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
+                projector_source: None,
                 quantize: None,
             },
             &reqs,
@@ -3835,6 +4246,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&request),
@@ -3913,6 +4325,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &ModelRequirements::from_request(&request),
@@ -3967,8 +4380,8 @@ mod tests {
     #[ignore = "real-weight: needs an optional Qwen-Image-2.1-PE checkpoint staged + a Metal device"]
     fn qwen_prompt_rewrite_real_weights() {
         use crate::qwen_prompt_rewrite::{
-            load_system_prompt, parse_rewrite, suggested_resolution, Rewriter,
-            REWRITE_MAX_NEW_TOKENS, REWRITE_TEMPERATURE, REWRITE_TOP_K, REWRITE_TOP_P,
+            load_system_prompt, parse_rewrite, suggested_resolution, Rewriter, REWRITE_TEMPERATURE,
+            REWRITE_TOP_K, REWRITE_TOP_P, T2I_MAX_NEW_TOKENS,
         };
         use gen_core::core_llm::{
             LoadSpec, Message, ModelRequirements, Sampling, StreamEvent, TextLlmRequest,
@@ -4004,7 +4417,7 @@ mod tests {
                 top_k: REWRITE_TOP_K,
                 ..Sampling::default()
             },
-            max_new_tokens: REWRITE_MAX_NEW_TOKENS,
+            max_new_tokens: T2I_MAX_NEW_TOKENS,
             seed: None,
             ..Default::default()
         };
@@ -4014,6 +4427,9 @@ mod tests {
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
                 quantize: None,
+                // The PE checkpoints carry their vision tower inside the snapshot (`model.visual.*`),
+                // like every other `qwen3_5` wrapper, so there is no separate projector to point at.
+                projector_source: None,
             },
             &ModelRequirements::from_request(&request),
         )
@@ -4270,6 +4686,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
+                projector_source: None,
                 quantize: None,
             },
             &reqs,

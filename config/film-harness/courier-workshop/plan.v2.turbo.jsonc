@@ -17,6 +17,24 @@
   // degraded one, and the only way to say which is which is to render both.
   //
   // --------------------------------------------------------------------------------------------
+  // THE PROMPTS RESTATE THE PACK — READ THIS BEFORE COMPARING AGAINST A PHASE-3 RUN (sc-24017)
+  //
+  // This file's prompts are `plan.v2.jsonc`'s, and were written in phase 2, when the prompt was the only place a subject
+  // could be described. They therefore restate what the pack already says: "the blue work jacket",
+  // "the small bright red parcel", "the long wooden workbench", "warm late-afternoon light" are the
+  // pack's own descriptions of `courier`, `red_parcel`, `workbench_table` and `house_style`,
+  // rewritten by hand into every shot that shows them.
+  //
+  // Since epic 24017 the COMPILER inserts those descriptions itself — verbatim, from the pack, in
+  // every shot — so a phase-3 compile of this file dispatches each of them TWICE: once in the
+  // compiler's own binding or identity sentence, and once in the authored prose here.
+  //
+  // The prompt text is deliberately LEFT ALONE. This plan is the 64/72 baseline, and the phase-3
+  // evaluation's question is what the compiler's insertions change; editing the prompts would
+  // change two things at once and isolate neither. Read the duplication as a property of the
+  // BASELINE rather than as a defect to fix here, and do not "tidy" these prompts.
+  //
+  // --------------------------------------------------------------------------------------------
   // WHICH ADAPTERS, AND WHY THESE TWO
   //
   // The plan declares the LoRAs ONCE on the family, exactly as it declares `tier` once. Each
@@ -94,7 +112,10 @@
   //     one workbench, all from the same verbatim workshop description. This is the pack the
   //     sc-23405 evidence was produced against:
   //     `~/SceneWorks/film-harness-evidence/sc-23403/courier-refs/references.jsonc`. It is NOT
-  //     checked in (PNGs), so it is named by `--references` at the command line.
+  //     checked in (PNGs), so it is named by `--references` at the command line. Being out of the
+  //     repo, it does not move when the pack schema does: it must declare
+  //     `"schemaVersion": 2` (`REFERENCE_PACK_SCHEMA_VERSION`), and an older copy is refused by
+  //     version rather than read.
   //   * a pack the user supplied themselves, with the same seven roles.
   //
   //   film-harness run \
@@ -134,7 +155,7 @@
   // reference-conditioned step at 576x320 costs ~143 s. `plan.jsonc`'s 2700 s cuts a legitimate
   // reference shot at roughly step 14 of 50. `maxRunSeconds` is six of those ceilings (64800), so
   // the run bound is the shot bound times the shots and neither is a runaway.
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "courier-workshop-v2",
   "version": 1,
   "title": "Courier at the Workshop (references)",
@@ -185,7 +206,7 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Empty workshop, door closed, workbench clear.",
       "endState": "Door open, courier standing in the doorway holding the red parcel, workbench still clear.",
-      "sound": "Room tone, distant birds, a door latch clicking and the door creaking open.",
+      "audio": "Room tone, distant birds, a door latch clicking and the door creaking open. No music.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
@@ -206,7 +227,7 @@
       // Placed against SH020 so the two-shot smoke (`--shots SH010,SH020`) exercises all three
       // buses: a line inside the second shot, with both beds running continuously under the cut.
       "dialogueClip": { "role": "courier_line", "offsetSeconds": 1.2, "gain": 1.0 },
-      "sound": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone.",
+      "audio": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone. No music.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
@@ -224,7 +245,7 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Parcel in the courier's hands above the bench.",
       "endState": "Red parcel resting on the workbench, hands gone.",
-      "sound": "Soft thump of cardboard on wood, sleeves rustling, room tone.",
+      "audio": "Soft thump of cardboard on wood, sleeves rustling, room tone. No music.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["courier", "red_parcel", "workbench_table", "workshop_location"]
@@ -242,7 +263,7 @@
       "targetDurationSeconds": 5.1667,
       "startState": "Courier at the bench, red parcel on the bench.",
       "endState": "Door closed, workshop empty except for the red parcel on the bench.",
-      "sound": "Footsteps receding, door creak and latch, then room tone.",
+      "audio": "Footsteps receding, door creak and latch, then room tone. No music.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["courier", "red_parcel", "workshop_location", "workbench_table"]
@@ -256,13 +277,13 @@
       "beatId": "discovery",
       "beat": "The recipient enters and notices the parcel.",
       "framing": "medium, recipient enters camera-left, bench centre",
-      "prompt": "The recipient in the grey work apron with rolled sleeves enters the cluttered woodworking workshop through the door on the left, wiping her hands on a rag, hand tools on the pegboard behind her. She stops as she notices the small bright red parcel sitting on the long wooden workbench in the centre and walks toward it. Warm late-afternoon light, film grain.",
+      "prompt": "The recipient in the grey work apron with rolled sleeves enters the cluttered woodworking workshop through the door on the left, wiping his hands on a rag, hand tools on the pegboard behind him. He stops as he notices the small bright red parcel sitting on the long wooden workbench in the centre and walks toward it. Warm late-afternoon light, film grain.",
       "targetDurationSeconds": 5.1667,
       "startState": "Empty workshop, red parcel on the bench, door closed.",
       "endState": "Recipient standing at the bench looking down at the parcel.",
       "dialogue": "Recipient (quietly): \"Huh. That's not mine.\"",
       "dialogueClip": { "role": "recipient_line", "offsetSeconds": 2.6, "gain": 1.0 },
-      "sound": "Door opening, footsteps, a rag dropped on the bench, room tone.",
+      "audio": "Door opening, footsteps, a rag dropped on the bench, room tone. No music.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["recipient", "red_parcel", "workshop_location", "workbench_table"]
@@ -276,13 +297,13 @@
       "beatId": "opening",
       "beat": "The recipient opens the parcel.",
       "framing": "close on hands and parcel, slight high angle",
-      "prompt": "Close-up on the small bright red parcel on the sawdust-covered wooden workbench of the cluttered woodworking workshop. The recipient's hands, with the grey apron sleeve, tear the tape, fold back the flaps and lift the lid, and a soft warm glow from inside lights her fingers. Shallow depth of field, warm late-afternoon light, film grain.",
+      "prompt": "Close-up on the small bright red parcel on the sawdust-covered wooden workbench of the cluttered woodworking workshop. The recipient's hands, with the grey apron sleeve, tear the tape, fold back the flaps and lift the lid, and a soft warm glow from inside lights his fingers. Shallow depth of field, warm late-afternoon light, film grain.",
       "targetDurationSeconds": 5.1667,
       "startState": "Sealed red parcel on the bench, recipient's hands entering frame.",
       "endState": "Parcel open, flaps folded back, hands resting on the bench beside it.",
       "dialogue": "Recipient (whisper): \"Oh. Oh, that's lovely.\"",
       "dialogueClip": { "role": "recipient_reveal_line", "offsetSeconds": 3.0, "gain": 0.8, "fadeOutSeconds": 0.4 },
-      "sound": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
+      "audio": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
       "conditioning": {
         "mode": "reference_to_video",
         "referenceRoles": ["recipient", "red_parcel", "workbench_table", "workshop_location"]

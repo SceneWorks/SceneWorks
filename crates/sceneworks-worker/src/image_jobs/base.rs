@@ -7486,6 +7486,71 @@ pub(crate) fn load_reference_image(
     asset_id: &str,
     project_path: &Path,
 ) -> WorkerResult<Image> {
+    // Every caller that existed before sc-24113 keeps upstream-parity truncation, byte-for-byte.
+    load_reference_image_with(
+        data_dir,
+        project_id,
+        asset_id,
+        project_path,
+        FlattenPolicy::Truncate,
+    )
+}
+
+/// How a reference that CARRIES an alpha channel is reduced to the 3-channel `gen_core::Image`
+/// every engine at this pin takes (sc-24113).
+///
+/// A PARITY knob, not a quality one, and both answers are correct — for different upstream
+/// pipelines:
+///
+/// * [`Truncate`](FlattenPolicy::Truncate) drops the fourth byte, which is what
+///   `DynamicImage::to_rgb8()` does and what upstream `PIL.Image.convert("RGB")` does. Every edit
+///   model SceneWorks shipped before 2.1 — SDXL inpaint, FLUX.2 edit, Kolors IP-adapter,
+///   `qwen_image_edit_2511` — is compared against a reference implementation that truncates, so
+///   this is the only answer that keeps them at parity, and it is the default for that reason.
+/// * [`OverWhite`](FlattenPolicy::OverWhite) composites straight (un-premultiplied) alpha over an
+///   opaque white backdrop, matching the S4 contract's `RgbaImage::to_rgb_over_white()`.
+///   Qwen-Image 2.1 feeds its VISION tower the composited copy, so its reference path wants this.
+///
+/// ⚠️ The two are IDENTICAL on an opaque image (`A=255`) and differ MAXIMALLY on a transparent one,
+/// because 2.1's alpha is straight: `A=0` does NOT zero RGB, so a transparent pixel keeps whatever
+/// colour it was authored with. A blanket change of this default would therefore move every
+/// existing model silently rather than loudly — which is exactly what the first cut of sc-24113 did.
+///
+/// Note for sc-24110 (S3-SW), which owns the 2.1 reference carrier: once
+/// `Conditioning::ReferenceRgba` lands, an alpha-carrying 2.1 reference travels UN-FLATTENED with
+/// all four channels reaching the VAE, and this policy governs only the composited copy the vision
+/// tower gets. The parameter is left in place for that call site.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum FlattenPolicy {
+    /// Drop the alpha byte — upstream `convert("RGB")` semantics. Every pre-2.1 lane.
+    #[default]
+    Truncate,
+    /// Composite straight alpha over opaque white — the S4 `to_rgb_over_white()` semantics.
+    ///
+    /// Constructed only by tests at this pin: `qwen_image_2_1` has no worker-side reference route
+    /// until the terminal bump, so there is no production caller to pass it yet (item 8d of the
+    /// `PENDING_PIN_ENGINE_IDS` checklist). The variant exists now so the parity DECISION is made
+    /// and tested once, rather than under time pressure when sc-24110's route lands.
+    #[allow(dead_code)]
+    OverWhite,
+}
+
+/// [`load_reference_image`] with an explicit [`FlattenPolicy`].
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn load_reference_image_with(
+    data_dir: &Path,
+    project_id: &str,
+    asset_id: &str,
+    project_path: &Path,
+    flatten: FlattenPolicy,
+) -> WorkerResult<Image> {
     let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
         .get_asset(project_id, asset_id)
         .map_err(|error| {
@@ -7507,39 +7572,34 @@ pub(crate) fn load_reference_image(
     let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
         WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
     })?;
-    // sc-24113: an alpha-carrying reference is COMPOSITED over white, never truncated.
+    // sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the
+    // default is upstream-parity truncation. See [`FlattenPolicy`] for why both answers are
+    // correct and why the default must not move: `to_rgb8()` drops the fourth byte exactly as
+    // `PIL.Image.convert("RGB")` does, which is what every pre-2.1 edit model is compared against.
     //
-    // `DynamicImage::to_rgb8()` converts RGBA→RGB by DROPPING the fourth byte, which is exactly
-    // what the S4 RGBA contract says a flattening consumer must not do: 2.1's alpha is STRAIGHT
-    // (un-premultiplied) and `A=0` does NOT zero RGB, so a fully transparent pixel keeps whatever
-    // colour it was authored with. Truncating therefore turns a transparent background into
-    // whatever garbage the encoder happened to leave in the RGB planes — commonly black — and
-    // hands the VAE a reference the user never saw. Compositing matches the engine's own
-    // `RgbaImage::to_rgb_over_white()`, so the two agree on what a flattened reference looks like.
+    // `OverWhite` composites straight alpha over an opaque white backdrop, matching the S4
+    // contract's `RgbaImage::to_rgb_over_white()`. It matters only for an image that actually
+    // carries alpha, and only where the transparency is real: `A=255` makes the two identical, and
+    // `A=0` makes them maximally different because straight alpha leaves the hidden RGB intact.
     //
-    // ⚠️ Flattening AT ALL is the pin's limitation, not the desired behaviour. Under the S4
-    // contract an alpha-carrying reference travels as `Conditioning::ReferenceRgba` with all four
-    // channels reaching the VAE — a flattened reference is a DIFFERENT request, and it is the case
-    // transparent-layer editing depends on. `gen_core::RgbaImage` and that carrier do not exist at
-    // the revision this branch pins, so the worker composites and RECORDS the carrier it would have
-    // used (`qwen_alpha::reference_conditioning_kind`); the terminal pin bump replaces this
-    // function's tail with the four-channel path.
-    let carries_alpha = decoded.color().has_alpha();
-    let rgb = if carries_alpha {
-        let rgba = decoded.to_rgba8();
-        let (width, height) = (rgba.width(), rgba.height());
-        image::RgbImage::from_fn(width, height, |x, y| {
-            let [r, g, b, a] = rgba.get_pixel(x, y).0;
-            let over_white = |channel: u8| {
-                // Straight alpha over an opaque white backdrop, rounded half-up:
-                //   out = channel * a/255 + 255 * (1 - a/255)
-                let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
-                ((blended + 127) / 255) as u8
-            };
-            image::Rgb([over_white(r), over_white(g), over_white(b)])
-        })
-    } else {
-        decoded.to_rgb8()
+    // A non-alpha source takes `to_rgb8()` under either policy — the same call, the same bytes —
+    // so nothing here can perturb an ordinary opaque reference.
+    let rgb = match (flatten, decoded.color().has_alpha()) {
+        (FlattenPolicy::OverWhite, true) => {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = (rgba.width(), rgba.height());
+            image::RgbImage::from_fn(width, height, |x, y| {
+                let [r, g, b, a] = rgba.get_pixel(x, y).0;
+                let over_white = |channel: u8| {
+                    // Straight alpha over an opaque white backdrop, rounded half-up:
+                    //   out = channel * a/255 + 255 * (1 - a/255)
+                    let blended = channel as u32 * a as u32 + 255 * (255 - a as u32);
+                    ((blended + 127) / 255) as u8
+                };
+                image::Rgb([over_white(r), over_white(g), over_white(b)])
+            })
+        }
+        _ => decoded.to_rgb8(),
     };
     Ok(Image {
         width: rgb.width(),
@@ -8042,8 +8102,7 @@ pub(crate) struct QwenImage21Reference {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
-    request.model == "qwen_image_2_1"
-        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    request.model == "qwen_image_2_1" && !qwen_image_2_1_reference_ids(request).is_empty()
 }
 
 /// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
@@ -8055,15 +8114,29 @@ fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
 /// Order: `sourceAssetId`, then `maskAssetId` (an ORDINARY reference — 2.1 has no mask tensor),
 /// then `referenceAssetIds` in submitted order, then the singular `referenceAssetId`.
 ///
+/// **MODE-INDEPENDENT**, matching the router exactly. A payload with no `mode` and a
+/// `sourceAssetId`, or `mode: "image_generation"` with a `referenceAssetIds` list, is claimed by
+/// the router as a conditioned request — so if this function consulted the mode it would return
+/// empty for a job the router already admitted, and the references would be silently dropped into
+/// a plain text-to-image render. There is no mode axis in the upstream contract at all: an empty
+/// ordered list IS text-to-image and a non-empty one IS the edit call.
+///
+/// **DEDUPED by asset id, keeping the first occurrence.** The web's `editReferenceIds` leads
+/// `referenceAssetIds` with the working image while `buildEditJobBody` also sets `sourceAssetId`,
+/// so the ordinary Image-Editor payload names the same asset twice. Sending it twice is not a
+/// harmless duplicate here: every entry occupies one of the ten slots and gets its own number in
+/// the prompt template, so a duplicate silently costs a slot AND renumbers every reference after
+/// it. First-occurrence wins because the earlier slot is the one the prompt refers to.
+///
 /// **No `.take(N)`.** Every other edit lane silently truncates an over-long set; here the API
 /// refuses it with a 400 that names the cap, so a list that reaches the worker is already inside
-/// 1..=10 and truncating would only hide a routing defect.
+/// the cap and truncating would only hide a routing defect.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if !is_qwen_image_2_1_edit(request) {
+    if request.model != "qwen_image_2_1" {
         return Vec::new();
     }
     let scalar = |value: &Option<String>| -> Option<String> {
@@ -8078,6 +8151,8 @@ fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
     ids.extend(scalar(&request.mask_asset_id));
     ids.extend(request.reference_asset_ids.iter().cloned());
     ids.extend(scalar(&request.reference_asset_id));
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.retain(|id| seen.insert(id.clone()));
     ids
 }
 
@@ -8115,8 +8190,30 @@ fn resolve_qwen_image_2_1_edit(
     }
     let mut references = Vec::with_capacity(ids.len());
     for id in &ids {
-        let source =
-            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        // `FlattenPolicy::Truncate`, named EXPLICITLY rather than taken from the default
+        // (sc-24110 answering the note on [`FlattenPolicy`]).
+        //
+        // `OverWhite` is the composited copy 2.1's VISION tower consumes — and SceneWorks never
+        // produces that copy. The engine takes ONE ordered list of RGB8 images and does its own
+        // single LANCZOS fit feeding both the Qwen3-VL processor and the VAE (S3 contract), so the
+        // vision-tower composite is engine-internal and there is no call site here where those
+        // semantics apply. Passing `OverWhite` would be claiming to have done work this side does
+        // not do.
+        //
+        // The choice is also inert TODAY: the two policies are identical on an opaque image, and an
+        // alpha-carrying reference never reaches a flatten at all — `build_qwen_image_2_1_conditioning`
+        // refuses it below, because its carrier (`Conditioning::ReferenceRgba`) is not in the pinned
+        // `gen_core`. Naming it anyway is what keeps 2.1 pinned if that default is ever flipped, and
+        // it is the line that changes when the RGBA carrier lands: an alpha-carrying reference will
+        // then travel UN-FLATTENED with all four channels reaching the VAE, and this policy will
+        // govern only the composited copy — exactly as [`FlattenPolicy`]'s note describes.
+        let source = load_reference_image_with(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+            FlattenPolicy::Truncate,
+        )?;
         // sc-24111's lane, reused verbatim: the same asset, read through the same
         // `safe_project_path` confinement, for its alpha plane alone.
         let alpha = load_reference_alpha(&settings.data_dir, &request.project_id, id, project_path)?;
@@ -8136,7 +8233,9 @@ fn resolve_qwen_image_2_1_edit(
 ///   single image, one `Conditioning::MultiReference` for many. Both kinds flatten into the same
 ///   ordered list engine-side, so the single case stays byte-identical to the one-reference path.
 /// * **Never `Conditioning::Mask`.** The engine does not declare that kind and refuses it by name;
-///   a mask asset is an ordinary ordered reference (see [`qwen_image_2_1_reference_ids`]).
+///   a mask asset is an ordinary ordered reference (see [`qwen_image_2_1_reference_ids`]). Such a
+///   carrier reaches this route only from a DIRECT API CALLER OR WORKFLOW REPLAY — the Image
+///   Editor gates its mask tool on `image_inpaint`, which this model does not declare.
 /// * Strength is always `None` — upstream's condition images have no strength, and the engine
 ///   refuses anything but an unset-or-1.0 value.
 ///
@@ -8209,6 +8308,56 @@ fn resolve_qwen_image_2_1_edit_images(
     let references = resolve_qwen_image_2_1_edit(request, settings, project_path)?;
     build_qwen_image_2_1_conditioning(&references)?;
     Ok(references.into_iter().map(|entry| entry.image).collect())
+}
+
+/// Refuse a Qwen-Image 2.1 render whose generic-lane slots carry anything but the ordered
+/// reference list (sc-24110).
+///
+/// The never-a-Mask guarantee has to hold on the path that actually RUNS. What `generate_one`
+/// sends is [`build_lane_conditioning`]`(identity_init, &edit_refs, edit_mask)` — so
+/// [`build_qwen_image_2_1_conditioning`] can state the contract perfectly and still be bypassed if
+/// either of the other two slots is ever populated for this model. Today neither is
+/// (`resolve_generic_lane_conditioning` is a per-family table and 2.1 is in none of its arms, and
+/// the candle lane's `edit_reference` is likewise family-keyed), which is exactly the problem: it
+/// holds by accident of a table this model is absent from, and adding an arm for it would silently
+/// start sending the engine a `Conditioning::Mask` it refuses by name, or an img2img-init
+/// `Reference` carrying a strength it also refuses.
+///
+/// So the invariant is ASSERTED at the seam rather than inferred. Erroring is the right answer
+/// over quietly clearing the slots: a populated slot means some caller believes this model has an
+/// img2img or inpaint surface, and it does not — upstream's pipeline takes only an ordered list of
+/// condition images (S3 contract).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn guard_qwen_image_2_1_lane_slots(
+    request: &ImageRequest,
+    identity_init: Option<&(Image, f32)>,
+    edit_mask: Option<&Image>,
+) -> WorkerResult<()> {
+    if request.model != "qwen_image_2_1" {
+        return Ok(());
+    }
+    if edit_mask.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "qwen_image_2_1: an inpaint mask reached the generic lane's mask slot, which would be \
+             sent as Conditioning::Mask — a carrier this engine does not declare and refuses by \
+             name. 2.1 has no mask tensor and performs no inpainting: draw the annotation into the \
+             reference, or pass the mask as an ordinary ordered reference the prompt names."
+                .to_owned(),
+        ));
+    }
+    if identity_init.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "qwen_image_2_1: an img2img-init reference reached the generic lane's single-reference \
+             slot, which would be sent with a strength. Upstream's condition images have no \
+             strength and this engine refuses one; every 2.1 reference travels in the ordered \
+             conditioning list instead."
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
@@ -9051,6 +9200,12 @@ async fn generate_stream(
     } else {
         Vec::new()
     };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs.
+    guard_qwen_image_2_1_lane_slots(
+        request,
+        identity_init.as_ref(),
+        ideogram_edit_mask.as_ref(),
+    )?;
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
@@ -11485,6 +11640,10 @@ async fn generate_candle_stream(
     } else {
         Vec::new()
     };
+    // The never-a-Mask / never-a-strength guarantee, on the path that actually runs — the candle
+    // twin of the MLX call. `edit_reference` is this lane's single-reference (img2img-init) slot
+    // and `edit_mask` its mask slot; both must stay empty for 2.1.
+    guard_qwen_image_2_1_lane_slots(request, edit_reference.as_ref(), edit_mask.as_ref())?;
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
     }

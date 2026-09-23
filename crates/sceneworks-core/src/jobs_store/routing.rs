@@ -332,6 +332,17 @@ pub fn qwen_image_2_1_reference_ids(payload: &Map<String, Value>) -> Option<Vec<
     if let Some(id) = scalar(payload, "referenceAssetId")? {
         ids.push(id.to_owned());
     }
+    // DEDUPE by asset id, keeping the FIRST occurrence — and this is a correctness fix, not tidying.
+    //
+    // The web's `editReferenceIds` leads `referenceAssetIds` with the working image while
+    // `buildEditJobBody` also sets `sourceAssetId`, so the ordinary Image-Editor payload names the
+    // same asset twice. On this engine every entry occupies one of the model's slots AND gets its
+    // own number in the prompt template, so sending it twice silently costs a slot and renumbers
+    // every reference after it — a duplicate is not a harmless repeat, it changes the render and
+    // the count the cap is measured against. First occurrence wins because the earlier slot is the
+    // one the prompt refers to.
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.retain(|id| seen.insert(id.clone()));
     Some(ids)
 }
 

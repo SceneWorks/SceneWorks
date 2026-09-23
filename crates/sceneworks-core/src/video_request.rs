@@ -768,6 +768,11 @@ pub fn image_max_reference_assets(model_manifest_entry: &JsonObject) -> Option<u
 /// family it would change it twice over, because the ordered list is semantic: the template numbers
 /// the images (`<image1>` …) and block-causal attention makes each one visible only to what follows,
 /// so silently shortening the list re-numbers every reference after the cut.
+///
+/// `references` is the FLATTENED ordered conditioning list, not `referenceAssetIds.len()` — the
+/// engine receives ONE list and `sourceAssetId` / `maskAssetId` are entries in it (sc-24110). The
+/// wording below says so, because naming a single carrier would send the caller to trim a field
+/// that may not even be the one over budget.
 pub fn image_reference_limit_error(
     model: &str,
     references: usize,
@@ -778,12 +783,14 @@ pub fn image_reference_limit_error(
         if cap == 0 {
             format!(
                 "{model} takes no reference images, but this request supplies {references}. \
-                 Remove referenceAssetIds, or choose a model that conditions on references."
+                 Remove the reference carriers (sourceAssetId, maskAssetId and referenceAssetIds), \
+                 or choose a model that conditions on references."
             )
         } else {
             format!(
                 "{model} takes up to {cap} reference images, but this request supplies \
-                 {references}. Reduce referenceAssetIds to {cap} or fewer."
+                 {references}. Reduce the ordered conditioning list (source, mask and references \
+                 together) to {cap} or fewer."
             )
         }
     })
@@ -853,6 +860,23 @@ pub fn image_dimension_error(
     let envelope = image_dimension_envelope(model_manifest_entry);
     let min = envelope.min.unwrap_or(fallback_min);
     let max = envelope.max.unwrap_or(fallback_max);
+    // The GRID is enforced only for a model that ALSO declares its own `minDimension`/`maxDimension`
+    // — i.e. one that has opted into a complete size envelope.
+    //
+    // `requiresDimensionsMultipleOf` is NOT new: six shipped `mage_flow*` image models have
+    // declared `16` for a long time, and on the image lane it had exactly one reader — the Studio's
+    // free Width/Height control, which SNAPS client-side. Enforcing it at enqueue for every
+    // declaring model turned a silent snap into a 400 and would have rejected an off-grid size
+    // those models have always accepted, including stored recipes and workflow replays (a 1000x1000
+    // Mage-Flow render is not a multiple of 16).
+    //
+    // Gating on the envelope keeps the new refusal to models that declared one — today only
+    // `qwen_image_2_1` — while leaving the Mage family exactly as it was. It is also the honest
+    // reading: a bare stride was authored as advice to a snapping control, whereas a declared
+    // min/max/stride triple is a model stating its whole request contract.
+    let grid = envelope
+        .multiple
+        .filter(|_| envelope.min.is_some() && envelope.max.is_some());
     for (value, axis) in [(width, "width"), (height, "height")] {
         if value < min {
             return Some(format!(
@@ -866,7 +890,7 @@ pub fn image_dimension_error(
                  {axis} of {value}."
             ));
         }
-        if let Some(multiple) = envelope.multiple {
+        if let Some(multiple) = grid {
             if !value.is_multiple_of(multiple) {
                 return Some(format!(
                     "{model} renders on a {multiple}-pixel grid; this request's {axis} of {value} \
@@ -2325,7 +2349,18 @@ mod tests {
             .expect("an 11th reference must be refused");
         assert!(message.contains("up to 10"), "{message}");
         assert!(message.contains("11"), "{message}");
-        assert!(message.contains("referenceAssetIds"), "{message}");
+        // sc-24110: the wording names the ORDERED CONDITIONING LIST, not `referenceAssetIds`.
+        // The count is over the flattened list — source, mask and references together — so naming
+        // a single carrier would send the caller to trim a field that may not be the one over
+        // budget, or that may be empty while the request is still eleven images.
+        assert!(
+            message.contains("ordered conditioning list"),
+            "the refusal must name what is actually counted: {message}"
+        );
+        assert!(
+            message.contains("source, mask and references together"),
+            "…and spell out which carriers that is: {message}"
+        );
     }
 
     #[test]
@@ -2337,6 +2372,77 @@ mod tests {
         let message = image_reference_limit_error("plain_model", 1, &entry).expect("refused");
         assert!(message.contains("takes no reference images"), "{message}");
         assert_eq!(image_reference_limit_error("plain_model", 0, &entry), None);
+    }
+
+    /// sc-24113 REGRESSION: a bare `requiresDimensionsMultipleOf` must NOT become an enqueue
+    /// refusal for the models that already declared one.
+    ///
+    /// Six shipped `mage_flow*` image entries declare `16` with no min/max, and on the image lane
+    /// that key had exactly ONE reader before this story — the Studio's free Width/Height control,
+    /// which SNAPS. Enforcing the grid for every declaring model turned that silent snap into a
+    /// 400 and would have rejected sizes those models have always accepted, including stored
+    /// recipes and workflow replays: 1000×1000 is not a multiple of 16.
+    ///
+    /// Read off the REAL manifest rather than a fixture, because the claim is about what is
+    /// shipped. Dropping the `envelope.min.is_some() && envelope.max.is_some()` gate in
+    /// `image_dimension_error` reds every row below.
+    #[test]
+    fn a_bare_dimension_stride_stays_advisory_for_the_models_that_already_declared_one() {
+        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("models array");
+
+        let striding: Vec<&Value> = models
+            .iter()
+            .filter(|model| model["type"] == "image")
+            .filter(|model| model["limits"]["requiresDimensionsMultipleOf"].is_number())
+            .collect();
+        // Anti-collapse: if the filter ever matches nothing, every assertion below is vacuous.
+        assert!(
+            striding.len() >= 7,
+            "expected the six mage_flow* entries plus qwen_image_2_1, got {}",
+            striding.len()
+        );
+
+        for model in striding {
+            let id = model["id"].as_str().expect("model id").to_owned();
+            let entry = model.as_object().expect("model object").clone();
+            let declares_envelope = model["limits"]["minDimension"].is_number()
+                && model["limits"]["maxDimension"].is_number();
+
+            if id.starts_with("mage_flow") {
+                assert!(
+                    !declares_envelope,
+                    "{id} gained a size envelope — re-read this test before re-pinning it"
+                );
+                // 1000 is off the ÷16 grid and comfortably inside the blanket bounds: exactly the
+                // shape a stored recipe replays.
+                assert_eq!(
+                    image_dimension_error(&id, 1000, 1000, &entry, 256, 4096),
+                    None,
+                    "{id} must still enqueue an off-grid size"
+                );
+                // ... and an on-grid one, so the row cannot pass by refusing everything.
+                assert_eq!(
+                    image_dimension_error(&id, 1024, 1024, &entry, 256, 4096),
+                    None
+                );
+                // The blanket bounds still apply — the gate narrows the GRID check, not the range.
+                assert!(image_dimension_error(&id, 200, 1024, &entry, 256, 4096).is_some());
+            } else {
+                // A model that declares the full envelope DOES get the grid enforced.
+                assert_eq!(
+                    id, "qwen_image_2_1",
+                    "a new envelope-declaring model appeared"
+                );
+                assert!(declares_envelope);
+                let message = image_dimension_error(&id, 1000, 1000, &entry, 256, 4096)
+                    .expect("2.1 enforces its declared grid");
+                assert!(message.contains("32-pixel grid"), "{message}");
+            }
+        }
     }
 
     #[test]

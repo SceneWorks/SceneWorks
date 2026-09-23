@@ -724,6 +724,62 @@
 /* A boolean control in the Simple settings bar (sc-24113). Simple had no checkbox pattern — every
    control until now was a select, a chip row or a tile — so this is the first one, kept to the
    same 34px row height as `.su-chip` so it lines up with its neighbours in the bar. */
+/* The Advanced disclosure (sc-24113). Simple's contract is a reduced SURFACE, so the controls a
+   model declares live behind one fold that is closed by default rather than lengthening the
+   settings bar for everyone. */
+.su-advanced {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: var(--surface);
+}
+
+.su-advanced-summary {
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.su-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.su-advanced-summary::after {
+  content: "\203A";
+  float: right;
+  transform: rotate(90deg);
+  opacity: 0.6;
+}
+
+.su-advanced[open] .su-advanced-summary::after {
+  transform: rotate(-90deg);
+}
+
+.su-advanced-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 0 14px;
+}
+
+.su-free-size-row {
+  display: flex;
+  gap: 8px;
+}
+
+.su-free-size-row .su-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.su-error {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--danger, #c0392b);
+}
+
 .su-checkline {
   display: flex;
   align-items: center;
