@@ -313,6 +313,12 @@ export function ImageStudio() {
     createImageJob,
     createPreset,
     refinePrompt,
+    // sc-24113's Qwen 2.1 prompt rewriter. App.jsx has always passed it (it is in the provider's
+    // value list beside `refinePrompt`), but this destructure never picked it up, so
+    // `qwenRewriteAvailable`'s `typeof qwenRewritePrompt === "function"` guard read an undefined
+    // global: a ReferenceError at render in a module that is not in strict-undefined territory only
+    // because eslint caught it first. Destructured here, beside the sibling it mirrors.
+    qwenRewritePrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,

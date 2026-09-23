@@ -17,6 +17,10 @@
 // destination size, `getImageData` / `putImageData`, `fillRect`. No transforms, no paths, no
 // interpolation beyond nearest-neighbour. That is what the export paths under test use.
 
+// `Buffer` is a Node global, but this file lives under `src/` where the eslint config declares
+// browser globals only — so it must be imported explicitly rather than relied on ambiently. Same
+// reason `node:zlib` is imported beside it.
+import { Buffer } from "node:buffer";
 import { deflateSync, inflateSync } from "node:zlib";
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];

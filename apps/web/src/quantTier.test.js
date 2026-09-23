@@ -852,7 +852,7 @@ describe("qwen_image_2_1 tier surface", () => {
     // behind. The picker shape must not need a second edit to catch up.
     const published = projectTierShapes({
       ...entry,
-      downloads: entry.downloads.map(({ pendingArtifact, ...download }) => download),
+      downloads: entry.downloads.map(({ pendingArtifact: _pendingArtifact, ...download }) => download),
     });
     expect(installedTiers(published)).toEqual(["q4", "q8", "bf16"]);
     // …and with three installed tiers the generation-time selector opens, on both platforms.
