@@ -2014,6 +2014,96 @@
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q8-seed16353-step2"
     },
+    "qwen_image_2_1:bf16:candle": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-bf16-1024-seed16402-step2"
+    },
+    "qwen_image_2_1:bf16:mlx": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+      "fixture": "qwen-image-2-1-mlx-bf16-1024-seed22732-step2"
+    },
+    "qwen_image_2_1:q4:candle": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-q4-1024-seed16402-step2"
+    },
+    "qwen_image_2_1:q4:mlx": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+      "fixture": "qwen-image-2-1-mlx-q4-1024-seed22732-step2"
+    },
+    "qwen_image_2_1:q8:candle": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-q8-1024-seed16402-step2"
+    },
+    "qwen_image_2_1:q8:mlx": {
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+      "fixture": "qwen-image-2-1-mlx-q8-1024-seed22732-step2"
+    },
     "qwen_image_edit_2511:bf16:candle": {
       "provider": "qwen_image_edit",
       "mode": "edit_image",

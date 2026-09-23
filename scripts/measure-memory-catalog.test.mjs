@@ -477,6 +477,64 @@ test("an artifact is resolved per (lane, tier), including the flat upstream leg 
   assert.match(missingTier.reason, /^no SceneWorks\/wan2\.2-ti2v-5b-candle@[0-9a-f]{8}\/q4 on this host$/);
 });
 
+// sc-24112. A `pendingArtifact` download row carries the null-SHA placeholder for an artifact not yet
+// on the Hub. It must classify as `weights_missing` NAMING the pending row — never a probe of
+// `@00000000` — and `--download-missing` must report it unfetchable rather than pass the placeholder
+// to `--revision`. A LOCAL manifest literal, so the test does not expire when the real upload pins
+// the shipped rows.
+test("a pendingArtifact tier is weights_missing and unfetchable, and its published siblings are not", async () => {
+  const PENDING = "0".repeat(40);
+  const models = [{
+    id: "split_model",
+    downloads: [
+      { provider: "huggingface", repo: "Up/Stream", revision: REVISION, variant: "bf16", files: [] },
+      { provider: "huggingface", repo: "SceneWorks/split-mlx", revision: PENDING, variant: "q8", pendingArtifact: true, files: ["q8/*"] },
+      { provider: "huggingface", repo: "SceneWorks/split-mlx", revision: PENDING, variant: "q4", pendingArtifact: true, files: ["q4/*"] },
+    ],
+  }];
+  const family = {
+    env: "SPLIT", repo: "SceneWorks/split-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "SPLIT_BF16", repo: "Up/Stream", layout: "flat" } },
+  };
+  const families = { split_model: family };
+  const hub = await fakeHub([["Up/Stream", REVISION]]);
+
+  const pending = await resolveArtifactRoot(models, "split_model", "q8", familyArtifact(family, "mlx", "q8"), [hub]);
+  assert.equal(pending.root, null);
+  assert.equal(pending.revision, null);
+  assert.match(pending.reason, /^SceneWorks\/split-mlx\/q8 is a pendingArtifact download/);
+  assert.ok(!pending.expected.includes(PENDING), "the placeholder SHA is never probed as a snapshot");
+
+  const dense = await resolveArtifactRoot(models, "split_model", "bf16", familyArtifact(family, "candle", "bf16"), [hub]);
+  assert.equal(dense.root, snapshotPath(hub, "Up/Stream", REVISION), "the flat bf16 leg is the snapshot root");
+
+  const row = (tier, backend) => ({ key: `split_model:${tier}:${backend}`, modelId: "split_model", tier, backend, provider: "split_model" });
+  const q4 = anchorDownloadTargets(row("q4", "candle"), models, { families, platform: "linux" });
+  assert.deepEqual(q4.targets, []);
+  assert.equal(q4.unfetchable.length, 1);
+  assert.match(q4.unfetchable[0], /pendingArtifact/);
+  const bf16 = anchorDownloadTargets(row("bf16", "mlx"), models, { families, platform: "macos" });
+  assert.deepEqual(bf16.unfetchable, []);
+  assert.deepEqual(bf16.targets.map((target) => [target.repo, target.revision, target.include]), [["Up/Stream", REVISION, []]]);
+});
+
+// sc-24112. Qwen-Image 2.1 is a split-repo family: its packed tiers are the SceneWorks re-host's
+// `<tier>/` subdirs and its bf16 tier is the upstream snapshot at its ROOT, on both lanes. Asserted
+// structurally so it holds before and after the terminal upload pins the re-host revision.
+test("qwen_image_2_1 binds the packed re-host per tier and the upstream snapshot root at bf16", () => {
+  const family = PROVIDER_FAMILIES.qwen_image_2_1;
+  for (const backend of family.arms) {
+    for (const tier of ["q4", "q8"]) {
+      assert.deepEqual(familyArtifact(family, backend, tier), {
+        env: "QWEN_IMAGE_2_1", repo: "SceneWorks/qwen-image-2-1-mlx", layout: "tiered",
+      });
+    }
+    assert.deepEqual(familyArtifact(family, backend, "bf16"), {
+      env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat",
+    });
+  }
+});
+
 test("classification: runnable anchors carry the adapter env family and the canonical tier root", async () => {
   const hub = await fakeHub([
     ["SceneWorks/qwen-image-mlx", REVISION, "q4"],
@@ -2364,9 +2422,10 @@ async function pinnedLoaderGaps() {
 /**
  * sc-24112: the gaps excused because the PINNED runtime does not register the provider AT ALL, so
  * neither lane's capture adapter can have an arm for it and no change in this repository can make
- * the cell capturable. `qwen_image_2_1` is the case: its engine lands in inference at the epic's
- * terminal pin bump, and the checked-in engine-capability dumps — which cannot be re-taken at this
- * pin — are where that absence is recorded.
+ * the cell capturable. `qwen_image_2_1` WAS the case until the feature-branch pin registered its
+ * engine (b12c632b): the dumps then carried the provider, the excuse emptied itself as designed, and
+ * the adapter arms and plan anchors landed with it. The checked-in engine-capability dumps are where
+ * such an absence is recorded.
  *
  * Not an allowlist, for the same reason `pinnedLoaderGaps` is not one: the excuse is re-derived
  * from the dumps themselves, so it EMPTIES ITSELF at the pin bump. The moment the dumps carry the

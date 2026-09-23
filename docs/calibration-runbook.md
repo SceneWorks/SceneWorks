@@ -776,8 +776,8 @@ SCENEWORKS_IDEOGRAM_REPOSITORY=SceneWorks/ideogram-4-mlx     # fixed; validated 
 SCENEWORKS_IDEOGRAM_REVISION=<exact artifact revision>
 SCENEWORKS_IDEOGRAM_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # q4 | q8 ONLY — bf16 is the family below
 
-# BOTH adapters — the Ideogram bf16 tier (sc-22732). It is the ONLY shipped cell in the catalog whose
-# tier is not in its family's default repository: the MLX-quantized turnkey above is not bf16, so the
+# BOTH adapters — the Ideogram bf16 tier (sc-22732). Its tier is not in its family's default
+# repository (qwen_image_2_1 below is the other such family): the MLX-quantized turnkey above is not bf16, so the
 # worker resolves this separate repo at a separate revision (`image_jobs/base.rs` IDEOGRAM_BF16_REPO)
 # and so must a capture. Binding bf16 through the packed family would name the wrong repository AND
 # the wrong revision in the record's loadability fingerprint — the one claim about the snapshot that
@@ -786,6 +786,20 @@ SCENEWORKS_IDEOGRAM_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # q4 | q8 ONLY 
 SCENEWORKS_IDEOGRAM_BF16_REPOSITORY=SceneWorks/ideogram-4    # fixed; validated against IDEOGRAM_BF16_REPOSITORY
 SCENEWORKS_IDEOGRAM_BF16_REVISION=<exact artifact revision>
 SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
+
+# BOTH adapters — qwen_image_2_1 (sc-24112). The second split-repo family, Ideogram's shape with the
+# halves swapped: q8/q4 are the `<tier>/` subdirs of the SceneWorks re-host, and bf16 IS the upstream
+# `Qwen/Qwen-Image-2.1` snapshot at its ROOT (the converter refuses to emit a `bf16/` copy), exactly
+# the directories the worker's `qwen_image_2_1_declared_tier_dir` resolves. The re-host rows are
+# `pendingArtifact` (null-SHA placeholder) until the epic's terminal upload pins them; until then
+# `--list` reports q8/q4 `weights_missing` naming the pending row and `--download-missing` refuses to
+# fetch them. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
+SCENEWORKS_QWEN_IMAGE_2_1_REPOSITORY=SceneWorks/qwen-image-2-1-mlx  # fixed; validated against QWEN_IMAGE_2_1_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8 ONLY — bf16 is the family below
+SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY=Qwen/Qwen-Image-2.1       # fixed; validated against QWEN_IMAGE_2_1_BF16_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
 
 # BOTH adapters — the SenseNova-U1 family (sc-22734). SIX catalog ids on TWO engine ids, and SIX
 # env families: each id ships its OWN independently pinned tiered rehost, so the arm resolves the
