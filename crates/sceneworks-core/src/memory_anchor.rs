@@ -1395,6 +1395,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-q4-mlx-evidence.json"),
     ),
     (
+        "docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json"),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),

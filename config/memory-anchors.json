@@ -6987,6 +6987,51 @@
       "overallAllocatorEnvelopeBytes": 24862009684
     },
     {
+      "id": "qwen_image_2_1:mlx:q8:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-f2821e51ea2feb7865aa",
+      "modelId": "qwen_image_2_1",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json",
+        "sha256": "7911ea21b9bc01f0793cfd6eb8c797ed01539059c68d5309d6ee112891450a9e",
+        "recordId": "imc-f2821e51ea2feb7865aa",
+        "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+        "loaderClosureDigest": "f7322afaef2c4ac06ed49b932e706ead37aeee0d683ec3294fcc488855b138f6"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 19038984660,
+        "denoise": 24334935460,
+        "decode": 24215900116
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 19415119120,
+        "denoise": 31892449748,
+        "decode": 24220684244
+      },
+      "overallAllocatorEnvelopeBytes": 31892449748
+    },
+    {
       "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
       "modelId": "qwen_image_edit_2511",
       "modelFamily": "qwen-image",
@@ -12400,17 +12445,6 @@
       "modelFamily": "qwen-image-2-1",
       "route": "qwen_image_2_1",
       "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:qwen_image_2_1:mlx:q8",
-      "modelId": "qwen_image_2_1",
-      "modelFamily": "qwen-image-2-1",
-      "route": "qwen_image_2_1",
-      "backend": "mlx",
       "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
