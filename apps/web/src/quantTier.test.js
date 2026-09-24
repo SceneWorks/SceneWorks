@@ -938,7 +938,7 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
       expect(tierFits(variantOf(model, "q4"), 32, options), `${backend} q4`).toBe(true);
       expect(tierFits(variantOf(model, "bf16"), 32, options), `${backend} bf16`).toBe(false);
     }
-    // The pre-selected tier is the densest that fits: q8 on a 32 GB card (its 29 floor admits
+    // The pre-selected tier is the densest that fits: q8 on a 32 GB card (its 30 floor admits
     // it), q4 on a 32 GB Mac (q8's footprint estimate is over 32 x 0.9).
     expect(suggestTier(model, 32, { backend: "candle" })).toBe("q8");
     expect(suggestTier(model, 32, { backend: "mlx" })).toBe("q4");
