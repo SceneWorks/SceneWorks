@@ -3753,6 +3753,8 @@
           "installed": false,
           "installedPath": null,
           "missingRequiredFiles": [],
+          "pendingArtifact": false,
+          "tierDeletable": true,
           "variant": "default"
         }
       ]

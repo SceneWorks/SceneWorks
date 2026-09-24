@@ -2182,7 +2182,10 @@ pub(super) fn run_loaded_video_generation(
             }),
             adapter_apply_reports: generator.adapter_apply_reports(),
         }),
-        GenerationOutput::Images(_) => Err(WorkerError::Engine(
+        // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
+        // unreachable on this path — no video request sets `output_channels` — but the match
+        // must name it rather than let a four-channel still arrive unannounced.
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
         )),
         // `GenerationOutput::Audio` arrived with the candle-audio lane (sc-12834); no video engine

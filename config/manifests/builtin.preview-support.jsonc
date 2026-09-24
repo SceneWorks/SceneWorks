@@ -7,11 +7,11 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "81fda3bd5a9d5920ad9cdc62796df3305be96742",
-      "audioInferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a"
+      "inferenceRevision": "d2b8cb3352e1b43983efd8ac833122e95db53ae7",
+      "audioInferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd"
     },
     "mlx": {
-      "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a"
+      "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd"
     }
   },
   "models": {
@@ -170,6 +170,10 @@
     "qwen_image": {
       "candle": true,
       "mlx": true
+    },
+    "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
     },
     "qwen_image_edit": {
       "mlx": true

@@ -14,9 +14,30 @@ import {
   buildSimpleImageRequest,
   referenceStrengthFor,
   resolveSimpleTier,
+  simpleNativeControls,
+  simpleRewriteReferenceIds,
+  simpleRewriteResolutionTarget,
   workerAdvertises,
 } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
+// sc-24113 — Qwen-Image 2.1's controls in the Simple shell. Simple exposes the model, so it gets
+// the same transparency toggle and the same rewrite affordance; what it does NOT get is a second,
+// simplified version of either, which is why both reuse the advanced modules verbatim.
+import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
+import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
+import {
+  dimensionConstraintMessage,
+  evaluateModelDimensions,
+  modelDimensionConstraints,
+} from "../resolutionOverride.js";
+import { minStepsForModel } from "../videoModelLimits.js";
+import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
+import {
+  QWEN_IMAGE_2_1_MODEL_ID,
+  QWEN_REWRITE_I2I_MODEL_ID,
+  QWEN_REWRITE_T2I_MODEL_ID,
+} from "../constants.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
@@ -40,7 +61,11 @@ import {
 // real job queue; the reduced surface is which knobs are SHOWN, not what gets submitted
 // (see simpleJobs.js — the payload goes through the same builder the full studio uses).
 
-const VARIATION_OPTIONS = [1, 2, 4, 6].map((n) => ({ value: n, label: String(n) }));
+// The fallback variation ladder, for a model that publishes no `limits.count` (sc-24113 made the
+// declared ladder win; before that this hardcoded list was the whole story and a model asking for
+// 8 could not be given 8).
+const DEFAULT_VARIATION_OPTIONS = [1, 2, 4, 6];
+const asChipOptions = (values) => values.map((n) => ({ value: n, label: String(n) }));
 const DEFAULT_RESOLUTIONS = ["1024x1024", "1344x768", "768x1344", "896x1152", "1152x896", "1216x832"];
 const TIER_SCREEN = "image";
 
@@ -57,6 +82,7 @@ export function SimpleImageStudio() {
     loras = [],
     jobs = [],
     createLoraDownloadJob,
+    qwenRewritePrompt,
     activeProject,
   } = useAppContext();
   const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
@@ -77,6 +103,26 @@ export function SimpleImageStudio() {
   const [styleId, setStyleId] = useStudioState("image", "styleId", null);
   const [referenceAssetId, setReferenceAssetId] = useStudioState("image", "referenceAssetId", null);
   const [refineOpen, setRefineOpen] = useStudioState("image", "refineOpen", false);
+  // Transparency (sc-24113): sticky like every other Simple control, and only RENDERED for a model
+  // that advertises four-channel decode — so a value carried over from Qwen 2.1 is inert elsewhere
+  // (the payload builder re-checks the capability against the selected model).
+  const [transparentBackground, setTransparentBackground] = useStudioState(
+    "image",
+    "transparentBackground",
+    false,
+  );
+  const [qwenRewriteOpen, setQwenRewriteOpen] = useStudioState("image", "qwenRewriteOpen", false);
+  // sc-24113 — the controls Simple did not expose. Every one is STICKY like the rest of this shell
+  // and lives behind a disclosure that is COLLAPSED by default, so the reduced surface stays
+  // reduced for someone who never opens it.
+  const [advancedOpen, setAdvancedOpen] = useStudioState("image", "advancedOpen", false);
+  const [steps, setSteps] = useStudioState("image", "steps", "");
+  const [seed, setSeed] = useStudioState("image", "seed", "");
+  const [negativePrompt, setNegativePrompt] = useStudioState("image", "negativePrompt", "");
+  const [guidance, setGuidance] = useStudioState("image", "guidance", "");
+  const [widthOverride, setWidthOverride] = useStudioState("image", "widthOverride", "");
+  const [heightOverride, setHeightOverride] = useStudioState("image", "heightOverride", "");
+  const [extraReferenceIds, setExtraReferenceIds] = useStudioState("image", "extraReferenceIds", []);
   const [submitting, setSubmitting] = useState(false);
 
   // Models that serve the active tab, under the same capability + Mac-gating predicate
@@ -179,6 +225,94 @@ export function SimpleImageStudio() {
   // model without it the tile stays visible (the design's 2-up tile grid) but disabled and
   // says why, rather than accepting a reference the payload would then drop.
   const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+
+  // The model's OWN variation ladder (sc-24113). `limits.count` was inert here — Simple offered a
+  // hardcoded [1,2,4,6] to every model, so Qwen-Image 2.1, whose engine takes 8, could not be given
+  // 8 and every model was offered a 6 that nothing declares. Absent ⇒ the historical ladder, so no
+  // other model moves.
+  // sc-24114: only for a model with the native-envelope surface (`simpleNativeControls`) — every
+  // other model keeps the historical ladder, since `limits.count` was never read here before.
+  const nativeControls = simpleNativeControls(selectedModel);
+  const variationOptions = useMemo(() => {
+    if (!simpleNativeControls(selectedModel)) return asChipOptions(DEFAULT_VARIATION_OPTIONS);
+    const declared = selectedModel?.limits?.count;
+    const usable = Array.isArray(declared)
+      ? declared.filter((value) => Number.isInteger(value) && value > 0)
+      : [];
+    return asChipOptions(usable.length ? usable : DEFAULT_VARIATION_OPTIONS);
+  }, [selectedModel]);
+  // Keep the selection legal as the ladder changes with the model, the same shape the resolution
+  // seed above uses: an out-of-ladder value would render no chip as active.
+  useEffect(() => {
+    if (!variationOptions.some((option) => option.value === variations)) {
+      setVariations(variationOptions[0].value);
+    }
+  }, [variationOptions, variations, setVariations]);
+
+  // sc-24113 — Simple's ordered reference list. Simple held ONE `referenceAssetId`, which cannot
+  // express the 1-10 ordered list 2.1 takes, so a model whose whole edit surface is that list was
+  // reduced to a single image in this shell. The plural list is kept ALONGSIDE the existing single
+  // tile rather than replacing it: every other edit model in Simple takes one source image, and the
+  // tile is how the design surfaces it.
+  const maxSimpleReferences = maxReferencesForModel(selectedModel, 1);
+  const supportsOrderedReferences = maxSimpleReferences > 1 && Boolean(selectedModel?.ui?.multiReference);
+  // Drop extras when the model cannot use them, so the rail never shows what will not be sent.
+  useEffect(() => {
+    if (!supportsOrderedReferences && extraReferenceIds.length) {
+      setExtraReferenceIds([]);
+      return;
+    }
+    if (extraReferenceIds.length > maxSimpleReferences - 1) {
+      setExtraReferenceIds((current) => current.slice(0, maxSimpleReferences - 1));
+    }
+  }, [supportsOrderedReferences, maxSimpleReferences, extraReferenceIds.length, setExtraReferenceIds]);
+
+  // sc-24113 — the sc-15299 generation axes, read the same way the full studio reads them: an
+  // ABSENT `image` block means BOTH are supported, so a model that declares nothing keeps both
+  // controls. Simple hid them from every model; that was a surface decision, not a capability one.
+  const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+
+  // The model's own free-size envelope, shared with the full studio so the two shells cannot
+  // disagree about what is legal. For a model that declares nothing this is the blanket
+  // 256-4096 with no stride, exactly as before.
+  const dimensionConstraints = modelDimensionConstraints(selectedModel);
+  // A sticky free size typed on a native-surface model must not ride onto a model without the fold.
+  const dimensionEval = evaluateModelDimensions({
+    model: selectedModel,
+    resolution,
+    widthOverride: nativeControls ? widthOverride : "",
+    heightOverride: nativeControls ? heightOverride : "",
+  });
+  const dimensionError = dimensionConstraintMessage(dimensionEval);
+
+  // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
+  // shows), then the extras in the order the user arranged them.
+  const orderedReferenceIds = useMemo(
+    () => (referenceAssetId ? [referenceAssetId, ...extraReferenceIds] : [...extraReferenceIds]),
+    [referenceAssetId, extraReferenceIds],
+  );
+
+  // sc-24113 — which Qwen rewriter this request selects, and whether it is installed. Selected by
+  // the REQUEST (a reference attached means the editing half) and never by a picker, exactly as in
+  // the advanced studio. sc-24114: the rewriter reads the SAME ordered list the render conditions
+  // on (up to the model's cap), so its `<imageN>` numbering names the pictures actually sent.
+  const qwenRewriteReferenceIds = useMemo(
+    () =>
+      simpleRewriteReferenceIds({ supportsOrderedReferences, orderedReferenceIds, referenceAssetId }),
+    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
+  );
+  const qwenRewriteModel = useMemo(() => {
+    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
+    const id = qwenRewriteReferenceIds.length
+      ? QWEN_REWRITE_I2I_MODEL_ID
+      : QWEN_REWRITE_T2I_MODEL_ID;
+    return imageModels.find((entry) => entry.id === id) ?? null;
+  }, [imageModels, selectedModel?.id, qwenRewriteReferenceIds.length]);
+  const qwenRewriteAvailable =
+    Boolean(qwenRewriteModel) &&
+    qwenRewriteModel.installState !== "missing" &&
+    typeof qwenRewritePrompt === "function";
   const referenceUsable = mode === "edit_image" || supportsImg2img;
 
   // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
@@ -235,6 +369,10 @@ export function SimpleImageStudio() {
     Boolean(resolution) &&
     !busy &&
     !needsSource &&
+    // sc-24113: a broken free-size override blocks Generate the same way it does in the full
+    // studio. Without this the enqueue gate would 400 and the user would meet the model's own
+    // envelope as a failed submit rather than as a message under the field they typed in.
+    !dimensionEval.invalid &&
     // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
     // worker reject it — the job would fail with an error the studio never surfaces.
     !editLoraMissing;
@@ -259,11 +397,28 @@ export function SimpleImageStudio() {
         // One armed reference; simpleJobs routes it by mode (edit source vs img2img
         // reference + advanced.strength) and drops it when the model can't use it.
         referenceAssetId,
+        // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
+        // model declares the surface, so every other model's payload is byte-identical.
+        referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
+        // The advanced fold's knobs. Empty string means "the model default", exactly as the full
+        // studio's overrides do, so an untouched control adds nothing to the payload.
+        // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
+        steps: nativeControls ? steps : "",
+        seed: nativeControls ? seed : "",
+        negativePrompt: nativeControls && supportsNegativePrompt ? negativePrompt : "",
+        guidance: nativeControls && supportsGuidance ? guidance : "",
+        width: dimensionEval.width,
+        height: dimensionEval.height,
         supportsImg2img,
         img2imgStrength: referenceStrengthFor(selectedModel),
         // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
         editLora: editLoraInstalled ? editLora : null,
         loras: lora.serializedLoras,
+        // sc-24113 — the transparency request. `selectedModel` rides along as the capability
+        // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
+        // never leak onto a model that would refuse it.
+        selectedModel,
+        transparentBackground,
         ...tier,
       });
       if (!request) {
@@ -336,6 +491,38 @@ export function SimpleImageStudio() {
         {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
             same job; an instruction like "deblur this image" means nothing to text-to-image. */}
         {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
+        {/* sc-24113 — Qwen-Image 2.1's OFFICIAL rewriter in the Simple shell. It renders the SAME
+            advanced control rather than a simplified twin, and that is deliberate: Simple's generic
+            refine drops the review step and replaces the prompt outright, which is exactly what this
+            story forbids. The rewrite lands in an editable box with Apply / Keep original beside it
+            here too. Absent entirely unless the matching rewriter is already installed — direct
+            prompting needs neither, with no download and no prompt to install. */}
+        {qwenRewriteAvailable && qwenRewriteOpen ? (
+          <QwenRewritePromptControl
+            modelId={model}
+            onApply={setPrompt}
+            onApplyResolution={(value) => {
+              // sc-24114: never silently ignored — a preset the chips offer is selected, anything
+              // else lands as the free size in the (opened) Advanced fold, like the classic studio.
+              const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
+              if (!target) return;
+              if (target.resolution) {
+                setResolution(target.resolution);
+                setWidthOverride("");
+                setHeightOverride("");
+                return;
+              }
+              setWidthOverride(target.widthOverride);
+              setHeightOverride(target.heightOverride);
+              setAdvancedOpen(true);
+            }}
+            projectId={activeProject?.id ?? ""}
+            prompt={prompt}
+            referenceAssetIds={qwenRewriteReferenceIds}
+            rewriteModel={qwenRewriteModel}
+            rewritePrompt={qwenRewritePrompt}
+          />
+        ) : null}
         {refineOpen ? (
           <RefinePanel
             blurb="Rewrite this prompt with richer detail using the Anubis-8B refiner."
@@ -364,6 +551,22 @@ export function SimpleImageStudio() {
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
         />
+        {qwenRewriteAvailable ? (
+          <button
+            className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
+            onClick={() => {
+              setRefineOpen(false);
+              setQwenRewriteOpen((open) => !open);
+            }}
+            type="button"
+          >
+            <span className="su-tile-head">
+              <Icon.Sparkle size={15} />
+              Qwen rewriter
+            </span>
+            <span className="su-tile-sub">Qwen's own rewriter, plus an aspect suggestion</span>
+          </button>
+        ) : null}
         <button
           className={refineOpen ? "su-tile active" : "su-tile"}
           onClick={() => {
@@ -408,7 +611,35 @@ export function SimpleImageStudio() {
             value={resolutionText}
           />
         </div>
-        <Chips label="Variations" onChange={setVariations} options={VARIATION_OPTIONS} value={variations} />
+        <Chips label="Variations" onChange={setVariations} options={variationOptions} value={variations} />
+        {/* sc-24113 — native transparency. Simple exposes the model, so it exposes the toggle; it
+            renders only for a model that advertises four-channel decode, so the reduced surface
+            stays reduced for every other model in the catalog. */}
+        {showTransparencyToggle(selectedModel) ? (
+          <label className="su-checkline su-transparency-toggle">
+            <input
+              checked={transparentBackground}
+              onChange={(event) => setTransparentBackground(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Transparent background (RGBA)</span>
+          </label>
+        ) : null}
+        {/* The other half, and the non-obvious one: this model has no transparency MODE — the
+            toggle only keeps the alpha channel, and whether it holds a cut-out is decided by the
+            PROMPT. Offered as a button that edits the visible prompt, never applied silently; it
+            disappears once the prompt already says it. */}
+        {transparencyPromptSuggestion(prompt, transparentBackground) ? (
+          <button
+            className="su-pill-btn su-transparency-hint"
+            onClick={() =>
+              setPrompt(transparencyPromptSuggestion(prompt, transparentBackground))
+            }
+            type="button"
+          >
+            Ask for transparency in the prompt
+          </button>
+        ) : null}
         {/* Last child of the settings bar, so LoRAs read as a peer of Model / Resolution /
             Variations rather than a card of their own (sc-15370's call, applied to Simple). */}
         <SimpleLoraField
@@ -424,6 +655,156 @@ export function SimpleImageStudio() {
           selectedModel={selectedModel}
         />
       </div>
+
+      {/* sc-24113 — the controls Simple was missing, behind a disclosure that is COLLAPSED by
+          default. Simple's contract is a reduced SURFACE, not a reduced payload (simpleJobs.js runs
+          the same builder the full studio does), so the right shape for "this model declares these
+          controls" is one fold rather than eight more rows in the settings bar. */}
+      {nativeControls ? (
+      <details
+        className="su-advanced"
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+        open={advancedOpen}
+      >
+        <summary className="su-advanced-summary">Advanced</summary>
+        <div className="su-advanced-body">
+          {supportsOrderedReferences ? (
+            <div className="su-field">
+              <label htmlFor="su-image-add-reference">
+                References (up to {maxSimpleReferences}, in order)
+              </label>
+              {/* The ORDER is part of the request for this family — the template numbers the images
+                  and each is visible only to what follows — so the rail shows it and edits it. The
+                  reference armed on the tile above is always image 1. */}
+              <OrderedReferenceList
+                assetIds={orderedReferenceIds}
+                labelFor={(id) => assets.find((asset) => asset.id === id)?.name ?? id}
+                onChange={(next) => {
+                  // The tile owns the first slot, so a reorder writes back through BOTH pieces of
+                  // state rather than letting them drift apart.
+                  const [first, ...rest] = next;
+                  setReferenceAssetId(first ?? null);
+                  setExtraReferenceIds(rest);
+                }}
+              />
+              <SheetSelect
+                kind="grid"
+                label="Add a reference"
+                onSelect={(id) =>
+                  setExtraReferenceIds((current) =>
+                    current.includes(id) || id === referenceAssetId
+                      ? current
+                      : [...current, id].slice(0, maxSimpleReferences - 1),
+                  )
+                }
+                options={recentImageAssets
+                  .filter(
+                    (asset) =>
+                      asset.id !== referenceAssetId && !extraReferenceIds.includes(asset.id),
+                  )
+                  .map((asset) => ({ value: asset.id, label: asset.name ?? asset.id }))}
+                title="Add a reference"
+                value=""
+              />
+              {extraReferenceIds.length ? (
+                <button
+                  className="su-pill-btn"
+                  onClick={() => setExtraReferenceIds([])}
+                  type="button"
+                >
+                  Clear extra references
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="su-field">
+            <label htmlFor="su-image-steps">Steps</label>
+            <input
+              className="su-input"
+              id="su-image-steps"
+              // The MODEL's floor, not a hardcoded 1 — the enqueue gate refuses below it.
+              min={String(minStepsForModel(selectedModel))}
+              max="80"
+              onChange={(event) => setSteps(event.target.value)}
+              placeholder={String(selectedModel?.defaults?.steps ?? "")}
+              type="number"
+              value={steps}
+            />
+          </div>
+          <div className="su-field">
+            <label htmlFor="su-image-seed">Seed</label>
+            <input
+              className="su-input"
+              id="su-image-seed"
+              onChange={(event) => setSeed(event.target.value)}
+              placeholder="Random"
+              type="number"
+              value={seed}
+            />
+          </div>
+          {supportsGuidance ? (
+            <div className="su-field">
+              <label htmlFor="su-image-guidance">Guidance</label>
+              <input
+                className="su-input"
+                id="su-image-guidance"
+                min="0"
+                max="30"
+                onChange={(event) => setGuidance(event.target.value)}
+                placeholder={String(selectedModel?.defaults?.guidanceScale ?? "")}
+                step="0.1"
+                type="number"
+                value={guidance}
+              />
+            </div>
+          ) : null}
+          {supportsNegativePrompt ? (
+            <div className="su-field">
+              <label htmlFor="su-image-negative">Negative prompt</label>
+              <textarea
+                className="su-textarea"
+                id="su-image-negative"
+                onChange={(event) => setNegativePrompt(event.target.value)}
+                placeholder="What must NOT appear"
+                value={negativePrompt}
+              />
+            </div>
+          ) : null}
+          <div className="su-field su-free-size">
+            <label htmlFor="su-image-width">
+              Custom size ({dimensionConstraints.min}–{dimensionConstraints.max} px
+              {dimensionConstraints.step > 1 ? `, in steps of ${dimensionConstraints.step}` : ""})
+            </label>
+            <div className="su-free-size-row">
+              <input
+                aria-label="Custom width"
+                className="su-input"
+                id="su-image-width"
+                max={dimensionConstraints.max}
+                min={dimensionConstraints.min}
+                onChange={(event) => setWidthOverride(event.target.value)}
+                placeholder={String(dimensionEval.width || "")}
+                step={dimensionConstraints.step}
+                type="number"
+                value={widthOverride}
+              />
+              <input
+                aria-label="Custom height"
+                className="su-input"
+                max={dimensionConstraints.max}
+                min={dimensionConstraints.min}
+                onChange={(event) => setHeightOverride(event.target.value)}
+                placeholder={String(dimensionEval.height || "")}
+                step={dimensionConstraints.step}
+                type="number"
+                value={heightOverride}
+              />
+            </div>
+            {dimensionError ? <p className="su-error">{dimensionError}</p> : null}
+          </div>
+        </div>
+      </details>
+      ) : null}
 
       <StyleStrip onChange={setStyleId} value={styleId} />
 

@@ -346,6 +346,7 @@ fn flux2_edit_resolved_quant(
     reconcile_resolved_tier_quant(
         requested_for_reconcile,
         weights_dir,
+        &request.model_manifest_entry,
         !dense_text_encoder,
         model_id,
         job_id,

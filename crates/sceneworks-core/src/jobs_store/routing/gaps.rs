@@ -790,6 +790,11 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         .collect();
 
     match cause {
+        // sc-24109 REMOVED the `qwen_image_2_1` "macOS-only model" arm sc-24108 added here. It was
+        // correct for exactly as long as the id had no candle lane of any shape; the native
+        // Candle/CUDA port now serves it, so `candle_routed` is true and this classifier is never
+        // reached for a plain 2.1 txt2img at all. A conditioned 2.1 request off-Mac is refused for
+        // the reason it is really refused — the carrier — which the generic arms below already say.
         CandleImageRefusal::UnroutedFamily => UnsupportedReason::new(
             Some(model),
             "unsupported image model / shape",
@@ -1075,6 +1080,27 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "reference / edit conditioning",
             "base Qwen-Image reference / edit_image conditioning is not available in the native flow on Mac unless it is the strict-pose ControlNet tier.",
             Some("epic 3401"),
+        ),
+        // sc-24110 narrows the sc-24108 arm. It said "text-to-image only", which was true for
+        // exactly as long as the provider declared an empty conditioning set; the engine now
+        // declares Reference AND MultiReference on both backends, so the editor's working image,
+        // the single-reference flows, the plural set AND a mask image (an ORDINARY ordered
+        // reference on this model) all route normally. Only the carriers 2.1 genuinely has no shape
+        // for land here.
+        //
+        // The message names the WORKAROUND rather than just the refusal, because for this family
+        // there is a real one and it is not obvious: 2.1 has no mask tensor at all, so a local edit
+        // is an annotation drawn into the reference itself (which the Image Editor's paint tools
+        // already produce), or a separate mask attached as another ordered reference the prompt
+        // names. Sending the user to a different model would be the wrong advice.
+        //
+        // An over-cap or empty conditioning set never reaches here: the API refuses it at enqueue
+        // with a message that names the cap.
+        "qwen_image_2_1" => UnsupportedReason::new(
+            Some(model),
+            "pose / strict-control conditioning",
+            "Qwen Image 2.1 takes up to 10 ordered reference images, but no pose or ControlNet input — it has no strict-control tier. To constrain an edit, draw the marking into the reference image itself, or attach a mask as another reference and name it in the prompt (\"use the second image as a mask\").",
+            Some("epic 24107"),
         ),
         "flux_schnell" | "flux_dev" => UnsupportedReason::new(
             Some(model),

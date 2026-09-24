@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
+import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -41,7 +43,12 @@ import {
 } from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
-import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
+import {
+  blanketFloorGb,
+  lightestInstallableTier,
+  suggestTier,
+  tierFits,
+} from "../tierSuggestion.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import {
@@ -390,6 +397,16 @@ function ModelTierDownloadPanel({
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
+          // sc-24112: a DECLARED-but-unpublished tier. The catalog advertises it so the tier axis is
+          // real before the artifact exists, but there is nothing to fetch — the API refuses the
+          // download with the reason, so offering the checkbox would be an invitation to an error.
+          const pendingArtifact =
+            variant.pendingArtifact === true || variant.installState === "pending";
+          // Whether the PER-TIER delete can reclaim this tier on its own. The API refuses a tier with
+          // no `files` scope ("delete the whole model instead"), because a whole-repo row IS the model
+          // rather than a slice of it. Before sc-24112 every variant row carried a glob and this was
+          // safe to assume; `qwen_image_2_1`'s bf16 tier is the whole upstream snapshot and is not.
+          const tierDeletable = variant.tierDeletable !== false;
           const missingHere = Array.isArray(variant.missingRequiredFiles) ? variant.missingRequiredFiles : [];
           const incompleteHint = missingHere.length
             ? `This tier is partly downloaded and won't load. Missing: ${missingHere.join(", ")}. Select it and download again to repair.`
@@ -410,7 +427,7 @@ function ModelTierDownloadPanel({
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={installed || Boolean(activeJob) || licenseAckRequired}
+                  disabled={installed || pendingArtifact || Boolean(activeJob) || licenseAckRequired}
                   onChange={() => toggle(tier)}
                 />
                 <span className="model-tier-label">
@@ -444,12 +461,20 @@ function ModelTierDownloadPanel({
                 }
                 title={incomplete ? incompleteHint : undefined}
               >
-                {activeJob ? activeJob.status : installed ? "installed" : incomplete ? "incomplete" : "not installed"}
+                {activeJob
+                  ? activeJob.status
+                  : installed
+                    ? "installed"
+                    : pendingArtifact
+                      ? "not published yet"
+                      : incomplete
+                        ? "incomplete"
+                        : "not installed"}
               </span>
               {/* Reclaim an installed tier's disk (sc-12024). Only this tier's files/blobs are
                   removed; the model and its other tiers stay installed. Disabled while a download
                   for this tier is in flight or this tier is mid-delete. */}
-              {installed && onDeleteVariant ? (
+              {installed && tierDeletable && onDeleteVariant ? (
                 <button
                   type="button"
                   className="model-tier-delete danger-action"
@@ -1279,7 +1304,7 @@ export function ModelManagerScreen() {
     // Conversion state is a platform capability supplied by the API, not a memory measurement.
     // Keep that control surface intact while guarding the MLX memory block by the active lane.
     const mlxState = cleanupOnly ? null : model.mlxConversionState;
-    const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx") : null;
+    const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx", lightestInstallableTier(model)) : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
     const convertJobs = convertJobsFor(model);
     const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
@@ -1473,6 +1498,21 @@ export function ModelManagerScreen() {
             acknowledged={licenseAcknowledged}
             onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
             onOpenSettings={() => setActiveView("Settings")}
+          />
+        ) : null}
+        {/* The PERSISTENT half of the licence surface (sc-24108). The gate above disappears the
+            moment the model finishes installing, which used to take the restriction with it — this
+            row keeps the licence name, the link and the full notice reachable from model details
+            for the whole life of the install. Its condition is the PRESENCE of licence terms, not
+            the install state; `gateVisible` only stops the same paragraphs being printed twice
+            while the gate is still on screen. */}
+        {!cleanupOnly ? (
+          <ModelLicenseSummary
+            licenseName={licenseComponentForModel(model.id)?.license}
+            licenseUrl={model.licenseUrl}
+            licenseNotice={model.licenseNotice}
+            nonCommercial={model.nonCommercial === true}
+            gateVisible={licenseGateApplies}
           />
         ) : null}
         {incomplete ? (

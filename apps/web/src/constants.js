@@ -98,6 +98,17 @@ export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
 
+// Qwen-Image 2.1 and its two OFFICIAL prompt rewriters (sc-24113, epic 24107).
+//
+// The rewriters are OPTIONAL, explicitly downloaded checkpoints — `autoDownload: false` in the
+// manifest — and the image model works fully without either. Which of the two applies is decided by
+// the REQUEST (references attached ⇒ the editing one) and never by a user-facing picker, so these
+// ids are looked up by the caller, not offered as a choice. They mirror
+// `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`'s `Rewriter::catalog_id`.
+export const QWEN_IMAGE_2_1_MODEL_ID = "qwen_image_2_1";
+export const QWEN_REWRITE_T2I_MODEL_ID = "qwen_image_2_1_pe_t2i";
+export const QWEN_REWRITE_I2I_MODEL_ID = "qwen_image_2_1_pe_i2i";
+
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
 // 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never
@@ -197,6 +208,78 @@ const seededFallbackModels = [
       // STRICT_CONTROL_ENGINES qwen_image_control = {pose,canny,depth}).
       controlModes: ["pose", "canny", "depth"],
       controlScale: { label: "Control strength", default: 0.9, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
+    // Qwen Image 2.1 (sc-24108) — a separate model from `qwen_image` above, not a newer build of
+    // it. Text-to-image only: NO poseLibrary / controlModes / controlScale, because the 2.1
+    // provider declares no conditioning at all. ⚠️ No `image` block: ABSENT MEANS TRUE, and 2.1 is
+    // a true-CFG family that takes both a guidance scale and a negative prompt.
+    id: "qwen_image_2_1",
+    name: "Qwen Image 2.1",
+    type: "image",
+    // Upstream ships ONE pipeline: text-to-image is that pipeline with no condition images, and
+    // editing / multi-reference / local editing are the SAME call with 1-10 ORDERED condition
+    // images. `image_to_image` (sc-24113) is the single-reference face of that call and
+    // `edit_image` (sc-24110) the ordered-set face the Image Editor drives; both are declared
+    // because both are the same engine call. `image_inpaint` is deliberately absent — there is no
+    // mask tensor in this family, so a mask is just another ordered reference the prompt names.
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    // ⚠️ PROVISIONAL KEY (sc-24113) — see `apps/web/src/qwenAlpha.js`. The engine-side RGBA output
+    // contract is being defined concurrently by inference sc-24111, so this flag and the request
+    // field it implies are spelled in exactly three places and a rename is one line in each.
+    supportsAlphaOutput: true,
+    // The seed carries `limits` for this model where most entries do not, because every one of
+    // these keys drives a CONTROL and a pre-catalog render would otherwise offer the wrong bounds:
+    // the Aspect menu would show the blanket 768²/1024²/1280x720/720x1280 (none of which is a legal
+    // 2.1 bucket), Steps would offer 1 against a floor of 2, and the free Width/Height boxes would
+    // offer 256-4096 with no stride. Kept byte-identical to the manifest entry; `imageLimitsParity`
+    // asserts the two agree in both directions.
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 2,
+      // sc-24114: the curated menu both providers publish — mirrors the manifest.
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 40,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 text-to-image and reference editing (research licence).",
+      // The ordered-reference surface: `multiReference` opens the Image Editor's reference rail and
+      // the Studio's plural `referenceAssetIds` payload, widened to the model's declared
+      // `limits.maxReferenceAssets` instead of the global MAX_EDIT_REFERENCES.
+      //
+      // `img2img` was declared here and is REMOVED (sc-24110), for the same reason the manifest
+      // does not declare it: that flag's whole control is the `advanced.strength` slider, and
+      // upstream's condition images have NO strength — the engine refuses one and the API 400s it
+      // at enqueue, so the slider would advertise a knob every render rejects. It also drifted from
+      // the manifest, which never declared it. The single-reference case is the ordered list with
+      // one entry, which is the same engine call.
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1.md",
+      },
     },
   },
   {

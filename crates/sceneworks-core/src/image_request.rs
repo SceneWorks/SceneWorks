@@ -261,6 +261,97 @@ pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
     }
 }
 
+/// The ORDERED condition-image asset ids of a one-ordered-list image edit, or `None` when a carrier
+/// is malformed. Re-exported from the router so the API validates the EXACT list the worker will
+/// render, in the exact order — see `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids` for
+/// why the order is semantic rather than bookkeeping.
+pub use crate::jobs_store::qwen_image_2_1_reference_ids as ordered_image_reference_ids;
+
+/// Reject an `edit_image` / `character_image` request for a model whose route is ONE ordered
+/// conditioning list, or `None` when the request is admissible (sc-24110).
+///
+/// The SHAPE half only. **Counting is not done here** — the cap lives in
+/// `limits.maxReferenceAssets` and is enforced once, by
+/// [`crate::video_request::image_reference_limit_error`], so there is exactly one place that knows
+/// what the ceiling is. What is left is everything else an ordered list can be wrong about:
+///
+///   1. **no references at all.** The conditioned modes ARE the conditioning call; with nothing to
+///      condition on there is no request to make. A 400 rather than a silent fall-back to
+///      text-to-image, which would render something the caller did not ask for.
+///   2. **a per-reference strength.** Upstream's condition images carry no strength and the engine
+///      refuses anything but unset-or-1.0; this says so at enqueue in the engine's own terms.
+///   3. **a malformed carrier**, which fails closed.
+///
+/// `None` for every model that declares no `limits.maxReferenceAssets` — the same declaration that
+/// arms the cap arms this, so the two halves can never be armed separately and the image models
+/// neither story touches are byte-for-byte unchanged.
+///
+/// Per-reference GEOMETRY and FORMAT are not judged here either — that needs the asset store, so it
+/// lives beside the call site (`apps/rust-api`'s `validate_ordered_image_references`).
+pub fn ordered_image_reference_error(
+    model: &str,
+    payload: &JsonObject,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
+    // a CONDITIONED mode exactly like the edit modes (it needs at least one reference).
+    let conditioned_mode = matches!(mode, "edit_image" | "character_image" | "image_to_image");
+    let Some(ids) = ordered_image_reference_ids(payload) else {
+        return Some(format!(
+            "{model}: one of sourceAssetId / maskAssetId / referenceAssetId / referenceAssetIds is \
+             malformed — each must be a non-blank asset id string, and referenceAssetIds must be an \
+             array of them."
+        ));
+    };
+    if ids.is_empty() {
+        if !conditioned_mode {
+            // A plain text-to-image request: nothing to condition on, nothing to judge.
+            return None;
+        }
+        return Some(format!(
+            "{model} conditions on an ordered list of 1 to {cap} reference images, but this \
+             {mode} request supplies none. Add at least one reference, or send a text-to-image \
+             request instead."
+        ));
+    }
+    // A non-empty list IS the conditioning call whatever the mode says (the router claims it
+    // mode-independently), so a strength is refused on every mode that carries references.
+    ordered_image_reference_strength_error(model, payload)
+}
+
+/// The strength half of [`ordered_image_reference_error`], split out so the four carriers the UI
+/// and the API have historically used for this one quantity are read in one place.
+///
+/// The refusal carries the ENGINE's reason, not a SceneWorks-flavored restatement of it: a
+/// condition image on this route is composed at full weight because upstream's pipeline has no
+/// strength input at all — there is nothing to turn down. A value of exactly 1.0 is accepted (it is
+/// what "full weight" spells), and so is an absent one.
+fn ordered_image_reference_strength_error(model: &str, payload: &JsonObject) -> Option<String> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    for key in ["strength", "referenceStrength"] {
+        let Some(value) = payload
+            .get(key)
+            .or_else(|| advanced.and_then(|advanced| advanced.get(key)))
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let Some(strength) = value.as_f64() else {
+            return Some(format!("{model}: `{key}` must be a number, or absent."));
+        };
+        if (strength - 1.0).abs() > f64::EPSILON {
+            return Some(format!(
+                "{model} conditions on a reference at full weight — upstream's condition images \
+                 have no strength, so `{key}: {strength}` has nothing to apply to. Drop the field \
+                 (or send 1.0)."
+            ));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +481,42 @@ mod tests {
         let bogus =
             ImageRequest::from_payload(&payload(json!({ "projectId": "p", "fitMode": "weird" })));
         assert_eq!(bogus.fit_mode, "crop");
+    }
+
+    /// sc-24114: `image_to_image` is the declared single-reference face of the ordered-list call,
+    /// so it is judged exactly like the edit modes — no references is a 400 — and a strength is
+    /// refused on EVERY mode that carries references, because the router claims a non-empty list
+    /// mode-independently (a `text_to_image` + `referenceAssetId` request is the same engine call).
+    #[test]
+    fn ordered_reference_shape_gate_covers_image_to_image_and_every_referenced_mode() {
+        let entry = payload(json!({ "limits": { "maxReferenceAssets": 10 } }));
+        let check =
+            |body: Value| ordered_image_reference_error("qwen_image_2_1", &payload(body), &entry);
+
+        let empty = check(json!({ "mode": "image_to_image" }));
+        assert!(
+            empty
+                .as_deref()
+                .is_some_and(|m| m.contains("supplies none")),
+            "{empty:?}"
+        );
+        assert_eq!(
+            check(json!({ "mode": "image_to_image", "referenceAssetId": "r" })),
+            None
+        );
+        for mode in ["image_to_image", "text_to_image", "image_generation"] {
+            let refused = check(json!({
+                "mode": mode, "referenceAssetId": "r", "advanced": { "strength": 0.4 }
+            }));
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|m| m.contains("no strength")),
+                "{mode}: {refused:?}"
+            );
+        }
+        // A plain text-to-image request is untouched.
+        assert_eq!(check(json!({ "mode": "text_to_image" })), None);
+        assert_eq!(check(json!({ "advanced": { "strength": 0.4 } })), None);
     }
 }

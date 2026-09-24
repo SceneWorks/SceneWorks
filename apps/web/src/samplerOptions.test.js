@@ -201,4 +201,19 @@ describe("samplerOptions", () => {
       expect(SCHEDULER_LABELS[key]).toBeTruthy();
     }
   });
+  it("exposes Qwen Image 2.1's curated solver menu on both lanes (sc-24114)", () => {
+    // Both providers publish curated_sampler_names()/curated_scheduler_names() and honour
+    // req.sampler/req.scheduler, so the studio dropdown must appear (length > 1) with that menu.
+    const qwen = fallbackModels.find((model) => model.id === "qwen_image_2_1");
+    for (const backend of ["mlx", "candle", null]) {
+      expect(samplerOptionsFromModel(qwen, backend)).toEqual([
+        "default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc",
+        "lcm", "ddim", "dpmpp_2m_sde", "er_sde",
+      ]);
+      expect(schedulerOptionsFromModel(qwen, backend)).toEqual([
+        "default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta",
+        "ddim_uniform", "beta57",
+      ]);
+    }
+  });
 });

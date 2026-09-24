@@ -3166,6 +3166,575 @@
       }
     },
     {
+      // Qwen-Image 2.1 (sc-24108, epic 24107) — a NEW catalog id beside the 2512-weights
+      // `qwen_image` entry above, NOT a re-point of it. Different architecture, different
+      // snapshot, different licence: a ~7.1B single-stream flow-matching DiT on a 64-channel /
+      // 16x-spatial latent (vs 2512's 16-channel z16), a Qwen3-VL language tower as the text
+      // encoder (vs 2512's Qwen2.5-VL), and the Qwen RESEARCH LICENSE (vs 2512's Apache-2.0).
+      // Nothing about `qwen_image`, `qwen_image_edit_2511` or the Fun-Controlnet-Union strict
+      // control tier is shared with this entry — in particular, none of 2512's measured memory
+      // rows apply here and none are copied (epic requirement E5).
+      //
+      // Native on BOTH backends under one engine id `qwen_image_2_1`: MLX on Apple Silicon
+      // (inference `mlx-gen-qwen-image-2-1`, sc-24108) and Candle/CUDA off-Mac
+      // (`candle-gen-qwen-image-2-1`, sc-24109). The routing catalog carries `mlx_routed: true` +
+      // `candle_routed: true`, so the SAME request — seven presets, ÷32 stride, 40 steps, seed,
+      // negative prompt, true-CFG guidance, count — is claimable on whichever worker the host has.
+      //
+      // sc-24112 — THREE INSTALLABLE TIERS, ON BOTH BACKENDS, from pinned reproducible bundles.
+      //
+      // The tier surface is per-backend truthful and is still NOT a merged per-model-id list — it
+      // is simply that, after inference PR #1007, the two providers happen to declare the SAME
+      // pair: MLX `supported_quants: [Q4, Q8]` and Candle `supported_quants: [Q4, Q8]` (it was
+      // `[]` at sc-24109). Both backends load the SAME packed artefacts: MLX packed-detects the
+      // triple, Candle's `AdaptLinear::linear_detect_gs` does the same on the DiT and the Qwen3
+      // tower. `spec.quantize` on Candle is therefore a tier SELECTOR, exactly as on MLX — a dense
+      // snapshot plus a quantize request is a typed refusal ("no on-the-fly quantization"), NOT a
+      // fallback. The two declarations are still read separately (`ModelCaps::candle_quant` is the
+      // Candle column; the `mlx` block is the MLX one) and `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
+      // — renamed for the new truth — is where a merge would show up.
+      //
+      // A tier is a WHOLE-PIPELINE contract here, unlike the 2512 `qwen_image` entry above: q4 runs
+      // q4 through the DiT *and* the Qwen3 language tower. There is no `precisionFloors` row and no
+      // `mlx.denseTextEncoderTier`. 2512 pairs a ~20B DiT with a ~7B Qwen2.5-VL tower, so its dense
+      // tower is a minority of the footprint; 2.1 pairs a 7.12B DiT with a 7.57B Qwen3 tower, and
+      // under staged residency the floor is `max(tower, DiT + VAE)` — a dense tower would pin that
+      // floor at ~14.5 GiB at EVERY tier and q4 would buy ~0.3 GiB over q8. The earlier
+      // Q4→Q8 text-encoder floor was WITHDRAWN in #1007's fix pass for exactly that reason.
+      "id": "qwen_image_2_1",
+      "name": "Qwen Image 2.1",
+      "family": "qwen-image-2-1",
+      "type": "image",
+      "adapter": "qwen_image_2_1",
+      // Upstream ships ONE pipeline: text-to-image is that pipeline called with no condition
+      // images, and editing / multi-reference / local editing are the SAME call with 1-10 ORDERED
+      // condition images (S3 edit contract). There is no second checkpoint and no second request
+      // shape.
+      //
+      // `image_to_image` (sc-24113) is the single-reference face of that call, and `edit_image`
+      // (sc-24110) is the ordered-set face the Image Editor drives; both are the same engine call,
+      // so both are declared rather than one being made to stand in for the other.
+      //
+      // `image_inpaint` is deliberately NOT declared: there is no mask tensor, no strength and no
+      // inpaint mode. An annotation is drawn INTO a reference, and a "separate mask" is just
+      // another ordered reference the prompt names.
+      //
+      // `character_image` is not declared either — the reference route would serve it, but
+      // Character Studio's contract (a named subject carried across renders) is a separate product
+      // surface neither story wires.
+      "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+      // True-CFG family: the engine takes a real negative branch and a `true_cfg` scale that only
+      // engages once a negative prompt is present. Both axes are therefore TRUE, which is what an
+      // absent `image` block already means (sc-15299 polarity), so nothing is declared here.
+      //
+      // `supportsAlphaOutput` mirrors the engine's `Capabilities::supports_alpha_output` (S4 RGBA
+      // contract, inference sc-24111): this model can decode straight to four channels, which is
+      // what backs the Image Studio / Image Editor transparency toggle. 2.1's VAE really does
+      // (`QwenImage21Vae::decode_rgba` -> [1, 4, H, W]), the request carries
+      // `output_channels: Rgba`, and the whole SceneWorks egress path already preserves it.
+      //
+      // ⚠️ It is NOT a "transparency mode" — there is no such thing upstream. The VAE is ALWAYS
+      // four-channel; this only says the fourth channel can survive the decode instead of being
+      // composited over white. Whether it holds a cut-out is decided by the PROMPT (the model
+      // card's "the background is transparent" convention), which is why the UI pairs the toggle
+      // with editable prompt wording rather than shipping the toggle alone.
+      "supportsAlphaOutput": true,
+      "downloads": [
+        // The UPSTREAM diffusers snapshot, pulled directly and whole — no SceneWorks re-host.
+        // `Qwen/Qwen-Image-2.1` is a public, UNGATED repo, so there is nothing a mirror would buy
+        // except a second copy under a licence (Qwen RESEARCH) whose §3 redistribution terms we
+        // deliberately never trigger: SceneWorks pulls at runtime into the user's own cache and
+        // redistributes no weights (see scripts/check-no-nc-weights.mjs). An empty `files` list is
+        // the whole-repo snapshot convention; the engine loads the tree as-is
+        // (model_index.json + processor/ + scheduler/ + text_encoder/ + transformer/ + vae/).
+        //
+        // `estimatedSizeBytes` is the EXACT byte total of the pinned revision's tree, summed from
+        // the resolved blobs of that snapshot on disk (33,134,949,212 B = 30.86 GiB), not an
+        // estimate: 4 text-encoder shards (17.53 GB), 2 transformer shards (14.23 GB), the VAE
+        // (1.35 GB), the tokenizer/processor corpus and the small configs.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` are null because NOTHING has been measured for
+        // 2.1 yet. They are filled by the epic-end measurement campaign, never by copying the
+        // 2512 rows.
+        //
+        // sc-24112 TAGS THIS ROW `variant: "bf16"`. It is the densest of three installable tiers
+        // now, so the precision axis is real and a tier picker has something to offer. bf16 is the
+        // one tier the converter REFUSES to produce (it is the released snapshot itself), which is
+        // why it alone still comes from `Qwen/Qwen-Image-2.1` while q8/q4 come from the SceneWorks
+        // re-host below.
+        //
+        // NO `platforms` KEY either, as of sc-24109. The MLX-only slice restricted this artifact to
+        // `["macos"]` so a Windows/Linux install could not download 31 GB of weights nothing on
+        // that host could load. The native Candle/CUDA port registers the SAME engine id off-Mac
+        // from the SAME upstream diffusers tree, so the restriction is now the thing that would
+        // lie: `retain_downloads_for_os` would strip the only artifact and the Models screen would
+        // show an un-installable model on every non-Mac host.
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1",
+          "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+          "variant": "bf16",
+          "files": [],
+          "estimatedSizeBytes": 33134949212,
+          "footprint": { "diskSizeBytes": 33134949212, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ── The SceneWorks re-host: q8 and q4, one complete standalone snapshot per subdir ───────
+        //
+        // `SceneWorks/qwen-image-2-1-mlx` with `q8/` and `q4/` subdirs, each a complete
+        // `from_snapshot`-loadable tree in the released layout (model_index.json + processor/ +
+        // scheduler/ + text_encoder/ + transformer/ + vae/) whose two packable components are
+        // already affine-quantized at group 64, plus the `CHANGES.md` change record (§3(b)) and a
+        // `SHA256SUMS` manifest of everything the converter wrote, and the upstream LICENSE/README. Produced by
+        // `mlx-gen-qwen-image-2-1`'s `convert::prequantize_turnkey`, which is byte-reproducible and
+        // byte-identical to `mlx_rs::ops::quantize` over the bf16 source. There is no `bf16/`
+        // subdir: the converter refuses to emit one, because the dense tier IS the upstream
+        // snapshot and a second copy would be a §3 redistribution of unmodified weights.
+        //
+        // ⚠️ REDISTRIBUTION. Unlike the ungated upstream pull above, these two ARE a SceneWorks
+        // re-host of Qwen-RESEARCH-licensed weights, so §3 is triggered and its three obligations
+        // travel IN the artefact: each tier subdir carries a copy of the Agreement (LICENSE), a
+        // `CHANGES.md` change record marking the files that were changed (the two quantized
+        // components, with the tier and group size) — the §3(b) record the converter writes beside
+        // its `SHA256SUMS` — and the verbatim attribution notice. `licenseNotice`/`licenseUrl` below
+        // apply to all three tiers, and `requiresLicenseAcknowledgment` gates every one of them —
+        // the sc-24109 accept is per MODEL, not per artifact, so a q4 install cannot skip it.
+        // `nonCommercial: true` keeps `scripts/check-no-nc-weights.mjs` fatal on any build that
+        // embeds these bytes; re-hosting them on the Hub is not embedding them in a build.
+        //
+        // PUBLISHED (sc-24114) at revision `1691de01c24a070131e0a28bf4c065fd027f4fe9` (q8 landed in
+        // 2f5ad8bb…, q4 in 1691de01…). The sc-24112 null-SHA placeholder and its `pendingArtifact`
+        // flag are gone together, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
+        // keeps rigid (a null SHA without the flag, or the flag with a real SHA, fails the audit),
+        // and `default` sits on q4, the lightest installable tier — the catalog convention
+        // `qwen_image` / `qwen_image_edit_2511` above follow, and what
+        // `test_qwen_image_2_1_defaults_to_its_lightest_installable_tier` demands.
+        //
+        // `estimatedSizeBytes` is MEASURED from the published blobs at 1691de01…: the EXACT sum of
+        // every file under the tier's subdir as the Hub API reports it (`model_info(...,
+        // files_metadata=True)`), the same way the bf16 row's total was obtained:
+        //
+        //   q8 = 19_949_564_007 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
+        //                                       + VAE 1_350_989_512 + small files
+        //   q4 = 12_919_123_211 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
+        //                                       + VAE 1_350_989_512 + small files
+        //
+        // Cross-check against the sc-24112 derivation (bf16 tree total with the DiT's 232 and the
+        // tower's 252 group-64 Linears swapped from bf16 to packed width, the arithmetic of the
+        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_325 B and q4 3_311_185 B
+        // BELOW the derived number — ~3.31 MB each, within 860 B of one another, so the packed-weight
+        // arithmetic holds and the residue is the non-weight files the re-host carries instead of
+        // upstream's.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` stay null on every tier: nothing has been
+        // measured for 2.1 on either backend, and the per-tier derived ladder lives in the
+        // `mlx`/`candle` blocks below where it is labelled derived.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19949564007,
+          "footprint": { "diskSizeBytes": 19949564007, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 12919123211,
+          "footprint": { "diskSizeBytes": 12919123211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1"
+      },
+      // `gated` is deliberately ABSENT: the Hub repo is public, so there is no access request and
+      // no token to collect. `requiresLicenseAcknowledgment` is the credential-free half of the
+      // sc-7872 gate (the `minimax_h3` precedent) — it blocks the download behind an in-app accept
+      // and surfaces `licenseNotice` on the Models screen and in the Setup wizard.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+      // Transcribed from the LICENSE file beside the pinned weights ("Qwen RESEARCH LICENSE
+      // AGREEMENT", release date 2026-09-20); the clause-by-clause evidence is
+      // inference:docs/licensing/sc-24108-qwen-research-licence-evidence.md.
+      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs): "Non-Commercial"
+      // is §1(i) of the agreement above, so a build that ever embedded these weights must fail.
+      "nonCommercial": true,
+      "defaults": {
+        // The engine's own 1:1 preset (config.rs PRESETS) and DEFAULT_STEPS. Guidance is
+        // `true_cfg`, whose engine default is 1.0 — i.e. CFG off until the user types a negative
+        // prompt, at which point the scale becomes live. `count` is 1 rather than the catalog's
+        // usual 4: a 2048-square 40-step render on a ~7.1B DiT is not a batch-of-four default.
+        "resolution": "2048x2048",
+        "steps": 40,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Exactly the seven upstream presets, in the engine's own order: 1:1, 4:3, 3:4, 3:2, 2:3,
+        // 16:9, 9:16. Every side is a multiple of the engine's ÷32 request stride and sits inside
+        // its [32, 2752] envelope.
+        //
+        // `shipped_image_geometry_is_within_the_pinned_engine_envelope` re-checks both against the
+        // PINNED descriptor on every lane that links the provider — which, since the epic's
+        // terminal pin (inference b12c632b4), is both.
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ],
+        // Up to 8 in one request — the engine's own `max_count` (S1 contract). sc-24113 adds the 8
+        // rung: the earlier [1, 2, 4] was a cost preference, not the engine's ceiling, and the
+        // story's control surface is explicitly "count (max 8)".
+        "count": [1, 2, 4, 8],
+        // The FREE-SIZE envelope (sc-24113), distinct from the seven presets above. The engine's
+        // request bounds are min_size 32 / max_size 2752 on a `RangeCheckedOnGrid { multiple: 32 }`
+        // floor (S1 contract), and all three are now declared rather than inferred:
+        //
+        // * `minDimension` 32 is BELOW the API's blanket 256 floor, which is why that floor became a
+        //   per-model fallback (`HISTORICAL_MIN_IMAGE_DIMENSION`) instead of a global constant. A
+        //   model declaring nothing still gets 256.
+        // * `maxDimension` 2752 is far below the blanket 4096, so an over-cap size that used to
+        //   sail through every check in the app and die in the provider is now a 400 at enqueue.
+        // * `requiresDimensionsMultipleOf` 32 is the request grid. Deriving the range from the
+        //   preset ladder (what `modelDimensionConstraints` did before it had these keys) would have
+        //   given 1536..2752 — the extremes of the seven buckets — which is not the engine's
+        //   envelope and would have refused every legal small size.
+        //
+        // ⚠️ The grid is enforced AT ENQUEUE only because this entry declares the OTHER TWO keys
+        // as well. `requiresDimensionsMultipleOf` on its own stays advisory, as it has always been
+        // on the image lane: the six shipped `mage_flow*` entries declare `16` with no min/max, and
+        // their only reader is the Studio's free Width/Height control, which SNAPS. Enforcing a
+        // bare stride would have turned that silent snap into a 400 and rejected off-grid sizes
+        // those models have always accepted, including stored recipes and workflow replays. See
+        // `image_dimension_error` in crates/sceneworks-core/src/video_request.rs.
+        "minDimension": 32,
+        "maxDimension": 2752,
+        "requiresDimensionsMultipleOf": 32,
+        // The ORDERED reference list's ceiling (sc-24113, S3 edit contract): 1-10 images, in request
+        // order, refused by name at `validate` beyond 10. Declared so the refusal happens at enqueue
+        // with the count named, rather than as a silent truncation in the worker — and truncation is
+        // not a smaller render here but a different one, because the template numbers the images
+        // (`<image1>` ...) and block-causal attention makes each visible only to what follows.
+        //
+        // ONE key, three consumers (sc-24110): the enqueue gate in `create_image_job`, the routing
+        // predicate that decides which worker may claim the job, and the worker's own resolver.
+        // The count is over the FLATTENED ordered list — `sourceAssetId`, `maskAssetId` and every
+        // `referenceAssetIds` entry together — because that is the single list the engine receives,
+        // so a per-carrier reading would admit eleven images as "nine references". On the IMAGE
+        // lane an ABSENT key means NO cap (the video lane reads the same key as "8 when absent");
+        // both readings are stated where they are read.
+        "maxReferenceAssets": 10,
+        // The engine refuses `steps < 2` outright (S1 contract: DEFAULT_STEPS 40, steps >= 2), and
+        // 2 is the smallest schedule with an intermediate sigma — one evaluation is a single Euler
+        // jump from pure noise. Without this key `advanced.steps: 1` travelled all the way to the
+        // MLX provider and died there, which the user sees as a failed render; declared, it is a
+        // 400 at enqueue naming the floor. sc-24108 added the IMAGE enqueue reader for this key
+        // (`create_image_job`); it was video-only before, and this is the first image model to
+        // declare a sampling floor.
+        "hardMinSteps": 2,
+        // The curated solver menu BOTH providers publish (`curated_sampler_names()` /
+        // `curated_scheduler_names()`: 10 samplers and 8 schedulers in both runtime capability
+        // dumps), and both pipelines honour `req.sampler` / `req.scheduler` (sc-24114). Declared
+        // exactly as the dumps state it, the way the other curated flow models do; `"default"` is
+        // the engine's own flow-match Euler over its dynamic-shift schedule. The worker's manifest ⊆
+        // engine drift guard keeps this list honest, and the API refuses an off-menu name.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      // The engine refuses adapters outright at this pin (`supports_lora`/`supports_lokr` false,
+      // typed Unsupported), so there is no LoRA family to advertise and the Studio's LoRA rail
+      // stays closed for this id.
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // ── ADMISSION GEOMETRY (sc-24112) ────────────────────────────────────────────────────────
+      //
+      // Mirrored VERBATIM from the provider's `memory_strategy::admission_geometry()`, which both
+      // backends publish identically. It exists because `limits.resolutions` cannot bound this
+      // route: the DiT attends over a JOINT sequence whose length grows with the REFERENCE COUNT
+      // as well as the target area, and the activation transient is linear in that sequence. A
+      // consumer that budgeted from the largest side, or from the default preset, would under-
+      // budget the real worst case — and one that priced a reference at the TARGET's token count
+      // would over-budget it by more than 3x and refuse requests that would in fact have fitted.
+      //
+      //   maxSide                2752   the longest side any preset uses
+      //   maxPresetArea     4_300_800   2400x1792 — NEITHER the widest preset (2752x1536, 4.23 Mpx)
+      //                                 NOR the square default (2048x2048, 4.19 Mpx). 4.30 Mpx.
+      //   maxTargetImageTokens 16_800   maxPresetArea / 16^2  (150 x 112)
+      //   maxReferenceImages       10   what the joint layout can express (upstream's README cap)
+      //   tokensPerMaxReference 4_096   (1024/16)^2. CONSTANT in the target size: the engine's
+      //                                 `reference::prepare` fits EVERY condition image to its
+      //                                 1024^2 output_resolution before the vision tower and the
+      //                                 VAE see it, so a reference costs the same at every preset.
+      //   maxJointTokens       58_016   256 + 16_800 + 10 x 4_096 — the quantity to gate on
+      //   pixelsPerToken           16   the VAE's spatial scale (patch_size is 1; latents unpatched)
+      //   maxBatch                  8   images per request; they render SEQUENTIALLY, so this
+      //                                 multiplies time, not peak
+      //
+      // The gate this feeds REFUSES and never silently shrinks: an over-envelope request is a typed
+      // refusal naming the number, not a quietly resized image, a dropped reference or a downgraded
+      // tier. A legal 10-reference request at the default preset (256 + 16_384 + 40_960 = 57_600
+      // tokens) is ADMITTED — it is inside the envelope, and refusing it would be the over-pricing
+      // failure described above.
+      //
+      // These are structural counts off the frozen engine geometry, not measurements. The request-
+      // time per-image checks (the 1..=10 bound, RGBA conversion, the smart_resize/VAE grid
+      // agreement) stay in the engine's `reference` module, where a bad reference is a REQUEST
+      // refusal rather than a memory refusal.
+      "admissionGeometry": {
+        "maxSide": 2752,
+        "maxPresetArea": 4300800,
+        "maxTargetImageTokens": 16800,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 4096,
+        "maxJointTokens": 58016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8
+      },
+      // ── THE DERIVED MEMORY LADDER (sc-24112) ─────────────────────────────────────────────────
+      //
+      // Every number in the two backend blocks below is DERIVED and NONE is measured. They come
+      // from the engine's own `memory_strategy::derived` module — parameter counts x dtype width
+      // for the weights, plus a structural count of the live tensors in the ported forward for the
+      // transient — and NOT ONE of them is copied from the 2512 `qwen_image` rows above. That
+      // route's DiT is ~3x this one and its text tower is a different architecture; its measured
+      // anchor is not evidence here (epic requirement E5). The engine itself refuses to launder
+      // these into evidence: it registers NO `ActivationMemoryRegistration`, so
+      // `activation_memory_bytes_1024("qwen_image_2_1")` answers None and callers fall back to the
+      // asset-facts + generic-headroom estimate path where the safety margin applies. The epic's
+      // TERMINAL measurement story owns the real anchor; nothing here is it.
+      //
+      // The ladder, in GiB (resident weights and the activation columns at the 2048-square
+      // default preset; the floor column at the preset that binds it):
+      //
+      //   tier | tower  | DiT   | VAE  | resident | staged floor | activation @2048^2  | floor peak
+      //        |        |       |      | (all 3)  | max(tower,   | untiled / bounded   | (default path,
+      //        |        |       |      |          |  DiT+VAE)    | 25 maps / 512-64    |  2400x1792)
+      //   -----+--------+-------+------+----------+--------------+---------------------+-----------
+      //   bf16 | 14.10  | 13.25 | 1.26 |  28.61   |    14.51     |  56.25 / 6.06       |   34.99
+      //   q8   |  8.03  |  7.04 | 1.26 |  16.33   |     8.30     |  56.25 / 6.06       |   22.71
+      //   q4   |  4.80  |  3.73 | 1.26 |   9.78   |     4.99     |  56.25 / 6.06       |   16.16
+      //
+      // The VAE is dense f32 at every tier (all-conv, no group-quantizable 2-D leaf) and the
+      // activation transient is tier-INDEPENDENT (bf16 activations over packed weights), which is
+      // why only the two packable components move.
+      //
+      // WHY THE UNTILED COLUMN IS 56.25 AND NOT A "3 LIVE MAPS" 6.75 (inference PR #1029). MLX does
+      // not execute synchronously: its eval loop keeps up to 10 Metal command buffers in flight
+      // ahead of the GPU (`MAX_ACTIVE_TASKS`, mlx/transforms.cpp), every full-res decoder op at a
+      // preset is its own command buffer, and an in-flight op pins its input and output map until
+      // it retires. The untiled decode's live set is therefore the 3 structural maps plus 2 maps for
+      // each of the 10 in-flight ops and the one being scheduled — 25 full-res 144-channel f32
+      // maps, 2.25 GiB each at 2048^2 — and the campaign measured exactly that (a 56.63 GiB
+      // transient; a 109.85 GB footprint once the unbounded allocator pool kept it).
+      //
+      // So the provider decodes BOUNDED BY DEFAULT (512 tile / 64 overlap) wherever tiling saves
+      // memory: the untiled and bounded transients meet at exactly 512^2, so every area above
+      // 512^2 — every shipped preset and the fitted-1024^2 reference grid — decodes bounded, and
+      // only at or below 512^2 does the single pass run. The bounded path's peak is the decode
+      // HEAD, not the tiles: the mid-block's single-head global attention (head_dim 1152, past the
+      // fused SDPA kernel) materialises 6 [tokens, tokens] f32 matrices under the same pipelining
+      // (6.0 GiB at 2048^2, 6.31 at 2400x1792), plus the RGBA f32 output canvas. The provider also
+      // installs per-request MLX cache/memory limits so the footprint tracks the derived budget.
+      //
+      // Because the head term is quadratic in tokens, the default-path peak is monotonic in AREA
+      // and the largest-area preset (2400x1792 / 1792x2400), NOT the 2048-square default, binds.
+      // The engine publishes that maximum as `derived::default_path_peak_max_bytes(tier)`:
+      // resident + default-path activation at `derived::default_path_peak_max_preset()`, which the
+      // engine tests is >= every preset's default-path peak. (Off-preset, the admissible 2752^2
+      // square is higher — `admissible_square_peak_bytes`, bf16 48.29 GiB — and the floor rule
+      // stays on the presets, as it always was.)
+      //
+      // The staged floor is `max(tower, DiT + VAE)` and NEVER the sum: `Residency::from_policy`
+      // loads the Qwen3 tower, encodes, DROPS it, then loads the DiT and VAE. That is the whole
+      // reason the tower is packed on this route where 2512 leaves it dense — see the tier note at
+      // the top of this entry.
+      //
+      // `minMemoryGbByTier` turns the ladder into a per-tier floor with ONE rule, stated in GiB
+      // because every consumer's budget is GiB (`VramBudget.free_gb` divides nvidia-smi MiB by
+      // 1024; the web compares against the host's reported memory the same way):
+      //
+      //   floor = ceil(derived::default_path_peak_max_bytes(tier), in GiB, x 1.25)
+      //
+      //   bf16  34.98 GiB x1.25 = 43.73 -> 44
+      //   q8    22.71 GiB x1.25 = 28.38 -> 29   admits a 32 GB Mac
+      //   q4    16.16 GiB x1.25 = 20.20 -> 21   admits a 24 GB Mac as well
+      //
+      // Why x1.25 and not the `measured peak + HEADROOM_GB` (2 GiB) this repo applies to a
+      // `vramGbByTier` row: these peaks are DERIVED, and the engine's own doc says its transient is
+      // a structural count that omits allocator slack and kernel workspace (the bounded tile term
+      // is documented err-low where it binds, below 2048^2). A derived number carries a
+      // proportional margin; a measured one carries the fixed headroom. When the terminal
+      // measurement story lands real rows they win ahead of these floors and get the ordinary
+      // `+ HEADROOM_GB`. (An earlier revision applied x1.25 to the peak in DECIMAL GB, giving
+      // 48/31/23 — which refused a real 5090 once a compositor held 0.84 GiB.)
+      //
+      // The scalar `minMemoryGb` is the densest tier's floor, 44: the conservative fallback for any
+      // tier key not in the map (today, `nvfp4`). Falling through to a light tier's floor for an
+      // unknown tier would be a PERMISSIVE under-prediction, which admits a load that OOMs.
+      //
+      // There is deliberately NO staged-floor key (sc-24114 removed `stagedMinMemoryGbByTier`): the
+      // MLX contract below declares no staged row, so no worker path ever applied that number, and
+      // a floor the UI quotes must be one the product stands behind. On MLX `minMemoryGbByTier` is
+      // `advisory` (schema: no MLX runtime gate reads it — the MLX fit gate admits from the
+      // provider's own memory model); it is PINNED to that same provider model by
+      // `qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`. The Candle keys are
+      // `binding` and consumed by `vram_gate::predicted_peak_gb`
+      // (`qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source`).
+      //
+      // NO `calibrations` on either lane (nothing has been measured). BOTH blocks carry a
+      // HAND-AUTHORED, request-owned `memoryStrategyContract` (sc-24114): this route's MLX rules are
+      // non-legacy, so every MLX row must carry a provider-owned `requestContexts` predicate that no
+      // dump publishes (scripts/generate-manifest-memory-declarations.mjs skips such lanes, see
+      // `parseRequestContextLanes`), and the Candle rows carry the same predicate so a reference
+      // request has a declaration rather than `NoRelevantDeclaration`.
+      "mlx": {
+        "minMemoryGb": 44,
+        "minMemoryGbByTier": { "bf16": 44, "q8": 29, "q4": 21 },
+        // The image lane's DEFAULT TIER declaration (not a load-time transform request): with no
+        // `advanced.mlxQuantize` on the job, this is the tier the resolver descends into and the
+        // tier every consumer sizes against. 8 matches the app-wide q8 default, so declaring it
+        // changes nothing today and states the fact where a reader looks for it. There is no
+        // `minQualityTier` floor: all three tiers are honest whole-pipeline tiers here (no dense
+        // component is held above the selection), so nothing needs clamping up.
+        "quantize": 8,
+        // SC-24114: the exact request-owned MLX declaration. This lane's route rules are
+        // non-legacy, so every row MUST carry `requestContexts` (a row without one fails the load
+        // closed) and the generator cannot project one — it is hand-authored, from the provider's
+        // own contract at the pin: Resident / StagedResidency / BoundedDecode implemented,
+        // BoundedAttention and BoundedTransformerResidency structurally not applicable; decode
+        // tiles 768/640/512/384/256 at overlap 64 (default 512). Every public mode maps onto the
+        // provider's ONE memory mode, `text_to_image`, which prices 0..=10 ordered references as
+        // extra joint-sequence blocks (`expected_provider_mode`).
+        //
+        // Deliberately NO `staged_residency` row on this lane. An MLX staged row authorizes the
+        // load as `Eligible + Sequential` UNCONDITIONALLY (`evaluate_declared_mlx_load_shape_for_
+        // request`), and this provider's `Sequential` policy drops and reloads the language tower
+        // on EVERY request — so declaring it would slow every Mac that fits resident. Staging stays
+        // what the fit gate chooses when resident does not fit (`decide_residency_for_spec`, the
+        // descriptor's `supports_sequential_offload`), and no staged floor is advertised for it.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-mlx-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      // sc-24109/sc-24112 — the off-Mac (Windows/Linux, CUDA) lane. Same engine id, same seven
+      // presets and same true-CFG request contract as MLX; only the tensor backend differs. As of
+      // inference PR #1007 it also loads the same packed tier artefacts.
+      //
+      // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` and
+      // `candle.minMemoryGbByTier` are `x-sceneworks-contract: binding` and are read by
+      // crates/sceneworks-worker/src/vram_gate.rs (`predicted_peak_gb`). With NO `candle` block the
+      // fit gate is skipped ENTIRELY and a too-small card discovers it is too small by OOMing
+      // mid-load; with one, the gate REFUSES the load before it starts on any card with less free
+      // VRAM than the resolved floor. A refusal that names the number is the intended behaviour; a
+      // reactive OOM is not.
+      //
+      // WHAT sc-24112 CHANGES HERE. sc-24109 set a single floor for every tier key, which refused a
+      // 32 GB RTX 5090 and a 40 GB A100 — correct for a bf16-only install whose weights alone are
+      // 28.61 GiB resident. It is the WRONG answer for q8 (16.33 GiB) and q4 (9.78 GiB), and it is
+      // those tiers, not a loosened bf16 number, that make those cards usable.
+      // `minMemoryGbByTier` states each tier's own derived floor.
+      //
+      // The resolution order in `predicted_peak_gb` is: `vramGbByTier[tier]` + HEADROOM_GB, else
+      // `minMemoryGbByTier[tier]`, else `minMemoryGb`. The new key sits in the middle BECAUSE it is
+      // already padded — a measured row is a raw peak the gate pads, and putting a derived floor
+      // there would pad it twice AND, via the sibling `measured` flag, file it as evidence.
+      // Nothing about 2.1 has been measured on any CUDA host, so `vramGbByTier` stays ABSENT.
+      //
+      // Derived candle floors, in GiB. The weights column and the x1.25 margin (and why it is not
+      // `peak + HEADROOM_GB`) are documented above the `mlx` block; the rule is the same on both
+      // lanes — floor = ceil(max over the presets of (resident + transient), in GiB, x 1.25) — but
+      // the candle TRANSIENT is not the MLX one. The candle crate owns no activation table; CUDA
+      // executes synchronously (no 10-deep command-buffer run-ahead, no pooled reuse cache) and the
+      // candle provider's default decode stays UNTILED, so its peak transient is the decode tail's 3
+      // structural full-res maps (3 x 144 x H x W x 4 B), not MLX's 25 pipelined maps. That term is
+      // linear in area, so the largest-area preset, 2400x1792, binds: 6.92 GiB. The synchronous
+      // denoise and the decode head's [tokens, tokens] attention stay below it at every preset
+      // (even six f32 score matrices are 6.31 GiB at 2400x1792).
+      //   bf16 45 — 28.61 + 6.92 = 35.53 GiB x1.25 = 44.41
+      //   q8   30 — 16.33 + 6.92 = 23.25 GiB x1.25 = 29.07 → admits an A100-40GB, and an RTX 5090
+      //                                                        (31.84 GiB) with <= 1.84 GiB held
+      //   q4   21 —  9.78 + 6.92 = 16.70 GiB x1.25 = 20.88 → admits a 24 GB card
+      // The scalar `minMemoryGb` is bf16's 45, the conservative fallback for a tier key with no row
+      // (today `nvfp4`): falling through to a light tier's floor would be a PERMISSIVE
+      // under-prediction, and an under-prediction admits a load that OOMs.
+      //
+      // Deliberately ABSENT, each for its own reason:
+      // * `vramGbByTier` / `sequentialPeakGb` / `measured` — per-tier MEASURED peaks off an A/B
+      //   harness (see the `qwen_image` block above). Nothing has been measured. The epic's
+      //   terminal measurement story fills these; when it does, its rows win ahead of the derived
+      //   floors above and those floors become the fallback they were always meant to be.
+      // * any `quantize` key — `candle.quantize` is not a manifest key at all. The Candle tier
+      //   surface is the routing catalog's `ModelCaps::candle_quant` column, which sc-24112 flips
+      //   to true because the Candle provider now declares `supported_quants: [Q4, Q8]`. That is a
+      //   SEPARATE declaration from the MLX one, read separately; the two are not merged into a
+      //   per-model-id list, which is what
+      //   `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them` pins.
+      // * `supportsSequentialOffload` / `memoryStrategyCapabilities` — legacy hand-written claims;
+      //   the `memoryStrategyContract` below is the request-owned declaration instead (sc-24114).
+      "candle": {
+        "minMemoryGb": 45,
+        "minMemoryGbByTier": { "bf16": 45, "q8": 30, "q4": 21 },
+        // SC-24114: the exact request-owned Candle declaration — the same rows as the MLX block
+        // (same provider contract, same one memory mode), so an `edit_image` / `image_to_image` /
+        // `character_image` request has a declaration instead of `NoRelevantDeclaration`. The
+        // generator appends its engine-coverage rows after these; on Candle a row without
+        // `requestContexts` is inert to request matching.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-candle-derived-2026-09-22-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      "ui": {
+        "label": "Qwen Image 2.1",
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
+        "recommendedFor": ["text_to_image", "edit_image"],
+        // Multi-image reference editing (sc-24110). The Image Editor gates its reference picker on
+        // this flag, and the Image Studio its plural `referenceAssetIds` payload — so without it
+        // the 1-10 ordered references this model is built around were reachable only by driving
+        // the API directly, while the shipped prompt guide documented them. The picker's CEILING
+        // is not this flag: it is `limits.maxReferenceAssets` via `maxReferencesForModel`, so the
+        // one manifest number serves the enqueue gate, the worker and the picker alike.
+        "multiReference": true,
+        // `img2img` is deliberately NOT declared. That flag opens the Image Studio's single-source
+        // reference flow, whose whole control is `advanced.strength` — and upstream's condition
+        // images have NO strength, which the engine refuses and the API 400s at enqueue. Offering
+        // the control would advertise a knob every render rejects. The single-reference case is
+        // served by the ordered list with one entry, which is the same engine call.
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
+            { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
+          ]
+        }
+      }
+    },
+    {
       "id": "qwen_image_edit_2511",
       "name": "Qwen Image Edit (2511)",
       "family": "qwen-image",
@@ -24681,6 +25250,173 @@
       }
     },
     {
+      // Qwen-Image 2.1 OFFICIAL PROMPT REWRITER — text-to-image half (sc-24113, epic 24107).
+      //
+      // Upstream ships prompt rewriting as a SEPARATE pair of checkpoints, not as anything inside
+      // the image model: `Qwen/Qwen-Image-2.1-PE-T2I` rewrites a text-to-image brief, and its
+      // sibling `-PE-I2I` (the next entry) rewrites an EDIT instruction against the reference
+      // images. Which one applies is decided by the REQUEST — references present means edit — and
+      // never by a user-facing model picker.
+      //
+      // Both are fine-tuned Qwen3.5/3.6 (`model_type` `qwen3_5`) 9.41B VLM checkpoints, which is
+      // the SAME architecture the optional `film_planner_qwen3_6_27b` entry above already runs:
+      // they load on the existing native TextLlm lane (`adapter: "prompt-refine"` →
+      // `mlx-llama` on macOS / `candle-llama` off-Mac, through `Architecture::Qwen35` →
+      // `Qwen35Config`/`Qwen35Model`, with `Qwen35VisionModel` + DeepStack serving the I2I image
+      // turns). NOTHING new is built to run them; the worker's `prompt_refine` job takes a
+      // `qwen_image_rewrite` task and a `payload.model` override, exactly as the film planner does.
+      //
+      // `autoDownload: false` is the load-bearing half of the story's third requirement: direct
+      // prompting into Qwen-Image 2.1 must work with NEITHER rewriter installed — no download, no
+      // install prompt, no degraded path. The rewrite affordance simply does not render unless the
+      // matching checkpoint is already present, and the image model never consults it.
+      //
+      // `files` names the loader's required set rather than `[]`, for the reason the film-planner
+      // entry gives: a metadata-only revision must never advertise as usable. `system_prompt.txt`
+      // is in that set because it IS the frozen template — the worker reads the system prompt from
+      // the installed snapshot instead of vendoring a copy of Qwen-licensed Materials into this
+      // repo, and pins the expected SHA-256 of the pinned revision's file in
+      // `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs` so an upstream re-push is a loud
+      // mismatch rather than a silent behaviour change.
+      "id": "qwen_image_2_1_pe_t2i",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 32,
+      "name": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+      "family": "qwen-image-2-1-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-PE-T2I",
+          // Frozen at the first published revision (2026-09-20). The rewriter's system prompt ships
+          // INSIDE the snapshot, so the revision pin is simultaneously the template pin.
+          "revision": "f3ed7985c788ad75b3ab7223e0c4c51e2a43545b",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "system_prompt.txt",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+            "LICENSE"
+          ],
+          "estimatedSizeBytes": 18839810614,
+          "footprint": { "diskSizeBytes": 18839810614, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-PE-T2I"
+      },
+      // Same credential-free licence gate the base `qwen_image_2_1` entry uses (sc-7872 shape):
+      // the repo is public and ungated, so there is no token to collect, but the weights are Qwen
+      // RESEARCH (non-commercial) and the accept must be surfaced before the download starts.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE",
+      "licenseNotice": "The Qwen-Image 2.1 prompt rewriters are governed by the Qwen RESEARCH LICENSE AGREEMENT — the same non-commercial terms as the Qwen-Image 2.1 weights themselves, and NOT SceneWorks' own AGPL-3.0 licence. §1(i) and §2(a) grant use, reproduction, distribution and modification FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means research or evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory (model-business@notice.qwencloud.com) for any commercial use. §4(b)/§4(c) forbid using \"Qwen\" as the primary name of a derivative work and require a prominent \"Built with Qwen\" notice on any model you train or improve with this one or its outputs. §3 carries the Agreement with any redistribution. This rewriter is an OPTIONAL download: Qwen-Image 2.1 generates and edits normally without it, and installing it only adds an explicit \"Rewrite prompt\" action you choose to run. SceneWorks never redistributes these weights — they are pulled from Qwen's own repository into your machine. Read the full text at the link below before downloading.",
+      "nonCommercial": true,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+        "description": "Optional official rewriter for Qwen Image 2.1 text-to-image prompts. Turns a short brief into a long descriptive prompt and suggests an aspect ratio; you edit and accept the result, and your original prompt is never replaced on its own. Qwen Image 2.1 works fully without it.",
+        "recommendedFor": ["qwen_image_2_1_prompt_rewrite"],
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-PE-T2I model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I" },
+            { "label": "Qwen-Image-2.1 prompt rewriting (GitHub)", "url": "https://github.com/QwenLM/Qwen-Image-2.1#prompt-rewriting" }
+          ]
+        }
+      }
+    },
+    {
+      // Qwen-Image 2.1 OFFICIAL PROMPT REWRITER — image-editing half (sc-24113, epic 24107).
+      //
+      // The edit twin of the entry above, and structurally identical to it: same 9.41B `qwen3_5`
+      // architecture, same native TextLlm lane, same optional-download and licence posture. It
+      // differs in exactly two ways, both of which live in the snapshot rather than here:
+      //
+      //   1. Its `system_prompt.txt` is the EDIT enhancer, and its reply carries a third field
+      //      `ratio_follow` ("<image1>" …) that is mutually exclusive with `wh_ratio` — the
+      //      output resolution either follows a named input image or takes a stated ratio.
+      //   2. It is driven with the ordered reference images attached to the user turn as vision
+      //      blocks, so the rewrite can actually see what it is editing. The worker sends the same
+      //      ordered 1–10 reference list the render will use, which is why swapping two references
+      //      changes the rewrite as well as the render.
+      //
+      // It is selected by the REQUEST, never by the user: a rewrite on a Qwen-Image 2.1 request
+      // that carries references routes here; one with no references routes to `-PE-T2I`.
+      "id": "qwen_image_2_1_pe_i2i",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 32,
+      "name": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+      "family": "qwen-image-2-1-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-PE-I2I",
+          "revision": "72927bc08afc99b7888ceb7d7d51a12db3700bbd",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "system_prompt.txt",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+            "LICENSE"
+          ],
+          "estimatedSizeBytes": 18839819638,
+          "footprint": { "diskSizeBytes": 18839819638, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-PE-I2I"
+      },
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I/blob/72927bc08afc99b7888ceb7d7d51a12db3700bbd/LICENSE",
+      "licenseNotice": "The Qwen-Image 2.1 prompt rewriters are governed by the Qwen RESEARCH LICENSE AGREEMENT — the same non-commercial terms as the Qwen-Image 2.1 weights themselves, and NOT SceneWorks' own AGPL-3.0 licence. §1(i) and §2(a) grant use, reproduction, distribution and modification FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means research or evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory (model-business@notice.qwencloud.com) for any commercial use. §4(b)/§4(c) forbid using \"Qwen\" as the primary name of a derivative work and require a prominent \"Built with Qwen\" notice on any model you train or improve with this one or its outputs. §3 carries the Agreement with any redistribution. This rewriter is an OPTIONAL download: Qwen-Image 2.1 generates and edits normally without it, and installing it only adds an explicit \"Rewrite prompt\" action you choose to run. SceneWorks never redistributes these weights — they are pulled from Qwen's own repository into your machine. Read the full text at the link below before downloading.",
+      "nonCommercial": true,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+        "description": "Optional official rewriter for Qwen Image 2.1 edit instructions. Reads your ordered reference images, rewrites the instruction, and says which reference the output resolution should follow; you edit and accept the result. Qwen Image 2.1 editing works fully without it.",
+        "recommendedFor": ["qwen_image_2_1_prompt_rewrite"],
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-PE-I2I model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I" },
+            { "label": "Qwen-Image-2.1 prompt rewriting (GitHub)", "url": "https://github.com/QwenLM/Qwen-Image-2.1#prompt-rewriting" }
+          ]
+        }
+      }
+    },
+    {
       // Dataset captioning LLM (sc-5620, the JoyCaption twin of the sc-5605 prompt_refine gap).
       // The native captioner (`caption_jobs.rs`, the `training_caption` job used by LoRA-training
       // auto-captioning) runs JoyCaption in-process — the MLX provider on macOS (sc-3556) and
@@ -26682,7 +27418,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "94e8609dbc1bd1637465ff5d98d8f801837bd5eb7c372452dcc8c6254376ca69",
+              "sha256": "4aca60f746019e98f8981663f394728f5dfcd3e19172f9fdd88ea212417c7cd0",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -26701,13 +27437,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 250777,
-                  "sha256": "3a27821ead11d82a03ac17e80f32c001289130b1fa34c2a31a275d5d51612f5d"
+                  "byteSize": 251788,
+                  "sha256": "337bb3b086e2b2043fb7e1672262d69d83295b008a858e2c2ede8b78a41315fa"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "5572df182a63f181da1891061ae69a6f8638155f37dbfaff2a2dc3e66ef731d2"
+                  "sha256": "97e099232b150eac3bc75df948d31bfc9d940f16e8f64b65ac54657dc2679a04"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -26716,8 +27452,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 123271,
-                  "sha256": "b5070a361fb275c0a2d8c0bbb0180a5ca72c4533991476911e5dd4bf972f0c4a"
+                  "byteSize": 135325,
+                  "sha256": "6795856b217fc457236ea01e1e79c5f65f7766424a5d9a1b1abb2e125b5f7ad8"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -26732,7 +27468,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 8876,
-                  "sha256": "d5550e8dc55becaaeb44afe2b014dc207aed877e961b03b7e078acdfe87916b3"
+                  "sha256": "e4a84ddb3ff587798da7d6889c5375570dbc3f61758bf5f466c8d404a5046733"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -26751,8 +27487,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 138683,
-                  "sha256": "9d7fc5f333a93a9e2115bd81a1fe1d4f2dd45d48e743dc43c3f6a09f5e2643b3"
+                  "byteSize": 143423,
+                  "sha256": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
@@ -26761,8 +27497,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 147103,
-                  "sha256": "49ab768720f51a78a942b7c0445f92b554dd5ef74a9dcf1b725c7acab1060d71"
+                  "byteSize": 148393,
+                  "sha256": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -26776,8 +27512,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 211797,
-                  "sha256": "7982db22418e766874630d5f029890df6e2a58a4aad917fc8b79f825fa47da9d"
+                  "byteSize": 243023,
+                  "sha256": "a7754eccd40ab453475f3243b03522d80d31ef5c7fab2157cc6816ba8987514c"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -26801,8 +27537,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 134070,
-                  "sha256": "46e585ea823d0a1b3b76835c85d05c2c640e41493b2d5c2b2e552b1f8cc68666"
+                  "byteSize": 147353,
+                  "sha256": "321eb8f2fe37645316b97ad26c9765a50c6fa237b1ac9e60a8f7a70436658287"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

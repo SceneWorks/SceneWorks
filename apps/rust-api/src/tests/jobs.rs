@@ -7643,6 +7643,474 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     );
 }
 
+/// sc-24113: Qwen-Image 2.1's official prompt rewriting rides the EXISTING `prompt_refine` seam.
+///
+/// The point of this test is what it does NOT find: no new route, no new job type, no second LLM
+/// runtime. The rewrite is a `task` discriminator on `POST /api/v1/prompts/refine`, exactly as the
+/// film planner and the two caption tasks are, and the checkpoints it runs are Qwen3.5/3.6
+/// (`qwen3_5`) — the same architecture the optional `film_planner_qwen3_6_27b` entry already loads
+/// on the native TextLlm lane.
+///
+/// Three request shapes matter and all three are here: the text-to-image rewrite (no references),
+/// the edit rewrite (ordered references, which is what SELECTS the I2I checkpoint in the worker),
+/// and the over-cap refusal.
+#[tokio::test]
+async fn qwen_image_rewrite_rides_the_prompt_refine_seam_with_ordered_references() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Rewrite Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let mut asset_ids = Vec::new();
+    for index in 1..=11 {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("Reference{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+
+    // 1. TEXT-TO-IMAGE: no references at all. This is NOT an error — it is the shape that selects
+    //    the T2I rewriter in the worker, and it is why the rewrite is not a "vision task" (which
+    //    would require an image and waive the prompt).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "a cinematic harbour at dusk",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["type"], "prompt_refine",
+        "no new job type is introduced"
+    );
+    assert_eq!(job["payload"]["task"], "qwen_image_rewrite");
+    assert_eq!(job["payload"]["modelId"], "qwen_image_2_1");
+    assert_eq!(job["payload"]["prompt"], "a cinematic harbour at dusk");
+    assert!(
+        job["payload"].get("imagePaths").is_none(),
+        "a text-to-image rewrite carries no references: {job}"
+    );
+
+    // ... and the prompt is still REQUIRED, unlike a true vision task. A rewrite with nothing to
+    // rewrite is a caller error, not a picture-driven request.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "   ",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a rewrite needs a prompt");
+
+    // 2. EDIT: ordered references. They arrive as the PLURAL `imagePaths` array in request order —
+    //    even at one reference — because the rewriter's `<imageN>` numbering is positional, so a
+    //    scalar `imagePath` would have no position to be "reference 1" of.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "put the courier in the second scene",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[0], asset_ids[1]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let paths = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("ordered reference paths");
+    assert_eq!(paths.len(), 2);
+    let first_order: Vec<String> = paths
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+
+    // Swapping the two references produces a DIFFERENT payload order. The rewrite must see exactly
+    // the list the render will condition on, in the same order, or its `ratio_follow: "<image1>"`
+    // names a different picture than the one the user put first.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "put the courier in the second scene",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[1], asset_ids[0]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let swapped_order: Vec<String> = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("ordered reference paths")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(swapped_order.len(), 2);
+    assert_ne!(
+        swapped_order, first_order,
+        "reordering the references must reorder the rewrite's view of them"
+    );
+    assert_eq!(
+        swapped_order,
+        first_order.iter().rev().cloned().collect::<Vec<_>>(),
+        "and it must be exactly the reversal, not an arbitrary reshuffle"
+    );
+
+    // A single reference still uses the plural key.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "recolour the jacket",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[0]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["imagePaths"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(job["payload"].get("imagePath").is_none());
+
+    // 3. TEN is legal — the rewrite's ceiling is the RENDER's ceiling, not the mood board's 6.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "compose all of them",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids[..10],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "10 references are legal: {job}"
+    );
+    assert_eq!(
+        job["payload"]["imagePaths"].as_array().map(Vec::len),
+        Some(10)
+    );
+
+    // ... and the 11th is refused, naming the cap.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "compose all of them",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 10"),
+        "names the rewrite's own cap: {body}"
+    );
+
+    // The unrelated mood-board cap is UNCHANGED at 6 — widening the rewrite must not widen it.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "prompt": "",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids[..7],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 6"),
+        "the mood board keeps its own ceiling: {body}"
+    );
+}
+
+/// sc-24113: the rewrite's RESULT reaches the client as an editable prompt plus a separate
+/// aspect-ratio suggestion, and the user's original prompt is never replaced.
+///
+/// Driven with a FIXTURE reply through the same claim + worker-owned progress shape production
+/// uses, so no model runs. What is asserted is the CONTRACT the UI reads: `originalPrompt` and
+/// `refinedPrompt` are both present and different, and `rewriteSuggestion` carries a legal preset
+/// the user may accept or ignore.
+#[tokio::test]
+async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_original() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Rewrite Result Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "a cinematic harbour at dusk",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+
+    // The worker's completion shape for this task, with the rewriter's JSON already parsed into
+    // the two halves the UI needs (see `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`).
+    complete_prompt_refine_job(
+        &app,
+        &job_id,
+        json!({
+            "originalPrompt": "a cinematic harbour at dusk",
+            "refinedPrompt": "A wide harbour at dusk, fishing boats moored along a stone quay, \
+                              amber light raking across wet cobbles",
+            "rewriteSuggestion": {
+                "whRatio": "16:9",
+                "ratioFollow": "",
+                "resolution": "2752x1536",
+                "rewriter": "t2i",
+                "rewriterModelId": "qwen_image_2_1_pe_t2i"
+            },
+            "executionIdentity": {
+                "provider": "native",
+                "model": "Qwen/Qwen-Image-2.1-PE-T2I",
+                "backend": "fixture",
+                "thinkingMode": "auto"
+            }
+        }),
+    )
+    .await;
+
+    let (status, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["status"], "completed");
+
+    let result = &completed["result"];
+    // The ORIGINAL survives. This is the whole "never replaced silently" guarantee at the data
+    // layer: the client renders the rewrite in an editable box beside the prompt it came from, and
+    // nothing has overwritten anything until the user presses Apply.
+    assert_eq!(result["originalPrompt"], "a cinematic harbour at dusk");
+    assert_ne!(
+        result["refinedPrompt"], result["originalPrompt"],
+        "the rewrite must be offered as a distinct value, not folded into the original"
+    );
+    // The rewrite arrives as PLAIN TEXT, not as the rewriter's JSON envelope — the user has to be
+    // able to edit it, and nobody should have to parse Qwen's schema to show it in a textarea.
+    let refined = result["refinedPrompt"].as_str().expect("refined prompt");
+    assert!(!refined.trim_start().starts_with('{'), "{refined}");
+    assert!(refined.contains("harbour"), "{refined}");
+
+    // The aspect suggestion is SEPARATE and names a legal preset — one of the seven the Aspect
+    // menu already offers, so accepting it is the same as picking it by hand.
+    assert_eq!(result["rewriteSuggestion"]["whRatio"], "16:9");
+    assert_eq!(result["rewriteSuggestion"]["resolution"], "2752x1536");
+    assert_eq!(
+        result["rewriteSuggestion"]["rewriterModelId"],
+        "qwen_image_2_1_pe_t2i"
+    );
+}
+
+/// sc-24113: direct prompting works with NEITHER rewriter installed — no download, no prompt to
+/// install, no degraded path.
+///
+/// The catalog fixture carries Qwen-Image 2.1 and BOTH rewriters, with the rewriters marked
+/// `autoDownload: false` exactly as the shipped manifest does. A plain image job must then be
+/// created without either of them being touched, and — the part that would be easy to get wrong —
+/// without a `prompt_refine` job appearing anywhere as a side effect.
+#[tokio::test]
+async fn direct_prompting_needs_neither_rewriter_installed() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": { "hardMinSteps": 2, "minDimension": 32, "maxDimension": 2752, "requiresDimensionsMultipleOf": 32 },
+              "ui": { "label": "Qwen Image 2.1" }
+            },
+            {
+              "id": "qwen_image_2_1_pe_t2i",
+              "name": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+              "family": "qwen-image-2-1-pe",
+              "type": "utility",
+              "adapter": "prompt-refine",
+              "autoDownload": false,
+              "capabilities": [],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1-PE-T2I", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Qwen Image 2.1 Prompt Rewriter (text-to-image)" }
+            },
+            {
+              "id": "qwen_image_2_1_pe_i2i",
+              "name": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+              "family": "qwen-image-2-1-pe",
+              "type": "utility",
+              "adapter": "prompt-refine",
+              "autoDownload": false,
+              "capabilities": [],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1-PE-I2I", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Qwen Image 2.1 Prompt Rewriter (image editing)" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Direct Prompting Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Neither rewriter is auto-downloaded. That is the manifest fact the "no download, no prompt to
+    // install" guarantee rests on, so assert it rather than assuming it.
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let models = catalog.as_array().expect("catalog is an array");
+    for rewriter in ["qwen_image_2_1_pe_t2i", "qwen_image_2_1_pe_i2i"] {
+        let entry = models
+            .iter()
+            .find(|model| model["id"] == rewriter)
+            .unwrap_or_else(|| panic!("{rewriter} is in the catalog"));
+        assert_eq!(
+            entry["autoDownload"],
+            json!(false),
+            "{rewriter} must be an explicit, optional download: {entry}"
+        );
+    }
+
+    // A plain generation succeeds with neither installed, at the model's own defaults.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a cinematic harbour at dusk",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "direct prompting must work with no rewriter installed: {body}"
+    );
+    assert_eq!(body["payload"]["width"], 2048);
+    assert_eq!(body["payload"]["height"], 2048);
+    assert_eq!(body["payload"]["prompt"], "a cinematic harbour at dusk");
+
+    // ... and no rewrite was triggered as a side effect. Rewriting is a USER ACTION: an image job
+    // must never enqueue one on its own, the way an Ideogram plain-text job enqueues magic-prompt.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array()
+            .expect("jobs is an array")
+            .iter()
+            .all(|job| job["type"] != "prompt_refine"),
+        "generating must not enqueue a rewrite: {jobs:?}"
+    );
+}
+
 #[tokio::test]
 async fn image_caption_refine_job_requires_source_asset_and_project() {
     // sc-8108: the image-caption task is driven by a reference asset, so it must reject a request that
@@ -11273,6 +11741,1055 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .as_str()
         .unwrap_or_default()
         .contains("fps must be between 1 and 60"));
+}
+
+/// sc-24108: the IMAGE half of the same gate. `limits.hardMinSteps` was video-only — its two
+/// rejection seams were `create_video_job` and the worker's video lane — so an image model with a
+/// real sampling floor had nowhere to declare it. Qwen-Image 2.1's engine refuses `steps < 2`, and
+/// without this gate `advanced.steps: 1` travelled all the way to the MLX provider and died there,
+/// which reaches the user as a failed render instead of a 400 naming the floor.
+///
+/// The fixture makes the two homes disagree the same way the video test does: one image model with
+/// no floor, one with 2. Both halves are asserted — the refusal AND the at-floor admission — so a
+/// gate that simply rejected every step count could not pass.
+#[tokio::test]
+async fn image_steps_under_the_models_hard_floor_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unfloored_image",
+              "name": "Unfloored",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unfloored", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Unfloored" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": { "hardMinSteps": 2 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Step Floor Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Under the floor: refused at enqueue, naming the model, the floor and what was asked.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1 step under Qwen Image 2.1's 2-step floor must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1"),
+        "names the model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 2 sampling steps"),
+        "states the floor: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 1."),
+        "states what was asked: {detail}"
+    );
+
+    // At the floor: admitted, and the count travels VERBATIM — the gate refuses, never rewrites.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 2 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
+    assert_eq!(body["payload"]["advanced"]["steps"], 2);
+
+    // An image model that declares NO floor is untouched: absent means no floor, so every other
+    // image model in the catalog is byte-for-byte unchanged by this gate.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unfloored_image",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model with no declared floor must still admit 1 step: {body}"
+    );
+}
+
+/// sc-24114: the declared sampler / scheduler MENU is enforced at image enqueue. Qwen-Image 2.1's
+/// providers publish a curated solver menu and honour it; a name on no lane's menu would be silently
+/// dropped back to the engine default by the worker, so it is a 400 naming the menu. A member is
+/// admitted verbatim, and a model that declares no menu is untouched.
+#[tokio::test]
+async fn image_sampler_off_the_models_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "menuless_image",
+              "name": "Menuless",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/menuless", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Menuless" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": {
+                "samplers": ["default", "euler", "er_sde"],
+                "schedulers": ["default", "karras", "beta57"]
+              },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Sampler Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let post = |model: &'static str, advanced: Value| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse",
+            "advanced": advanced
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    let (status, body) = post(
+        "qwen_image_2_1",
+        json!({ "sampler": "er_sde", "scheduler": "beta57" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a menu member is admitted: {body}"
+    );
+    assert_eq!(body["payload"]["advanced"]["sampler"], "er_sde");
+
+    for advanced in [
+        json!({ "sampler": "dpmpp_3m" }),
+        json!({ "scheduler": "polyexponential" }),
+    ] {
+        let (status, body) = post("qwen_image_2_1", advanced.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{advanced} is off the menu: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1") && detail.contains("does not offer"),
+            "{detail}"
+        );
+    }
+
+    let (status, body) = post("menuless_image", json!({ "sampler": "dpmpp_3m" })).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "no declared menu ⇒ untouched: {body}"
+    );
+}
+
+/// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
+/// the ORDERED reference ceiling and the FREE-SIZE envelope.
+///
+/// Both gates are new to the image lane and both had the same hole before this story. The API's
+/// `validate_image_job` never looked at `referenceAssetIds` at all (the only image-side caps were
+/// per-family constants deep in the worker, which silently TRUNCATE), and it enforced one blanket
+/// 256..=4096 with no stride for every model in the catalog. For a native-resolution model that is
+/// both too narrow and too wide: 2.1 renders from 32 px — below the blanket floor — up to 2752 — far
+/// below the blanket ceiling — on a 32-px grid. An off-grid or over-cap size therefore passed every
+/// check in the app and died inside the provider, reaching the user as a failed render rather than
+/// a 400 naming the bound.
+///
+/// The fixture makes the two homes disagree the way the step-floor test above does: one image model
+/// that declares nothing, one that declares the full envelope. Every assertion has its admitting
+/// twin, so a gate that simply rejected everything could not pass.
+#[tokio::test]
+async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unbounded_image",
+              "name": "Unbounded",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8, "resolution": "1024x1024" },
+              "limits": {},
+              "ui": { "label": "Unbounded" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": {
+                "resolutions": ["2048x2048", "2400x1792", "2752x1536"],
+                "count": [1, 2, 4, 8],
+                "minDimension": 32,
+                "maxDimension": 2752,
+                "requiresDimensionsMultipleOf": 32,
+                "maxReferenceAssets": 10,
+                "hardMinSteps": 2
+              },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Controls Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Eleven REAL raster assets. sc-24110 added a per-entry half to this gate — each ordered
+    // reference must actually be a raster image the project owns — so the ids here have to exist
+    // for the COUNT and ORDER assertions below to be reading what they claim to read rather than
+    // tripping the per-entry check first.
+    let mut uploaded: Vec<String> = Vec::new();
+    for index in 0..11 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        uploaded.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let refs = |count: usize| -> Vec<String> { uploaded[..count].to_vec() };
+
+    // TEN references: admitted, and — the load-bearing half — the list arrives in the SAME ORDER it
+    // was sent. Order is semantic for this family: the template numbers the images (<image1> …) and
+    // block-causal attention makes each visible only to what follows, so a reordered payload is a
+    // different render, not a cosmetic difference.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(10),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "10 references are legal: {body}"
+    );
+    assert_eq!(
+        body["payload"]["referenceAssetIds"],
+        json!(refs(10)),
+        "the ordered list must travel verbatim"
+    );
+
+    // ... and swapping two of them is a DIFFERENT payload, not a normalized-away one. This is the
+    // assertion that would catch a future "sort or de-dupe the references" change.
+    let swapped = json!([uploaded[1], uploaded[0], uploaded[2]]);
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": swapped,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["payload"]["referenceAssetIds"], swapped);
+    assert_ne!(
+        body["payload"]["referenceAssetIds"],
+        json!([uploaded[0], uploaded[1], uploaded[2]]),
+        "reordering the references must change the request"
+    );
+
+    // ELEVEN: refused at enqueue, naming the cap and the count. Refused rather than truncated,
+    // because dropping one renumbers every reference after it.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(11),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an 11th reference must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1"),
+        "names the model: {detail}"
+    );
+    assert!(detail.contains("up to 10"), "states the cap: {detail}");
+    assert!(detail.contains("11"), "states what was asked: {detail}");
+
+    // A model that declares NO cap is untouched: absent means no opinion, so every other image
+    // model in the catalog is byte-for-byte unchanged by this gate.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unbounded_image",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(11),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model with no declared reference cap is unchanged: {body}"
+    );
+
+    // FREE SIZE — the declared envelope admits a size the blanket 256 floor would have refused
+    // outright, with no model ever getting a say.
+    for (width, height) in [(32u32, 32u32), (2752, 1536), (1024, 2048)] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{width}x{height} is inside the declared envelope and on the grid: {body}"
+        );
+        // The geometry travels VERBATIM — the gate refuses, it never coerces. Image dimensions
+        // have silently coerced in this codebase before (sc-12400), which is exactly how a wrong
+        // size reached the engine unnoticed.
+        assert_eq!(body["payload"]["width"], width);
+        assert_eq!(body["payload"]["height"], height);
+    }
+
+    // Over the declared ceiling, below the declared floor, and off the declared grid: each a 400
+    // naming its own bound, none of them a silent refit.
+    for (width, height, needle) in [
+        (2784u32, 2048u32, "2752"),
+        (2048, 2784, "2752"),
+        (2048, 2050, "32-pixel grid"),
+        (2050, 2048, "32-pixel grid"),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{width}x{height} is outside the declared envelope: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(needle),
+            "{width}x{height} must name `{needle}`: {detail}"
+        );
+    }
+
+    // The blanket floor did NOT move for anyone else. A model that declares no `minDimension`
+    // still refuses a sub-256 side — the check moved one layer down, it did not loosen.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unbounded_image",
+            "prompt": "a lighthouse",
+            "width": 64,
+            "height": 64,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "widening the shape check must not lower the floor for an undeclared model: {body}"
+    );
+    assert!(
+        body["detail"].as_str().unwrap_or_default().contains("256"),
+        "the historical floor is still the one that refuses it: {body}"
+    );
+
+    // COUNT — the declared ladder tops out at 8, which is also the API's blanket ceiling, so both
+    // halves are asserted against the same number from opposite sides.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 8,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "8 is the declared maximum: {body}"
+    );
+    assert_eq!(body["payload"]["count"], 8);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 9,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "9 is past the ceiling");
+
+    // SEED and NEGATIVE PROMPT + TRUE-CFG GUIDANCE round-trip verbatim. They are not gated by
+    // anything — which is the point: they are part of the declared surface and nothing in this
+    // story may have started rewriting them.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "seed": 4242,
+            "negativePrompt": "watermark, blurry",
+            "advanced": { "steps": 40, "guidanceScale": 4.0 },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["payload"]["seed"], 4242);
+    assert_eq!(body["payload"]["negativePrompt"], "watermark, blurry");
+    assert_eq!(body["payload"]["advanced"]["steps"], 40);
+    assert_eq!(body["payload"]["advanced"]["guidanceScale"], 4.0);
+
+    // TRANSPARENCY — the toggle rides `advanced.transparentBackground` and round-trips untouched,
+    // so the worker's `qwen_alpha` adapter sees exactly what the user asked for. ⚠️ The key name is
+    // stable (it is a SceneWorks request axis); the ENGINE-side names it maps to are provisional
+    // pending inference sc-24111 and are spelled only in `crates/sceneworks-worker/src/qwen_alpha.rs`
+    // and `apps/web/src/qwenAlpha.js`.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a cut-out courier on a transparent background",
+            "advanced": { "transparentBackground": true },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["payload"]["advanced"]["transparentBackground"],
+        json!(true),
+        "the transparency request must reach the worker verbatim"
+    );
+
+    // ... and an omitted toggle stays omitted. Defaulting it to `false` would write a new key onto
+    // every image job in the app for a value that means "the default".
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "an opaque courier",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        body["payload"]["advanced"]
+            .get("transparentBackground")
+            .is_none(),
+        "an opaque render must put nothing new on the wire: {body}"
+    );
+}
+
+/// sc-24112 — the declared request-geometry ENVELOPE (`admissionGeometry`) is enforced at ENQUEUE,
+/// not only in the worker. 2752x2752 passes every per-side check (`maxDimension: 2752`, the 32-px
+/// grid) and is still 7.57 Mpx against the 4.30 Mpx largest-preset area; before this the API
+/// accepted it and the job failed later in the worker. Driven off the SHIPPED catalog entry, so the
+/// envelope under test is the declared one, with an admitting twin at the widest real preset.
+///
+/// *Mutation that reds this:* removing the `refuse_over_envelope` call from `create_image_job`.
+#[tokio::test]
+async fn image_jobs_outside_the_declared_admission_envelope_are_refused_at_enqueue() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = shipped["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .clone();
+    assert!(
+        entry.get("admissionGeometry").is_some(),
+        "precondition: the shipped entry declares its envelope"
+    );
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string(&json!({ "schemaVersion": 1, "models": [entry] }))
+            .expect("fixture serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Envelope Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let enqueue = |width: u32, height: u32| {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+    };
+
+    let (status, body) = enqueue(2752, 1536).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the widest shipped preset is inside the envelope: {body}"
+    );
+
+    let (status, body) = enqueue(2752, 2752).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "2752x2752 is over the declared area: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("4300800"),
+        "must name the declared area: {detail}"
+    );
+    assert!(
+        detail.contains("refused rather than silently resized"),
+        "{detail}"
+    );
+}
+
+/// sc-24110 — the parts of the ordered-conditioning contract the count gate above cannot see.
+///
+/// `image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits` owns the CEILING
+/// and the ORDER; both read `limits.maxReferenceAssets`, which stays the single source of truth for
+/// the number. What it cannot express is everything else the ordered list can be wrong about, and
+/// each of these was a render failure or a silently different render before:
+///
+///   * the cap is over the FLATTENED list. The engine receives ONE list, and on this model
+///     `sourceAssetId` and `maskAssetId` are entries in it — a mask is an ordinary reference the
+///     prompt names, not a mask tensor. Counting `referenceAssetIds` alone would admit
+///     `source + mask + 9` as "nine references" and hand the worker eleven images.
+///   * a conditioned mode with NOTHING to condition on. The conditioned modes ARE the conditioning
+///     call; falling back to text-to-image would render something the caller did not ask for.
+///   * a per-reference `strength`. Upstream's condition images have no strength at all, and the
+///     engine refuses anything but unset-or-1.0 — after the weights are loaded.
+///   * an entry that is not a raster image this project owns. The worker would fail the job at
+///     decode time, by which point a job exists and a GPU has been claimed.
+#[tokio::test]
+async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unbounded_image",
+              "name": "Unbounded",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8, "resolution": "1024x1024" },
+              "limits": {},
+              "ui": { "label": "Unbounded" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": { "hardMinSteps": 2, "maxReferenceAssets": 10 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Ordered Conditioning" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // TWELVE distinct assets. The count below is over DISTINCT ids — the ordered list is deduped,
+    // because the ordinary Image-Editor payload names its working image in both `sourceAssetId` and
+    // the head of `referenceAssetIds`. A fixture whose carriers OVERLAP would therefore be counting
+    // fewer images than it names, and an "eleven" case built from overlapping slices is really a
+    // nine: it would pass against a gate that had no flattening at all.
+    let mut assets: Vec<String> = Vec::new();
+    for index in 0..12 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assets.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let post = |body: Value| {
+        let app = app.clone();
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    // ── The cap is over the FLATTENED list: source + mask + 9 is ELEVEN images, not nine.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[2..11]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "source + mask + 9 DISTINCT references is eleven images in ONE ordered list: {body}"
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("up to 10"),
+        "{body}"
+    );
+
+    // …and the same three carriers at TEN are admitted, so the count is a count and not a
+    // blanket refusal of the mask/source carriers.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[2..10]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "source + mask + 8 DISTINCT references is exactly ten: {body}"
+    );
+    assert_eq!(
+        body["payload"]["maskAssetId"], assets[1],
+        "the mask travels as an ordinary ordered reference — it is NOT stripped"
+    );
+
+    // ── DEDUPE, at the count the cap is measured against. This is the ORDINARY Image-Editor
+    // payload: the web leads `referenceAssetIds` with the working image and ALSO sets
+    // `sourceAssetId`, so the same asset is named twice. Counting it twice would burn one of the
+    // model's ten slots on a duplicate and renumber every reference after it — and would reject a
+    // legal ten-image edit as eleven.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4],
+                              assets[5], assets[6], assets[7], assets[8], assets[9]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the working image named twice is ONE image — ten distinct ids is at the cap, not over it: {body}"
+    );
+
+    // …and the dedupe is not a way to sneak past the cap: eleven DISTINCT ids still refuse, even
+    // when one of them is also the source.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4], assets[5],
+                              assets[6], assets[7], assets[8], assets[9], assets[10]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "eleven distinct images is still eleven: {body}"
+    );
+
+    // ── ZERO references on a conditioned mode.
+    for mode in ["edit_image", "character_image"] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": mode,
+            "prompt": "compose these"
+        }))
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{mode} with nothing to condition on must be refused: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1"),
+            "names the model: {detail}"
+        );
+        assert!(detail.contains("supplies none"), "{detail}");
+    }
+
+    // ── STRENGTH, refused in the ENGINE's terms. 1.0 IS full weight and is admitted.
+    for (advanced, admitted) in [
+        (json!({ "strength": 0.5 }), false),
+        (json!({ "referenceStrength": 0.8 }), false),
+        (json!({ "strength": 1.0 }), true),
+    ] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "compose these",
+            "referenceAssetIds": [assets[0]],
+            "advanced": advanced
+        }))
+        .await;
+        if admitted {
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "a strength of exactly 1.0 is what full weight spells: {body}"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{advanced} must be refused: {body}"
+            );
+            let detail = body["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.contains("full weight") && detail.contains("no strength"),
+                "the refusal must carry the engine's reason: {detail}"
+            );
+        }
+    }
+
+    // ── PER-ENTRY existence and format, naming the ORDINAL — on a route where position is
+    // semantic, "reference 2" is something the caller can act on where a bare id is not.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "not-an-asset"]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference 2"),
+        "names the ordinal, not just the id: {body}"
+    );
+
+    // ── A malformed carrier fails CLOSED rather than reading as "not supplied".
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "  "]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // ── Every one of these is armed by the SAME declaration as the cap, so a model that declares
+    // nothing pays none of it — not the refusals, and not the asset reads.
+    for body in [
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these"
+        }),
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these", "referenceAssetIds": ["not-an-asset"],
+            "advanced": { "strength": 0.5 }
+        }),
+    ] {
+        let (status, response) = post(body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a model declaring no cap is byte-for-byte unchanged: {body} -> {response}"
+        );
+    }
+
+    // ── And plain text-to-image on the capped model is not this gate's business either.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "prompt": "a lighthouse"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 /// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,

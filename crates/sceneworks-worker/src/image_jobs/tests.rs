@@ -9090,6 +9090,1199 @@ fn mage_edit_request_shape_reaches_each_registered_engine() {
     }
 }
 
+/// sc-24110 — the ORDER of the Qwen-Image 2.1 conditioning list, worker side.
+///
+/// Not cosmetic and not bookkeeping: upstream numbers the images in the prompt template
+/// (`<image1>…`), reads the LAST one for its size fallback, and attends block-causally, so a
+/// reference is visible only to what follows it. Swapping two entries is a DIFFERENT render. The
+/// ids below are deliberately anti-lexical so a sort would fail.
+///
+/// Un-gated from `cfg(target_os = "macos")` on purpose — the resolver compiles and runs on the
+/// candle lane too (`cfg(any(macos, backend-candle))`), and the Mage twin above being Mac-only is
+/// the reason its ordering contract is unexercised off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "sourceAssetId": "source",
+            "maskAssetId": "mask",
+            "referenceAssetIds": ["reference-b", "reference-a"]
+        }))),
+        vec![
+            "source".to_owned(),
+            "mask".to_owned(),
+            "reference-b".to_owned(),
+            "reference-a".to_owned(),
+        ],
+        "source, then the mask as an ORDINARY second reference, then the submitted order"
+    );
+
+    // Swapping two submitted references changes the list. This is the property the API's
+    // order-preservation test and the payload-builder test below both rest on.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "referenceAssetIds": ["reference-a", "reference-b"]
+        }))),
+        vec!["reference-a".to_owned(), "reference-b".to_owned()]
+    );
+
+    // Character Studio's singular carrier lands last, and a text-to-image request carries nothing.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "character_image",
+            "referenceAssetId": "subject"
+        }))),
+        vec!["subject".to_owned()]
+    );
+    // A mode-less payload with a carrier is STILL conditioned — the list is mode-independent,
+    // exactly as the router's is. Gating it on the mode here would return empty for a job the
+    // router already claimed and drop the reference into a plain text-to-image render.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "source"
+        }))),
+        vec!["source".to_owned()]
+    );
+
+    // What DOES carry nothing: a request with no carriers at all (the text-to-image call), and any
+    // other model id — the 2512 edit ids are a different engine with their own lane.
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
+        json!({ "projectId": "p", "model": "qwen_image_edit_2511", "mode": "edit_image", "sourceAssetId": "s" }),
+    ] {
+        assert!(
+            qwen_image_2_1_reference_ids(&request(payload.clone())).is_empty(),
+            "{payload}"
+        );
+    }
+}
+
+/// The worker's ordering and the router's MUST be the same list (sc-24110).
+///
+/// Two functions read the same carriers: `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`
+/// over the raw payload (which is what the scheduler gates on and what the API validates and counts
+/// against the cap), and `image_jobs::qwen_image_2_1_reference_ids` over the parsed `ImageRequest`
+/// (which is what actually gets rendered). If they disagreed, the API would validate one ordered
+/// list and the worker would render another — an 11th reference could be admitted, or the images
+/// could arrive numbered differently than the prompt says. Neither is visible from either side
+/// alone, so it is pinned from outside both.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image", "sourceAssetId": "src" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "src", "maskAssetId": "mask",
+            "referenceAssetIds": ["ref-b", "ref-a"]
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "referenceAssetIds": ["ref-a", "ref-b"], "referenceAssetId": "single"
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "character_image",
+            "referenceAssetId": "subject"
+        }),
+        // Blank and whitespace-only carriers are "not supplied" on both sides.
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "   ", "referenceAssetIds": ["ref-a"]
+        }),
+        // MODE-INDEPENDENT. The router's list does not consult `mode` at all — an empty list IS
+        // text-to-image and a non-empty one IS the edit call — so a conditioned payload that
+        // names no mode, or names a text-to-image one, is still claimed as conditioned. A worker
+        // twin that gated on the mode would return EMPTY for these and the references would be
+        // silently dropped into a plain unconditioned render, with nothing on the API side to
+        // reject it (the enqueue gate returns early for non-conditioned modes).
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "src" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "image_generation",
+            "referenceAssetIds": ["ref-a", "ref-b"]
+        }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "text_to_image",
+            "referenceAssetId": "ref-a"
+        }),
+        // DEDUPE, keeping the first occurrence. This is the ordinary Image-Editor payload: the web
+        // leads `referenceAssetIds` with the working image and ALSO sets `sourceAssetId`, so the
+        // same asset is named twice. Each entry costs one of the model's slots and gets its own
+        // number in the prompt template, so a duplicate is not a harmless repeat.
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "A", "referenceAssetIds": ["A", "B"]
+        }),
+    ] {
+        let map = payload.as_object().expect("payload object").clone();
+        let router = sceneworks_core::jobs_store::qwen_image_2_1_reference_ids(&map)
+            .expect("these payloads are all well-formed");
+        let worker = qwen_image_2_1_reference_ids(&request(payload.clone()));
+        assert_eq!(
+            worker, router,
+            "the worker renders a different ordered list than the router validated: {payload}"
+        );
+        // …and the worker's EDIT-ROUTE predicate claims exactly what the router claims. This is
+        // the gate `generate_stream` / `generate_candle_stream` / the candle route resolver branch
+        // on: a mode gate here would leave a mode-less or `image_generation` payload with its
+        // references on the plain text-to-image path, silently dropped.
+        assert_eq!(
+            is_qwen_image_2_1_edit(&request(payload.clone())),
+            !router.is_empty(),
+            "the worker's edit predicate disagrees with the router's claim: {payload}"
+        );
+    }
+
+    // The two properties above, stated as VALUES rather than only as agreement — agreement alone
+    // would be satisfied by both sides being wrong in the same way.
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "sourceAssetId": "src"
+        }))),
+        vec!["src".to_owned()],
+        "a mode-less conditioned payload must still carry its reference"
+    );
+    assert_eq!(
+        qwen_image_2_1_reference_ids(&request(json!({
+            "projectId": "p", "model": "qwen_image_2_1", "mode": "edit_image",
+            "sourceAssetId": "A", "referenceAssetIds": ["A", "B"]
+        }))),
+        vec!["A".to_owned(), "B".to_owned()],
+        "the duplicated working image must occupy ONE slot, at its first position"
+    );
+    assert_eq!(
+        sceneworks_core::jobs_store::qwen_image_2_1_reference_ids(
+            json!({ "sourceAssetId": "A", "maskAssetId": "A", "referenceAssetIds": ["B", "A", "B"] })
+                .as_object()
+                .expect("payload object")
+        ),
+        Some(vec!["A".to_owned(), "B".to_owned()]),
+        "the router dedupes across every carrier, first occurrence winning"
+    );
+
+    // A plain text-to-image request carries nothing, and a 2512 edit id is not this route at all.
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
+        json!({
+            "projectId": "p", "model": "qwen_image_edit_2511", "mode": "edit_image",
+            "sourceAssetId": "src"
+        }),
+    ] {
+        assert!(
+            qwen_image_2_1_reference_ids(&request(payload.clone())).is_empty(),
+            "{payload}"
+        );
+    }
+}
+
+/// The conditioning list itself: RGB references become `Reference` (one) / `MultiReference` (many),
+/// in order, and **never** a `Conditioning::Mask` — the engine does not declare that kind and
+/// refuses it by name, telling the caller to send the mask as an ordinary extra reference instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_conditioning_is_ordered_references_and_never_a_mask() {
+    let image = |seed: i64| gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: stub_rgb8(8, 8, seed),
+    };
+    let rgb = |seed: i64| QwenImage21Reference {
+        image: image(seed),
+        alpha: None,
+    };
+
+    assert!(build_qwen_image_2_1_conditioning(&[])
+        .expect("no references is the text-to-image call")
+        .is_empty());
+
+    // One reference stays a `Reference`, byte-identical to every other single-reference lane.
+    match build_qwen_image_2_1_conditioning(&[rgb(1)])
+        .expect("one RGB reference")
+        .as_slice()
+    {
+        [gen_core::Conditioning::Reference { image, strength }] => {
+            assert_eq!(image.pixels, stub_rgb8(8, 8, 1));
+            assert!(
+                strength.is_none(),
+                "upstream's condition images have no strength — the engine refuses anything but \
+                 unset-or-1.0, so the worker must never invent one"
+            );
+        }
+        other => panic!("expected a single Reference, got {other:?}"),
+    }
+
+    // Many become ONE `MultiReference` whose images are in request order.
+    let many: Vec<QwenImage21Reference> = (1..=10).map(rgb).collect();
+    match build_qwen_image_2_1_conditioning(&many)
+        .expect("ten RGB references")
+        .as_slice()
+    {
+        [gen_core::Conditioning::MultiReference { images }] => {
+            assert_eq!(images.len(), 10);
+            for (index, image) in images.iter().enumerate() {
+                assert_eq!(
+                    image.pixels,
+                    stub_rgb8(8, 8, index as i64 + 1),
+                    "reference {} is out of order — the prompt template numbers these",
+                    index + 1
+                );
+            }
+        }
+        other => panic!("expected one ordered MultiReference, got {other:?}"),
+    }
+
+    // The whole point of the story: a mask reaches the engine as an ordered REFERENCE. The
+    // conditioning list this lane produces never contains a `Mask`, for any input.
+    for count in [1usize, 2, 10] {
+        let references: Vec<QwenImage21Reference> = (0..count).map(|i| rgb(i as i64)).collect();
+        assert!(
+            !build_qwen_image_2_1_conditioning(&references)
+                .expect("RGB references")
+                .iter()
+                .any(|conditioning| matches!(conditioning, gen_core::Conditioning::Mask { .. })),
+            "{count} references produced a Conditioning::Mask, which this engine refuses by name"
+        );
+    }
+}
+
+/// The generic lane must send EXACTLY what the dedicated builder says it sends.
+///
+/// `resolve_qwen_image_2_1_edit_images` hands the generic lane a `Vec<Image>` which
+/// `build_lane_conditioning` then turns into the conditioning list — so the dedicated builder would
+/// be decorative if the two ever disagreed. This is what makes it honest to state the contract in
+/// one place and wire the other.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder() {
+    for count in [1usize, 2, 10] {
+        let references: Vec<QwenImage21Reference> = (0..count)
+            .map(|i| QwenImage21Reference {
+                image: gen_core::Image {
+                    width: 8,
+                    height: 8,
+                    pixels: stub_rgb8(8, 8, i as i64),
+                },
+                alpha: None,
+            })
+            .collect();
+        let images: Vec<gen_core::Image> =
+            references.iter().map(|entry| entry.image.clone()).collect();
+        assert_eq!(
+            format!(
+                "{:?}",
+                build_qwen_image_2_1_conditioning(&references).expect("RGB references")
+            ),
+            format!("{:?}", build_lane_conditioning(None, &images, None)),
+            "{count} references: the generic lane and the dedicated builder disagree"
+        );
+    }
+}
+
+/// sc-24110 / sc-24113 — an alpha-carrying reference travels as `Conditioning::ReferenceRgba`,
+/// UN-flattened, in its own ordered slot.
+///
+/// The VAE encodes all four channels (S4 contract), so flattening the alpha away would send a
+/// DIFFERENT request. The mixed list is emitted per entry — a `MultiReference` holds only RGB — and
+/// the generic lane (what actually RUNS) must build exactly what the dedicated builder builds.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_alpha_reference_travels_as_reference_rgba_in_its_slot() {
+    // The pinned provider must actually declare the carrier this builds, on the registered
+    // descriptor — otherwise the engine would refuse the request by name.
+    let model = crate::engines::mlx_model("qwen_image_2_1").expect("2.1 is registered");
+    assert!(model
+        .descriptor
+        .capabilities
+        .conditioning
+        .contains(&gen_core::ConditioningKind::ReferenceRgba));
+
+    let rgb = stub_rgb8(2, 1, 1);
+    let mut plane = image::GrayImage::new(2, 1);
+    plane.put_pixel(0, 0, image::Luma([0]));
+    plane.put_pixel(1, 0, image::Luma([200]));
+    let references = vec![
+        QwenImage21Reference {
+            image: gen_core::Image {
+                width: 2,
+                height: 1,
+                pixels: stub_rgb8(2, 1, 7),
+            },
+            alpha: None,
+        },
+        QwenImage21Reference {
+            image: gen_core::Image {
+                width: 2,
+                height: 1,
+                pixels: rgb.clone(),
+            },
+            alpha: Some(plane.clone()),
+        },
+    ];
+    let conditioning =
+        build_qwen_image_2_1_conditioning(&references).expect("an RGBA reference is buildable");
+    assert_eq!(conditioning.len(), 2, "one ordered entry per reference");
+    match &conditioning[0] {
+        Conditioning::Reference { strength, .. } => assert_eq!(*strength, None),
+        other => panic!("slot 1 is opaque and must stay a plain Reference: {other:?}"),
+    }
+    match &conditioning[1] {
+        Conditioning::ReferenceRgba { image, strength } => {
+            assert_eq!(*strength, None);
+            assert_eq!((image.width, image.height), (2, 1));
+            // Straight RGB kept intact under A=0 — never composited, never zeroed.
+            assert_eq!(
+                image.pixels,
+                vec![rgb[0], rgb[1], rgb[2], 0, rgb[3], rgb[4], rgb[5], 200]
+            );
+        }
+        other => panic!("slot 2 carries alpha and must be ReferenceRgba: {other:?}"),
+    }
+
+    // The path that RUNS builds the identical list.
+    let images: Vec<gen_core::Image> = references.iter().map(|r| r.image.clone()).collect();
+    let alpha: Vec<Option<image::GrayImage>> = references.iter().map(|r| r.alpha.clone()).collect();
+    assert_eq!(
+        format!("{conditioning:?}"),
+        format!(
+            "{:?}",
+            build_lane_conditioning_with_alpha(None, &images, &alpha, None)
+        )
+    );
+    // The image-conditioning count the request scope grades against is unchanged: one per entry.
+    assert_eq!(lane_reference_count(false, images.len(), false), 2);
+}
+
+/// The alpha plane of a 2.1 reference is fitted with EXACTLY the geometry its RGB gets, so the two
+/// halves of a `ReferenceRgba` stay aligned; a letterbox the source never covered is transparent.
+/// sc-24110 — the never-a-Mask guarantee on the path that actually RUNS.
+///
+/// `build_qwen_image_2_1_conditioning` states the contract, but what `generate_one` sends is
+/// `build_lane_conditioning(identity_init, &edit_refs, edit_mask)` — so the builder's answer could
+/// be perfect and still be bypassed if either of the other two slots were ever populated for this
+/// model. `guard_qwen_image_2_1_lane_slots` is what closes that, and this exercises it directly
+/// rather than through a builder whose output the lane discards.
+///
+/// The mutation this is armed against: adding `"qwen_image_2_1"` to a mask-bearing arm of
+/// `resolve_generic_lane_conditioning` (or to the candle lane's `edit_mask` pair). Without the
+/// guard that change ships a `Conditioning::Mask` to an engine that refuses the kind by name, and
+/// every existing test stays green.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_lane_slots_refuse_a_mask_or_a_strength_bearing_reference() {
+    let edit = request(json!({
+        "projectId": "p",
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "sourceAssetId": "src",
+        "maskAssetId": "mask"
+    }));
+    let image = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: stub_rgb8(8, 8, 1),
+    };
+
+    // The shape the lane really produces today: both slots empty, so the ordered reference list is
+    // the whole of the conditioning.
+    guard_qwen_image_2_1_lane_slots(&edit, None, None)
+        .expect("the ordered-reference-only shape is what this route sends");
+
+    // A populated MASK slot — the mutation above — is refused by name.
+    let error = guard_qwen_image_2_1_lane_slots(&edit, None, Some(&image))
+        .expect_err("a mask slot would be sent as Conditioning::Mask");
+    let error = error.to_string();
+    assert!(error.contains("Conditioning::Mask"), "{error}");
+    assert!(error.contains("no mask tensor"), "{error}");
+
+    // A populated single-reference (img2img-init) slot carries a STRENGTH, which this engine also
+    // refuses — every 2.1 reference travels in the ordered list instead.
+    let error = guard_qwen_image_2_1_lane_slots(&edit, Some(&(image.clone(), 0.6)), None)
+        .expect_err("an img2img-init slot would be sent with a strength");
+    let error = error.to_string();
+    assert!(error.contains("strength"), "{error}");
+
+    // Every OTHER model is untouched — the guard is keyed on the id, so the Ideogram edit lane
+    // keeps sending its mask and the Z-Image lane keeps sending its init.
+    for model in ["ideogram_4", "z_image_turbo", "qwen_image_edit_2511"] {
+        let other = request(json!({
+            "projectId": "p", "model": model, "mode": "edit_image", "sourceAssetId": "src"
+        }));
+        guard_qwen_image_2_1_lane_slots(&other, Some(&(image.clone(), 0.6)), Some(&image))
+            .unwrap_or_else(|error| panic!("{model} must be unaffected: {error}"));
+    }
+}
+
+/// The solid colour of each fixture asset, in the ORDER the engine must number them: the source
+/// (`<image1>`), the mask as an ordinary reference (`<image2>`), then the submitted reference.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const QWEN_EDIT_FIXTURE_COLOURS: [[u8; 3]; 3] = [[200, 30, 30], [250, 250, 250], [30, 30, 200]];
+
+/// sc-24110 — a real project holding three solid-colour PNGs, so the LIVE lane resolvers read real
+/// assets through the real `ProjectStore` + `safe_project_path` confinement, and each image's
+/// identity stays readable from its bytes after the lane's geometry fit.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct QwenImage21EditFixture {
+    _data: tempfile::TempDir,
+    settings: Settings,
+    project_path: PathBuf,
+    project_id: String,
+    /// Source, mask, reference — the order of [`QWEN_EDIT_FIXTURE_COLOURS`].
+    ids: Vec<String>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl QwenImage21EditFixture {
+    fn new() -> Self {
+        let data = tempfile::tempdir().unwrap();
+        let mut settings = Settings::from_env();
+        settings.data_dir = data.path().to_path_buf();
+        let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("sc24110-qwen-image-2-1-edit").unwrap();
+        let project_path = PathBuf::from(&project.path);
+        let mut ids = Vec::new();
+        for (index, colour) in QWEN_EDIT_FIXTURE_COLOURS.iter().enumerate() {
+            let file = data.path().join(format!("qwen-edit-{index}.png"));
+            image::RgbImage::from_pixel(16, 16, image::Rgb(*colour))
+                .save(&file)
+                .unwrap();
+            let asset = store
+                .import_asset(
+                    &project.id,
+                    sceneworks_core::project_store::UploadAsset {
+                        filename: format!("qwen-edit-{index}.png"),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: file,
+                        source_asset_id: None,
+                        provenance: None,
+                    },
+                )
+                .unwrap();
+            ids.push(asset["id"].as_str().unwrap().to_owned());
+        }
+        Self {
+            _data: data,
+            settings,
+            project_path,
+            project_id: project.id,
+            ids,
+        }
+    }
+
+    /// The ordinary Image-Editor edit payload plus a mask. The web names the working image TWICE —
+    /// in `sourceAssetId` and at the head of `referenceAssetIds` — so this is also the dedupe case.
+    fn edit_request(&self) -> ImageRequest {
+        request(json!({
+            "projectId": self.project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "use the second image as the mask",
+            "width": 64,
+            "height": 64,
+            "count": 2,
+            "sourceAssetId": self.ids[0],
+            "maskAssetId": self.ids[1],
+            "referenceAssetIds": [self.ids[0], self.ids[2]],
+        }))
+    }
+}
+
+/// The centre pixel of an RGB8 engine image — the fixture colours are solid, so this names WHICH
+/// asset an emitted image is, whatever the lane's fit did to its edges.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_edit_centre_rgb(image: &Image) -> [u8; 3] {
+    let offset = (((image.height / 2) * image.width + image.width / 2) * 3) as usize;
+    [
+        image.pixels[offset],
+        image.pixels[offset + 1],
+        image.pixels[offset + 2],
+    ]
+}
+
+/// Assert on the conditioning a lane EMITS for the fixture's edit: one ordered `MultiReference`
+/// whose images are the source at `<image1>`, the mask at `<image2>` and the reference at
+/// `<image3>` — the duplicated working image occupying ONE slot — and no `Conditioning::Mask`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_edit_emits_the_ordered_list(emitted: &[Conditioning], lane: &str) {
+    assert!(
+        !emitted
+            .iter()
+            .any(|conditioning| matches!(conditioning, Conditioning::Mask { .. })),
+        "{lane}: a Conditioning::Mask reached a 2.1 render — the engine refuses that kind by name"
+    );
+    match emitted {
+        [Conditioning::MultiReference { images }] => {
+            let centres: Vec<[u8; 3]> = images.iter().map(qwen_edit_centre_rgb).collect();
+            assert_eq!(
+                centres,
+                QWEN_EDIT_FIXTURE_COLOURS.to_vec(),
+                "{lane}: the source must be <image1> and the mask <image2> (the ordinal the \
+                 engine's own refusal text tells the caller to name), the reference <image3>, and \
+                 the working image named twice must occupy ONE slot"
+            );
+        }
+        other => panic!("{lane}: expected one ordered MultiReference, got {other:?}"),
+    }
+}
+
+/// sc-24110 — the never-a-Mask guarantee and the reference ORDINALS, on the MLX path that RUNS.
+///
+/// This drives `resolve_generic_lane_inputs` — the exact call `generate_stream` makes — against a
+/// real on-disk source + mask + reference edit, then assembles the conditioning through
+/// `build_lane_conditioning`, which is what `generate_one` sends. So the mask slot, the
+/// img2img-init slot, the ordered list and the emitted ordinals are all read off the live path,
+/// not off a builder whose answer the lane could ignore.
+///
+/// Armed against: adding `"qwen_image_2_1"` to the Ideogram mask arm of
+/// `resolve_generic_lane_conditioning` (the lane then refuses — the guard — and, with the guard
+/// also removed, emits a `Mask` the assertion names); restoring the mode gate or dropping the
+/// dedupe in the resolver; and reordering source/mask.
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_lane_emits_source_then_mask_as_references_and_never_a_mask() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+
+    let (lane, edit_refs, edit_ref_alpha) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves a source + mask + reference edit");
+    assert!(
+        lane.ideogram_edit_mask.is_none(),
+        "the mask slot must stay EMPTY for 2.1 — a mask is an ordinary ordered reference"
+    );
+    assert!(
+        lane.identity_init.is_none(),
+        "the img2img-init slot carries a strength, which 2.1 refuses"
+    );
+
+    // `generate_one_on_surface` sends exactly this, with the lane's alpha planes.
+    let emitted = build_lane_conditioning_with_alpha(
+        lane.identity_init.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        lane.ideogram_edit_mask.as_ref(),
+    );
+    assert_qwen_edit_emits_the_ordered_list(&emitted, "mlx");
+
+    // ONE source of truth: what the lane emits IS the dedicated builder's answer for the same
+    // resolved references.
+    let references = resolve_qwen_image_2_1_edit(&edit, &fixture.settings, &fixture.project_path)
+        .expect("resolved references");
+    assert_eq!(
+        format!("{emitted:?}"),
+        format!(
+            "{:?}",
+            build_qwen_image_2_1_conditioning(&references).expect("RGB references")
+        ),
+        "the live lane must send exactly what build_qwen_image_2_1_conditioning builds"
+    );
+    // …and the count the request scope grades against is the three it really carries.
+    assert_eq!(
+        lane_reference_count(lane.identity_init.is_some(), edit_refs.len(), false),
+        3
+    );
+}
+
+/// sc-24113 S4 — an alpha-carrying reference on the MLX path that RUNS: resolved from a real RGBA
+/// asset through `resolve_generic_lane_inputs`, it reaches the request `generate_one_on_surface`
+/// builds as `Conditioning::ReferenceRgba` in its own ordered slot — straight RGB kept, alpha
+/// intact — beside an ordinary `Reference`, and that list IS the dedicated builder's answer.
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_lane_sends_an_alpha_reference_as_reference_rgba() {
+    let fixture = QwenImage21EditFixture::new();
+    let store = ProjectStore::new(fixture.settings.data_dir.clone(), "worker");
+    let file = fixture._data.path().join("qwen-edit-cutout.png");
+    image::RgbaImage::from_fn(16, 16, |x, _| {
+        image::Rgba([10, 200, 30, if x < 8 { 0 } else { 255 }])
+    })
+    .save(&file)
+    .unwrap();
+    let cutout = store
+        .import_asset(
+            &fixture.project_id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "qwen-edit-cutout.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let edit = request(json!({
+        "projectId": fixture.project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "put the cut-out on the first image",
+        "width": 64,
+        "height": 64,
+        "sourceAssetId": fixture.ids[0],
+        "referenceAssetIds": [cutout["id"].as_str().unwrap()],
+    }));
+
+    let (lane, edit_refs, edit_ref_alpha) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves an RGBA reference");
+    assert_eq!(edit_refs.len(), 2);
+    assert!(
+        edit_ref_alpha[0].is_none(),
+        "the opaque source carries no plane"
+    );
+    assert!(
+        edit_ref_alpha[1].is_some(),
+        "the cut-out's plane must survive the resolve"
+    );
+
+    let emitted = build_lane_conditioning_with_alpha(
+        lane.identity_init.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        lane.ideogram_edit_mask.as_ref(),
+    );
+    assert_eq!(
+        emitted.len(),
+        2,
+        "one ordered entry per reference: {emitted:?}"
+    );
+    assert!(matches!(
+        emitted[0],
+        Conditioning::Reference { strength: None, .. }
+    ));
+    match &emitted[1] {
+        Conditioning::ReferenceRgba { image, strength } => {
+            assert_eq!(*strength, None);
+            assert_eq!(
+                (image.width, image.height),
+                (edit_refs[1].width, edit_refs[1].height),
+                "RGB and alpha share the fitted geometry"
+            );
+            let alphas: std::collections::BTreeSet<u8> =
+                image.pixels.chunks_exact(4).map(|p| p[3]).collect();
+            assert!(alphas.contains(&0) && alphas.contains(&255), "{alphas:?}");
+            // Straight alpha: the transparent half keeps its authored colour, never zeroed.
+            let transparent = image.pixels.chunks_exact(4).find(|p| p[3] == 0).unwrap();
+            assert_eq!(&transparent[..3], &[10, 200, 30]);
+        }
+        other => panic!("the cut-out must travel as ReferenceRgba, got {other:?}"),
+    }
+    let references = resolve_qwen_image_2_1_edit(&edit, &fixture.settings, &fixture.project_path)
+        .expect("resolved references");
+    assert_eq!(
+        format!("{emitted:?}"),
+        format!(
+            "{:?}",
+            build_qwen_image_2_1_conditioning(&references).unwrap()
+        ),
+        "the live lane must send exactly what build_qwen_image_2_1_conditioning builds"
+    );
+}
+
+/// sc-24110 — the candle twin of the live-path test above: `resolve_candle_lane_inputs` is the
+/// exact call `generate_candle_stream` makes. Compiled by `rust:check:candle`; it RUNS only on a
+/// candle test lane (a Mac cannot run candle-gated tests).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_lane_emits_source_then_mask_as_references_and_never_a_mask() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+
+    let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+        resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live candle lane resolves a source + mask + reference edit");
+    assert!(
+        edit_mask.is_none(),
+        "the candle mask slot must stay EMPTY for 2.1"
+    );
+    assert!(
+        edit_reference.is_none(),
+        "the candle img2img-init slot carries a strength, which 2.1 refuses"
+    );
+    let emitted = build_lane_conditioning_with_alpha(
+        edit_reference.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        edit_mask.as_ref(),
+    );
+    assert_qwen_edit_emits_the_ordered_list(&emitted, "candle");
+}
+
+/// sc-24114 — a Qwen-Image 2.1 reference reaches the conditioning list at its NATIVE geometry.
+///
+/// Upstream never crops or letterboxes a condition image; the engine fits each one itself,
+/// aspect-preserved, onto its ~1024²-area grid. So a PORTRAIT reference (and its alpha plane) in a
+/// 16:9 request must arrive un-resampled — not centre-cropped to 16:9 by the default
+/// `fitMode: "crop"`, and not letterboxed by `pad`.
+///
+/// Armed against: restoring `fit_engine_image(source, request.width, request.height, …)` (and the
+/// matching alpha fit) in `resolve_qwen_image_2_1_edit` — the emitted dims become 64×36.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_portrait_reference_request(
+    fit_mode: &str,
+) -> (QwenImage21EditFixture, ImageRequest) {
+    let fixture = QwenImage21EditFixture::new();
+    let store = ProjectStore::new(fixture.settings.data_dir.clone(), "worker");
+    let file = fixture._data.path().join("qwen-edit-portrait.png");
+    // 12×20 portrait, left half transparent — so the plane's geometry is checkable too.
+    image::RgbaImage::from_fn(12, 20, |x, _| {
+        image::Rgba([90, 60, 200, if x < 6 { 0 } else { 255 }])
+    })
+    .save(&file)
+    .unwrap();
+    let portrait = store
+        .import_asset(
+            &fixture.project_id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "qwen-edit-portrait.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let edit = request(json!({
+        "projectId": fixture.project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "place the person from <image2> into <image1>",
+        "width": 64,
+        "height": 36,
+        "fitMode": fit_mode,
+        "sourceAssetId": fixture.ids[0],
+        "referenceAssetIds": [portrait["id"].as_str().unwrap()],
+    }));
+    (fixture, edit)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, fit_mode: &str) {
+    match emitted {
+        [Conditioning::Reference { image: source, .. }, Conditioning::ReferenceRgba {
+            image: portrait, ..
+        }] => {
+            assert_eq!(
+                (source.width, source.height),
+                (16, 16),
+                "{lane}/{fit_mode}: the square source must keep its native 16×16"
+            );
+            assert_eq!(
+                (portrait.width, portrait.height),
+                (12, 20),
+                "{lane}/{fit_mode}: the portrait reference was fitted to the 16:9 output — \
+                 upstream never crops or letterboxes a condition image"
+            );
+            // The plane is the asset's own, unresampled: columns 0..6 transparent, 6..12 opaque.
+            for (index, pixel) in portrait.pixels.chunks_exact(4).enumerate() {
+                let expected = if index % 12 < 6 { 0 } else { 255 };
+                assert_eq!(
+                    pixel[3], expected,
+                    "{lane}/{fit_mode}: alpha misaligned at {index}"
+                );
+            }
+        }
+        other => panic!("{lane}/{fit_mode}: expected [Reference, ReferenceRgba], got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_lane_sends_references_at_native_geometry() {
+    for fit_mode in ["crop", "pad", "stretch"] {
+        let (fixture, edit) = qwen_image_2_1_portrait_reference_request(fit_mode);
+        let (lane, edit_refs, edit_ref_alpha) =
+            resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live MLX lane resolves a portrait reference");
+        let emitted = build_lane_conditioning_with_alpha(
+            lane.identity_init.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            lane.ideogram_edit_mask.as_ref(),
+        );
+        assert_qwen_image_2_1_native_geometry(&emitted, "mlx", fit_mode);
+    }
+}
+
+/// The candle twin: `resolve_candle_lane_inputs` is the call `generate_candle_stream` makes. Runs
+/// on a candle test lane only.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_lane_sends_references_at_native_geometry() {
+    for fit_mode in ["crop", "pad", "stretch"] {
+        let (fixture, edit) = qwen_image_2_1_portrait_reference_request(fit_mode);
+        let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+            resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live candle lane resolves a portrait reference");
+        let emitted = build_lane_conditioning_with_alpha(
+            edit_reference.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            edit_mask.as_ref(),
+        );
+        assert_qwen_image_2_1_native_geometry(&emitted, "candle", fit_mode);
+    }
+}
+
+/// sc-24114 — the declared `image_to_image` operation under its own mode is a 1-reference edit in
+/// upstream terms: the lane emits exactly ONE strength-less `Conditioning::Reference` (never the
+/// img2img-init slot, which carries a strength 2.1 refuses).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn qwen_image_2_1_image_to_image_request(fixture: &QwenImage21EditFixture) -> ImageRequest {
+    request(json!({
+        "projectId": fixture.project_id,
+        "model": "qwen_image_2_1",
+        "mode": "image_to_image",
+        "prompt": "the same scene at dusk",
+        "width": 64,
+        "height": 64,
+        "referenceAssetId": fixture.ids[2],
+    }))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn assert_qwen_image_2_1_one_reference(emitted: &[Conditioning], lane: &str) {
+    match emitted {
+        [Conditioning::Reference {
+            image,
+            strength: None,
+        }] => assert_eq!(
+            qwen_edit_centre_rgb(image),
+            QWEN_EDIT_FIXTURE_COLOURS[2],
+            "{lane}: the one reference must be the submitted asset"
+        ),
+        other => panic!("{lane}: image_to_image must emit exactly one Reference, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn qwen_image_2_1_live_mlx_image_to_image_emits_one_reference() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = qwen_image_2_1_image_to_image_request(&fixture);
+    // The predicate both lanes divert on (the MLX generic arm, the candle `QwenImage21Edit` route).
+    assert!(is_qwen_image_2_1_edit(&edit));
+    let (lane, edit_refs, edit_ref_alpha) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves an image_to_image request");
+    let emitted = build_lane_conditioning_with_alpha(
+        lane.identity_init.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        lane.ideogram_edit_mask.as_ref(),
+    );
+    assert_qwen_image_2_1_one_reference(&emitted, "mlx");
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_live_candle_image_to_image_emits_one_reference() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = qwen_image_2_1_image_to_image_request(&fixture);
+    // The predicate both lanes divert on (the MLX generic arm, the candle `QwenImage21Edit` route).
+    assert!(is_qwen_image_2_1_edit(&edit));
+    let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+        resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live candle lane resolves an image_to_image request");
+    let emitted = build_lane_conditioning_with_alpha(
+        edit_reference.as_ref(),
+        &edit_refs,
+        &edit_ref_alpha,
+        edit_mask.as_ref(),
+    );
+    assert_qwen_image_2_1_one_reference(&emitted, "candle");
+}
+
+/// A generator that behaves like a real denoise under a user cancel: it reports a step, keeps
+/// working long enough for the worker's 2-second cancel poll to come due, reports another step,
+/// and then stops only when the request's OWN cancel flag is tripped. It records every request it
+/// receives, so a test can read the conditioning the engine was really handed.
+#[cfg(target_os = "macos")]
+struct CancelAwareEditProbe {
+    probe: HiresProbeGenerator,
+    /// Each received request's conditioning + cancel flag. NOT the whole `GenerationRequest`: its
+    /// preview / prompt-enhancement sinks hold senders of the job's event channel, so keeping a
+    /// clone alive would stop the consumer's channel from ever closing.
+    received: std::sync::Mutex<Vec<(Vec<Conditioning>, CancelFlag)>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Generator for CancelAwareEditProbe {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.probe.descriptor()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        Ok(None)
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        self.received
+            .lock()
+            .unwrap()
+            .push((req.conditioning.clone(), req.cancel.clone()));
+        on_progress(Progress::Step {
+            current: 1,
+            total: 40,
+        });
+        // Past the consumer's 2-second cancel-poll throttle, so the NEXT step is a poll point.
+        std::thread::sleep(Duration::from_millis(2_300));
+        on_progress(Progress::Step {
+            current: 2,
+            total: 40,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !req.cancel.is_cancelled() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if req.cancel.is_cancelled() {
+            return Err(gen_core::Error::Canceled);
+        }
+        Ok(GenerationOutput::Images(vec![Image {
+            width: req.width,
+            height: req.height,
+            pixels: vec![0; (req.width * req.height * 3) as usize],
+        }]))
+    }
+}
+
+/// sc-24110 — PROGRESS and CANCEL on the Qwen-Image 2.1 EDIT route, end to end on the MLX lane.
+///
+/// Every stage here is the production one except the engine: the conditioning comes from
+/// `resolve_generic_lane_inputs` over real assets; the batch runs on
+/// `drive_gen_items_scored_reported` (the carrier `generate_stream` uses) through
+/// `generate_one_with_hires` (the call `generate_stream` makes, which assembles the
+/// `GenerationRequest`); and the events are consumed by `consume_gen_events` against a stub API
+/// that reports a user cancel. So the assertions are on what the API was actually told:
+///
+/// 1. a NON-terminal `generating` progress tick for the edit render (the reviewer's gap: no edit
+///    route had a progress test on either lane);
+/// 2. then the NON-terminal "Cancelling…" acknowledgement, with the job's cancel flag reaching the
+///    engine request — the denoise stops, not just the UI;
+/// 3. then the terminal `canceled`, and image 2 never starts.
+///
+/// And the request the engine received is the EDIT one (the ordered list, source first, no Mask),
+/// so this cannot pass by ticking a text-to-image render.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_cancel() {
+    let fixture = QwenImage21EditFixture::new();
+    let edit = fixture.edit_request();
+    let (lane, edit_refs, _edit_ref_alpha) =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+            .expect("the live MLX lane resolves the edit");
+
+    let (base_url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
+    let mut settings = crate::tests::test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(crate::tests::job_snapshot_json("job-1", true))
+        .expect("job snapshot deserializes");
+    let plan = ImagePlan::with_count(&edit, 2, None);
+    let cancel = CancelFlag::new();
+    let generator = Arc::new(CancelAwareEditProbe {
+        probe: HiresProbeGenerator::new(),
+        received: Default::default(),
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
+    let task_generator = Arc::clone(&generator);
+    let task_cancel = cancel.clone();
+    let blocking = tokio::task::spawn_blocking(move || {
+        drive_gen_items_scored_reported(
+            tx,
+            [11_i64, 12],
+            move |_index, seed, preview, prompt_enhancement, on_progress| {
+                let (width, height, pixels) = generate_one_with_hires(
+                    task_generator.as_ref(),
+                    "use the second image as the mask",
+                    64,
+                    64,
+                    seed,
+                    40,
+                    None,
+                    None,
+                    lane.identity_init.as_ref(),
+                    &edit_refs,
+                    lane.ideogram_edit_mask.as_ref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &PromptEnhance::default(),
+                    None,
+                    preview,
+                    prompt_enhancement.for_prompt("use the second image as the mask"),
+                    &task_cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, width, height, pixels, None)))
+            },
+        )
+    });
+
+    let mut asset_writes = Vec::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        consume_gen_events(
+            &api,
+            &settings,
+            &job,
+            &plan,
+            &fixture.project_path,
+            "mlx",
+            "mlx_qwen_2_1",
+            &serde_json::Map::new(),
+            2,
+            rx,
+            cancel.clone(),
+            blocking,
+            &mut asset_writes,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the edit render never finished: {:#?}",
+            posts.lock().expect("posts lock")
+        )
+    });
+    assert!(
+        matches!(outcome, Err(WorkerError::Canceled(_))),
+        "a user-cancelled edit ends as Canceled, got {outcome:?}"
+    );
+
+    let posts = posts.lock().expect("posts lock").clone();
+    let message = |post: &Value| post["message"].as_str().unwrap_or_default().to_owned();
+    let generating = posts
+        .iter()
+        .position(|post| message(post).contains("step 1/40"))
+        .unwrap_or_else(|| panic!("the edit render must report its first step: {posts:#?}"));
+    assert_eq!(
+        (
+            posts[generating]["status"].as_str(),
+            posts[generating]["stage"].as_str()
+        ),
+        (Some("running"), Some("generating")),
+        "the progress tick must be NON-terminal: {posts:#?}"
+    );
+    let acknowledged = posts
+        .iter()
+        .position(|post| message(post).contains("Cancelling"))
+        .unwrap_or_else(|| panic!("the cancel must be acknowledged: {posts:#?}"));
+    assert!(
+        acknowledged > generating,
+        "the acknowledgement follows the tick: {posts:#?}"
+    );
+    assert_eq!(
+        posts[acknowledged]["status"], "running",
+        "the acknowledgement stays NON-terminal until the denoise actually stops"
+    );
+    let last = posts.last().expect("posts");
+    assert_eq!(
+        last["status"], "canceled",
+        "the terminal canceled lands last, once the render has stopped: {posts:#?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post["status"] == "canceled")
+            .count(),
+        1,
+        "exactly one terminal write: {posts:#?}"
+    );
+
+    let received = generator.received.lock().unwrap();
+    assert_eq!(
+        received.len(),
+        1,
+        "image 2 must never start after the cancel — it would re-encode the whole reference prefix"
+    );
+    let (conditioning, request_cancel) = &received[0];
+    assert!(
+        request_cancel.is_cancelled(),
+        "the job's cancel flag must be the one the engine request carries"
+    );
+    assert_qwen_edit_emits_the_ordered_list(conditioning, "mlx engine request");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn boogu_build_reference_conditioning_single_vs_multi() {
@@ -9537,6 +10730,7 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
         &plan,
         &base_fact,
         &upscaled,
+        None,
         "seedvr2",
         2,
         0.5,
@@ -9599,6 +10793,7 @@ fn write_upscaled_asset_confines_malicious_model_id() {
             &plan,
             &base_fact,
             &upscaled,
+            None,
             "seedvr2",
             2,
             0.5,
@@ -10571,10 +11766,7 @@ fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
 
     let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
     assert_eq!(
-        scheduler_models_without_native_candle_generator(
-            scheduler_models,
-            BESPOKE_BUILTIN_MODELS,
-        ),
+        scheduler_models_without_native_candle_generator(scheduler_models, BESPOKE_BUILTIN_MODELS),
         Vec::<&str>::new(),
         "every generic scheduler-routed id must resolve through MODEL_TABLE to a linked Candle image \
          generator; route membership alone is not proof that the worker can render it",
@@ -10624,6 +11816,55 @@ fn scheduler_only_unregistered_model_fails_native_generator_parity() {
             &["bernini_image"],
         ),
         vec!["synthetic_scheduler_only_model"],
+    );
+}
+
+/// sc-24109: the SceneWorks half of the native Candle/CUDA Qwen-Image 2.1 port.
+///
+/// Two facts, both of which are how a wired-but-wrong lane shows up at runtime rather than in a
+/// load error:
+///
+/// 1. The id takes the GENERIC txt2img route. 2.1 declares an empty conditioning set on both
+///    backends, so it must never be drawn into one of the bespoke conditioned lanes (`QwenEdit`,
+///    `QwenControl`) that the 2512 ids own — those load a different engine entirely, and the
+///    2.1 snapshot shares no weights with them.
+/// 2. It stamps its OWN adapter. The default arm of `candle_adapter_label` is `candle_sdxl`, so a
+///    missing arm does not fail — it silently labels every 2.1 asset as an SDXL render, and the
+///    recipe can no longer say which weights produced the image.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    for payload in [
+        json!({ "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse", "count": 1 }),
+        json!({
+            "projectId": "p", "model": "qwen_image_2_1", "prompt": "a lighthouse",
+            "width": 2752, "height": 1536, "steps": 40, "seed": 7, "count": 2,
+            "negativePrompt": "watermark", "advanced": { "guidanceScale": 4.0 }
+        }),
+    ] {
+        let request = request(payload.clone());
+        assert_eq!(
+            resolve_candle_image_route(&request, &settings),
+            Some(CandleImageRoute::CandleTxt2Img),
+            "2.1 has no conditioned candle lane — it renders on the generic txt2img route: {payload}"
+        );
+        assert_eq!(
+            CandleImageRoute::CandleTxt2Img.adapter_label(&request),
+            "candle_qwen_2_1",
+            "2.1 must not inherit the 2512 label or fall through to the candle_sdxl default"
+        );
+    }
+
+    // The 2512 id keeps its own stamp — the two are different weights, so they are different
+    // adapters, and this is the contrast that a shared arm would erase.
+    assert_eq!(
+        CandleImageRoute::CandleTxt2Img.adapter_label(&request(json!({
+            "projectId": "p", "model": "qwen_image", "prompt": "p", "count": 1
+        }))),
+        "candle_qwen",
     );
 }
 
@@ -12608,6 +13849,138 @@ fn qwen_edit_engine_id_maps_variants() {
     // Base txt2img Qwen and other families have no edit variant.
     assert_eq!(qwen_edit_engine_id("qwen_image"), None);
     assert_eq!(qwen_edit_engine_id("flux2_klein_9b"), None);
+}
+
+/// sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the DEFAULT
+/// is upstream-parity truncation.
+///
+/// Both answers are correct for different upstream pipelines, and the distinction is invisible
+/// unless a reference genuinely carries transparency — which is why getting it wrong is silent.
+/// `to_rgb8()` drops the fourth byte exactly as `PIL.Image.convert("RGB")` does, so every edit model
+/// shipped before 2.1 (SDXL inpaint, FLUX.2 edit, Kolors IP-adapter, `qwen_image_edit_2511`) is at
+/// parity only under `Truncate`. `OverWhite` matches the S4 contract's `to_rgb_over_white()`, which
+/// is what 2.1's vision tower is fed.
+///
+/// The fixture is deliberately adversarial: a fully transparent pixel whose hidden RGB is pure
+/// BLACK. 2.1's alpha is straight — `A=0` does NOT zero RGB — so the two policies disagree
+/// maximally there (`[0,0,0]` vs `[255,255,255]`) and agree exactly on the opaque pixels.
+///
+/// Flipping `FlattenPolicy`'s `#[default]` to `OverWhite` reds the truncation half below; that is
+/// the mutation this test exists to catch, because the first cut of sc-24113 composited on EVERY
+/// lane and moved every pre-2.1 model off parity without a single test noticing.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_request() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc24113-alpha-reference").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+
+    // A 2x2 RGBA reference: transparent-BLACK, half-transparent red, opaque green, opaque black.
+    // The first pixel is the adversarial one — truncation and compositing disagree maximally about
+    // it, because straight alpha leaves the hidden RGB intact.
+    let source_file = data_dir.path().join("reference.png");
+    image::RgbaImage::from_fn(2, 2, |x, y| match (x, y) {
+        (0, 0) => image::Rgba([0, 0, 0, 0]),
+        (1, 0) => image::Rgba([255, 0, 0, 128]),
+        (0, 1) => image::Rgba([0, 255, 0, 255]),
+        _ => image::Rgba([0, 0, 0, 255]),
+    })
+    .save(&source_file)
+    .unwrap();
+    let asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+
+    assert!(
+        load_reference_alpha(&settings.data_dir, &project.id, &asset_id, &project_path)
+            .unwrap()
+            .is_some(),
+        "the fixture genuinely carries alpha, or this test proves nothing"
+    );
+
+    // DEFAULT — what every pre-2.1 model gets. Raw RGB bytes, alpha dropped, upstream parity.
+    let truncated =
+        load_reference_image(&settings.data_dir, &project.id, &asset_id, &project_path).unwrap();
+    assert_eq!((truncated.width, truncated.height), (2, 2));
+    assert_eq!(truncated.pixels.len(), 2 * 2 * 3);
+    // A=0 with hidden BLACK stays black — `convert("RGB")` semantics, and the byte-for-byte
+    // behaviour SDXL inpaint / FLUX.2 edit / Kolors / qwen_image_edit_2511 are compared against.
+    assert_eq!(&truncated.pixels[0..3], &[0, 0, 0]);
+    // A=128 red keeps its raw red; the alpha byte is simply not consulted.
+    assert_eq!(&truncated.pixels[3..6], &[255, 0, 0]);
+    assert_eq!(&truncated.pixels[6..9], &[0, 255, 0]);
+    assert_eq!(&truncated.pixels[9..12], &[0, 0, 0]);
+
+    // The default really is `Truncate` — asserted on the enum too, so a changed `#[default]` fails
+    // here by name rather than only through the bytes above.
+    assert_eq!(FlattenPolicy::default(), FlattenPolicy::Truncate);
+
+    // OPT-IN — the S4 `to_rgb_over_white()` semantics 2.1's vision tower wants.
+    let composited = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &asset_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    // A=0 over white is WHITE — maximally different from the truncated [0, 0, 0] above.
+    assert_eq!(&composited.pixels[0..3], &[255, 255, 255]);
+    // A=128 red over white: 255*128/255 + 255*127/255 = 255 red; 0*128/255 + 255*127/255 = 127.
+    assert_eq!(&composited.pixels[3..6], &[255, 127, 127]);
+    // A=255 is the IDENTITY under both policies, which is why an opaque reference cannot be
+    // perturbed by this choice no matter which lane loads it.
+    assert_eq!(&composited.pixels[6..9], &truncated.pixels[6..9]);
+    assert_eq!(&composited.pixels[9..12], &truncated.pixels[9..12]);
+
+    // An OPAQUE source is byte-identical under both policies — the same `to_rgb8()` call — so no
+    // existing reference in the app can move whichever policy a future caller picks.
+    let opaque_file = data_dir.path().join("opaque.png");
+    image::RgbImage::from_pixel(2, 2, image::Rgb([17, 34, 51]))
+        .save(&opaque_file)
+        .unwrap();
+    let opaque_asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "opaque.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: opaque_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let opaque_id = opaque_asset["id"].as_str().unwrap().to_owned();
+    assert!(
+        load_reference_alpha(&settings.data_dir, &project.id, &opaque_id, &project_path)
+            .unwrap()
+            .is_none()
+    );
+    let opaque_default =
+        load_reference_image(&settings.data_dir, &project.id, &opaque_id, &project_path).unwrap();
+    let opaque_over_white = load_reference_image_with(
+        &settings.data_dir,
+        &project.id,
+        &opaque_id,
+        &project_path,
+        FlattenPolicy::OverWhite,
+    )
+    .unwrap();
+    assert_eq!(opaque_default.pixels, opaque_over_white.pixels);
 }
 
 #[cfg(target_os = "macos")]
@@ -20198,6 +21571,11 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "QwenEdit",
         "ZimageEdit",
         "MageEdit",
+        // Qwen-Image 2.1 reference / local editing (sc-24110): the ordered condition images are
+        // consumed by the SAME base — its own Qwen3-VL vision tower and VAE — with no second
+        // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
+        // admission gate. Structurally the SenseNova case, not the ControlNet case.
+        "QwenImage21Edit",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic
@@ -20752,6 +22130,91 @@ mod preview_stream_tests {
             }
         }
         assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+
+    /// sc-24109: progress and cancellation on the lane Qwen-Image 2.1 renders on off-Mac.
+    ///
+    /// `qwen_image_2_1` has no bespoke route — `resolve_candle_image_route` sends it to
+    /// `CandleImageRoute::CandleTxt2Img`, whose producer is exactly this `drive_gen_items` carrier
+    /// (see `every_scheduler_routed_candle_image_has_a_native_worker_route` and
+    /// `qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp`). So the two facts the
+    /// story needs — a step reaches the consumer, and a cancel STOPS the batch instead of
+    /// completing it — are pinned here, on the real loop, with no weights and no GPU.
+    ///
+    /// ⚠️ THIS CARRIER IS ID-AGNOSTIC. `drive_gen_items` never sees a model id, so nothing below
+    /// mentions `qwen_image_2_1` and nothing below could: the id-specific binding — that 2.1 lands
+    /// on the route whose producer IS this carrier — is proven separately by
+    /// `qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp` and
+    /// `every_scheduler_routed_candle_image_has_a_native_worker_route`. What this test owns is the
+    /// carrier's own behaviour, which those two cannot reach. The batch is sized 4 because that is
+    /// a real advertised `limits.count` bucket for 2.1, not because the loop knows it.
+    ///
+    /// THE DISCRIMINATOR IS "STOPS", NOT "SKIPS". An earlier two-item version of this test asserted
+    /// only that the last item produced no events, which `break` and `continue` satisfy equally:
+    /// changing `break` to `continue` at the `else` arm of `drive_gen_items` left it — and the whole
+    /// worker suite — green, while the batch would actually go on invoking the producer (and, on the
+    /// real lane, go on driving the GPU) for every remaining image after the user cancelled.
+    ///
+    /// So the assertion is made on INVOCATION, not on output: `invoked` records the indices the
+    /// producer was actually called with. A loop that breaks calls it for 0 and 1 and stops; a loop
+    /// that skips calls it for 0, 1, 2 and 3. Only the first is a cancel.
+    #[test]
+    fn cancelling_a_candle_batch_stops_it_after_reporting_progress() {
+        use std::cell::RefCell;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
+        let cancel = gen_core::CancelFlag::new();
+        let observed = cancel.clone();
+        let invoked: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+        // A four-image batch. Image 0 reports a step and completes, and trips the flag on its way
+        // out; image 1 observes it and answers `None`, which must END the batch.
+        drive_gen_items(
+            tx,
+            [0_usize, 1, 2, 3],
+            |index, _item, _preview, progress| {
+                invoked.borrow_mut().push(index);
+                if observed.is_cancelled() {
+                    return Ok(None);
+                }
+                progress(Progress::Step {
+                    current: 1,
+                    total: 40,
+                });
+                cancel.cancel();
+                Ok(Some((70_i64 + index as i64, 1, 1, vec![0_u8; 3])))
+            },
+        )
+        .expect("a cancelled batch is not an error — it stops early and reports what it produced");
+
+        assert_eq!(
+            *invoked.borrow(),
+            vec![0, 1],
+            "the producer must be invoked for image 0 and for the image that observes the cancel, \
+             and then NOT AT ALL — an invocation for index 2 means the loop skipped the cancelled \
+             item instead of stopping, so the user's cancel merely dropped one image while the \
+             batch kept running"
+        );
+
+        match rx.try_recv().expect("image 0 reports its first step") {
+            GenEvent::Step {
+                index,
+                current,
+                total,
+            } => {
+                assert_eq!((index, current, total), (0, 1, 40));
+            }
+            other => panic!("expected a step event, got {}", gen_event_name(&other)),
+        }
+        match rx.try_recv().expect("image 0 completes") {
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            other => panic!("expected an image event, got {}", gen_event_name(&other)),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "images 1, 2 and 3 must produce NO further events — not a step, and above all not an \
+             Image the consumer would persist and count toward a completed generation set"
+        );
     }
 
     fn gen_event_name(event: &GenEvent) -> &'static str {
@@ -26570,4 +28033,1044 @@ fn checkpoint_negative_prompt_uses_provider_capabilities() {
     let mut blank = req;
     blank.negative_prompt = " \n ".into();
     assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
+}
+
+// ---------------------------------------------------------------------------
+// Native transparency through the generation funnel (sc-24111)
+// ---------------------------------------------------------------------------
+//
+// `write_image_asset` is the one function EVERY generated image asset is written through, and it
+// used to call `image::RgbImage::from_raw(width, height, pixels)` directly. That single
+// constructor — not the PNG writer below it — is what made an RGBA generation impossible: a
+// 4-channel engine buffer was rejected as "size mismatch" when it was perfectly well formed.
+//
+// The mapping is keyed on the buffer's own channel count and on nothing else, because the model
+// that emits four channels today (`qwen_image_2_1`, from the inference half of this story) must not
+// be the model that has to be named here tomorrow.
+
+/// The committed RGBA fixture, as a flat 4-channel engine buffer at the requested geometry.
+fn alpha_engine_buffer(width: u32, height: u32) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("alpha")
+        .join("alpha-64.png");
+    let source = image::open(&path)
+        .unwrap_or_else(|error| panic!("RGBA fixture at {} decodes: {error}", path.display()))
+        .to_rgba8();
+    image::imageops::resize(&source, width, height, image::imageops::FilterType::Nearest).into_raw()
+}
+
+fn alpha_histogram(image: &image::RgbaImage) -> std::collections::BTreeMap<u8, usize> {
+    let mut histogram = std::collections::BTreeMap::new();
+    for pixel in image.pixels() {
+        *histogram.entry(pixel.0[3]).or_insert(0) += 1;
+    }
+    histogram
+}
+
+#[test]
+fn write_image_asset_writes_a_four_channel_engine_buffer_as_an_rgba_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1", "prompt": "A cut-out courier",
+        "count": 1, "width": 320, "height": 256, "seed": 101,
+        "modelManifestEntry": { "family": "qwen-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let pixels = alpha_engine_buffer(req.width, req.height);
+    let expected = image::RgbaImage::from_raw(req.width, req.height, pixels.clone()).unwrap();
+    // The fixture's own shape, asserted before it is used to prove anything.
+    let expected_histogram = alpha_histogram(&expected);
+    assert!(
+        expected_histogram.len() >= 8
+            && expected_histogram.contains_key(&0)
+            && expected_histogram.contains_key(&255),
+        "the scaled fixture lost its soft/transparent/opaque structure"
+    );
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        101,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+
+    let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+    let decoded = image::open(project_path.join(media_rel)).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the generation funnel flattened a 4-channel engine buffer"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!((decoded.width(), decoded.height()), (320, 256));
+    assert_eq!(alpha_histogram(&decoded), expected_histogram);
+    assert_eq!(decoded.as_raw(), expected.as_raw());
+    // And it is still a workflow-carrying PNG: the alpha did not cost the chunk.
+    assert!(
+        sceneworks_core::workflow_png::read_workflow_chunk_file(&project_path.join(media_rel))
+            .is_ok()
+    );
+}
+
+#[test]
+fn write_image_asset_leaves_a_three_channel_engine_buffer_byte_identical() {
+    // The control, and the reason the mapping is on channel count rather than a flag: widening
+    // this funnel must not move a single byte for the lanes that were already here.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 101,
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+    let pixels = stub_rgb8(req.width, req.height, 101);
+    let expected = image::RgbImage::from_raw(req.width, req.height, pixels.clone()).unwrap();
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        101,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+
+    let written = project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap());
+    let decoded = image::open(&written).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgb8,
+        "an opaque generation grew an alpha channel"
+    );
+    assert_eq!(decoded.to_rgb8().as_raw(), expected.as_raw());
+
+    // Byte-for-byte against the pre-sc-24111 write: the same pixels through the same writer with
+    // the same envelope. A change to the encoder settings or the colour type reds this.
+    let reference = dir.path().join("reference.png");
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&written).unwrap();
+    sceneworks_core::workflow_png::write_workflow_chunk(&expected, &reference, share.as_ref())
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&written).unwrap(),
+        std::fs::read(&reference).unwrap(),
+        "the RGB write through the widened funnel is no longer byte-identical"
+    );
+}
+
+#[test]
+fn write_image_asset_refuses_a_buffer_that_is_neither_three_nor_four_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "x",
+        "count": 1, "width": 320, "height": 256, "seed": 1
+    }));
+    let plan = ImagePlan::new(&req);
+
+    for (label, pixels) in [
+        ("grayscale", vec![0u8; 320 * 256]),
+        ("truncated", vec![0u8; 320 * 256 * 3 - 1]),
+    ] {
+        let error = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .expect_err("a malformed engine buffer is refused, not reinterpreted");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(_)),
+            "{label} buffer produced {error:?}"
+        );
+    }
+}
+
+#[test]
+fn split_alpha_separates_the_plane_the_post_pass_engines_cannot_carry() {
+    let source = image::RgbaImage::from_fn(4, 4, |x, y| {
+        image::Rgba([10 + x as u8, 20 + y as u8, 30, (x * 60) as u8])
+    });
+    let (rgb, alpha) = split_alpha(&image::DynamicImage::ImageRgba8(source.clone()));
+    let alpha = alpha.expect("an RGBA source has a plane");
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_eq!(rgb.get_pixel(x, y).0, [10 + x as u8, 20 + y as u8, 30]);
+            assert_eq!(alpha.get_pixel(x, y).0[0], source.get_pixel(x, y).0[3]);
+        }
+    }
+
+    // An opaque source has no plane, which is what keeps every pre-existing lane on the RGB arm.
+    let opaque = image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+    let (_, none) = split_alpha(&image::DynamicImage::ImageRgb8(opaque));
+    assert!(none.is_none());
+}
+
+#[test]
+fn reattach_alpha_is_verbatim_at_the_same_geometry_and_keeps_the_bands_when_scaled() {
+    // Same geometry — the detail refiner's case. Nothing resamples, so the source's alpha survives
+    // exactly, every soft value included.
+    let alpha = image::GrayImage::from_fn(8, 8, |x, _| image::Luma([(x * 36).min(255) as u8]));
+    let rgb = image::RgbImage::from_pixel(8, 8, image::Rgb([9, 8, 7]));
+    let GeneratedPixels::Rgba(same) = reattach_alpha(rgb.clone(), Some(&alpha)) else {
+        panic!("attaching a plane must produce RGBA");
+    };
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(same.get_pixel(x, y).0[3], alpha.get_pixel(x, y).0[0]);
+            assert_eq!(&same.get_pixel(x, y).0[..3], &[9, 8, 7]);
+        }
+    }
+
+    // Scaled geometry — the upscale case. The fully transparent and fully opaque BANDS survive
+    // bilinear resampling (it interpolates between equal values inside a band); only the ramp
+    // moves.
+    let banded = image::GrayImage::from_fn(16, 4, |x, _| {
+        image::Luma(if x < 4 {
+            [0]
+        } else if x < 12 {
+            [((x - 4) * 32).min(255) as u8]
+        } else {
+            [255]
+        })
+    });
+    let scaled_rgb = image::RgbImage::from_pixel(32, 8, image::Rgb([1, 1, 1]));
+    let GeneratedPixels::Rgba(scaled) = reattach_alpha(scaled_rgb, Some(&banded)) else {
+        panic!("attaching a plane must produce RGBA");
+    };
+    assert_eq!(scaled.dimensions(), (32, 8));
+    assert_eq!(
+        scaled.get_pixel(1, 4).0[3],
+        0,
+        "the transparent band closed"
+    );
+    assert_eq!(scaled.get_pixel(30, 4).0[3], 255, "the opaque band opened");
+    let histogram = alpha_histogram(&scaled);
+    assert!(
+        histogram.len() >= 6,
+        "the soft ramp collapsed to {} values",
+        histogram.len()
+    );
+
+    // No plane — the RGB arm, untouched.
+    assert!(matches!(reattach_alpha(rgb, None), GeneratedPixels::Rgb(_)));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_reattaches_the_alpha_the_engine_could_not_see() {
+    // The inline Image Studio upscale's write, driven with the plane `apply_inline_upscale` splits
+    // off its source. The engines are RGB-only, so this is where the channel has to come back.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1", "prompt": "A cut-out courier",
+        "count": 1, "width": 320, "height": 256, "seed": 7
+    }));
+    let plan = ImagePlan::new(&req);
+    let base_fact = json!({
+        "index": 0, "seed": 7, "type": "image", "displayName": "Base",
+        "mediaPath": "assets/images/base.png", "width": 320, "height": 256
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+
+    // A 2x upscale result, plus the SOURCE-sized alpha plane, so the resample is exercised.
+    let upscaled = image::RgbImage::from_fn(640, 512, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 77])
+    });
+    let source_alpha = image::GrayImage::from_fn(320, 256, |x, _| {
+        image::Luma(if x < 80 {
+            [0]
+        } else if x < 240 {
+            [((x - 80) * 255 / 159) as u8]
+        } else {
+            [255]
+        })
+    });
+
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        Some(&source_alpha),
+        "real-esrgan",
+        2,
+        0.0,
+        project_path,
+    )
+    .unwrap();
+
+    let written = project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap());
+    let decoded = image::open(&written).unwrap();
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the upscaled variant dropped the base render's alpha"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!(decoded.dimensions(), (640, 512));
+    assert_eq!(
+        decoded.get_pixel(2, 2).0[3],
+        0,
+        "the transparent band closed"
+    );
+    assert_eq!(
+        decoded.get_pixel(637, 2).0[3],
+        255,
+        "the opaque band opened"
+    );
+    assert!(
+        alpha_histogram(&decoded).len() >= 8,
+        "the soft edge did not survive the 2x resample"
+    );
+    // The colour the engine produced is untouched by the re-attach.
+    assert_eq!(
+        &decoded.get_pixel(637, 2).0[..3],
+        &upscaled.get_pixel(637, 2).0[..]
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist", "count": 1,
+        "width": 320, "height": 256, "seed": 7
+    }));
+    let plan = ImagePlan::new(&req);
+    let base_fact = json!({
+        "index": 0, "seed": 7, "type": "image", "displayName": "Base",
+        "mediaPath": "assets/images/base.png", "width": 320, "height": 256
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let upscaled = image::RgbImage::from_fn(640, 512, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 77])
+    });
+
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        None,
+        "real-esrgan",
+        2,
+        0.0,
+        project_path,
+    )
+    .unwrap();
+
+    let decoded =
+        image::open(project_path.join(fact.get("mediaPath").and_then(Value::as_str).unwrap()))
+            .unwrap();
+    assert_eq!(decoded.color(), image::ColorType::Rgb8);
+    assert_eq!(decoded.to_rgb8().as_raw(), upscaled.as_raw());
+}
+
+/// sc-24112 — `qwen_image_2_1`'s SPLIT-REPO tier resolution, driven off the shipped catalog.
+///
+/// Every other quant-matrix model puts its three tiers in one repo, so `standard_tier_subdir`
+/// descends `<root>/<tier>/` and is done. 2.1 cannot: its bf16 tier IS the released upstream
+/// snapshot at that repo's ROOT (the converter refuses to emit a `bf16/` copy, and re-hosting
+/// unmodified weights would be a §3 redistribution SceneWorks has no need to make), while q8 and
+/// q4 are subdirs of the SceneWorks re-host. So the tier selects the REPO first, then the subdir —
+/// and that is what these tests pin, because a resolver that quietly assumed one repo would hand
+/// the loader `Qwen/Qwen-Image-2.1/q4`, which does not exist.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod qwen_image_2_1_tiers {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    const UPSTREAM_REPO: &str = "Qwen/Qwen-Image-2.1";
+    const UPSTREAM_REVISION: &str = "790c92633540aa0cb11d9abf19eb46d861714758";
+    const REHOST_REPO: &str = "SceneWorks/qwen-image-2-1-mlx";
+    /// The revision the q8/q4 tiers were PUBLISHED at (sc-24114). The shipped catalog pins it, and
+    /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
+    const REHOST_REVISION: &str = "1691de01c24a070131e0a28bf4c065fd027f4fe9";
+
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    fn tier_root(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) -> PathBuf {
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        match subdir {
+            Some(name) => snapshot.join(name),
+            None => snapshot,
+        }
+    }
+
+    /// Stage a loadable `transformer/` under one snapshot, in the layout that tier really ships:
+    /// the upstream bf16 ROOT as the sharded diffusers tree (index + shards), a packed q8/q4
+    /// SUBDIR exactly as `convert::prequantize_turnkey` writes and the Hub now serves it — ONE
+    /// `transformer/model.safetensors`, NO shard index, and a `config.json` carrying the
+    /// `quantization` marker.
+    fn stage_tier(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) {
+        let transformer = tier_root(data_dir, repo, revision, subdir).join("transformer");
+        std::fs::create_dir_all(&transformer).expect("create transformer dir");
+        match subdir {
+            None => std::fs::write(
+                transformer.join("diffusion_pytorch_model.safetensors.index.json"),
+                b"{}",
+            )
+            .expect("write shard index"),
+            Some(_) => {
+                std::fs::write(transformer.join("model.safetensors"), b"packed")
+                    .expect("write packed transformer");
+                std::fs::write(
+                    transformer.join("config.json"),
+                    br#"{"quantization":{"bits":8,"group_size":64}}"#,
+                )
+                .expect("write packed marker");
+            }
+        }
+    }
+
+    /// The shipped entry, which since sc-24114 IS the published catalog: the packed rows carry the
+    /// real re-host revision and no `pendingArtifact` flag.
+    fn entry_after_upload() -> serde_json::Map<String, Value> {
+        shipped_qwen_2_1_entry()
+    }
+
+    /// The same entry with the packed rows put back into the sc-24112 PENDING shape (null-SHA
+    /// placeholder + `pendingArtifact`), for the guard that must keep an unpublished tier inert.
+    fn pending_entry() -> serde_json::Map<String, Value> {
+        let mut entry = shipped_qwen_2_1_entry();
+        for download in entry
+            .get_mut("downloads")
+            .and_then(Value::as_array_mut)
+            .expect("downloads array")
+        {
+            let object = download.as_object_mut().expect("download object");
+            if object.get("repo").and_then(Value::as_str) == Some(REHOST_REPO) {
+                object.insert(
+                    "revision".to_owned(),
+                    Value::String("0000000000000000000000000000000000000000".to_owned()),
+                );
+                object.insert("pendingArtifact".to_owned(), Value::Bool(true));
+                object.remove("default");
+            }
+        }
+        entry
+    }
+
+    /// sc-24114 — the shipped catalog pins the PUBLISHED re-host: both packed rows carry the real
+    /// revision and no `pendingArtifact` flag. Fail-closed against a placeholder creeping back.
+    ///
+    /// *Mutation that reds this:* restoring the null SHA (or `pendingArtifact`) on either row.
+    #[test]
+    fn the_shipped_catalog_pins_the_published_rehost() {
+        let entry = shipped_qwen_2_1_entry();
+        let rows: Vec<&Value> = entry["downloads"]
+            .as_array()
+            .expect("downloads array")
+            .iter()
+            .filter(|download| download["repo"] == REHOST_REPO)
+            .collect();
+        assert_eq!(rows.len(), 2, "q8 and q4");
+        for row in rows {
+            assert_eq!(row["revision"], REHOST_REVISION, "{row}");
+            assert!(row.get("pendingArtifact").is_none(), "{row}");
+        }
+    }
+
+    /// sc-24114 (feature-end finding) — the PUBLISHED packed layout is seen as installed. The
+    /// converter writes `transformer/model.safetensors` + a `quantization` marker and no diffusers
+    /// shard index; the probe used to demand `diffusion_pytorch_model.safetensors[.index.json]`, so
+    /// an installed q8/q4 answered "not installed" on an explicit pick and a default fell to bf16.
+    ///
+    /// *Mutation that reds this:* reverting `qwen_image_2_1_has_loadable_transformer` to the
+    /// dense-only probe (the `packed` arm dropped).
+    #[test]
+    fn the_published_packed_layout_is_seen_as_installed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        let q8 = tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        assert!(
+            !q8.join("transformer/diffusion_pytorch_model.safetensors.index.json")
+                .exists()
+                && !q8
+                    .join("transformer/diffusion_pytorch_model.safetensors")
+                    .exists(),
+            "precondition: the packed tier carries no diffusers-named transformer file"
+        );
+
+        // bf16 is the upstream snapshot ROOT.
+        let (bf16, tier) =
+            resolved_with_tier(data.path(), &entry, Some(0)).expect("bf16 installed");
+        assert_eq!(tier, "bf16");
+        assert!(bf16.ends_with(UPSTREAM_REVISION), "{}", bf16.display());
+        // The packed q8 is installed — explicitly and as the unselected default.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(8)),
+            Some((q8.clone(), "q8"))
+        );
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None),
+            Some((q8, "q8"))
+        );
+        // q4 is not on disk: an explicit pick is refused, never substituted.
+        let error = super::super::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &request(&entry, Some(4)),
+        )
+        .expect_err("q4 is not installed")
+        .to_string();
+        assert!(error.contains("tier q4 is not installed"), "{error}");
+        // A dense bit width is bf16, not q8.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(16)).map(|(_, tier)| tier),
+            Some("bf16")
+        );
+
+        // A `model.safetensors` WITHOUT the `quantization` marker is not a packed tier.
+        let q4 =
+            tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4")).join("transformer");
+        std::fs::create_dir_all(&q4).expect("create q4 transformer");
+        std::fs::write(q4.join("model.safetensors"), b"x").expect("write q4 weights");
+        std::fs::write(q4.join("config.json"), b"{}").expect("write unmarked config");
+        assert!(super::super::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &request(&entry, Some(4)),
+        )
+        .is_err());
+    }
+
+    fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .as_object()
+            .expect("entry object")
+            .clone()
+    }
+
+    fn request(entry: &serde_json::Map<String, Value>, bits: Option<i64>) -> ImageRequest {
+        let mut payload = serde_json::Map::new();
+        payload.insert("projectId".to_owned(), Value::String("p".to_owned()));
+        payload.insert(
+            "model".to_owned(),
+            Value::String("qwen_image_2_1".to_owned()),
+        );
+        payload.insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(entry.clone()),
+        );
+        if let Some(bits) = bits {
+            payload.insert("advanced".to_owned(), json!({ "mlxQuantize": bits }));
+        }
+        ImageRequest::from_payload(&payload)
+    }
+
+    fn settings(data_dir: &Path) -> Settings {
+        Settings::for_test(data_dir.to_path_buf())
+    }
+
+    fn resolved(
+        data_dir: &Path,
+        entry: &serde_json::Map<String, Value>,
+        bits: Option<i64>,
+    ) -> Option<PathBuf> {
+        resolved_with_tier(data_dir, entry, bits).map(|(dir, _)| dir)
+    }
+
+    fn resolved_with_tier(
+        data_dir: &Path,
+        entry: &serde_json::Map<String, Value>,
+        bits: Option<i64>,
+    ) -> Option<(PathBuf, &'static str)> {
+        super::super::qwen_image_2_1_tier_dir(&settings(data_dir), &request(entry, bits))
+            .expect("the resolver answers rather than refusing")
+    }
+
+    /// Each tier resolves into ITS OWN repo — the whole reason this family needs a bespoke
+    /// resolver. bf16 is the upstream snapshot ROOT; q8 and q4 are subdirs of the re-host.
+    ///
+    /// *Mutation that reds this:* routing 2.1 through `standard_tier_subdir`, which would look for
+    /// `Qwen/Qwen-Image-2.1/q4`.
+    #[test]
+    fn each_tier_resolves_into_its_own_repository() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+
+        let bf16 = resolved(data.path(), &entry, Some(0)).expect("bf16 installed");
+        assert!(
+            bf16.ends_with(UPSTREAM_REVISION),
+            "bf16 is the upstream snapshot ROOT, with no tier subdir: {}",
+            bf16.display()
+        );
+        assert_eq!(
+            resolved(data.path(), &entry, Some(8))
+                .expect("q8 installed")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("q8")
+        );
+        assert_eq!(
+            resolved(data.path(), &entry, Some(4))
+                .expect("q4 installed")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("q4")
+        );
+        // No explicit selection takes the app-wide q8 default, the same rule every other
+        // quant-matrix model reads out of the same knob.
+        assert_eq!(
+            resolved(data.path(), &entry, None)
+                .expect("default tier installed")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("q8")
+        );
+    }
+
+    /// With NO tier selection, an uninstalled catalog default falls back DENSEST FIRST, so a
+    /// partial install never silently lands on the washed q4 — the same ordering, for the same
+    /// reason, as every other tier resolver.
+    #[test]
+    fn an_unselected_default_falls_back_densest_first() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        // Only bf16 and q4 on disk; the q8 default must land on bf16, not on q4.
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        let fallback = resolved(data.path(), &entry, None).expect("something is installed");
+        assert!(
+            fallback.ends_with(UPSTREAM_REVISION),
+            "the q8 default with q8 absent must fall back to bf16, never down to q4: {}",
+            fallback.display()
+        );
+    }
+
+    /// An EXPLICIT tier is honoured exactly or refused — never substituted. A q8 pick with only
+    /// q4 on disk is a typed error naming q8, and never `q4/`; the same for a bf16 pick. This is
+    /// the FLUX.1 Candle precedent (`candle_flux1_packed_requested_tier`): the silent fallback used
+    /// to rewrite the load to Q4 on MLX with only a `quant_tier_downgraded` event, and load q4
+    /// outright on Candle.
+    ///
+    /// *Mutation that reds this:* letting the explicit arm fall through to the densest-first
+    /// fallback (`installed(tier).or_else(...)`).
+    #[test]
+    fn an_explicit_uninstalled_tier_is_refused_never_substituted() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        for (bits, tier) in [(8, "q8"), (0, "bf16")] {
+            let answer = super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry, Some(bits)),
+            );
+            let error = answer
+                .expect_err("an explicit uninstalled tier must be refused, not substituted")
+                .to_string();
+            assert!(
+                error.contains(&format!("tier {tier} is not installed")),
+                "{error}"
+            );
+        }
+        // The installed pick itself still resolves.
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(4)).map(|(_, tier)| tier),
+            Some("q4")
+        );
+    }
+
+    /// Nothing installed: an UNSELECTED request answers `None` (the caller's ordinary "install the
+    /// model" path), but an EXPLICIT pick is the install error itself (sc-24114) — never `None`,
+    /// which let the caller fall back to the default snapshot directory and load a bf16 root that
+    /// may hold no `transformer/` at all.
+    ///
+    /// *Mutation that reds this:* restoring `return Ok(None)` in the explicit arm's
+    /// nothing-installed branch.
+    #[test]
+    fn nothing_installed_is_none_unselected_and_an_install_error_when_explicit() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        assert_eq!(resolved(data.path(), &entry_after_upload(), None), None);
+        for bits in [0, 4, 8, 16] {
+            let error = super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry_after_upload(), Some(bits)),
+            )
+            .expect_err("an explicit pick with nothing installed is the install error")
+            .to_string();
+            assert!(
+                error.contains("is not installed on this machine")
+                    && error.contains("Install it in Model Manager"),
+                "{bits}: {error}"
+            );
+        }
+    }
+
+    /// A dense bit width is the UNQUANTIZED tier (sc-24114): `mlxQuantize: 16` (bf16) or 32 must
+    /// resolve bf16, never q8 — only `1..=4` is q4 and `5..=8` q8.
+    ///
+    /// *Mutation that reds this:* the pre-fix `_ => "q8"` catch-all for every bit count above 4.
+    #[test]
+    fn a_dense_bit_width_selects_bf16_not_q8() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        for (bits, tier) in [
+            (16, "bf16"),
+            (32, "bf16"),
+            (9, "bf16"),
+            (8, "q8"),
+            (5, "q8"),
+            (4, "q4"),
+            (0, "bf16"),
+        ] {
+            assert_eq!(
+                resolved_with_tier(data.path(), &entry, Some(bits)).map(|(_, tier)| tier),
+                Some(tier),
+                "mlxQuantize {bits}"
+            );
+        }
+    }
+
+    /// A PENDING catalog (the sc-24112 shape, which the shipped catalog left at sc-24114): the
+    /// packed tiers carry the null-SHA placeholder and `pendingArtifact`, so they resolve to
+    /// NOTHING even with a directory staged at that revision. A pending tier must never point the loader anywhere: the unselected default lands
+    /// on the only real tier, and an explicit pick of a pending tier is a refusal, not a load.
+    ///
+    /// *Mutation that reds this:* dropping the `is_pending_artifact_download` guard — the null SHA
+    /// is a syntactically valid pinned revision, so the staged directory below would resolve.
+    #[test]
+    fn pending_tiers_resolve_to_nothing_rather_than_a_missing_directory() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = pending_entry();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        // Stage a q4 tree under the PLACEHOLDER revision. Only the pending guard stops this being
+        // resolved, which is what makes the assertion meaningful.
+        stage_tier(
+            data.path(),
+            REHOST_REPO,
+            "0000000000000000000000000000000000000000",
+            Some("q4"),
+        );
+        let default = resolved(data.path(), &entry, None).expect("bf16 is installed");
+        assert!(
+            default.ends_with(UPSTREAM_REVISION),
+            "the default against a pending catalog must land on the only real tier, \
+             not resolve the placeholder revision: {}",
+            default.display()
+        );
+        assert!(
+            super::super::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry, Some(4))
+            )
+            .is_err(),
+            "an explicit pick of a pending tier is refused, never resolved to the placeholder"
+        );
+    }
+
+    /// THE SHIPPED CATALOG with only bf16 staged must be priced and loaded AS bf16. Its directory is the upstream snapshot root, whose basename is a commit SHA,
+    /// so the basename reader alone answers `None` and every consumer used to fall back to the
+    /// request/manifest default (`mlx.quantize: 8` ⇒ "q8"): the Candle gate priced it at q8's floor
+    /// and Candle sent `LoadSpec.quantize = Q8` against a dense root, which the provider refuses; MLX
+    /// silently load-time-quantized bf16 to q8 behind a gate sized for packed q8.
+    ///
+    /// *Mutation that reds this:* `split_repo_root_tier_key` returning `None` (the pre-fix mapping).
+    #[test]
+    fn the_shipped_bf16_root_is_gated_and_loaded_as_bf16() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = shipped_qwen_2_1_entry();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        let (dir, tier) = resolved_with_tier(data.path(), &entry, None).expect("bf16 is installed");
+        assert_eq!(tier, "bf16");
+        assert_eq!(
+            super::super::tier_key_from_resolved_dir(&dir),
+            None,
+            "precondition: the root's basename is a SHA, not a tier token"
+        );
+        assert_eq!(
+            super::super::tier_key_for_resolved_dir(&entry, &dir),
+            Some("bf16")
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                super::super::tier_quant_from_resolved_dir(&entry, &dir),
+                Some((None, None)),
+                "MLX candidate quant: a dense root is never load-time quantized"
+            );
+            // The request carries no selection, so it derives the manifest's q8; reconcile must
+            // correct that to the dense tier that is actually on disk.
+            assert_eq!(
+                super::super::reconcile_resolved_tier_quant(
+                    (Some(Quant::Q8), Some(8)),
+                    &dir,
+                    &entry,
+                    true,
+                    "qwen_image_2_1",
+                    "job",
+                    "mlx",
+                ),
+                (None, None)
+            );
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            let request = request(&entry, None);
+            let gate = super::super::gate_tier_key(false, &dir, &request.advanced, &entry, false);
+            assert_eq!(gate, "bf16", "the VRAM gate prices the tier that loads");
+            assert_eq!(
+                super::super::candle_quant_for_resolved_tier(&request, gate, &dir, true, false),
+                (None, None),
+                "Candle never sends LoadSpec.quantize against the dense root"
+            );
+        }
+    }
+
+    /// The identity the resolver returns and the identity every consumer re-derives from the
+    /// directory are the same answer for every installed tier — the two cannot drift.
+    #[test]
+    fn resolved_tier_identity_round_trips_through_the_directory() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        for tier in ["q8", "q4"] {
+            stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some(tier));
+        }
+        for (bits, expected) in [(0, "bf16"), (8, "q8"), (4, "q4")] {
+            let (dir, tier) =
+                resolved_with_tier(data.path(), &entry, Some(bits)).expect("tier installed");
+            assert_eq!(tier, expected);
+            assert_eq!(
+                super::super::tier_key_for_resolved_dir(&entry, &dir),
+                Some(expected),
+                "{}",
+                dir.display()
+            );
+        }
+    }
+}
+
+/// sc-24112 — the count the declared admission envelope is priced against.
+///
+/// To `qwen_image_2_1` a working image IS an ordered condition image: upstream ships ONE pipeline,
+/// and "editing" is that call with one or more condition images. So `sourceAssetId` has to be
+/// counted alongside the reference carriers — leaving it out under-prices an edit by a whole
+/// reference block, and an under-price admits a request the engine cannot run.
+///
+/// The three carriers are mutually exclusive by the router's own rule
+/// (`routing::conditioned_reference_count` fails a multi-carrier payload closed), so in practice
+/// exactly one is populated; `max` is what makes a payload that somehow carries two price the
+/// larger rather than the first one checked.
+#[test]
+fn the_admission_reference_count_prices_every_condition_carrier() {
+    let count = |payload: Value| {
+        super::reference_image_count(&ImageRequest::from_payload(
+            payload.as_object().expect("payload object"),
+        ))
+    };
+    assert_eq!(count(json!({ "prompt": "p" })), 0);
+    assert_eq!(count(json!({ "referenceAssetId": "a" })), 1);
+    // The Image Editor's working image. *Mutation that reds this:* a plural-else-singular chain
+    // that never looks at `sourceAssetId`.
+    assert_eq!(count(json!({ "sourceAssetId": "a" })), 1);
+    assert_eq!(count(json!({ "referenceAssetIds": ["a", "b", "c"] })), 3);
+    // Blank ids are "not supplied", the same reading every other carrier check uses.
+    assert_eq!(count(json!({ "referenceAssetId": "   " })), 0);
+    assert_eq!(count(json!({ "sourceAssetId": "" })), 0);
+    assert_eq!(count(json!({ "referenceAssetIds": ["a", "  ", "c"] })), 2);
+    // A payload carrying two prices the larger, not the first.
+    assert_eq!(
+        count(json!({ "sourceAssetId": "a", "referenceAssetIds": ["a", "b"] })),
+        2
+    );
+}
+
+/// `qwen_image_2_1` is priced off the list its lane RENDERS — source, mask (an ordinary reference
+/// to this engine), then every reference — not the largest single carrier. Source + mask + nine
+/// references is eleven reference blocks, past the declared ten, and must be refused as such.
+///
+/// *Mutation that reds this:* dropping the `qwen_image_2_1` arm of `reference_image_count`, which
+/// falls back to the carrier `max` and prices this request as 9 (admitted).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn qwen_image_2_1_admission_counts_source_mask_and_every_reference() {
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .clone();
+    let references: Vec<String> = (1..=9).map(|n| format!("ref{n}")).collect();
+    let request = ImageRequest::from_payload(
+        json!({
+            "projectId": "p",
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "sourceAssetId": "source",
+            "maskAssetId": "mask",
+            "referenceAssetIds": references,
+            "modelManifestEntry": entry,
+        })
+        .as_object()
+        .expect("payload object"),
+    );
+    assert_eq!(super::reference_image_count(&request), 11);
+    let geometry =
+        crate::admission_geometry::AdmissionGeometry::from_manifest(&request.model_manifest_entry)
+            .expect("the shipped entry declares an envelope");
+    assert_eq!(
+        geometry.admit(2048, 2048, super::reference_image_count(&request), 1),
+        Err(
+            crate::admission_geometry::AdmissionRefusal::ReferenceCount {
+                requested: 11,
+                max: 10
+            }
+        )
+    );
+}
+
+/// The seam the worker's image entry point calls REFUSES an over-envelope request rather than
+/// shrinking it, and the refusal names the number. Driven over the SHIPPED catalog entry, so the
+/// envelope under test is the declared one rather than a fixture.
+#[test]
+fn an_over_envelope_qwen_image_2_1_request_is_refused_with_its_number() {
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+
+    // A legal ten-reference request at the default preset: 57 600 joint tokens against a declared
+    // 58 016. ADMITTED — refusing it would be the over-pricing the engine's own fix pass withdrew.
+    assert_eq!(
+        crate::admission_geometry::refuse_over_envelope(
+            "qwen_image_2_1",
+            &entry,
+            2048,
+            2048,
+            10,
+            1
+        ),
+        None
+    );
+
+    // Over the largest preset AREA with both sides individually legal — the case a max-side check
+    // waves through.
+    let refusal =
+        crate::admission_geometry::refuse_over_envelope("qwen_image_2_1", &entry, 2752, 2048, 0, 1)
+            .expect("2752x2048 is 5.63 Mpx against a 4.30 Mpx envelope");
+    assert!(refusal.contains("4300800"), "{refusal}");
+    assert!(
+        refusal.contains("refused rather than silently resized"),
+        "a refusal must say it is a refusal, not a resize: {refusal}"
+    );
+
+    // Eleven references is past what the joint layout can express.
+    let refusal = crate::admission_geometry::refuse_over_envelope(
+        "qwen_image_2_1",
+        &entry,
+        2048,
+        2048,
+        11,
+        1,
+    )
+    .expect("eleven references exceed the declared ten");
+    assert!(refusal.contains("10"), "{refusal}");
+    assert!(
+        refusal.contains("silently dropping references"),
+        "{refusal}"
+    );
 }

@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision b120a876 (inference main, merge of PR #1003: block-allocated MLX KV cache plus JoyCaption per-token progress). The delta from 0b084cbf adds exactly one provenance candidate, crates/contracts/core-llm/core-llm-testkit/src/comparison.rs, a testkit comparison helper the marker scan now matches; no candidate path was removed, no normalized ported-source marker changed, no source-area assignment changed, and the 14 other differing rows differ only in git_blob_sha1. The production-Rust crate prefix list is unchanged. Current reviewed population: 684 provenance candidates and 97 production-Rust crate prefixes. Existing report-only licensing findings remain the separate compliance worklist; read current counts from the checker output. Tests and fixtures are otherwise outside this production inventory.",
-  "inferenceRevision": "b120a876fa8820c462d57657514e77a305579236",
-  "auditDigest": "d0aa72438282e6419d5f4760ea1ad8cf0c85a27967104a235f218e5da7f47fec",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision ffea1439 (inference main, merge of PR #1029 — the MLX Qwen-Image 2.1 footprint model). The delta from the previously pinned revision 47dba529 also carries PR #1026 (candle conv2d im2col / softmax kernel-bound budgets, SDXL attention-chunk clamp), PR #1028 (external-VAE tiled decode past the kernel bound), PR #1034 (CI only), PR #1041 (Qwen-Image 2.1 candle loader materializes at f32 on a CPU device), PR #1040 (epic sc-24128 fast decode on Blackwell: candle-llm step seams, speculative engine, static KV, fused and NVFP4 kernels) and PR #1042/#1043 (runtime-2026.09.1-rc.0 release bookkeeping, CI policy). It adds one production crate, crates/kernels/candle-quant-kernels, which receives the NVFP4 codec and cuBLASLt wrapper moved out of candle-gen's quant module (so those two provenance candidates move path, not provenance) plus first-party NVRTC CUDA kernels, classified here as an architecture-reimplementation-existing-terms portedSourceArea with its three NVRTC include sites recorded as first-party source; it adds two provenance candidates, candle-llm's provider.rs and candle-gen's quant/nvfp4_kitchen.rs, both covered by their crates' existing areas, and retires no ported-source marker. Current reviewed population: 700 provenance candidates and 100 production-Rust crate prefixes. The two Qwen-Image 2.1 crates, crates/media/mlx-gen/mlx-gen-qwen-image-2-1 and crates/media/candle-gen/candle-gen-qwen-image-2-1, remain classified as architecture-reimplementation-existing-terms portedSourceAreas (sc-24114), under the Qwen Research License Agreement already mapped in the About manifest; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
+  "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd",
+  "auditDigest": "4fbf71923b07a003c48a3385d099f178b58ad5320e67df0082a3afbd1eaaccc9",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "b120a876fa8820c462d57657514e77a305579236",
+    "revision": "ffea1439fbf24eb3887861e300037f8b510878cd",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 684,
-    "populationSha256": "ccd534a1ae671a05b61836663ed5bd0cee301aa2b063961cea4cd363aad707dc"
+    "matchedFiles": 700,
+    "populationSha256": "2187b6747c37e35d54b0493fbdc7a57bc79f8158b1a53325769eb6ed0cd3dfac"
   },
   "portedSourceAreas": [
     {
@@ -143,6 +143,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/kernels/candle-quant-kernels",
+      "pathPrefix": "crates/kernels/candle-quant-kernels/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The NVFP4 codec (nvfp4.rs) and cuBLASLt wrapper (cublaslt.rs) moved here unchanged in provenance from crates/media/candle-gen/candle-gen/src/quant/ (inference sc-24135), where the same disposition already covered them; the remaining sources are first-party CUDA kernels behind an NVRTC seam. Applicable upstream model/provider terms are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-anima",
@@ -287,6 +294,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-qwen-image-2-1",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Qwen-Image 2.1 provider (Candle lane): an architecture reimplementation of the upstream diffusers pipeline (Qwen3-VL conditioning tower, MMDiT transformer, VAE, flow scheduler) and the SceneWorks tier converter. The applicable model terms (Qwen Research License Agreement) are mapped in the About manifest's qwen-image-2-1 component; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-sam3",
@@ -522,6 +536,13 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Qwen-Image 2.1 provider (MLX lane): an architecture reimplementation of the upstream diffusers pipeline (Qwen3-VL conditioning tower, MMDiT transformer, VAE, flow scheduler) and the SceneWorks tier converter. The applicable model terms (Qwen Research License Agreement) are mapped in the About manifest's qwen-image-2-1 component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-sam2",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-sam2/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
@@ -755,8 +776,20 @@
       "evidence": "Fixed negative-conditioning numeric tensor, not source code; it is part of the SeedVR2 model assembly, which sc-17632 declared as the installable `seedvr2_upscaler` catalog entry whose upstream terms are displayed."
     },
     {
-      "source": "crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs:185",
-      "included": "quant/nvfp4_quant.cu",
+      "source": "crates/kernels/candle-quant-kernels/src/cublaslt.rs:240",
+      "included": "nvfp4_quant.cu",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks inference source compiled at runtime by NVRTC; not third-party source and covered by the project license."
+    },
+    {
+      "source": "crates/kernels/candle-quant-kernels/src/fused_decode.rs:38",
+      "included": "fused_decode.cu",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks inference source compiled at runtime by NVRTC; not third-party source and covered by the project license."
+    },
+    {
+      "source": "crates/kernels/candle-quant-kernels/src/nvfp4_gemv.rs:43",
+      "included": "nvfp4_gemv.cu",
       "disposition": "first-party-source",
       "evidence": "SceneWorks inference source compiled at runtime by NVRTC; not third-party source and covered by the project license."
     },
@@ -830,10 +863,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "b120a876fa8820c462d57657514e77a305579236",
+    "revision": "ffea1439fbf24eb3887861e300037f8b510878cd",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 97,
-    "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
+    "cratePrefixes": 100,
+    "cratePopulationSha256": "52fac7b23b53ea970234496567b3e8072418fda4691e05a649a0071781358d4c"
   },
   "crateDispositions": [
     {

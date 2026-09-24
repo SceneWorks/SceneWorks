@@ -25,6 +25,7 @@ crates/contracts/core-llm
 crates/contracts/core-llm/core-llm-testkit
 crates/contracts/gen-core
 crates/contracts/gen-core-testkit
+crates/kernels/candle-quant-kernels
 crates/llm/candle-llm
 crates/llm/mlx-llm
 crates/llm/mlx-llm/server
@@ -52,6 +53,7 @@ crates/media/candle-gen/candle-gen-mochi
 crates/media/candle-gen/candle-gen-pid
 crates/media/candle-gen/candle-gen-pulid
 crates/media/candle-gen/candle-gen-qwen-image
+crates/media/candle-gen/candle-gen-qwen-image-2-1
 crates/media/candle-gen/candle-gen-sam3
 crates/media/candle-gen/candle-gen-sana
 crates/media/candle-gen/candle-gen-scail2
@@ -88,6 +90,7 @@ crates/media/mlx-gen/mlx-gen-mochi
 crates/media/mlx-gen/mlx-gen-pid
 crates/media/mlx-gen/mlx-gen-pulid
 crates/media/mlx-gen/mlx-gen-qwen-image
+crates/media/mlx-gen/mlx-gen-qwen-image-2-1
 crates/media/mlx-gen/mlx-gen-sam2
 crates/media/mlx-gen/mlx-gen-sam3
 crates/media/mlx-gen/mlx-gen-sana

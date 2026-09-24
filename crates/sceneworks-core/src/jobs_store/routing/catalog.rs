@@ -824,6 +824,41 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
     // which flipped krea/ideogram/boogu but not qwen). User LoRA/LoKr applies on the packed tiers.
     ModelCaps::new("qwen_image", true, true, false, false, true),
+    // Qwen-Image 2.1 (sc-24108 MLX / sc-24109 Candle, epic 24107): a SEPARATE model from the
+    // 2512-weights `qwen_image` row above — different snapshot, different latent space, different
+    // licence, and NOT a shared quant surface with it.
+    //
+    // `candle_routed` (sc-24109): the native Candle/CUDA port registers the SAME engine id
+    // `qwen_image_2_1`, so the one request contract that routes to MLX on a Mac routes off-Mac too.
+    // It takes TWO candle lanes to do that, and the split is not cosmetic (sc-24110): plain
+    // text-to-image reaches the generic txt2img lane, while a CONDITIONED request — the same
+    // upstream call with 1..N ordered condition images — is claimed by the bespoke
+    // `CandleImageLane::QwenImage21Edit` BEFORE the generic gate, because `CANDLE_IMAGE_CHECKS`
+    // refuses `edit_image` and every conditioning carrier for every family. The MLX arm makes the
+    // same two-shapes-one-contract decision in a single predicate.
+    //
+    // `candle_quant` FLIPS TO TRUE at sc-24112, and the reason is a change in the ENGINE, not a
+    // wiring catch-up. At sc-24109 the candle provider declared `supported_quants: []` and refused
+    // an on-the-fly quantize with a typed Unsupported at load, so `false` was the truthful column.
+    // Inference PR #1007 ports the packed loader to candle — `AdaptLinear::linear_detect_gs` reads
+    // the same packed triples on the DiT and the Qwen3 tower that MLX does — and the provider now
+    // declares `supported_quants: [Q4, Q8]`. `advanced.mlxQuantize` off-Mac is therefore a tier
+    // SELECT into an already-packed q4/q8 snapshot, exactly as on Mac, and the loader serves it.
+    // (A DENSE snapshot plus a quantize request is still a typed refusal on CANDLE: `spec.quantize`
+    // selects a tier there, it does not transform weights. MLX is different — against the dense
+    // snapshot it load-time quantizes — which is why the worker derives the load quant from the
+    // resolved artifact and sends none against the bf16 root on either lane.)
+    //
+    // This is NOT a merge of the two backends' surfaces. `candle_quant` is the CANDLE column and
+    // nothing else; the MLX lane's tier surface is the manifest's own `mlx` block; there is still
+    // no per-model-id quant field for the two to collapse into. They agree today because both
+    // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
+    // is where a merge, rather than an agreement, would show up.
+    //
+    // `candle_lora` and `candle_quant_lora` stay FALSE: the provider still declares
+    // `supports_lora`/`supports_lokr` false on both lanes, so there is no adapter to apply on a
+    // packed tier or anywhere else, and a LoRA request stays the typed `CandleImageRefusal::UserLora`.
+    ModelCaps::new("qwen_image_2_1", true, true, true, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2231,6 +2266,7 @@ mod tests {
         "flux_schnell",
         "flux_dev",
         "qwen_image",
+        "qwen_image_2_1",
         "qwen_image_edit",
         "qwen_image_edit_2509",
         "qwen_image_edit_2511",
@@ -2297,6 +2333,9 @@ mod tests {
         "flux2_klein_9b_true_v2",
         "flux2_dev",
         "qwen_image",
+        // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
+        // 2512 row it shares nothing with.
+        "qwen_image_2_1",
         "lens",
         "lens_turbo",
         // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
@@ -2394,6 +2433,14 @@ mod tests {
         // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
+        //
+        // sc-24112: `qwen_image_2_1`, once `candle-gen-qwen-image-2-1` gained the SAME packed load
+        // path (inference #1007 — `AdaptLinear::linear_detect_gs` on the DiT and the Qwen3 tower).
+        // Quant-only, not quant+adapter: the provider declares `supports_lora`/`supports_lokr`
+        // false, so it belongs here rather than in the combined list above. This is the identical
+        // shape as the SenseNova row directly below — an engine gaining a packed loader, and the
+        // routing half following it in the same story rather than a release later.
+        "qwen_image_2_1",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",

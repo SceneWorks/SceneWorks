@@ -122,6 +122,33 @@ const LICENSE_ACK_ONLY_MODEL = {
   ui: { attribution: "Powered by MiniMax H3", description: "Joint video + audio generation." },
 };
 
+// sc-24108: the same licence shape, but INSTALLED. `licenseGateApplies` is
+// `requiresLicenseAcknowledgment && downloadOnOffer`, so once every byte is on disk the gate box
+// stops rendering — which used to take the restriction off every surface in the app with it. This
+// fixture is the regression: nothing left to download, and the terms must still be readable.
+const QWEN_2_1_LICENSE_NOTICE =
+  "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT. §1(i) and §2(a) " +
+  "grant rights FOR NON-COMMERCIAL PURPOSES ONLY, where Non-Commercial means research or " +
+  "evaluation purposes only; §2(b) requires a separate commercial licence from Hangzhou Tongyi " +
+  "Laboratory.";
+const INSTALLED_LICENSED_MODEL = {
+  id: "qwen_image_2_1",
+  name: "Qwen Image 2.1",
+  type: "image",
+  family: "qwen-image-2-1",
+  installState: "installed",
+  installed: true,
+  downloadable: true,
+  updateAvailable: false,
+  requiresLicenseAcknowledgment: true,
+  nonCommercial: true,
+  licenseUrl:
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+  licenseNotice: QWEN_2_1_LICENSE_NOTICE,
+  downloads: [{ provider: "huggingface", repo: "Qwen/Qwen-Image-2.1", files: [] }],
+  ui: { description: "Qwen-Image 2.1 text-to-image target (research licence)." },
+};
+
 // The shape MiniMax-H3 ACTUALLY ships in (sc-17227): a quant matrix. A tiered model renders the
 // per-tier download panel INSTEAD of the single Download button, so proving the single-variant
 // button is blocked proves nothing about the path a real H3 user takes. Declaration is not
@@ -465,6 +492,46 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(terms.textContent).toContain("NON-TRANSFERABLE");
     expect(terms.textContent).toContain("United States of America");
     expect(terms.textContent).toContain("machine-generated");
+  });
+
+  // sc-24108: the acceptance criterion is "shown before download AND in model details". The gate
+  // above is only the first half — it is keyed on `downloadOnOffer`, so an INSTALLED model renders
+  // no gate, and before this the licence disappeared from the app entirely at that point. The
+  // persistent summary is the second half: same notice, no checkbox, nothing blocked.
+  it("keeps the licence readable on an INSTALLED model, outside the gate (sc-24108)", async () => {
+    await render([INSTALLED_LICENSED_MODEL]);
+    await selectTab(container, "Image Models");
+
+    // Precondition — the gate is genuinely gone, so this is not the gate under another name.
+    expect(container.querySelector(".model-gated-notice")).toBeNull();
+    expect(container.querySelector(".model-license-ack")).toBeNull();
+
+    const summary = container.querySelector(".model-license-summary");
+    expect(summary).toBeTruthy();
+    // The licence NAME, resolved from the bundled-licence corpus rather than invented.
+    expect(summary.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(summary.textContent).toContain("Non-commercial");
+    // A link to the full text.
+    const link = summary.querySelector("a");
+    expect(link.getAttribute("href")).toBe(INSTALLED_LICENSED_MODEL.licenseUrl);
+    // The full notice, present in the DOM but behind a DEFAULT-COLLAPSED disclosure.
+    const disclosure = summary.querySelector("details");
+    expect(disclosure).toBeTruthy();
+    expect(disclosure.open).toBe(false);
+    expect(disclosure.querySelector(".model-license-terms").textContent).toBe(
+      QWEN_2_1_LICENSE_NOTICE,
+    );
+    expect(disclosure.textContent).toContain("NON-COMMERCIAL PURPOSES ONLY");
+  });
+
+  // sc-24108: and it is a SUMMARY, not a second gate — the same several paragraphs must not print
+  // twice while the pre-download gate is still on screen.
+  it("does not duplicate the notice while the pre-download gate is showing (sc-24108)", async () => {
+    await render([{ ...INSTALLED_LICENSED_MODEL, installState: "missing", installed: false }]);
+    await selectTab(container, "Image Models");
+    expect(container.querySelector(".model-gated-notice")).toBeTruthy();
+    expect(container.querySelector(".model-license-summary")).toBeNull();
+    expect(container.querySelectorAll(".model-license-terms")).toHaveLength(1);
   });
 
   // sc-17227: MiniMax H3 Community License §IV.2 — "You shall prominently display 'MiniMax H3' on
@@ -1546,7 +1613,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
   // carrying variant / installState / downloadSizeBytes / footprint. Tiers are sized so the RAM
   // suggestion lands on q4 at 32 GB (budget 28.8 GB: q4 estimated peak 18 GB fits; q8/bf16 overflow)
   // and on bf16 at 512 GB (budget 460.8 GB: bf16 estimated peak 38 GB fits).
-  function matrixModel({ installed = [] } = {}) {
+  function matrixModel({ installed = [], pending = [], notDeletable = [] } = {}) {
     // diskGb (on-disk footprint, req #1 — this is what the row must render) is deliberately distinct
     // from downloadGb (compressed download) so the assertions prove the displayed size comes from
     // footprint.diskSizeBytes, not downloadSizeBytes. The RAM suggestion keys off diskGb.
@@ -1565,8 +1632,18 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       hasVariantMatrix: true,
       variants: tiers.map((tier) => ({
         variant: tier.variant,
-        installState: installed.includes(tier.variant) ? "installed" : "missing",
+        // sc-24112: `pending` is the API's third install state for a declared-but-unpublished
+        // tier, and `tierDeletable: false` is how it reports a tier the per-tier delete cannot
+        // reclaim on its own (a whole-repo row with no `files` scope).
+        installState: pending.includes(tier.variant)
+          ? "pending"
+          : installed.includes(tier.variant)
+            ? "installed"
+            : "missing",
         cacheState: installed.includes(tier.variant) ? "complete" : "missing",
+        pendingArtifact: pending.includes(tier.variant),
+        tierDeletable:
+          !pending.includes(tier.variant) && !notDeletable.includes(tier.variant),
         downloadSizeBytes: tier.downloadGb * GB,
         footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
       })),
@@ -1825,6 +1902,50 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
       expect.objectContaining({ id: "z_image_turbo" }),
       "q8",
     );
+  });
+
+  // sc-24112: a DECLARED-but-unpublished tier (`pendingArtifact`). The catalog advertises it so the
+  // tier axis is real before the bytes exist — the memory ladder, the fit gates and this panel are
+  // all built against it — but its artifact is not on the Hub yet and its revision is the null-SHA
+  // placeholder. The API refuses the download with the reason, so the row must NOT offer a
+  // checkbox that would queue a fetch that cannot resolve; it says why instead.
+  it("offers no download for a tier whose artifact is not published yet", async () => {
+    await render([
+      matrixModel({
+        installed: ["bf16"],
+        pending: ["q4", "q8"],
+      }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    for (const label of ["Q4", "Q8"]) {
+      const row = rowFor(label);
+      expect(row.querySelector("input").disabled).toBe(true);
+      expect(row.querySelector(".status-badge").textContent).toBe("not published yet");
+      // …and nothing to reclaim, because nothing was ever fetched.
+      expect(row.querySelector(".model-tier-delete")).toBeNull();
+    }
+    // The published tier is unaffected: still listed, still selectable-as-installed.
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+  });
+
+  // sc-24112: the per-tier delete is offered only for a tier the API can actually reclaim ALONE.
+  // A whole-repo tier (`files: []` — `qwen_image_2_1`'s bf16 IS the upstream snapshot) is the model
+  // rather than a slice of it, and `DELETE /models/:id/variants/:variant` refuses it with "delete
+  // the whole model instead". Before this story every variant row carried a file glob and the API's
+  // own comment assumed it always would, so the button was offered unconditionally on an installed
+  // tier — which would now render a Delete that always errors.
+  it("hides the per-tier delete on an installed tier the API cannot reclaim alone", async () => {
+    await render([
+      matrixModel({ installed: ["bf16", "q8"], notDeletable: ["bf16"] }),
+    ]);
+    const rowFor = (label) =>
+      tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes(label));
+    expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
+    expect(rowFor("bf16").querySelector(".model-tier-delete")).toBeNull();
+    // A scoped sibling still reclaims normally, so this is a per-row fact and not the control
+    // being switched off.
+    expect(rowFor("Q8").querySelector(".model-tier-delete")).toBeTruthy();
   });
 
   // sc-12025: convert-at-install models (mlxTiers, e.g. Anima) render no download panel, so they get

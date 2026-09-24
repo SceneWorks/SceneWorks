@@ -650,6 +650,16 @@ pub(crate) async fn run_image_detail_job(
         &source_id,
         &project_path,
     )?)?;
+    // Detail refines IN PLACE — the output geometry is the source's — so the source's alpha plane
+    // is attached to the result verbatim, with no resampler touching it (sc-24111). The SDXL tile
+    // refiner takes a flat 3-channel `gen_core::Image` and cannot be handed the channel, so it
+    // travels beside the engine image rather than through it.
+    let source_alpha = load_reference_alpha(
+        &settings.data_dir,
+        &request.project_id,
+        &source_id,
+        &project_path,
+    )?;
 
     let created_at = now_rfc3339();
     let asset_id = fresh_asset_id();
@@ -888,8 +898,9 @@ pub(crate) async fn run_image_detail_job(
     // Encode + atomically promote the refined PNG off the async runtime thread (sc-8909 / F-107).
     let encode_tmp = temp_path.clone();
     let encode_final = media_path.clone();
+    let written = reattach_alpha(refined, source_alpha.as_ref());
     tokio::task::spawn_blocking(move || {
-        write_workflow_chunk(&refined, &encode_tmp, share.as_ref())
+        write_workflow_chunk(written.as_workflow_image(), &encode_tmp, share.as_ref())
             .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
         std::fs::rename(&encode_tmp, &encode_final).inspect_err(|_| {
             let _ = std::fs::remove_file(&encode_tmp);

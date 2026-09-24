@@ -5,6 +5,7 @@
 // re-exports these so its public surface (and its tests) are unchanged.
 
 import { serializeLora } from "./presetUtils.js";
+import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 
 // Models that can edit an existing image with a prompt — the manifest tags them
 // with an `edit_image`/`image_edit` capability (same filter the Image Studio uses).
@@ -70,6 +71,8 @@ export function buildEditJobBody({
   editLora = null,
   editLoraWeight = null,
   guidanceScale = null,
+  transparentBackground = false,
+  modelEntry = null,
 }) {
   // Guidance override (sc-10275): only sent when the user set a finite value —
   // otherwise omitted so the worker's per-family model default stands. The worker
@@ -78,6 +81,12 @@ export function buildEditJobBody({
   const advanced = {};
   if (Number.isFinite(Number(guidanceScale)) && guidanceScale !== "" && guidanceScale != null) {
     advanced.guidanceScale = Number(guidanceScale);
+  }
+  // Transparency (sc-24114): the Studio's `transparentBackground` axis, on the editor's edit lane.
+  // Emitted only for a genuine request on an alpha-capable model (`modelEntry` is the selected
+  // catalog entry), so every other edit's payload is byte-identical.
+  if (transparentBackground && modelSupportsAlphaOutput(modelEntry)) {
+    advanced.transparentBackground = true;
   }
   const body = {
     projectId: project.id,

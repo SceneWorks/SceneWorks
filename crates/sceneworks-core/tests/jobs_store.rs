@@ -4485,6 +4485,59 @@ fn candle_supported_flags_a_torch_only_image_model() {
         .starts_with("candle_unsupported:"));
 }
 
+/// sc-24109 retires sc-24108's "macOS-only model" refusal for `qwen_image_2_1`: the native
+/// Candle/CUDA port serves the id off-Mac, so a candle worker CLAIMS a plain 2.1 text-to-image job
+/// through the same oracle that used to refuse it.
+///
+/// This is the one assertion that cannot be made from the routing tables alone — `candle_supported`
+/// is the gate an off-Mac worker actually consults, and a refusal here is what would leave the job
+/// terminal-failed on a Windows/Linux host no matter what the catalog said. The negative half is
+/// the discriminator: not only is the job claimed, none of the retired refusal's wording can still
+/// reach a user.
+#[test]
+fn candle_claims_qwen_image_2_1_text_to_image_off_mac() {
+    let store = store("candle-oracle-qwen-2-1");
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "a lighthouse" }),
+    );
+    assert!(
+        candle_supported(&job).is_ok(),
+        "an off-Mac worker must claim a plain Qwen Image 2.1 txt2img job (sc-24109)"
+    );
+
+    // A reference-conditioned request is claimed too (sc-24110): the Candle port declares the same
+    // `Reference` / `ReferenceRgba` / `MultiReference` conditioning as MLX, and the lane is keyed
+    // on the ordered reference list, never the mode — so the manifest's `image_to_image` shape (a
+    // plain request carrying a `referenceAssetId`) is claimed off-Mac exactly as on a Mac.
+    let conditioned = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "referenceAssetId": "ref_1" }),
+    );
+    assert!(
+        candle_supported(&conditioned).is_ok(),
+        "an off-Mac worker must claim a reference-conditioned Qwen Image 2.1 job"
+    );
+
+    // A carrier 2.1 does not declare (a pose set) is still refused — for the CARRIER, not for a
+    // platform boundary that no longer exists, so the reason names something the user can act on.
+    let posed = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "qwen_image_2_1", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+    );
+    let reason = candle_supported(&posed).unwrap_err();
+    assert_eq!(reason.model.as_deref(), Some("qwen_image_2_1"));
+    let message = reason.candle_error_message();
+    assert!(message.starts_with("candle_unsupported:"));
+    assert!(
+        !message.contains("only on the native MLX backend"),
+        "the retired macOS-only refusal must be unreachable: {message}"
+    );
+}
+
 #[test]
 fn candle_required_enforce_fails_unsupported_job() {
     let store = store("candle-enforce");
