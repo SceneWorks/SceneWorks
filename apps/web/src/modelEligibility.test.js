@@ -397,7 +397,31 @@ describe("audio model eligibility (sc-13403)", () => {
     audio: { languages: ["zh", "en"], sampleRates: [24000], maxDurationSecs: 300, supportsMultiSpeaker: true, maxSpeakers: 2 },
   };
 
+  // YuE lyrics2song (sc-19383): no editModes, so `supportsSegmentedLyrics` is its music signal. The
+  // CoT checkpoint would otherwise fall into the residual sfx bucket (it advertises sampleRates), and
+  // the ICL checkpoint into voiceclone (its ReferenceAudio is a song prompt, not a voice to clone).
+  const yueCot = {
+    id: "yue_en_cot",
+    type: "audio",
+    audio: { languages: ["en"], sampleRates: [44100], supportsGuidance: true, supportsSegmentedLyrics: true, supportsRepetitionPenalty: true },
+  };
+  const yueIcl = {
+    id: "yue_en_icl",
+    type: "audio",
+    audio: {
+      languages: ["en"],
+      sampleRates: [44100],
+      conditioning: ["ReferenceAudio"],
+      supportsGuidance: true,
+      supportsSegmentedLyrics: true,
+      supportsRepetitionPenalty: true,
+      supportsReferenceRegion: true,
+    },
+  };
+
   const seeded = [
+    ["YuE CoT (lyrics2song)", yueCot, "music"],
+    ["YuE ICL (lyrics2song, reference song prompt)", yueIcl, "music"],
     ["Kokoro-82M", kokoro, "speech"],
     ["MOSS-TTS-Realtime (streaming)", mossTtsRealtime, "speech"],
     ["MOSS-TTSD (multi-speaker)", mossTtsd, "speech"],
@@ -497,6 +521,12 @@ describe("audio model eligibility (sc-13403)", () => {
         "moss_tts_realtime",
         "moss_ttsd_v05",
         "openvoice_v2",
+        "yue_en_cot",
+        "yue_en_icl",
+        "yue_zh_cot",
+        "yue_zh_icl",
+        "yue_jp_kr_cot",
+        "yue_jp_kr_icl",
       ].sort(),
     );
     const expectedMode = {
@@ -508,6 +538,12 @@ describe("audio model eligibility (sc-13403)", () => {
       openvoice_v2: "voiceclone",
       chatterbox_ve: "voiceclone",
       chatterbox_tts: "voiceclone",
+      yue_en_cot: "music",
+      yue_en_icl: "music",
+      yue_zh_cot: "music",
+      yue_zh_icl: "music",
+      yue_jp_kr_cot: "music",
+      yue_jp_kr_icl: "music",
     };
     for (const model of fallbackAudio) {
       expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);

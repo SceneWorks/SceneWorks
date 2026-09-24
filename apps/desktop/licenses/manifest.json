@@ -296,6 +296,61 @@
       ]
     },
     {
+      "id": "yue",
+      "models": [
+        "yue_en_cot",
+        "yue_en_icl",
+        "yue_zh_cot",
+        "yue_zh_icl",
+        "yue_jp_kr_cot",
+        "yue_jp_kr_icl"
+      ],
+      "name": "YuE (Lyrics-to-Song)",
+      "publisher": "Multimodal Art Projection (M-A-P) · HKUST",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/multimodal-art-projection/YuE",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Lyrics-to-song music model (Audio Studio → Music): the six stage-1 7B checkpoints (m-a-p/YuE-s1-7B-anneal-{en,zh,jp-kr}-{cot,icl}) and the stage-2 1B upsampler (m-a-p/YuE-s2-1B-general). SceneWorks re-hosts safetensors copies on its Hugging Face org (SceneWorks/yue-s1-7b-anneal-*-candle, SceneWorks/yue-s2-1b-general-candle) — the bf16 weights plus q8 and q4 tiers quantized by SceneWorks — downloads only the selected tier on first use, and runs them natively (Candle) on every platform. Every re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed; upstream recommends (does not require) crediting outputs as \"Generated with YuE by HKUST/M-A-P\".",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
+          "key": "yue-license"
+        },
+        {
+          "label": "NOTICE",
+          "key": "yue-notice"
+        }
+      ]
+    },
+    {
+      "id": "xcodec-mini-infer",
+      "models": [],
+      "name": "xcodec_mini_infer (YuE codec + Vocos decoders)",
+      "publisher": "Multimodal Art Projection (M-A-P) · HKUST",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/m-a-p/xcodec_mini_infer",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, the vocal and instrumental Vocos 44.1 kHz decoders, and the mm tokenizer. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
+          "key": "xcodec-mini-infer-license"
+        },
+        {
+          "label": "NOTICE",
+          "key": "xcodec-mini-infer-notice"
+        }
+      ]
+    },
+    {
       "id": "openvoice-v2",
       "models": [
         "openvoice_v2"
@@ -1266,7 +1321,12 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/candle",
       "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source.",
-      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "z-image-apache"
+        }
+      ]
     },
     {
       "id": "opencv-source",
@@ -1276,7 +1336,12 @@
       "license": "Apache-2.0",
       "homepage": "https://opencv.org/",
       "usage": "InstantID keypoint rendering faithfully ports OpenCV drawing primitives and its literal sine table.",
-      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "z-image-apache"
+        }
+      ]
     },
     {
       "id": "diffusers-source",
@@ -1286,7 +1351,12 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/diffusers",
       "usage": "Native provider modules include structural Rust ports of Diffusers implementations, including ACE-Step OobleckDecoder.",
-      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "z-image-apache"
+        }
+      ]
     },
     {
       "id": "joycaption-source",
@@ -1296,7 +1366,12 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/fpgaminer/joycaption",
       "usage": "The caption-type taxonomy, prompt template bodies and name option reproduced in the native captioners are near-verbatim copies of gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION) from fpgaminer/joycaption, which is Apache-2.0. This covers BOTH caption lanes: the Candle provider (crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs) and the MLX provider (crates/media/mlx-gen/src/caption/joycaption.rs). SceneWorks MODIFIED the reproduced text: punctuation was normalized (em dash to hyphen, curly to straight quotes, backticks dropped) and upstream's \"Note any watermarks, signatures, or compression artifacts.\" sentence was folded into the \"Never mention...\" clause of the Straightforward bodies. The upstream repository ships no NOTICE file. This entry covers the reproduced PROMPT CONTENT only; the JoyCaption model WEIGHTS declare no license of their own and remain undetermined.",
-      "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "joycaption-source-apache"
+        }
+      ]
     },
     {
       "id": "sam3",

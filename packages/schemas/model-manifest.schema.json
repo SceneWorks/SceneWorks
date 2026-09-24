@@ -1917,6 +1917,18 @@
                 "type": "boolean",
                 "description": "Whether the model accepts a negative prompt (backend Capabilities.supports_negative_prompt). Read by Audio Studio's Music tab for its Negative prompt field. ABSENT MEANS FALSE — same audio polarity and the same sc-15299 history as `supportsGuidance`."
               },
+              "supportsSegmentedLyrics": {
+                "type": "boolean",
+                "description": "Whether the model sings structured lyrics ([verse] / [chorus] … sections) rendered segment by segment (backend Capabilities.supports_segmented_lyrics, YuE epic sc-19373). When true the request may carry AudioParams.segments (how many lyric sections to render) and AudioParams.max_new_tokens_per_segment (the per-segment decode budget); a model that does not advertise it refuses both as a typed Unsupported at the gen-core floor. A lyrics-to-song model has no audio-edit surface, so this flag is its Music-mode signal (modelEligibility.audioModelServesMode). ABSENT MEANS FALSE (audio polarity)."
+              },
+              "supportsRepetitionPenalty": {
+                "type": "boolean",
+                "description": "Whether the model's autoregressive decode honours a repetition penalty (backend Capabilities.supports_repetition_penalty, YuE epic sc-19373) — the AudioParams.repetition_penalty knob. ABSENT MEANS FALSE (audio polarity)."
+              },
+              "supportsReferenceRegion": {
+                "type": "boolean",
+                "description": "Whether a ReferenceAudio clip can be narrowed to a time window (backend Capabilities.supports_reference_region, AudioParams.reference_region) — YuE's in-context-learning checkpoints prompt on a chosen start/end window of the reference (epic sc-19373). ABSENT MEANS FALSE (audio polarity)."
+              },
               "conditioning": {
                 "type": "array",
                 "uniqueItems": true,
