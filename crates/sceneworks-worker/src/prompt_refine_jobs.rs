@@ -1240,9 +1240,9 @@ pub(crate) async fn run_prompt_refine_job(
         source: weights_dir.to_string_lossy().into_owned(),
         // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
         // Prism GGUF load. The refiners (including the vision tasks) load snapshot directories
-        // that carry their own projector, so `None` preserves the existing behaviour.
-        projector_source: None,
-        quantize: None,
+        // that carry their own projector, so the default `projector_source: None` preserves the
+        // existing behaviour; every other load option keeps its default as well.
+        ..Default::default()
     };
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
     // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
@@ -3260,8 +3260,7 @@ mod tests {
         let err = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: dir.path().to_string_lossy().into_owned(),
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &reqs,
         )
@@ -3297,8 +3296,7 @@ mod tests {
         let reqs = ModelRequirements::default().with_constraint(Constraint::Json);
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
-            projector_source: None,
-            quantize: None,
+            ..Default::default()
         };
         let err = crate::inference_runtime::load_for_model_with(&spec, &reqs)
             .err()
@@ -3390,8 +3388,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
-            projector_source: None,
-            quantize: None,
+            ..Default::default()
         };
 
         // (1) Selection: the worker's image_caption resolution requirements (JSON constraint only)
@@ -3482,8 +3479,7 @@ mod tests {
         write_qwen3_vl_config(dir.path());
         let spec = LoadSpec {
             source: dir.path().to_string_lossy().into_owned(),
-            projector_source: None,
-            quantize: None,
+            ..Default::default()
         };
 
         // The worker's image_describe resolution requirements: no constraint, no vision filter.
@@ -3590,8 +3586,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &reqs,
         )
@@ -3664,8 +3659,7 @@ mod tests {
         let captioner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &reqs,
         )
@@ -3740,8 +3734,7 @@ mod tests {
         let describer = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: snapshot,
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &reqs,
         )
@@ -3806,8 +3799,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &ModelRequirements::from_request(&request),
         )
@@ -3885,8 +3877,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &ModelRequirements::from_request(&request),
         )
@@ -4133,8 +4124,7 @@ mod tests {
         let refiner = crate::inference_runtime::load_for_model_with(
             &LoadSpec {
                 source: weights_dir.to_string_lossy().into_owned(),
-                projector_source: None,
-                quantize: None,
+                ..Default::default()
             },
             &reqs,
         )
