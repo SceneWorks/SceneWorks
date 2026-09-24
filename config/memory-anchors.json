@@ -6897,6 +6897,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "qwen_image_2_1:mlx:bf16:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-eb5ea9b2c2b9f8ca000e",
+      "modelId": "qwen_image_2_1",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-24114/qwen-image-2-1-bf16-mlx-evidence.json",
+        "sha256": "90260463785fc3c789f0b6be317eb2da0afe7cc5911440d57f2765a590080d95",
+        "recordId": "imc-eb5ea9b2c2b9f8ca000e",
+        "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+        "loaderClosureDigest": "f7322afaef2c4ac06ed49b932e706ead37aeee0d683ec3294fcc488855b138f6"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 33619148116,
+        "denoise": 35083265068,
+        "decode": 37397958484
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 35393371280,
+        "denoise": 41458712114,
+        "decode": 37402726228
+      },
+      "overallAllocatorEnvelopeBytes": 43773405530
+    },
+    {
       "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
       "modelId": "qwen_image_edit_2511",
       "modelFamily": "qwen-image",
@@ -12311,17 +12356,6 @@
       "route": "qwen_image_2_1",
       "backend": "candle",
       "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:qwen_image_2_1:mlx:bf16",
-      "modelId": "qwen_image_2_1",
-      "modelFamily": "qwen-image-2-1",
-      "route": "qwen_image_2_1",
-      "backend": "mlx",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
