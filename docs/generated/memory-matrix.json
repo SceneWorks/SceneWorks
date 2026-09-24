@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:90dd9ce2c74f7f29aa8d37d89e9601905ee91d807a84fcab09b2439fe8322e70",
+    "sceneWorksRevision": "source-tree:3f38b252015c75fe1f057c0ed9a5b0d7a75056b95ae3cf9965ca6c486efdc58b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "695f2f38f67d8bf92d262ee07876671c927e929b08fd933e494162cb549b8a91"
+        "sha256": "6e90ac639263ccbc3a8c781c6f93869497f0e9cb784dc59e3ddf5a04c7ee7bef"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "b115aa150ec7cd2ee669d5aa1aa24f1321d2fc031d608783746e3728389c2a83"
+        "sha256": "71b97f8e0fbe923db9c0cb8b07426b6bc7fe42982cdc68fb40c5044f8bfce971"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9570,
-    "publishedCells": 3825,
-    "elidedCells": 5745,
+    "publishedCells": 3840,
+    "elidedCells": 5730,
     "elidedByState": {
-      "Implemented": 1244,
+      "Implemented": 1229,
       "Missing": 4501
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -162,9 +162,9 @@
         "reason": "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 measurability burndown reads the routing catalog and DOES claim these cells"
       }
     ],
-    "anchors": 248,
-    "analyticOnlyCells": 101,
-    "anchoredCells": 3825,
+    "anchors": 249,
+    "analyticOnlyCells": 100,
+    "anchoredCells": 3840,
     "staleAnchors": 247,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -7304,6 +7304,24 @@
         "fps": null
       },
       "source": "docs/calibration/sc-24114/qwen-image-2-1-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 15
+    },
+    {
+      "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+      "modelId": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "provider": "qwen_image_2_1",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-24114/qwen-image-2-1-q4-mlx-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 15
@@ -15804,12 +15822,12 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 18,
-      "published": 3,
-      "elided": 15,
+      "published": 6,
+      "elided": 12,
       "implemented": 9,
       "states": {
-        "Anchored": 3,
-        "Implemented": 6,
+        "Anchored": 6,
+        "Implemented": 3,
         "Missing": 9
       },
       "implementedBy": {
@@ -15846,12 +15864,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 18,
-      "published": 6,
-      "elided": 12,
+      "published": 12,
+      "elided": 6,
       "implemented": 18,
       "states": {
-        "Anchored": 6,
-        "Implemented": 12
+        "Anchored": 12,
+        "Implemented": 6
       }
     },
     {
@@ -15859,12 +15877,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 18,
-      "published": 6,
-      "elided": 12,
+      "published": 12,
+      "elided": 6,
       "implemented": 18,
       "states": {
-        "Anchored": 6,
-        "Implemented": 12
+        "Anchored": 12,
+        "Implemented": 6
       }
     },
     {
@@ -145550,6 +145568,843 @@
       }
     },
     {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:lora:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:lora:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:bounded_decode",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            384,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:lora:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:lora:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:bounded_decode",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            384,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:lora:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:lora:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:bounded_decode",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            384,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:resident",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:staged_residency",
+      "modelId": "qwen_image_2_1",
+      "resolvedRoute": "qwen_image_2_1",
+      "provider": "qwen_image_2_1",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 15511,
+      "owningModelStory": 24108,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#qwen_image_2_1:mlx:q4:base:base:qwen-image-2-1-mlx-derived-2026-09-22-v1:imc-e0fa226b85943407caf2"
+          }
+        ]
+      }
+    },
+    {
       "id": "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:identity:resident",
       "modelId": "qwen_image_edit_2511",
       "resolvedRoute": "qwen_image_edit",
@@ -242002,7 +242857,22 @@
       "qwen_image_2_1:qwen_image_2_1:mlx:bf16:text_to_image:lora:staged_residency",
       "qwen_image_2_1:qwen_image_2_1:mlx:bf16:text_to_image:none:bounded_decode",
       "qwen_image_2_1:qwen_image_2_1:mlx:bf16:text_to_image:none:resident",
-      "qwen_image_2_1:qwen_image_2_1:mlx:bf16:text_to_image:none:staged_residency"
+      "qwen_image_2_1:qwen_image_2_1:mlx:bf16:text_to_image:none:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:lora:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:lora:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:bounded_decode",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:edit_image:none:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:lora:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:lora:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:bounded_decode",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:image_to_image:none:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:lora:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:lora:staged_residency",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:bounded_decode",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:resident",
+      "qwen_image_2_1:qwen_image_2_1:mlx:q4:text_to_image:none:staged_residency"
     ],
     "qwen_image_edit_2511": [
       "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:identity:resident",
