@@ -678,13 +678,11 @@ async fn generate_vision_json(
     let spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
         // Only a separable Prism GGUF load needs an explicit projector artifact. Every SceneWorks
-        // vision model is a snapshot directory whose projector is part of the model, so `None` is
-        // the load this code has always performed — it does not turn vision off.
-        projector_source: None,
-        quantize: None,
-        // Keep the backend's CUDA-graph default (candle-llm: off unless `CANDLE_LLM_CUDA_GRAPHS`),
-        // the load this code has always performed.
-        cuda_graphs: None,
+        // vision model is a snapshot directory whose projector is part of the model, so the
+        // default `projector_source: None` is the load this code has always performed — it does
+        // not turn vision off. Every other load option keeps its default too (dense weights, the
+        // backend's own decode defaults), so a load option the contract adds needs no edit here.
+        ..Default::default()
     };
     let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
     let generation = crate::refine_model_cache::with_cached_refiner(

@@ -171,9 +171,7 @@ mod tests {
     fn spec(source: &str) -> LoadSpec {
         LoadSpec {
             source: source.to_owned(),
-            projector_source: None,
-            quantize: None,
-            cuda_graphs: None,
+            ..Default::default()
         }
     }
 
