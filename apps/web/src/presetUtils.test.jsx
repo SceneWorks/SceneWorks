@@ -635,6 +635,18 @@ describe("findModelEditLora (epic 10871)", () => {
     expect(findModelEditLora(catalogLoras, { id: "qwen_image_edit", family: "qwen-image" })).toBe(null);
   });
 
+  it("returns null for Qwen Image 2.1, whose catalog row refuses adapters", () => {
+    // The API stamps `supported: false` on a declared-empty advertisement; without it the empty
+    // family set fell into the permissive branch and the Krea edit LoRA was auto-applied, which
+    // the API then 400'd with "has no declared LoRA families".
+    const qwen21 = {
+      id: "qwen_image_2_1",
+      family: "qwen-image-2-1",
+      loraCompatibility: { families: [], types: [], supported: false },
+    };
+    expect(findModelEditLora(catalogLoras, qwen21)).toBe(null);
+  });
+
   it("returns null on missing inputs", () => {
     expect(findModelEditLora(null, { family: "krea_2" })).toBe(null);
     expect(findModelEditLora(catalogLoras, null)).toBe(null);

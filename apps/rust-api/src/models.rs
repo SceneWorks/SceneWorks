@@ -7892,6 +7892,30 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
     }
 }
 
+/// A manifest that DECLARES `loraCompatibility.families: []` (e.g. `qwen_image_2_1`, whose engine
+/// refuses adapters) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
+/// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
+/// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
+/// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on
+/// exactly the models the API refuses. An explicit `supported` already on the entry is kept.
+fn mark_empty_lora_advertisement_unsupported(object: &mut JsonObject) {
+    let Some(compatibility) = object
+        .get_mut("loraCompatibility")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if compatibility
+        .get("families")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        compatibility
+            .entry("supported".to_owned())
+            .or_insert(Value::Bool(false));
+    }
+}
+
 /// Project the exact active-provider surface for a stamped imported source shape. Family siblings
 /// are never unioned: a Krea transformer file, SDXL fused checkpoint, Mage directory, and external
 /// ComfyUI tree each see only registrations for their structural loader.
@@ -8638,6 +8662,7 @@ fn apply_model_catalog_entry(
     apply_mac_and_mlx_fields(object, data_dir);
     apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
+    mark_empty_lora_advertisement_unsupported(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
     // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
@@ -13441,6 +13466,47 @@ mod imported_lora_advertisement_tests {
             withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    /// A manifest-declared `families: []` (Qwen Image 2.1) is refused by the LoRA validator, so the
+    /// catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers every
+    /// LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
+    /// advertisements, and an explicit `supported`, are left alone.
+    #[test]
+    fn a_declared_empty_lora_advertisement_is_marked_unsupported() {
+        let mut qwen =
+            json!({ "id": "qwen_image_2_1", "loraCompatibility": { "families": [], "types": [] } })
+                .as_object()
+                .expect("object")
+                .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen);
+        assert_eq!(
+            qwen["loraCompatibility"],
+            json!({ "families": [], "types": [], "supported": false })
+        );
+
+        let serving = json!({ "families": ["qwen-image"], "types": ["style"] });
+        let mut qwen_2512 = json!({ "id": "qwen_image", "loraCompatibility": serving.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen_2512);
+        assert_eq!(qwen_2512["loraCompatibility"], serving);
+
+        let mut absent = json!({ "id": "external_qwen", "loraCompatibility": {} })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut absent);
+        assert_eq!(absent["loraCompatibility"], json!({}));
+
+        let explicit = json!({ "families": [], "supported": true });
+        let mut kept = json!({ "id": "x", "loraCompatibility": explicit.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut kept);
+        assert_eq!(kept["loraCompatibility"], explicit);
     }
 
     #[test]
