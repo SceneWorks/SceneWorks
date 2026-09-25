@@ -5394,6 +5394,43 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "MOSS-TTSD v0.5 (Multi-Speaker)" }
             },
             {
+              "id": "yue_en_cot",
+              "name": "YuE English CoT",
+              "family": "yue",
+              "type": "audio",
+              "audio": {
+                "languages": ["en"], "sampleRates": [44100], "supportsGuidance": true,
+                "supportsSegmentedLyrics": true, "supportsRepetitionPenalty": true
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "bf16", "files": ["bf16/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle" },
+              "ui": { "label": "YuE English CoT" }
+            },
+            {
+              "id": "yue_en_icl",
+              "name": "YuE English ICL",
+              "family": "yue",
+              "type": "audio",
+              "audio": {
+                "languages": ["en"], "sampleRates": [44100], "conditioning": ["ReferenceAudio"],
+                "supportsGuidance": true, "supportsSegmentedLyrics": true,
+                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true,
+                "supportsOutputLimiter": true
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "bf16", "files": ["bf16/*"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle" },
+              "ui": { "label": "YuE English ICL" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -6082,6 +6119,296 @@ async fn create_audio_job_rejects_empty_prompt() {
     assert!(body["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("prompt")));
+}
+
+/// A project + app over the audio manifest (which carries `yue_en_cot` / `yue_en_icl`), for the
+/// YuE job-surface tests (sc-19384).
+async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Song Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (temp_dir, app, project_id)
+}
+
+/// The full YuE R5 control set (sc-19384): every knob a `POST /api/v1/audio/jobs` carries — genre
+/// tags (prompt), lyrics, segments, per-segment token budget, repetition penalty, seed, guidance
+/// on + scale, ICL mode + reference (single AND dual) + window, tier — reaches the worker payload
+/// verbatim, with the model's manifest entry injected.
+#[tokio::test]
+async fn create_audio_job_maps_the_full_yue_control_set() {
+    let (_temp_dir, app, project_id) = yue_audio_app().await;
+    let lyrics = "[verse]\nwalking down the empty street\n[chorus]\nsing it loud";
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "yue_en_icl",
+            "prompt": "uplifting pop female vocal airy",
+            "lyrics": lyrics,
+            "segments": 3,
+            "maxNewTokensPerSegment": 1500,
+            "repetitionPenalty": 1.25,
+            "seed": 11,
+            "guidanceEnabled": true,
+            "guidance": 1.5,
+            "iclMode": "dual",
+            "iclVocalAssetId": "asset_vocal",
+            "iclInstrumentalAssetId": "asset_inst",
+            "iclStartSecs": 5.0,
+            "iclEndSecs": 25.0,
+            "quantTier": "q8",
+            "outputLimiter": "rescale",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    for (key, expected) in [
+        ("model", json!("yue_en_icl")),
+        ("prompt", json!("uplifting pop female vocal airy")),
+        ("lyrics", json!(lyrics)),
+        ("segments", json!(3)),
+        ("maxNewTokensPerSegment", json!(1500)),
+        ("repetitionPenalty", json!(1.25)),
+        ("seed", json!(11)),
+        ("guidanceEnabled", json!(true)),
+        ("guidance", json!(1.5)),
+        ("iclMode", json!("dual")),
+        ("iclVocalAssetId", json!("asset_vocal")),
+        ("iclInstrumentalAssetId", json!("asset_inst")),
+        ("iclStartSecs", json!(5.0)),
+        ("iclEndSecs", json!(25.0)),
+        ("quantTier", json!("q8")),
+        ("outputLimiter", json!("rescale")),
+    ] {
+        assert_eq!(
+            payload[key], expected,
+            "{key} must reach the worker payload"
+        );
+    }
+    assert_eq!(payload["modelManifestEntry"]["id"], "yue_en_icl");
+
+    // Single-track ICL and guidance OFF are accepted too.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "yue_en_icl",
+            "prompt": "rock",
+            "lyrics": lyrics,
+            "guidanceEnabled": false,
+            "iclMode": "single",
+            "iclReferenceAssetId": "asset_mix",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclReferenceAssetId"], "asset_mix");
+    assert_eq!(job["payload"]["guidanceEnabled"], false);
+
+    // A CoT render with no reference is the plain lyrics2song path.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_cot", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+
+    // An `_icl` checkpoint with NO reference is a plain prompt run (upstream allows it; epic R1).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("iclMode").is_none());
+
+    // A start with no end is accepted: the window ends at upstream's 30 s default (the worker
+    // builds the 5–30 s region — asserted in the worker's from_payload test).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics,
+            "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 5.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclStartSecs"], 5.0);
+    assert!(job["payload"].get("iclEndSecs").is_none());
+}
+
+/// ICL modes are reachable only on an in-context-learning checkpoint (sc-19384): an ICL request to a
+/// CoT model is a validation error (400), and so is an `_icl` checkpoint with no reference, a
+/// half-specified mode, an unknown mode, and an ill-ordered window. The YuE-only knobs are refused
+/// on a model that does not declare them, and the controls YuE does not read are refused on YuE.
+#[tokio::test]
+async fn create_audio_job_rejects_invalid_yue_requests() {
+    let (_temp_dir, app, project_id) = yue_audio_app().await;
+    let lyrics = "[verse]\nla la la";
+    let cases: Vec<(&str, Value, &str)> = vec![
+        (
+            "ICL mode on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclMode": "single", "iclReferenceAssetId": "a" }),
+            "in-context-learning",
+        ),
+        (
+            "ICL dual on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclMode": "dual", "iclVocalAssetId": "v", "iclInstrumentalAssetId": "i" }),
+            "in-context-learning",
+        ),
+        (
+            "start at the default 30 s end with no explicit end",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 30.0 }),
+            "iclEndSecs must be greater",
+        ),
+        (
+            "dual mode missing the instrumental",
+            json!({ "model": "yue_en_icl", "iclMode": "dual", "iclVocalAssetId": "v" }),
+            "iclInstrumentalAssetId",
+        ),
+        (
+            "single mode with a vocal id",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclVocalAssetId": "v" }),
+            "iclReferenceAssetId",
+        ),
+        (
+            "unknown ICL mode",
+            json!({ "model": "yue_en_icl", "iclMode": "triple", "iclReferenceAssetId": "a" }),
+            "iclMode must be one of",
+        ),
+        (
+            "ICL fields without a mode",
+            json!({ "model": "yue_en_icl", "iclReferenceAssetId": "a" }),
+            "need an iclMode",
+        ),
+        (
+            "reversed time range",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 20.0, "iclEndSecs": 10.0 }),
+            "iclEndSecs must be greater",
+        ),
+        (
+            "negative start",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": -1.0 }),
+            "iclStartSecs must be between",
+        ),
+        (
+            "window on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclStartSecs": 0.0, "iclEndSecs": 10.0 }),
+            "need an iclMode",
+        ),
+        (
+            "zero segments",
+            json!({ "model": "yue_en_cot", "segments": 0 }),
+            "segments must be",
+        ),
+        (
+            "zero token budget",
+            json!({ "model": "yue_en_cot", "maxNewTokensPerSegment": 0 }),
+            "maxNewTokensPerSegment must be",
+        ),
+        (
+            "non-positive repetition penalty",
+            json!({ "model": "yue_en_cot", "repetitionPenalty": 0.0 }),
+            "repetitionPenalty must be",
+        ),
+        (
+            "guidance scale with guidance off",
+            json!({ "model": "yue_en_cot", "guidanceEnabled": false, "guidance": 1.5 }),
+            "guidanceEnabled is false",
+        ),
+        (
+            "guidance ON scale at or below 1",
+            json!({ "model": "yue_en_cot", "guidance": 1.0 }),
+            "greater than 1",
+        ),
+        (
+            "unknown tier",
+            json!({ "model": "yue_en_cot", "quantTier": "q2" }),
+            "quantTier must be",
+        ),
+        (
+            "missing lyrics",
+            json!({ "model": "yue_en_cot", "lyrics": null }),
+            "lyrics are required",
+        ),
+        (
+            "steps on YuE",
+            json!({ "model": "yue_en_cot", "steps": 30 }),
+            "steps is not a control",
+        ),
+        (
+            "segments on a one-pass model",
+            json!({ "model": "acestep_v15_turbo", "segments": 2 }),
+            "does not render segmented lyrics",
+        ),
+        (
+            "repetition penalty on a model without it",
+            json!({ "model": "acestep_v15_turbo", "repetitionPenalty": 1.1 }),
+            "does not take a repetitionPenalty",
+        ),
+        (
+            "tier on an untiered model",
+            json!({ "model": "acestep_v15_turbo", "quantTier": "q4" }),
+            "does not ship a q4 tier",
+        ),
+        (
+            "guidance switch on a non-song model",
+            json!({ "model": "moss_sfx_v2", "guidanceEnabled": false }),
+            "does not take guidanceEnabled",
+        ),
+        (
+            "unknown output limiter",
+            json!({ "model": "yue_en_cot", "outputLimiter": "normalize" }),
+            "outputLimiter must be one of",
+        ),
+        (
+            "output limiter on a non-song model",
+            json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
+            "does not take an outputLimiter",
+        ),
+        (
+            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
+            // gate is the limiter's own flag, not the segmented-lyrics one.
+            "output limiter on a segmented model without the limiter flag",
+            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
+            "does not take an outputLimiter",
+        ),
+    ];
+    for (name, overrides, needle) in cases {
+        let mut body = json!({ "projectId": project_id, "prompt": "pop", "lyrics": lyrics });
+        for (key, value) in overrides.as_object().expect("override object") {
+            body[key] = value.clone();
+        }
+        let (status, response) = request(app.clone(), "POST", "/api/v1/audio/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {response}");
+        assert!(
+            response["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(needle)),
+            "{name}: expected a detail containing {needle:?}, got {response}"
+        );
+    }
 }
 
 // The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,

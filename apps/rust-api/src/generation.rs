@@ -2650,6 +2650,10 @@ pub(crate) async fn create_audio_job(
             "Model {model_id} is not an audio model (type: \"audio\" required)"
         )));
     }
+    // Segmented-song / ICL / tier fields vs the model's declared capabilities (sc-19384): an ICL
+    // mode on a non-`_icl` checkpoint (or a missing one on an `_icl` checkpoint) is a validation
+    // error here, not a failed job.
+    crate::validate_audio_job_for_model(&payload, &model_manifest_entry)?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     // Voice Clone (sc-13411 C4): the two-call chain runs a SECOND model — the base TTS (Kokoro) whose
     // speech the selected converter (OpenVoice V2) re-timbres. Resolve + inject its manifest entry too so
