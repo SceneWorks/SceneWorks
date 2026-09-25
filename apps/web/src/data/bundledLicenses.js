@@ -56,6 +56,14 @@ import mossTtsdApache from "../../../desktop/licenses/moss-ttsd-v05/Apache-2.0.t
 import xyTokenizerApache from "../../../desktop/licenses/xy-tokenizer-ttsd/Apache-2.0.txt?url&no-inline";
 import mossTtsRealtimeApache from "../../../desktop/licenses/moss-tts-realtime/Apache-2.0.txt?url&no-inline";
 import mossAudioTokenizerApache from "../../../desktop/licenses/moss-audio-tokenizer/Apache-2.0.txt?url&no-inline";
+// YuE lyrics2song (epic sc-19373, sc-19383): the stage-1/stage-2 LMs and their xcodec codec +
+// Vocos co-requisite, all Apache-2.0 (HKUST / M-A-P) and re-hosted on the SceneWorks HF org. Each
+// re-host's LICENSE (Apache-2.0 plus the YuE license agreement & disclaimer) and its NOTICE — which
+// Apache-2.0 Section 4(d) requires every redistribution to retain — are reproduced verbatim.
+import yueLicense from "../../../desktop/licenses/yue/LICENSE.txt?url&no-inline";
+import yueNotice from "../../../desktop/licenses/yue/NOTICE.txt?url&no-inline";
+import xcodecMiniInferLicense from "../../../desktop/licenses/xcodec-mini-infer/LICENSE.txt?url&no-inline";
+import xcodecMiniInferNotice from "../../../desktop/licenses/xcodec-mini-infer/NOTICE.txt?url&no-inline";
 // MMAudio video→audio (Foley) — RESEARCH / NON-COMMERCIAL only (epic 13678, sc-13684). Three upstream
 // licenses across three repos: CC-BY-NC-4.0 (hkchengrex/MMAudio weights), the Apple ML Research Model
 // License (apple/DFN5B-CLIP conditioner, the research-only gate), and MIT (nvidia/bigvgan_v2 44k vocoder).
@@ -168,6 +176,10 @@ const DOCUMENT_URL = {
   "xy-tokenizer-ttsd-apache": xyTokenizerApache,
   "moss-tts-realtime-apache": mossTtsRealtimeApache,
   "moss-audio-tokenizer-apache": mossAudioTokenizerApache,
+  "yue-license": yueLicense,
+  "yue-notice": yueNotice,
+  "xcodec-mini-infer-license": xcodecMiniInferLicense,
+  "xcodec-mini-infer-notice": xcodecMiniInferNotice,
   "mmaudio-cc-by-nc": mmaudioCcByNc,
   "mmaudio-apple-amlr": mmaudioAppleAmlr,
   "mmaudio-bigvgan-mit": mmaudioBigvganMit,

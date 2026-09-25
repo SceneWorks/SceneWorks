@@ -2,11 +2,11 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 101,
+    "modelCount": 107,
     "importedFamilyCount": 4,
-    "cellCount": 971,
+    "cellCount": 1004,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 51,
+    "candleOnlyCellCount": 78,
     "exceptionCount": 10
   },
   "sources": {
@@ -22,7 +22,7 @@
     "descriptorMlxRuntime": "a1e2145b452babcf8c12722d19a3fdc78b05d1e40dbf100580e086e99c628e7e",
     "descriptorPreviewFacts": "202c10065fcbebd7a5c98890160f2451562394da5e072d9543dcd9fd076b0d04",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "9a62f96dfe8c81140356644488c38a87e1acbbaace876305d90f08d8762051f5",
+    "manifest": "d136d84c1a6b66eba7f8d6b7eb63f90387c77ae30b59be322585153dde11e2f8",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
@@ -31,7 +31,7 @@
     "scheduler": "d082a1afddc8bda1ab75438d2913dad33af5e4ed34a0ace4ed90eecaafb9a43b",
     "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
     "webAudioStudio": "1fa9058bcd9a279b22559a4ae68216b0a674d130369ce694760997f4021470c6",
-    "webFallbackCatalog": "c46440a2dce66bbd1992e1b368f521157bad85e7e1c03beb5859bb6aafe16ebb",
+    "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
     "webImageRequest": "5a64c49b080d9e426ad0af92eeae9bfdb7a59b74556513476e7ef226c97bedf2",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -6639,6 +6639,285 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "yue_en_cot",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "yue_en_icl",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "referenceAudio",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "yue_jp_kr_cot",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "yue_jp_kr_icl",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "referenceAudio",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "yue_zh_cot",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "yue_zh_icl",
+      "family": "yue",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "referenceAudio",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
       }
     },
     {
