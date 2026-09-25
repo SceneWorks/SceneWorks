@@ -1203,6 +1203,7 @@ const seededFallbackModels = [
           supportsSegmentedLyrics: true,
           supportsRepetitionPenalty: true,
           supportsReferenceRegion: icl,
+          supportsOutputLimiter: true,
         },
         ui: {
           label: `YuE ${langLabel} ${modeLabel}`,

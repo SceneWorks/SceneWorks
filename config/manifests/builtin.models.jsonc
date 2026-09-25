@@ -26522,7 +26522,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": false
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -26647,7 +26648,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": true
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -26768,7 +26770,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": false
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -26890,7 +26893,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": true
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -27011,7 +27015,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": false
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -27133,7 +27138,8 @@
         "supportsNegativePrompt": false,
         "supportsSegmentedLyrics": true,
         "supportsRepetitionPenalty": true,
-        "supportsReferenceRegion": true
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
       },
       "downloads": [
         {
@@ -28174,7 +28180,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "1b2861900f5302386ce8fb8f080b992a5cf394ce27bc0e3964306acb9dd9b0ce",
+              "sha256": "2283031c4458c247ac8782b6a2b61757714af87df51437094951fe1ce155f97c",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28293,8 +28299,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 148851,
-                  "sha256": "f3335f49db6fbf409b49bb741b8ea4b2d742aefaa0703617b7145ec5fbc05e14"
+                  "byteSize": 149343,
+                  "sha256": "a7f90818d2879852238e608ded4f21cfa508797d965079f531b214cdbab8a7e3"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",
