@@ -1671,6 +1671,35 @@ def test_builtin_manifest_ships_the_seeded_audio_models():
     assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
 
 
+_YUE_MODEL_IDS = tuple(
+    f"yue_{language}_{mode}" for language in ("en", "zh", "jp_kr") for mode in ("cot", "icl")
+)
+
+
+def test_yue_entries_advertise_their_backend_audio_capabilities():
+    """sc-19383 (epic 19373): each YuE entry's `audio` block mirrors the candle-audio-yue descriptor
+    — segmented lyrics, repetition penalty and the Clamp/Rescale output limiter on every variant;
+    ReferenceAudio conditioning and the reference window only on the ICL checkpoints. The audio
+    polarity is ABSENT MEANS FALSE, so a dropped key silently hides the control.
+
+    *Mutation that reds this:* deleting any of those keys from one entry, or advertising
+    `conditioning` / `supportsReferenceRegion` on a CoT checkpoint.
+    """
+    by_id = {m.get("id"): m for m in _load_builtin_models_manifest()["models"]}
+    for model_id in _YUE_MODEL_IDS:
+        audio = by_id[model_id]["audio"]
+        icl = model_id.endswith("_icl")
+        for key in (
+            "supportsSegmentedLyrics",
+            "supportsRepetitionPenalty",
+            "supportsOutputLimiter",
+            "supportsGuidance",
+        ):
+            assert audio.get(key) is True, f"{model_id}.audio.{key} must be true"
+        assert audio.get("supportsReferenceRegion") is icl, model_id
+        assert ("ReferenceAudio" in audio.get("conditioning", [])) is icl, model_id
+
+
 def _duplicate_default_downloads(manifest: dict) -> list[str]:
     """Return model/platform pairs with ambiguous primary download selection."""
     ambiguous: list[str] = []

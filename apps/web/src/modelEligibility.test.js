@@ -403,7 +403,7 @@ describe("audio model eligibility (sc-13403)", () => {
   const yueCot = {
     id: "yue_en_cot",
     type: "audio",
-    audio: { languages: ["en"], sampleRates: [44100], supportsGuidance: true, supportsSegmentedLyrics: true, supportsRepetitionPenalty: true },
+    audio: { languages: ["en"], sampleRates: [44100], supportsGuidance: true, supportsSegmentedLyrics: true, supportsRepetitionPenalty: true, supportsOutputLimiter: true },
   };
   const yueIcl = {
     id: "yue_en_icl",
@@ -416,6 +416,7 @@ describe("audio model eligibility (sc-13403)", () => {
       supportsSegmentedLyrics: true,
       supportsRepetitionPenalty: true,
       supportsReferenceRegion: true,
+      supportsOutputLimiter: true,
     },
   };
 
