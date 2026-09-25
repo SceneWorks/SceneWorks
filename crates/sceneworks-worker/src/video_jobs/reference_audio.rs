@@ -183,17 +183,18 @@ async fn decode_reference_audio(
         CANCEL_MESSAGE,
         source,
         work_dir,
-        REFERENCE_AUDIO_SAMPLE_RATE,
-        REFERENCE_AUDIO_CHANNELS,
+        Some(REFERENCE_AUDIO_SAMPLE_RATE),
+        Some(REFERENCE_AUDIO_CHANNELS),
     )
     .await
 }
 
-/// Decode any container ffmpeg reads into a PCM-16 [`gen_core::AudioTrack`] at exactly
-/// `sample_rate` / `channels`, through the shared [`run_ffmpeg`] heartbeat + cooperative-cancel
-/// runner. The engine-agnostic half of [`decode_reference_audio`]: the audio job path's YuE ICL
-/// reference (sc-19384) normalizes onto xcodec's 16 kHz mono with the same command shape. `work_dir`
-/// is caller-owned scratch; the WAV is written inside it.
+/// Decode any container ffmpeg reads into a PCM-16 [`gen_core::AudioTrack`], through the shared
+/// [`run_ffmpeg`] heartbeat + cooperative-cancel runner. `Some(sample_rate)` / `Some(channels)`
+/// normalize onto exactly that rate / channel count (the video reference path, whose engine ships no
+/// resampler); `None` keeps the SOURCE's rate / channel count (the YuE ICL reference, sc-19384,
+/// whose engine owns the downmix + resample). `work_dir` is caller-owned scratch; the WAV is written
+/// inside it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_audio_normalized(
     api: &ApiClient,
@@ -202,8 +203,8 @@ pub(crate) async fn decode_audio_normalized(
     cancel_message: &str,
     source: &Path,
     work_dir: &Path,
-    sample_rate: u32,
-    channels: u16,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let wav = work_dir.join("reference.wav");
     let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
@@ -228,35 +229,31 @@ pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<Stri
     audio_normalize_ffmpeg_args(
         source,
         wav,
-        REFERENCE_AUDIO_SAMPLE_RATE,
-        REFERENCE_AUDIO_CHANNELS,
+        Some(REFERENCE_AUDIO_SAMPLE_RATE),
+        Some(REFERENCE_AUDIO_CHANNELS),
     )
 }
 
-/// The rate/channel normalization command behind [`reference_audio_ffmpeg_args`], parameterized so
-/// another engine boundary (YuE's 16 kHz mono xcodec input, sc-19384) reuses the one command shape.
+/// The decode command behind [`reference_audio_ffmpeg_args`], parameterized so another engine
+/// boundary reuses the one command shape: `None` omits `-ar` / `-ac`, so ffmpeg keeps the source's
+/// rate / channel layout (YuE's ICL reference, sc-19384, whose engine downmixes + resamples itself).
 pub(crate) fn audio_normalize_ffmpeg_args(
     source: &Path,
     wav: &Path,
-    sample_rate: u32,
-    channels: u16,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
 ) -> Vec<String> {
-    vec![
-        "ffmpeg".to_owned(),
-        "-nostdin".to_owned(),
-        "-y".to_owned(),
-        "-i".to_owned(),
-        source.display().to_string(),
-        "-map".to_owned(),
-        "0:a:0".to_owned(),
-        "-vn".to_owned(),
-        "-ar".to_owned(),
-        sample_rate.to_string(),
-        "-ac".to_owned(),
-        channels.to_string(),
-        // `read_wav_pcm16` reads PCM s16 only.
-        "-c:a".to_owned(),
-        "pcm_s16le".to_owned(),
-        wav.display().to_string(),
-    ]
+    let mut args: Vec<String> = ["ffmpeg", "-nostdin", "-y", "-i"].map(str::to_owned).into();
+    args.push(source.display().to_string());
+    args.extend(["-map", "0:a:0", "-vn"].map(str::to_owned));
+    if let Some(rate) = sample_rate {
+        args.extend(["-ar".to_owned(), rate.to_string()]);
+    }
+    if let Some(channels) = channels {
+        args.extend(["-ac".to_owned(), channels.to_string()]);
+    }
+    // `read_wav_pcm16` reads PCM s16 only.
+    args.extend(["-c:a", "pcm_s16le"].map(str::to_owned));
+    args.push(wav.display().to_string());
+    args
 }

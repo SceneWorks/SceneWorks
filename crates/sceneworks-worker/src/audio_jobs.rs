@@ -611,12 +611,8 @@ fn output_limiter(token: &str) -> WorkerResult<gen_core::OutputLimiter> {
     }
 }
 
-/// The rate every YuE ICL reference reaches the engine at: xcodec's 16 kHz mono input (the upstream
-/// pipeline loads the prompt audio mono and resamples it to 16 kHz before encoding). sc-19384.
-const ICL_REFERENCE_SAMPLE_RATE: u32 = 16_000;
 /// Upstream YuE's `prompt_end_time` default — the window end when a request sets only a start.
 const ICL_DEFAULT_END_SECS: f32 = 30.0;
-const ICL_REFERENCE_CHANNELS: u16 = 1;
 
 /// A weight tier resolved for a model that ships physical per-tier downloads (`<tier>/*`, sc-19384):
 /// the tier name (also the selector for its per-tier co-requisites) and the `LoadSpec::quantize`
@@ -729,9 +725,12 @@ fn resolve_audio_tier(
 /// (sc-19384): a `single` mix rides as the track itself; a `dual` pair rides as a track carrying
 /// `vocals` + `instrumental` stems (the engine's dual-track carrier), with the mix field their sum.
 /// Every clip goes through the shared asset guard ([`crate::video_jobs::ltx::resolve_clip_media_path`])
-/// and the shared ffmpeg normalization onto [`ICL_REFERENCE_SAMPLE_RATE`] mono, so any container the
-/// library holds is admissible. Scratch lives in a [`tempfile::TempDir`] that is removed on EVERY exit
-/// — refusal, cancel (the ffmpeg runner returns `Canceled`), panic, or the future being dropped.
+/// and the shared ffmpeg decode, so any container the library holds is admissible — decoded at its
+/// SOURCE sample rate and channel count (see [`decode_icl_clips`]): the engine's `load_audio_mono`
+/// port owns the `torch.mean` downmix and the torchaudio sinc-Hann resample to xcodec's 16 kHz,
+/// verified against the upstream goldens, so the worker must not pre-empt either with ffmpeg's.
+/// Scratch lives in a [`tempfile::TempDir`] that is removed on EVERY exit — refusal, cancel (the
+/// ffmpeg runner returns `Canceled`), panic, or the future being dropped.
 async fn resolve_icl_reference(
     api: &ApiClient,
     settings: &Settings,
@@ -743,7 +742,7 @@ async fn resolve_icl_reference(
     if references.is_empty() {
         return Ok(None);
     }
-    let mut decoded: Vec<(Option<&'static str>, gen_core::AudioTrack)> = Vec::new();
+    let mut sources = Vec::with_capacity(references.len());
     for (stem, asset_id) in references {
         let source = crate::video_jobs::ltx::resolve_clip_media_path(
             settings,
@@ -751,22 +750,75 @@ async fn resolve_icl_reference(
             asset_id,
             project_path,
         )?;
-        let track = decode_icl_clip(api, settings, &job.id, &source).await?;
-        decoded.push((stem, track));
+        sources.push((stem, source));
     }
+    let decoded = decode_icl_clips(api, settings, &job.id, sources).await?;
     Ok(Some(Conditioning::ReferenceAudio {
         audio: assemble_icl_track(decoded),
         strength: None,
     }))
 }
 
+/// Decode a job's ICL clips at their SOURCE sample rate and channel count (no `-ar` / `-ac`): the
+/// engine downmixes (`torch.mean` over channels) and resamples (torchaudio sinc-Hann → 16 kHz)
+/// exactly as upstream `load_audio_mono` does, so any worker-side conversion would bypass that
+/// golden-verified path.
+///
+/// The one exception is a `dual` pair whose stems differ in format: the engine's dual-track carrier
+/// is ONE [`gen_core::AudioTrack`] with one sample rate and one interleaved channel count for both
+/// stems. Only then is each clip that differs re-decoded onto the pair's common format — the HIGHER
+/// rate (an upsample, so neither stem loses band before the engine's own resample) and the higher
+/// channel count (a mono stem is duplicated, whose channel mean is the mono signal itself). See
+/// [`icl_common_format`].
+async fn decode_icl_clips(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    sources: Vec<(Option<&'static str>, PathBuf)>,
+) -> WorkerResult<Vec<(Option<&'static str>, gen_core::AudioTrack)>> {
+    let mut decoded = Vec::with_capacity(sources.len());
+    for (stem, source) in &sources {
+        decoded.push((
+            *stem,
+            decode_icl_clip(api, settings, job_id, source, None).await?,
+        ));
+    }
+    let tracks: Vec<&gen_core::AudioTrack> = decoded.iter().map(|(_, track)| track).collect();
+    if let Some(common) = icl_common_format(&tracks) {
+        for ((_, track), (_, source)) in decoded.iter_mut().zip(&sources) {
+            if (track.sample_rate, track.channels) != common {
+                *track = decode_icl_clip(api, settings, job_id, source, Some(common)).await?;
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+/// The `(sample_rate, channels)` every clip of a multi-clip ICL reference must be brought to, or
+/// `None` when they already agree (or there is only one clip) and every clip stays at its source
+/// format. The common format is the highest rate and the highest channel count among the clips.
+fn icl_common_format(tracks: &[&gen_core::AudioTrack]) -> Option<(u32, u16)> {
+    let first = tracks.first()?;
+    if tracks
+        .iter()
+        .all(|track| (track.sample_rate, track.channels) == (first.sample_rate, first.channels))
+    {
+        return None;
+    }
+    let rate = tracks.iter().map(|track| track.sample_rate).max()?;
+    let channels = tracks.iter().map(|track| track.channels).max()?;
+    Some((rate, channels))
+}
+
 /// Decode one ICL clip inside a job-scoped scratch dir under the system temp root (see
-/// [`resolve_icl_reference`] for the cleanup contract).
+/// [`resolve_icl_reference`] for the cleanup contract): at its source format when `format` is
+/// `None`, else onto exactly `(sample_rate, channels)`.
 async fn decode_icl_clip(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     source: &Path,
+    format: Option<(u32, u16)>,
 ) -> WorkerResult<gen_core::AudioTrack> {
     // `scratch` drops on success AND on every early return, removing the directory.
     let scratch = icl_scratch_dir(job_id)?;
@@ -777,8 +829,8 @@ async fn decode_icl_clip(
         CANCEL_MESSAGE,
         source,
         scratch.path(),
-        ICL_REFERENCE_SAMPLE_RATE,
-        ICL_REFERENCE_CHANNELS,
+        format.map(|(rate, _)| rate),
+        format.map(|(_, channels)| channels),
     )
     .await
 }
@@ -795,7 +847,8 @@ fn icl_scratch_dir(job_id: &str) -> WorkerResult<tempfile::TempDir> {
 }
 
 /// Build the engine's ICL reference track from decoded clips: one unnamed clip passes through; a
-/// named pair becomes stems over a common length, with the mix field their sample-wise sum.
+/// named pair (already on one format — [`decode_icl_clips`]) becomes stems over a common length,
+/// with the mix field their sample-wise sum.
 fn assemble_icl_track(
     mut decoded: Vec<(Option<&'static str>, gen_core::AudioTrack)>,
 ) -> gen_core::AudioTrack {
@@ -810,7 +863,8 @@ fn assemble_icl_track(
     let (sample_rate, channels) = decoded
         .first()
         .map(|(_, track)| (track.sample_rate, track.channels))
-        .unwrap_or((ICL_REFERENCE_SAMPLE_RATE, ICL_REFERENCE_CHANNELS));
+        // Unreachable in production (a job with no ICL clip never assembles a track).
+        .unwrap_or((16_000, 1));
     let mut samples = vec![0.0f32; len];
     let stems = decoded
         .into_iter()
@@ -5445,8 +5499,8 @@ mod yue_job_surface_tests {
         let request = AudioRequest::from_payload(payload.as_object().expect("object"));
         let clip = |value: f32| gen_core::AudioTrack {
             samples: vec![value; 1_600],
-            sample_rate: ICL_REFERENCE_SAMPLE_RATE,
-            channels: ICL_REFERENCE_CHANNELS,
+            sample_rate: 44_100,
+            channels: 2,
             stems: Vec::new(),
         };
         let reference = assemble_icl_track(vec![
@@ -5504,7 +5558,7 @@ mod yue_job_surface_tests {
                 assert!(strength.is_none());
                 let names: Vec<&str> = audio.stems.iter().map(|s| s.name.as_str()).collect();
                 assert_eq!(names, ["vocals", "instrumental"]);
-                assert_eq!(audio.sample_rate, ICL_REFERENCE_SAMPLE_RATE);
+                assert_eq!((audio.sample_rate, audio.channels), (44_100, 2));
                 assert!(audio.samples.iter().all(|&s| (s - (-0.25)).abs() < 1e-6));
             }
             other => panic!(
@@ -5700,9 +5754,179 @@ mod yue_job_surface_tests {
             .unwrap_or_default()
     }
 
+    /// Import `track` as a WAV asset of the staged project and return its asset id.
+    fn import_wav_asset(staged: &Staged, name: &str, track: &AudioTrack) -> String {
+        let dir = tempfile::tempdir().expect("upload dir");
+        let path = dir.path().join(name);
+        write_wav_pcm16(track, &path).expect("upload writes");
+        let asset = ProjectStore::new(staged.settings.data_dir.clone(), "worker")
+            .import_asset(
+                &staged.project_id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: name.to_owned(),
+                    content_type: Some("audio/wav".to_owned()),
+                    source_path: path,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        asset["id"].as_str().expect("asset id").to_owned()
+    }
+
+    /// Resolve the ICL reference of a job carrying `icl` (merged over the full payload) and return
+    /// the one `ReferenceAudio` track the engine would receive.
+    async fn resolved_icl_track(
+        staged: &Staged,
+        api: &ApiClient,
+        icl: Value,
+    ) -> gen_core::AudioTrack {
+        let mut payload = full_payload(&staged.project_id);
+        for (key, value) in icl.as_object().expect("icl object") {
+            payload[key] = value.clone();
+        }
+        let job = job_snapshot("yue-icl-format", payload.clone());
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        match resolve_icl_reference(api, &staged.settings, &job, &request, &staged.project_path)
+            .await
+            .expect("ICL reference resolves")
+        {
+            Some(Conditioning::ReferenceAudio { audio, .. }) => audio,
+            other => panic!("expected a ReferenceAudio conditioning, got {other:?}"),
+        }
+    }
+
+    /// Feature-end review (sc-19373): an ICL reference reaches `Conditioning::ReferenceAudio` at its
+    /// SOURCE sample rate and channel count — 44.1 kHz stereo stays 44.1 kHz stereo — so the engine's
+    /// golden-verified `load_audio_mono` port (channel mean + torchaudio sinc-Hann resample) is the
+    /// only downmix/resample on the path, never ffmpeg's.
+    #[tokio::test]
+    async fn icl_reference_reaches_the_engine_at_its_source_rate_and_channels() {
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!("icl_reference_reaches_the_engine_at_its_source_rate_and_channels: ffmpeg not found, skipping");
+            return;
+        }
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let staged = stage(base_url);
+        let api = ApiClient::new(&staged.settings);
+        // 0.1 s of distinct left/right channels: a downmix would collapse them to one value.
+        let frames = 4_410;
+        let asset = import_wav_asset(
+            &staged,
+            "ref-44k-stereo.wav",
+            &AudioTrack {
+                samples: (0..frames).flat_map(|_| [0.5f32, -0.25f32]).collect(),
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        );
+        let audio = resolved_icl_track(
+            &staged,
+            &api,
+            json!({ "iclMode": "single", "iclReferenceAssetId": asset }),
+        )
+        .await;
+        assert_eq!((audio.sample_rate, audio.channels), (44_100, 2));
+        assert_eq!(audio.samples.len(), frames * 2);
+        assert!(audio.stems.is_empty());
+        for frame in audio.samples.chunks_exact(2) {
+            assert!((frame[0] - 0.5).abs() < 1e-3 && (frame[1] + 0.25).abs() < 1e-3);
+        }
+    }
+
+    /// A dual ICL pair whose stems differ in format is brought onto ONE common format (the
+    /// engine's dual-track carrier has one rate and one channel count): the HIGHER rate and the
+    /// higher channel count. A 22.05 kHz mono vocal beside a 44.1 kHz stereo instrumental both
+    /// reach the engine at 44.1 kHz stereo, over the same duration.
+    #[tokio::test]
+    async fn dual_icl_stems_with_mismatched_rates_meet_at_the_higher_rate() {
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!("dual_icl_stems_with_mismatched_rates_meet_at_the_higher_rate: ffmpeg not found, skipping");
+            return;
+        }
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let staged = stage(base_url);
+        let api = ApiClient::new(&staged.settings);
+        let vocal = import_wav_asset(
+            &staged,
+            "vocal-22k-mono.wav",
+            &AudioTrack {
+                samples: vec![0.25f32; 22_050],
+                sample_rate: 22_050,
+                channels: 1,
+            },
+        );
+        let instrumental = import_wav_asset(
+            &staged,
+            "inst-44k-stereo.wav",
+            &AudioTrack {
+                samples: vec![-0.125f32; 44_100 * 2],
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        );
+        let audio = resolved_icl_track(
+            &staged,
+            &api,
+            json!({
+                "iclMode": "dual",
+                "iclVocalAssetId": vocal,
+                "iclInstrumentalAssetId": instrumental,
+            }),
+        )
+        .await;
+        assert_eq!((audio.sample_rate, audio.channels), (44_100, 2));
+        let names: Vec<&str> = audio.stems.iter().map(|stem| stem.name.as_str()).collect();
+        assert_eq!(names, ["vocals", "instrumental"]);
+        // Both stems span the same 1 s at 44.1 kHz stereo (ffmpeg's resampler may trim a few edge
+        // samples of the upsampled vocal; the pair is cut to the shorter one).
+        let len = audio.samples.len();
+        assert!(len.abs_diff(44_100 * 2) <= 256, "{len} samples");
+        assert!(audio.stems.iter().all(|stem| stem.samples.len() == len));
+    }
+
+    /// The ffmpeg-free half (hosted macOS CI has no ffmpeg): a source-format decode carries no
+    /// `-ar` / `-ac` at all, and still writes the PCM-16 WAV `read_wav_pcm16` decodes.
+    #[test]
+    fn source_format_decode_command_carries_no_rate_or_channel_flag() {
+        let args = crate::video_jobs::reference_audio::audio_normalize_ffmpeg_args(
+            Path::new("/in/ref.flac"),
+            Path::new("/out/ref.wav"),
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "-ar" || arg == "-ac"),
+            "{args:?}"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-c:a" && w[1] == "pcm_s16le"));
+        assert_eq!(args.last().map(String::as_str), Some("/out/ref.wav"));
+    }
+
+    /// The common-format rule itself: `None` (every clip keeps its source format) when the clips
+    /// agree or there is one clip; else the highest rate and the highest channel count.
+    #[test]
+    fn icl_common_format_is_the_higher_rate_and_channel_count_only_on_mismatch() {
+        let track = |sample_rate: u32, channels: u16| gen_core::AudioTrack {
+            samples: Vec::new(),
+            sample_rate,
+            channels,
+            stems: Vec::new(),
+        };
+        let (a, b, c) = (track(22_050, 1), track(44_100, 2), track(48_000, 1));
+        assert_eq!(icl_common_format(&[]), None);
+        assert_eq!(icl_common_format(&[&b]), None);
+        assert_eq!(icl_common_format(&[&b, &b]), None);
+        assert_eq!(icl_common_format(&[&a, &b]), Some((44_100, 2)));
+        assert_eq!(icl_common_format(&[&b, &a]), Some((44_100, 2)));
+        assert_eq!(icl_common_format(&[&b, &c]), Some((48_000, 2)));
+    }
+
     /// The ICL decode's scratch dir is removed on every exit (sc-19384): a refused decode (a source
     /// ffmpeg cannot read, or no ffmpeg at all), a decode whose job is already canceled, and — where
-    /// ffmpeg exists — a successful decode, which also lands on xcodec's 16 kHz mono.
+    /// ffmpeg exists — a successful decode, which keeps the source's rate and channel count.
     #[tokio::test]
     async fn icl_decode_scratch_is_removed_on_every_exit() {
         let (base_url, api_state) = spawn_stub_api().await;
@@ -5716,7 +5940,7 @@ mod yue_job_surface_tests {
         let garbage = dir.path().join("not-audio.wav");
         std::fs::write(&garbage, b"this is not audio").expect("garbage writes");
         let job_id = "yue-icl-scratch-refused";
-        assert!(decode_icl_clip(&api, &settings, job_id, &garbage)
+        assert!(decode_icl_clip(&api, &settings, job_id, &garbage, None)
             .await
             .is_err());
         assert!(
@@ -5739,17 +5963,12 @@ mod yue_job_surface_tests {
         )
         .expect("source writes");
         let job_id = "yue-icl-scratch-ok";
-        let track = decode_icl_clip(&api, &settings, job_id, &source)
+        let track = decode_icl_clip(&api, &settings, job_id, &source, None)
             .await
             .expect("a real clip decodes");
-        assert_eq!(track.sample_rate, ICL_REFERENCE_SAMPLE_RATE);
-        assert_eq!(track.channels, ICL_REFERENCE_CHANNELS);
-        // The stereo [0.25, -0.25] source downmixes to its channel mean, 0.0 (not one channel).
-        assert!(!track.samples.is_empty());
-        assert!(
-            track.samples.iter().all(|sample| sample.abs() < 1e-3),
-            "a stereo reference must downmix to mono (channel mean ≈ 0)"
-        );
+        // Decoded at the SOURCE format: the engine owns the downmix + resample.
+        assert_eq!((track.sample_rate, track.channels), (48_000, 2));
+        assert_eq!(track.samples.len(), 9_600 * 2);
         assert!(
             icl_scratch_dirs(job_id).is_empty(),
             "a successful decode leaves no scratch"
@@ -5769,7 +5988,7 @@ mod yue_job_surface_tests {
         .expect("long source writes");
         api_state.cancel.store(true, Ordering::SeqCst);
         let job_id = "yue-icl-scratch-canceled";
-        let canceled = decode_icl_clip(&api, &settings, job_id, &long_source).await;
+        let canceled = decode_icl_clip(&api, &settings, job_id, &long_source, None).await;
         assert!(
             matches!(canceled, Err(WorkerError::Canceled(_))),
             "a decode whose job is canceled ends Canceled, got {canceled:?}"

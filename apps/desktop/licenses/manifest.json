@@ -338,7 +338,7 @@
         "windows",
         "linux"
       ],
-      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, the vocal and instrumental Vocos 44.1 kHz decoders, and the mm tokenizer. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
+      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, and the vocal and instrumental Vocos 44.1 kHz decoders. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
       "documents": [
         {
           "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
@@ -1321,12 +1321,7 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/candle",
       "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "opencv-source",
@@ -1336,12 +1331,7 @@
       "license": "Apache-2.0",
       "homepage": "https://opencv.org/",
       "usage": "InstantID keypoint rendering faithfully ports OpenCV drawing primitives and its literal sine table.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "diffusers-source",
@@ -1351,12 +1341,7 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/diffusers",
       "usage": "Native provider modules include structural Rust ports of Diffusers implementations, including ACE-Step OobleckDecoder.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "joycaption-source",
@@ -1366,12 +1351,7 @@
       "license": "Apache-2.0",
       "homepage": "https://github.com/fpgaminer/joycaption",
       "usage": "The caption-type taxonomy, prompt template bodies and name option reproduced in the native captioners are near-verbatim copies of gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION) from fpgaminer/joycaption, which is Apache-2.0. This covers BOTH caption lanes: the Candle provider (crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs) and the MLX provider (crates/media/mlx-gen/src/caption/joycaption.rs). SceneWorks MODIFIED the reproduced text: punctuation was normalized (em dash to hyphen, curly to straight quotes, backticks dropped) and upstream's \"Note any watermarks, signatures, or compression artifacts.\" sentence was folded into the \"Never mention...\" clause of the Straightforward bodies. The upstream repository ships no NOTICE file. This entry covers the reproduced PROMPT CONTENT only; the JoyCaption model WEIGHTS declare no license of their own and remain undetermined.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "joycaption-source-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
     },
     {
       "id": "sam3",

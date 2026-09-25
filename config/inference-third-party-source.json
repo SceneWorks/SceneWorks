@@ -1,7 +1,7 @@
 {
   "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision ffea1439 (inference main, merge of PR #1029 — the MLX Qwen-Image 2.1 footprint model). The delta from the previously pinned revision 47dba529 also carries PR #1026 (candle conv2d im2col / softmax kernel-bound budgets, SDXL attention-chunk clamp), PR #1028 (external-VAE tiled decode past the kernel bound), PR #1034 (CI only), PR #1041 (Qwen-Image 2.1 candle loader materializes at f32 on a CPU device), PR #1040 (epic sc-24128 fast decode on Blackwell: candle-llm step seams, speculative engine, static KV, fused and NVFP4 kernels) and PR #1042/#1043 (runtime-2026.09.1-rc.0 release bookkeeping, CI policy). It adds one production crate, crates/kernels/candle-quant-kernels, which receives the NVFP4 codec and cuBLASLt wrapper moved out of candle-gen's quant module (so those two provenance candidates move path, not provenance) plus first-party NVRTC CUDA kernels, classified here as an architecture-reimplementation-existing-terms portedSourceArea with its three NVRTC include sites recorded as first-party source; it adds two provenance candidates, candle-llm's provider.rs and candle-gen's quant/nvfp4_kitchen.rs, both covered by their crates' existing areas, and retires no ported-source marker. Current reviewed population: 700 provenance candidates and 100 production-Rust crate prefixes. The two Qwen-Image 2.1 crates, crates/media/mlx-gen/mlx-gen-qwen-image-2-1 and crates/media/candle-gen/candle-gen-qwen-image-2-1, remain classified as architecture-reimplementation-existing-terms portedSourceAreas (sc-24114), under the Qwen Research License Agreement already mapped in the About manifest; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
   "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd",
-  "auditDigest": "4fbf71923b07a003c48a3385d099f178b58ad5320e67df0082a3afbd1eaaccc9",
+  "auditDigest": "b2c04f10770a87f18639e0c1a31b1a90a65f0ad123e05d192fed9120365a9243",
   "artifacts": [
     {
       "id": "cmudict",
@@ -104,6 +104,24 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio",
+      "paths": [
+        "crates/audio/candle-audio/src/dsp.rs",
+        "crates/audio/candle-audio/src/neural_codec.rs",
+        "crates/audio/candle-audio/src/vocos.rs"
+      ],
+      "provenance": "The YuE epic (sc-19373: sc-19377/19378/19379) lifted three marker-bearing shared building blocks into the candle audio commons: src/vocos.rs, the Vocos ConvNeXt + ISTFT-head vocoder architecture (gemelo-ai/vocos, as vendored in the Apache-2.0 m-a-p/xcodec_mini_infer tree; used by MOSS-TTSD and YuE); src/neural_codec.rs, the descript-audio-codec encoder/decoder + residual-VQ architecture (used by MOSS-SFX, MOSS-TTSD and YuE's xcodec); src/dsp.rs, torchaudio's sinc_interp_hann resampling kernel formula (torchaudio.functional._get_sinc_resample_kernel) for YuE's reference-audio load and low-band splice.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Independently written candle Rust reimplementing published architectures and a resampling formula, verified against pinned reference fixtures; no upstream source is copied. The model terms of every consumer are already mapped in the About manifest (xcodec-mini-infer, moss-soundeffect-v2, moss-ttsd-v05). Classified per file with `paths` so the crate-level decision stays the explicit crateDispositions entry for crates/audio/candle-audio."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-yue",
+      "pathPrefix": "crates/audio/candle-audio-yue/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural port (epic sc-19373) of the Apache-2.0 YuE-v1 inference pipeline -- github.com/multimodal-art-projection/YuE branch YuE-v1 @ 6d4f0b1f8ce6a55fb2392e959394c46e07ee334d (inference/infer.py prompt/segment/CFG schedule, mmtokenizer.py, codecmanipulator.py) -- and of the codec half of HF m-a-p/xcodec_mini_infer @ fe781a67815ab47b4a3a5fce1e8d0a692da7e4e5 (Apache-2.0): the SoundStream encoder + HuBERT semantic branch + RVQ + DAC decoder (models/, quantization/, descriptaudiocodec/) and the Vocos vocal/instrumental upsamplers (vocos/, vocoder.py) plus post_process_audio.py's low-band splice.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Candle reimplementation written against those pinned references (parity fixtures under the crate's tests/fixtures/); the upstream terms are already mapped in the About manifest as components `yue` (the six stage-1 checkpoints + stage-2, Apache-2.0 LICENSE + NOTICE) and `xcodec-mini-infer` (codec, HuBERT branch and both Vocos decoders, Apache-2.0 LICENSE + NOTICE). The candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/contracts/core-llm",
@@ -872,7 +890,7 @@
     {
       "prefix": "crates/audio/candle-audio",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Shared candle audio commons. src/mel.rs reconstructs the HTK mel filterbank and src/dsp.rs the librosa/torch `center=True` STFT conventions for preprocessing parity with the audio models' reference implementations. No upstream source is copied and no marker sentence appears, so it needs an explicit decision rather than an inferred one; the applicable model terms are already mapped in the About manifest via the consuming provider crates."
+      "evidence": "Shared candle audio commons. src/mel.rs reconstructs the HTK mel filterbank and src/dsp.rs the librosa/torch `center=True` STFT conventions for preprocessing parity with the audio models' reference implementations. No upstream source is copied. The crate-level decision is made here explicitly rather than inferred; the marker-bearing files the YuE epic added (vocos.rs, neural_codec.rs, dsp.rs resampler) are classified file-by-file in the `architecture:crates/audio/candle-audio` ported-source area; the applicable model terms are already mapped in the About manifest via the consuming provider crates."
     },
     {
       "prefix": "crates/audio/candle-audio-catalog",

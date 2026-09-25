@@ -26497,11 +26497,15 @@
       // `coRequisite` (componentId `stage2`, `subdir` = the tier dir), exactly the Mage-Flow sc-14980
       // shape, so `resolve_co_requisites_for_tier` can never pair a q4 stage 1 with a bf16 stage 2.
       //
-      // xcodec + BOTH Vocos decoders + the HuBERT semantic branch + the mm tokenizer are ONE untiered
-      // `coRequisite` (componentId `xcodec`) — the approved R2 carve-out: those convnets stay at
-      // upstream precision at every tier, and the re-host's `sceneworks-tiers.json` records
-      // `tiered: false`. The provider reads them all from the one `xcodec` component directory
-      // (`candle_audio_yue::model::XCODEC_COMPONENT_ID`); its descriptor's `required_components` is
+      // xcodec + BOTH Vocos decoders are ONE untiered `coRequisite` (componentId `xcodec`) — the
+      // approved R2 carve-out: those convnets stay at upstream precision at every tier, and the
+      // re-host's `sceneworks-tiers.json` records `tiered: false`. The provider opens exactly three
+      // files from the one `xcodec` component directory (`candle_audio_yue::model::XCODEC_COMPONENT_ID`):
+      // `final_ckpt/ckpt_00360000.safetensors` (codec encode + decode AND the HuBERT semantic branch,
+      // read from its `semantic_model.*` tensors) and the two `decoders/decoder_*.safetensors` Vocos
+      // upsamplers. The re-host's `semantic_ckpts/`, `mm_tokenizer_v0.2_hf/` (the mm tokenizer is read
+      // from each stage-1 tier dir) and `config.yaml` files are never opened, so they are not
+      // downloaded. Its descriptor's `required_components` is
       // exactly `["stage2", "xcodec"]`, which is what these two componentIds provision. Both
       // co-requisites are shared by all six entries (same repo + revision ⇒ one cached snapshot).
       //
@@ -26602,10 +26606,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
@@ -26728,10 +26732,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
@@ -26850,10 +26854,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
@@ -26973,10 +26977,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
@@ -27095,10 +27099,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
@@ -27218,10 +27222,10 @@
           "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
           "coRequisite": true,
           "componentId": "xcodec",
-          "files": ["final_ckpt/config.yaml", "final_ckpt/ckpt_00360000.safetensors", "decoders/config.yaml", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors", "semantic_ckpts/hf_1_325000/config.json", "semantic_ckpts/hf_1_325000/preprocessor_config.json", "semantic_ckpts/hf_1_325000/model.safetensors", "mm_tokenizer_v0.2_hf/tokenizer.model", "mm_tokenizer_v0.2_hf/tokenizer.json"],
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 1273277645,
-          "footprint": {"diskSizeBytes": 1273277645}
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
         }
       ],
       "paths": {
