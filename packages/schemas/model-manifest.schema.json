@@ -1929,6 +1929,10 @@
                 "type": "boolean",
                 "description": "Whether a ReferenceAudio clip can be narrowed to a time window (backend Capabilities.supports_reference_region, AudioParams.reference_region) — YuE's in-context-learning checkpoints prompt on a chosen start/end window of the reference (epic sc-19373). ABSENT MEANS FALSE (audio polarity)."
               },
+              "supportsOutputLimiter": {
+                "type": "boolean",
+                "description": "Whether the request can choose how the rendered waveform is kept inside [-1, 1] (backend Capabilities.supports_output_limiter, AudioParams.output_limiter: Clamp | Rescale) — YuE's final mix and stems (epic sc-19373). A limiter sent to a model that does not advertise it is refused as a typed Unsupported at the gen-core floor. ABSENT MEANS FALSE (audio polarity)."
+              },
               "conditioning": {
                 "type": "array",
                 "uniqueItems": true,
