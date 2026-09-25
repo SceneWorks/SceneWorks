@@ -434,6 +434,25 @@ pub(crate) async fn run_audio_generate_job(
 ) -> WorkerResult<()> {
     let request = AudioRequest::from_payload(&job.payload);
     audio_preflight(&request)?;
+    // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit this machine
+    // before the project, weights, reference clip or source track is touched. Reads only which tier
+    // dirs the snapshot holds (to price the tier the job will load). Skipped for non-YuE models.
+    if crate::yue_admission::is_yue(&request.model_manifest_entry) {
+        let model_root = resolve_audio_model_dir(settings, &request).ok();
+        let installed = |subdir: &str| {
+            model_root
+                .as_ref()
+                .is_some_and(|root| root.join(subdir).is_dir())
+        };
+        crate::yue_admission::check(
+            &request.model,
+            &job.payload,
+            &request.model_manifest_entry,
+            &settings.gpu_id,
+            &installed,
+        )
+        .await?;
+    }
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
