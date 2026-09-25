@@ -5673,7 +5673,7 @@ pub(crate) fn validate_audio_job_for_model(
             "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
         )));
     }
-    if payload.output_limiter.is_some() && !segmented {
+    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
         return Err(ApiError::bad_request(format!(
             "{model} does not take an outputLimiter"
         )));

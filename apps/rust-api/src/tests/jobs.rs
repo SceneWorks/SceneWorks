@@ -5419,7 +5419,8 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "audio": {
                 "languages": ["en"], "sampleRates": [44100], "conditioning": ["ReferenceAudio"],
                 "supportsGuidance": true, "supportsSegmentedLyrics": true,
-                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true
+                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true,
+                "supportsOutputLimiter": true
               },
               "downloads": [
                 { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
@@ -6357,6 +6358,13 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "output limiter on a non-song model",
             json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
+            "does not take an outputLimiter",
+        ),
+        (
+            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
+            // gate is the limiter's own flag, not the segmented-lyrics one.
+            "output limiter on a segmented model without the limiter flag",
+            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
             "does not take an outputLimiter",
         ),
     ];
