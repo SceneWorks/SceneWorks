@@ -288,10 +288,12 @@ pub(crate) fn audio_normalize_ffmpeg_args(
     args
 }
 
-/// `pan=mono|c0=g*c0+g*c1+…` with `g = 1/n`: the per-frame channel mean (`torch.mean(dim=0)`). `=`
-/// (not `<`) keeps the gains exactly as written — no renormalization.
+/// `aformat=sample_fmts=flt,pan=mono|c0=g*c0+g*c1+…` with `g = 1/n`: the per-frame channel mean
+/// (`torch.mean(dim=0)`). `=` (not `<`) keeps the gains exactly as written — no renormalization.
+/// The `aformat` converts to float FIRST: on a PCM-16 input (every library asset, sc-18650) `pan`
+/// would otherwise mix in s16 and round an odd channel sum off its exact half-LSB mean.
 fn mean_downmix_filter(n: u16) -> String {
     let gain = 1.0 / f64::from(n);
     let terms: Vec<String> = (0..n).map(|c| format!("{gain}*c{c}")).collect();
-    format!("pan=mono|c0={}", terms.join("+"))
+    format!("aformat=sample_fmts=flt,pan=mono|c0={}", terms.join("+"))
 }
