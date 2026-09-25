@@ -5524,6 +5524,8 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
 const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
 /// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
 const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
+/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
+const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
 /// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
 const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
 
@@ -5623,11 +5625,15 @@ fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
             }
         }
     }
-    if let (Some(start), Some(end)) = (payload.icl_start_secs, payload.icl_end_secs) {
+    // A window with only a start ends at upstream YuE's `prompt_end_time` default (30 s), so a start
+    // at or past 30 s with no end is as ill-ordered as an explicit end <= start.
+    if let Some(start) = payload.icl_start_secs {
+        let end = payload.icl_end_secs.unwrap_or(AUDIO_ICL_DEFAULT_END_SECS);
         if end <= start {
-            return Err(ApiError::bad_request(
-                "iclEndSecs must be greater than iclStartSecs",
-            ));
+            return Err(ApiError::bad_request(format!(
+                "iclEndSecs must be greater than iclStartSecs (the window ends at \
+                 {AUDIO_ICL_DEFAULT_END_SECS} s when iclEndSecs is omitted)"
+            )));
         }
     }
     if payload.icl_mode.is_some()
@@ -5644,7 +5650,8 @@ fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
 /// (sc-19384) — the manifest mirrors the engine's `Capabilities` flags, so a request the engine
 /// would refuse is a 400 here instead of a failed job. In particular an ICL mode is reachable only
 /// on an in-context-learning checkpoint (`audio.supportsSegmentedLyrics` + `ReferenceAudio`
-/// conditioning — the YuE `_icl` variants), and such a checkpoint requires one. A segmented-lyrics
+/// conditioning — the YuE `_icl` variants); such a checkpoint may also run WITHOUT one, as a plain
+/// prompt run, as upstream allows. A segmented-lyrics
 /// model also refuses the knobs it does not read (it sings lyrics to genre tags; length follows the
 /// lyrics and `segments`) rather than silently dropping them.
 pub(crate) fn validate_audio_job_for_model(
@@ -5673,7 +5680,7 @@ pub(crate) fn validate_audio_job_for_model(
             "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
         )));
     }
-    if payload.output_limiter.is_some() && !segmented {
+    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
         return Err(ApiError::bad_request(format!(
             "{model} does not take an outputLimiter"
         )));
@@ -5693,11 +5700,8 @@ pub(crate) fn validate_audio_job_for_model(
             "{model} does not take a reference window (iclStartSecs / iclEndSecs)"
         )));
     }
-    if icl_model && payload.icl_mode.is_none() {
-        return Err(ApiError::bad_request(format!(
-            "{model} is an in-context-learning checkpoint and needs a reference clip (iclMode)"
-        )));
-    }
+    // An `_icl` checkpoint WITHOUT a reference is a plain prompt run, exactly as upstream YuE allows
+    // (epic R1); only the reverse — ICL fields on a CoT checkpoint — is refused above.
     if segmented {
         if payload
             .lyrics

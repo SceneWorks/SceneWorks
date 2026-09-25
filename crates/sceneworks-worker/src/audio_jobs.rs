@@ -321,14 +321,15 @@ impl AudioRequest {
     }
 
     /// The ICL reference window (`AudioParams::reference_region`). `None` when neither end is set, so
-    /// the model's own default window applies; an open end means "to the clip end".
+    /// the model's own default window applies. A missing end mirrors upstream YuE's
+    /// `prompt_end_time` default ([`ICL_DEFAULT_END_SECS`]), and a missing start is `0`.
     fn reference_region(&self) -> Option<TimeRegion> {
         if self.icl_start_secs.is_none() && self.icl_end_secs.is_none() {
             return None;
         }
         Some(TimeRegion {
             start_secs: self.icl_start_secs.unwrap_or(0.0),
-            end_secs: self.icl_end_secs,
+            end_secs: Some(self.icl_end_secs.unwrap_or(ICL_DEFAULT_END_SECS)),
         })
     }
 
@@ -570,6 +571,20 @@ fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
     if let Some(limiter) = request.output_limiter.as_deref() {
         output_limiter(limiter)?;
     }
+    if let Some(TimeRegion {
+        start_secs,
+        end_secs: Some(end_secs),
+    }) = request.reference_region()
+    {
+        if !(start_secs.is_finite() && end_secs.is_finite() && start_secs >= 0.0)
+            || end_secs <= start_secs
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "the ICL reference window {start_secs}..{end_secs} s must satisfy 0 <= start < end \
+                 (the end defaults to {ICL_DEFAULT_END_SECS} s)."
+            )));
+        }
+    }
     // ICL reference (sc-19384): the mode/asset-id pairing is well-formed, and it is the job's ONE
     // reference-audio source — never combined with a voice-clone reference or an edit source.
     if !request.icl_references()?.is_empty()
@@ -599,6 +614,8 @@ fn output_limiter(token: &str) -> WorkerResult<gen_core::OutputLimiter> {
 /// The rate every YuE ICL reference reaches the engine at: xcodec's 16 kHz mono input (the upstream
 /// pipeline loads the prompt audio mono and resamples it to 16 kHz before encoding). sc-19384.
 const ICL_REFERENCE_SAMPLE_RATE: u32 = 16_000;
+/// Upstream YuE's `prompt_end_time` default — the window end when a request sets only a start.
+const ICL_DEFAULT_END_SECS: f32 = 30.0;
 const ICL_REFERENCE_CHANNELS: u16 = 1;
 
 /// A weight tier resolved for a model that ships physical per-tier downloads (`<tier>/*`, sc-19384):
@@ -1212,46 +1229,84 @@ struct SinglePlan {
     conditioning: Option<Conditioning>,
 }
 
-/// What the synthesis thread reports to the async progress pump: a streamed chunk count
-/// (sc-13675) or an engine [`Progress`] event (sc-19384 — YuE's per-segment / per-stage progress).
-enum SynthesisEvent {
-    Chunk(usize),
-    Engine(Progress),
+/// Coalesced progress-post cadence for the synthesis pump (sc-19384 review; the sc-11189 F-016
+/// pattern `caption_jobs` / `prompt_refine_jobs` use). Engine `Progress` and streamed chunks can fire
+/// per token / per frame (MOSS-TTS, Chatterbox T3), so the synthesis thread publishes into a
+/// latest-wins `watch` channel and the pump posts at most once per interval — always including the
+/// final state — instead of one awaited `update_job` per event.
+const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
+
+/// One Running job update the pump may post: `(stage, fraction, message)`.
+type SynthesisUpdate = (ProgressStage, f64, String);
+
+/// Folds streamed chunks (sc-13675) and engine [`Progress`] events (sc-19384) into the latest job
+/// update inside the (Generating 0.2 → Saving 0.9) band. The fraction is monotone: every event takes
+/// `max(previous, candidate)`, so a model that interleaves `Decoding` and `Step`s (or chunks and
+/// steps) never moves the bar backwards.
+#[derive(Debug)]
+struct SynthesisProgress {
+    chunks: usize,
+    fraction: f64,
 }
 
-/// Map an engine [`Progress`] event onto a Running job update inside the (Generating 0.2 → Saving
-/// 0.9) band: `Step { current, total }` advances the fraction proportionally (YuE reports one step
-/// per lyric segment and one per stage-2 track), `Loading` names the stage being loaded, and
-/// `Decoding` marks the codec/vocoder pass. `None` for a degenerate `total == 0` step.
-fn engine_progress_update(
-    progress: Progress,
-    last_fraction: f64,
-) -> Option<(ProgressStage, f64, String)> {
-    match progress {
-        Progress::Step { current, total } => {
-            if total == 0 {
-                return None;
-            }
-            let done = f64::from(current.min(total)) / f64::from(total);
-            Some((
-                ProgressStage::Generating,
-                0.2 + 0.65 * done,
-                format!("Generating audio ({current}/{total})."),
-            ))
+impl SynthesisProgress {
+    fn new() -> Self {
+        Self {
+            chunks: 0,
+            fraction: 0.2,
         }
-        Progress::Loading(phase) => Some((
-            ProgressStage::LoadingModel,
-            last_fraction,
-            match phase {
-                gen_core::LoadPhase::TextEncoder => "Loading the text encoder.".to_owned(),
-                gen_core::LoadPhase::Renderer => "Loading model weights.".to_owned(),
-            },
-        )),
-        Progress::Decoding => Some((
+    }
+
+    /// A streamed chunk (1-based running count). The total is unknown ahead of time (the AR loop
+    /// decides its own length via EOS), so the fraction approaches but never reaches 0.9.
+    fn chunk(&mut self, latest: usize) -> SynthesisUpdate {
+        self.chunks = self.chunks.max(latest);
+        let count = self.chunks;
+        self.fraction = self
+            .fraction
+            .max(0.25 + 0.6 * (count as f64 / (count as f64 + 6.0)));
+        (
             ProgressStage::Generating,
-            last_fraction.max(0.85),
-            "Decoding audio.".to_owned(),
-        )),
+            self.fraction,
+            format!(
+                "Streaming audio… ({count} chunk{})",
+                if count == 1 { "" } else { "s" }
+            ),
+        )
+    }
+
+    /// An engine event: `Step { current, total }` advances proportionally (YuE: one step per lyric
+    /// segment and one per stage-2 track), `Loading` names the stage being loaded, `Decoding` marks
+    /// the codec/vocoder pass. `None` for a degenerate `total == 0` step.
+    fn engine(&mut self, progress: Progress) -> Option<SynthesisUpdate> {
+        let (stage, candidate, message) = match progress {
+            Progress::Step { current, total } => {
+                if total == 0 {
+                    return None;
+                }
+                let done = f64::from(current.min(total)) / f64::from(total);
+                (
+                    ProgressStage::Generating,
+                    0.2 + 0.65 * done,
+                    format!("Generating audio ({current}/{total})."),
+                )
+            }
+            Progress::Loading(phase) => (
+                ProgressStage::LoadingModel,
+                self.fraction,
+                match phase {
+                    gen_core::LoadPhase::TextEncoder => "Loading the text encoder.".to_owned(),
+                    gen_core::LoadPhase::Renderer => "Loading model weights.".to_owned(),
+                },
+            ),
+            Progress::Decoding => (
+                ProgressStage::Generating,
+                0.85,
+                "Decoding audio.".to_owned(),
+            ),
+        };
+        self.fraction = self.fraction.max(candidate);
+        Some((stage, self.fraction, message))
     }
 }
 
@@ -1355,11 +1410,12 @@ async fn run_audio_synthesis_with(
     // streaming-capable Generator drives `generate_streaming` and emits an `AudioChunk` per PCM block
     // as the AR loop decodes it; any generator may report `Progress` (YuE: one `Step` per lyric
     // segment and per stage-2 track, `Loading` per LM stage, `Decoding` before the codec/vocoder).
-    // Both are forwarded over this channel and the concurrent async pump below posts a job update per
-    // event, so the Audio Studio's WorkerProgressCard advances THROUGH the render instead of sitting
-    // flat until the whole clip is done. The reassembled chunks equal the returned one-shot track
+    // Both fold (monotone) into the LATEST job update, published into a latest-wins `watch` channel
+    // that the concurrent async pump below posts at most once per [`PROGRESS_POST_INTERVAL`] (always
+    // including the final state), so the Audio Studio's WorkerProgressCard advances THROUGH the
+    // render without a per-token POST storm. The reassembled chunks equal the returned one-shot track
     // (the gen-core reassembly law), so the library asset is still the full `AudioTrack`.
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SynthesisEvent>();
+    let (update_tx, mut update_rx) = tokio::sync::watch::channel::<Option<SynthesisUpdate>>(None);
     // Named model components (epic 13657, sc-13679): resolve every coRequisite-provisioned component
     // this model's descriptor advertises (`chatterbox_tts` → `perth` + `voice_embedding`; YuE →
     // `stage2` + `xcodec`; most audio models advertise none → an empty map, a no-op) BEFORE the
@@ -1399,7 +1455,6 @@ async fn run_audio_synthesis_with(
     let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
         let cancel = cancel.clone();
-        let event_tx = event_tx.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
@@ -1441,11 +1496,17 @@ async fn run_audio_synthesis_with(
                 cancel,
                 ..Default::default()
             };
-            // Engine progress rides the same channel as streamed chunks (sc-19384). A closed channel
-            // (pump already gone) is fine — synthesis must never depend on the progress sink.
-            let progress_tx = event_tx.clone();
-            let mut on_progress = move |progress: Progress| {
-                let _ = progress_tx.send(SynthesisEvent::Engine(progress));
+            // Engine progress and streamed chunks fold into one latest update (sc-19384). Publishing
+            // never blocks and never fails — synthesis must not depend on the progress sink.
+            let fold = std::cell::RefCell::new(SynthesisProgress::new());
+            let publish = |update: SynthesisUpdate| {
+                update_tx.send_replace(Some(update));
+            };
+            let mut on_progress = |progress: Progress| {
+                let update = fold.borrow_mut().engine(progress);
+                if let Some(update) = update {
+                    publish(update);
+                }
             };
             // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
@@ -1454,7 +1515,8 @@ async fn run_audio_synthesis_with(
             let output = if generator.descriptor().capabilities.supports_streaming {
                 let mut on_chunk = |chunk: gen_core::AudioChunk| {
                     // The 1-based running chunk count.
-                    let _ = event_tx.send(SynthesisEvent::Chunk(chunk.index.saturating_add(1)));
+                    let update = fold.borrow_mut().chunk(chunk.index.saturating_add(1));
+                    publish(update);
                 };
                 generator.generate_streaming(&req, &mut on_chunk, &mut on_progress)
             } else {
@@ -1477,70 +1539,65 @@ async fn run_audio_synthesis_with(
             }
         })
     };
-    // Drop our extra sender so the channel closes the instant synthesis finishes (the blocking task's
-    // clones drop), letting the pump terminate cleanly on `recv() == None`.
-    drop(event_tx);
-    // Concurrent incremental-progress pump (sc-13675 / sc-19384): posts a Running job update as each
-    // streamed chunk or engine progress event arrives so the UI reflects the render. It runs
-    // ALONGSIDE `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a
-    // DIFFERENT endpoint). The cancel check stops new attempts once the shared flag is observed, but
-    // cancellation can still serialize while an already-started progress POST is awaiting the API.
-    // That race is safe because jobs_store transactionally rejects any nonterminal write after
-    // `Canceled`; the resulting 409 is deliberately ignored here because synthesis must not depend on
-    // its progress sink. The pump ends when synthesis closes the channel. A generator that reports
-    // nothing never sends, so the pump exits immediately with zero posts.
+    // Coalescing progress pump (sc-13675 / sc-19384): waits for the synthesis thread to publish a
+    // new latest update, then posts it — at most once per [`PROGRESS_POST_INTERVAL`], so a model
+    // reporting per token/frame costs a handful of POSTs per second, never one per event. When
+    // synthesis ends the sender drops (the blocking closure owns it), and the pump posts the final
+    // unposted state (if any) and exits, so draining it below is bounded by one interval + one POST.
+    // It runs ALONGSIDE `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel
+    // watcher on a DIFFERENT endpoint) and stops posting once the shared cancel flag is observed; a
+    // POST already in flight when a cancel lands gets a 409 from jobs_store (no nonterminal write
+    // after `Canceled`), which is deliberately ignored. A generator that reports nothing never
+    // publishes, so the pump exits with zero posts.
     let pump = {
         let api = api.clone();
         let job_id = job.id.clone();
         let backend = backend_label(&settings.gpu_id).to_owned();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            let mut count = 0usize;
-            let mut fraction = 0.2f64;
-            while let Some(event) = event_rx.recv().await {
+            let mut last_sent: Option<SynthesisUpdate> = None;
+            let mut last_post: Option<tokio::time::Instant> = None;
+            let mut posts = 0usize;
+            loop {
+                let closed = update_rx.changed().await.is_err();
                 if cancel.is_cancelled() {
                     break;
                 }
-                let (stage, message) = match event {
-                    SynthesisEvent::Chunk(latest) => {
-                        count = count.max(latest);
-                        // Asymptotic fraction inside the (Generating 0.2 → Saving 0.9) band: the total
-                        // chunk count is unknown ahead of time (the AR loop decides its own length via
-                        // EOS), so approach but never reach 0.9 rather than claim a false denominator.
-                        fraction = 0.25 + 0.6 * (count as f64 / (count as f64 + 6.0));
-                        (
-                            ProgressStage::Generating,
-                            format!(
-                                "Streaming audio… ({count} chunk{})",
-                                if count == 1 { "" } else { "s" }
+                if !closed {
+                    if let Some(at) = last_post {
+                        tokio::time::sleep_until(at + PROGRESS_POST_INTERVAL).await;
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                }
+                let latest = update_rx.borrow_and_update().clone();
+                if let Some(update) = latest {
+                    if last_sent.as_ref() != Some(&update) {
+                        let (stage, fraction, message) = update.clone();
+                        let _ = update_job(
+                            &api,
+                            &job_id,
+                            audio_progress(
+                                JobStatus::Running,
+                                stage,
+                                fraction,
+                                &message,
+                                None,
+                                &backend,
                             ),
                         )
+                        .await;
+                        posts += 1;
+                        last_post = Some(tokio::time::Instant::now());
+                        last_sent = Some(update);
                     }
-                    SynthesisEvent::Engine(progress) => {
-                        match engine_progress_update(progress, fraction) {
-                            Some((stage, next, message)) => {
-                                fraction = next;
-                                (stage, message)
-                            }
-                            None => continue,
-                        }
-                    }
-                };
-                let _ = update_job(
-                    &api,
-                    &job_id,
-                    audio_progress(
-                        JobStatus::Running,
-                        stage,
-                        fraction,
-                        &message,
-                        None,
-                        &backend,
-                    ),
-                )
-                .await;
+                }
+                if closed {
+                    break;
+                }
             }
-            count
+            posts
         })
     };
     // The shared blocking keepalive + cancel watcher (sc-13469): pings the worker heartbeat while the
@@ -1559,8 +1616,8 @@ async fn run_audio_synthesis_with(
         handle,
     )
     .await;
-    // Drain the pump. It has already ended (the channel closed when synthesis finished, or the cancel
-    // flag stopped it), so this is bounded and never hangs.
+    // Drain the pump. Synthesis has finished, so its sender is gone: the pump posts at most the one
+    // final unposted update (after at most one interval) and exits — bounded, never hangs.
     let _ = pump.await;
     result
 }
@@ -5057,6 +5114,7 @@ mod yue_job_surface_tests {
         seed: Option<u64>,
         guidance: Option<f32>,
         conditioning: Vec<Conditioning>,
+        components: BTreeMap<String, WeightsSource>,
     }
 
     #[derive(Clone, Copy)]
@@ -5065,6 +5123,10 @@ mod yue_job_surface_tests {
         Song,
         /// Flag `started`, then block until the request's cancel flag trips.
         WaitForCancel,
+        /// Emit this many `Step`s as fast as a per-token engine would (then return a song).
+        ManySteps(u32),
+        /// Emit `Decoding` then `Step { 2, 3 }` (a model interleaving the two), then return a song.
+        DecodeThenStep,
     }
 
     struct StubSong {
@@ -5078,6 +5140,33 @@ mod yue_job_surface_tests {
         (0..len)
             .map(|i| (i as f32 * freq * 0.001).sin() * amp)
             .collect()
+    }
+
+    /// A 0.1 s mix of two tones plus the two stems it is the sum of.
+    fn song_output() -> GenerationOutput {
+        let len = 4_410;
+        let vocals = tone(len, 440.0, 0.3);
+        let instrumental = tone(len, 110.0, 0.3);
+        let mix = vocals
+            .iter()
+            .zip(&instrumental)
+            .map(|(a, b)| a + b)
+            .collect();
+        GenerationOutput::Audio(gen_core::AudioTrack {
+            samples: mix,
+            sample_rate: 44_100,
+            channels: 1,
+            stems: vec![
+                gen_core::AudioStem {
+                    name: "vocals".to_owned(),
+                    samples: vocals,
+                },
+                gen_core::AudioStem {
+                    name: "instrumental".to_owned(),
+                    samples: instrumental,
+                },
+            ],
+        })
     }
 
     impl gen_core::Generator for StubSong {
@@ -5101,41 +5190,40 @@ mod yue_job_surface_tests {
                 seen.conditioning = req.conditioning.clone();
             }
             match self.behavior {
+                Behavior::ManySteps(total) => {
+                    for current in 1..=total {
+                        on_progress(Progress::Step { current, total });
+                        std::thread::sleep(Duration::from_micros(100));
+                    }
+                    Ok(song_output())
+                }
+                Behavior::DecodeThenStep => {
+                    on_progress(Progress::Decoding);
+                    on_progress(Progress::Step {
+                        current: 2,
+                        total: 3,
+                    });
+                    Ok(song_output())
+                }
                 Behavior::Song => {
                     // The YuE provider's progress contract: Loading per LM, one Step per lyric
-                    // segment and per stage-2 track (total = segments + 2), one Decoding.
-                    on_progress(Progress::Loading(gen_core::LoadPhase::Renderer));
+                    // segment and per stage-2 track (total = segments + 2), one Decoding. Each event
+                    // is spaced past the pump's post interval, the way a real multi-second segment
+                    // is, so every one is observable as its own job event.
+                    let mut emit = |progress: Progress| {
+                        on_progress(progress);
+                        std::thread::sleep(PROGRESS_POST_INTERVAL + Duration::from_millis(40));
+                    };
+                    emit(Progress::Loading(gen_core::LoadPhase::Renderer));
                     for current in 1..=2 {
-                        on_progress(Progress::Step { current, total: 4 });
+                        emit(Progress::Step { current, total: 4 });
                     }
-                    on_progress(Progress::Loading(gen_core::LoadPhase::Renderer));
+                    emit(Progress::Loading(gen_core::LoadPhase::Renderer));
                     for current in 3..=4 {
-                        on_progress(Progress::Step { current, total: 4 });
+                        emit(Progress::Step { current, total: 4 });
                     }
-                    on_progress(Progress::Decoding);
-                    let len = 4_410;
-                    let vocals = tone(len, 440.0, 0.3);
-                    let instrumental = tone(len, 110.0, 0.3);
-                    let mix = vocals
-                        .iter()
-                        .zip(&instrumental)
-                        .map(|(a, b)| a + b)
-                        .collect();
-                    Ok(GenerationOutput::Audio(gen_core::AudioTrack {
-                        samples: mix,
-                        sample_rate: 44_100,
-                        channels: 1,
-                        stems: vec![
-                            gen_core::AudioStem {
-                                name: "vocals".to_owned(),
-                                samples: vocals,
-                            },
-                            gen_core::AudioStem {
-                                name: "instrumental".to_owned(),
-                                samples: instrumental,
-                            },
-                        ],
-                    }))
+                    emit(Progress::Decoding);
+                    Ok(song_output())
                 }
                 Behavior::WaitForCancel => {
                     self.started.store(true, Ordering::SeqCst);
@@ -5164,6 +5252,7 @@ mod yue_job_surface_tests {
                     WeightsSource::Dir(dir) | WeightsSource::File(dir) => Some(dir.clone()),
                 };
                 record.quantize = spec.quantize;
+                record.components = spec.components.clone();
             }
             Ok(Box::new(StubSong {
                 descriptor: gen_core::ModelDescriptor {
@@ -5225,8 +5314,22 @@ mod yue_job_surface_tests {
         off.as_object_mut().expect("object").remove("guidance");
         let off = AudioRequest::from_payload(off.as_object().expect("object"));
         assert_eq!(off.effective_guidance(), Some(0.0));
-        // No window ⇒ the model's default window; an open end ⇒ to the clip end.
+        // No window ⇒ the model's default window.
         assert_eq!(off.reference_region(), None);
+        // A start with no end mirrors upstream's `prompt_end_time` default: 5–30 s.
+        let mut start_only = full_payload("project-1");
+        start_only["iclMode"] = json!("single");
+        start_only["iclReferenceAssetId"] = json!("a");
+        start_only["iclStartSecs"] = json!(5.0);
+        let start_only = AudioRequest::from_payload(start_only.as_object().expect("object"));
+        assert_eq!(
+            start_only.reference_region(),
+            Some(TimeRegion {
+                start_secs: 5.0,
+                end_secs: Some(30.0)
+            })
+        );
+        audio_preflight(&start_only).expect("a 5–30 s window is well-formed");
 
         // Malformed ICL pairings are refused worker-side too (a raw-enqueued job).
         for (extra, needle) in [
@@ -5244,6 +5347,10 @@ mod yue_job_surface_tests {
             ),
             (json!({ "iclReferenceAssetId": "a" }), "need an iclMode"),
             (json!({ "iclMode": "triple" }), "must be"),
+            (
+                json!({ "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 30.0 }),
+                "must satisfy 0 <= start < end",
+            ),
             (
                 json!({ "outputLimiter": "normalize" }),
                 "outputLimiter must be",
@@ -5637,17 +5744,280 @@ mod yue_job_surface_tests {
             .expect("a real clip decodes");
         assert_eq!(track.sample_rate, ICL_REFERENCE_SAMPLE_RATE);
         assert_eq!(track.channels, ICL_REFERENCE_CHANNELS);
+        // The stereo [0.25, -0.25] source downmixes to its channel mean, 0.0 (not one channel).
+        assert!(!track.samples.is_empty());
+        assert!(
+            track.samples.iter().all(|sample| sample.abs() < 1e-3),
+            "a stereo reference must downmix to mono (channel mean ≈ 0)"
+        );
         assert!(
             icl_scratch_dirs(job_id).is_empty(),
             "a successful decode leaves no scratch"
         );
 
+        // A long source, so the runner's immediate first cancel poll lands while ffmpeg is still
+        // decoding rather than racing a decode that already finished.
+        let long_source = dir.path().join("long.wav");
+        write_wav_pcm16(
+            &AudioTrack {
+                samples: tone(48_000 * 2 * 20, 440.0, 0.3),
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            &long_source,
+        )
+        .expect("long source writes");
         api_state.cancel.store(true, Ordering::SeqCst);
         let job_id = "yue-icl-scratch-canceled";
-        let _ = decode_icl_clip(&api, &settings, job_id, &source).await;
+        let canceled = decode_icl_clip(&api, &settings, job_id, &long_source).await;
+        assert!(
+            matches!(canceled, Err(WorkerError::Canceled(_))),
+            "a decode whose job is canceled ends Canceled, got {canceled:?}"
+        );
         assert!(
             icl_scratch_dirs(job_id).is_empty(),
             "a canceled decode leaves no scratch"
         );
+    }
+
+    /// Review fix 2: the progress fold is monotone — `Decoding` (0.85) followed by a `Step { 2, 3 }`
+    /// (0.63 on its own) must not move the bar backwards, nor may a later chunk or `Loading`.
+    #[test]
+    fn progress_fraction_never_goes_backwards() {
+        let mut fold = SynthesisProgress::new();
+        let mut fractions = vec![fold.engine(Progress::Decoding).expect("decoding").1];
+        fractions.push(
+            fold.engine(Progress::Step {
+                current: 2,
+                total: 3,
+            })
+            .expect("step")
+            .1,
+        );
+        fractions.push(fold.chunk(1).1);
+        fractions.push(
+            fold.engine(Progress::Loading(gen_core::LoadPhase::Renderer))
+                .expect("loading")
+                .1,
+        );
+        assert_eq!(fractions[0], 0.85);
+        assert!(
+            fractions.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress must not go backwards: {fractions:?}"
+        );
+    }
+
+    fn pump_test_settings(base_url: String) -> Settings {
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        settings.heartbeat_seconds = 5;
+        settings
+    }
+
+    fn running_posts(state: &StubApi) -> Vec<Value> {
+        state
+            .progress
+            .lock()
+            .expect("progress lock")
+            .iter()
+            .filter(|post| post["status"] == "running")
+            .cloned()
+            .collect()
+    }
+
+    /// Review fix 1: a per-token engine (5,000 `Step`s) costs a coalesced handful of progress POSTs —
+    /// at most one per `PROGRESS_POST_INTERVAL` plus the final state — never one POST per event, and
+    /// the final state is always posted.
+    #[tokio::test]
+    async fn per_token_progress_is_coalesced_to_the_post_interval() {
+        let (base_url, api_state) = spawn_stub_api().await;
+        let settings = pump_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let payload = full_payload("project-1");
+        let job = job_snapshot("yue-coalesce", payload.clone());
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        let started = Instant::now();
+        run_audio_synthesis_with(
+            &api,
+            &settings,
+            &job,
+            &request,
+            SinglePlan {
+                model_dir: PathBuf::from("/staged/yue"),
+                tier: None,
+                conditioning: None,
+            },
+            stub_loader(
+                Behavior::ManySteps(5_000),
+                Arc::new(Mutex::new(Seen::default())),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .await
+        .expect("synthesis completes");
+        let elapsed = started.elapsed();
+        let posts = running_posts(&api_state);
+        let budget = (elapsed.as_millis() / PROGRESS_POST_INTERVAL.as_millis()) as usize + 3;
+        assert!(
+            posts.len() <= budget,
+            "{} running posts for 5,000 steps in {elapsed:?} (budget {budget})",
+            posts.len()
+        );
+        assert_eq!(
+            posts.last().and_then(|post| post["message"].as_str()),
+            Some("Generating audio (5000/5000)."),
+            "the final state is always posted"
+        );
+    }
+
+    /// Review fix 2, end to end: a model that reports `Decoding` then a `Step` posts non-decreasing
+    /// fractions through the real pump.
+    #[tokio::test]
+    async fn interleaved_decode_and_step_posts_never_go_backwards() {
+        let (base_url, api_state) = spawn_stub_api().await;
+        let settings = pump_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let payload = full_payload("project-1");
+        let job = job_snapshot("yue-monotone", payload.clone());
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        run_audio_synthesis_with(
+            &api,
+            &settings,
+            &job,
+            &request,
+            SinglePlan {
+                model_dir: PathBuf::from("/staged/yue"),
+                tier: None,
+                conditioning: None,
+            },
+            stub_loader(
+                Behavior::DecodeThenStep,
+                Arc::new(Mutex::new(Seen::default())),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .await
+        .expect("synthesis completes");
+        let fractions: Vec<f64> = running_posts(&api_state)
+            .iter()
+            .filter_map(|post| post["progress"].as_f64())
+            .collect();
+        assert!(!fractions.is_empty());
+        assert!(
+            fractions.iter().all(|fraction| *fraction >= 0.85),
+            "no post may fall below the 0.85 Decoding mark once reached: {fractions:?}"
+        );
+    }
+
+    /// The shipped manifest entry for `model_id`.
+    fn builtin_entry(model_id: &str) -> Value {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+            .cloned()
+            .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
+    /// Review fix 3: the resolved tier reaches the co-requisite resolver. With the REAL `yue_en_cot`
+    /// descriptor (which requires `stage2` + `xcodec`) and its REAL manifest rows (three per-tier
+    /// `stage2` rows), a q8 job stages the q8 stage-2 subdir — resolving without the tier would be
+    /// refused ("no tier was resolved"), and would fail every real YuE job.
+    #[tokio::test]
+    async fn resolved_tier_selects_the_matching_stage2_component() {
+        let descriptor = crate::inference_runtime::audio_descriptor("yue_en_cot")
+            .expect("the linked audio registry serves yue_en_cot (run at the YuE inference pin)");
+        assert!(descriptor.required_components.contains(&"stage2"));
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let entry = builtin_entry("yue_en_cot");
+        let mut stage2_q8 = None;
+        for download in entry["downloads"].as_array().expect("downloads") {
+            if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            let is_stage2 = download["componentId"] == "stage2";
+            if is_stage2 && download["variant"] != "q8" {
+                continue;
+            }
+            let repo = download["repo"].as_str().expect("repo");
+            let revision = download["revision"].as_str().expect("revision");
+            let snapshot =
+                sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), repo)
+                    .expect("repo cache path resolves")
+                    .join("snapshots")
+                    .join(revision);
+            for file in download["files"].as_array().expect("files") {
+                let file = file
+                    .as_str()
+                    .expect("file")
+                    .replace('*', "weights.safetensors");
+                let path = snapshot.join(&file);
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+                std::fs::write(&path, b"weights").expect("file");
+            }
+            if is_stage2 {
+                stage2_q8 = Some(snapshot.join(download["subdir"].as_str().expect("subdir")));
+            }
+        }
+        let stage2_q8 = stage2_q8.expect("the manifest declares a q8 stage2 row");
+
+        let mut settings = pump_test_settings(base_url);
+        settings.data_dir = data_dir.path().to_path_buf();
+        let api = ApiClient::new(&settings);
+        let payload = json!({
+            "projectId": "project-1",
+            "model": "yue_en_cot",
+            "prompt": "pop",
+            "lyrics": LYRICS,
+            "quantTier": "q8",
+            "modelManifestEntry": entry,
+        });
+        let job = job_snapshot("yue-stage2-tier", payload.clone());
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        run_audio_synthesis_with(
+            &api,
+            &settings,
+            &job,
+            &request,
+            SinglePlan {
+                model_dir: PathBuf::from("/staged/yue-s1/q8"),
+                tier: Some(AudioTier {
+                    name: "q8".to_owned(),
+                    quantize: Some(gen_core::Quant::Q8),
+                }),
+                conditioning: None,
+            },
+            stub_loader(
+                Behavior::Song,
+                seen.clone(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .await
+        .expect("synthesis completes with the q8 components staged");
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(
+            seen.components.get("stage2"),
+            Some(&WeightsSource::Dir(stage2_q8)),
+            "the q8 job stages the q8 stage-2 subdir"
+        );
+        assert!(seen.components.contains_key("xcodec"));
     }
 }

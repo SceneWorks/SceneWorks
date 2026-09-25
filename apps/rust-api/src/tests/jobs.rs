@@ -5419,7 +5419,8 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "audio": {
                 "languages": ["en"], "sampleRates": [44100], "conditioning": ["ReferenceAudio"],
                 "supportsGuidance": true, "supportsSegmentedLyrics": true,
-                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true
+                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true,
+                "supportsOutputLimiter": true
               },
               "downloads": [
                 { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
@@ -6228,6 +6229,33 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+
+    // An `_icl` checkpoint with NO reference is a plain prompt run (upstream allows it; epic R1).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("iclMode").is_none());
+
+    // A start with no end is accepted: the window ends at upstream's 30 s default (the worker
+    // builds the 5–30 s region — asserted in the worker's from_payload test).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics,
+            "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 5.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclStartSecs"], 5.0);
+    assert!(job["payload"].get("iclEndSecs").is_none());
 }
 
 /// ICL modes are reachable only on an in-context-learning checkpoint (sc-19384): an ICL request to a
@@ -6250,9 +6278,9 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "in-context-learning",
         ),
         (
-            "ICL checkpoint without a reference",
-            json!({ "model": "yue_en_icl" }),
-            "needs a reference clip",
+            "start at the default 30 s end with no explicit end",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 30.0 }),
+            "iclEndSecs must be greater",
         ),
         (
             "dual mode missing the instrumental",
@@ -6357,6 +6385,13 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "output limiter on a non-song model",
             json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
+            "does not take an outputLimiter",
+        ),
+        (
+            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
+            // gate is the limiter's own flag, not the segmented-lyrics one.
+            "output limiter on a segmented model without the limiter flag",
+            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
             "does not take an outputLimiter",
         ),
     ];
