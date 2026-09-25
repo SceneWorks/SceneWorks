@@ -6229,6 +6229,33 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+
+    // An `_icl` checkpoint with NO reference is a plain prompt run (upstream allows it; epic R1).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("iclMode").is_none());
+
+    // A start with no end is accepted: the window ends at upstream's 30 s default (the worker
+    // builds the 5–30 s region — asserted in the worker's from_payload test).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics,
+            "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 5.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclStartSecs"], 5.0);
+    assert!(job["payload"].get("iclEndSecs").is_none());
 }
 
 /// ICL modes are reachable only on an in-context-learning checkpoint (sc-19384): an ICL request to a
@@ -6251,9 +6278,9 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "in-context-learning",
         ),
         (
-            "ICL checkpoint without a reference",
-            json!({ "model": "yue_en_icl" }),
-            "needs a reference clip",
+            "start at the default 30 s end with no explicit end",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 30.0 }),
+            "iclEndSecs must be greater",
         ),
         (
             "dual mode missing the instrumental",
