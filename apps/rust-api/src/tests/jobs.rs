@@ -6328,6 +6328,13 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "maxNewTokensPerSegment must be",
         ),
         (
+            // The stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1`
+            // for its prompt, so 16383 leaves none — refused here, not after the 7B load.
+            "token budget leaving no stage-1 prompt room",
+            json!({ "model": "yue_en_cot", "maxNewTokensPerSegment": 16383 }),
+            "maxNewTokensPerSegment must be between 1 and 16382",
+        ),
+        (
             "non-positive repetition penalty",
             json!({ "model": "yue_en_cot", "repetitionPenalty": 0.0 }),
             "repetitionPenalty must be",

@@ -5541,9 +5541,12 @@ fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
         }
     }
     if let Some(tokens) = payload.max_new_tokens_per_segment {
-        if !(1..=16_384).contains(&tokens) {
+        // YuE's stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1` of
+        // them for its prompt, which must be at least 1 — so 16382 is the largest budget the engine
+        // accepts. Refused here rather than after admission, the ICL encode and the 7B load.
+        if !(1..=16_382).contains(&tokens) {
             return Err(ApiError::bad_request(
-                "maxNewTokensPerSegment must be between 1 and 16384",
+                "maxNewTokensPerSegment must be between 1 and 16382",
             ));
         }
     }
