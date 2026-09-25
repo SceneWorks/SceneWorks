@@ -1570,7 +1570,7 @@ export function AudioStudio() {
                     <label>
                       Max tokens per section
                       <input
-                        max="16384"
+                        max="16382"
                         min="1"
                         onChange={(event) => setMaxNewTokensPerSegment(event.target.value)}
                         placeholder="3000 (default)"

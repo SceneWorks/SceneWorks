@@ -2216,6 +2216,11 @@ describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
       "Sample rate",
     ]);
     expect(advancedField("Guidance (CFG)").querySelector('input[type="checkbox"]').checked).toBe(true);
+    // The engine's stage-1 context is 16384 positions and keeps `16384 - budget - 1` for the prompt,
+    // so 16382 is the largest per-section budget it (and the API) accepts.
+    expect(advancedField("Max tokens per section").querySelector("input").getAttribute("max")).toBe(
+      "16382",
+    );
   });
 
   it("AC1: submits the lyrics, genre tags and every R5 knob in the sc-19384 payload shape", async () => {
