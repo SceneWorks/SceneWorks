@@ -5284,6 +5284,8 @@ mod yue_job_surface_tests {
         seed: Option<u64>,
         guidance: Option<f32>,
         conditioning: Vec<Conditioning>,
+        /// Read only by the registry-backed stage-2 tier test (same cfg).
+        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
         components: BTreeMap<String, WeightsSource>,
     }
 
@@ -5422,7 +5424,10 @@ mod yue_job_surface_tests {
                     WeightsSource::Dir(dir) | WeightsSource::File(dir) => Some(dir.clone()),
                 };
                 record.quantize = spec.quantize;
-                record.components = spec.components.clone();
+                #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+                {
+                    record.components = spec.components.clone();
+                }
             }
             Ok(Box::new(StubSong {
                 descriptor: gen_core::ModelDescriptor {
@@ -6502,6 +6507,7 @@ mod yue_job_surface_tests {
     }
 
     /// The shipped manifest entry for `model_id`.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     fn builtin_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -6524,6 +6530,9 @@ mod yue_job_surface_tests {
     /// descriptor (which requires `stage2` + `xcodec`) and its REAL manifest rows (three per-tier
     /// `stage2` rows), a q8 job stages the q8 stage-2 subdir — resolving without the tier would be
     /// refused ("no tier was resolved"), and would fail every real YuE job.
+    // Needs a linked candle audio registry (macOS, or `backend-candle` elsewhere) — the same cfg as
+    // `inference_runtime::audio()`; the backend-less Linux parity build ships no audio lane.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     #[tokio::test]
     async fn resolved_tier_selects_the_matching_stage2_component() {
         let descriptor = crate::inference_runtime::audio_descriptor("yue_en_cot")
