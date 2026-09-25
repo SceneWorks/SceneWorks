@@ -338,7 +338,7 @@
         "windows",
         "linux"
       ],
-      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, the vocal and instrumental Vocos 44.1 kHz decoders, and the mm tokenizer. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
+      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, and the vocal and instrumental Vocos 44.1 kHz decoders. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
       "documents": [
         {
           "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
