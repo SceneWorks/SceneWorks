@@ -2195,17 +2195,7 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     );
 }
 
-/// sc-24070: the normalization command pins the engine's CHANNEL layout as well as its rate.
-///
-/// The ffmpeg-free half of the defect, so it runs on every lane including hosted macOS CI, which
-/// ships no ffmpeg. The engine's `ref2va` layout reserves soundtrack rows for exactly
-/// `AUDIO_OUTPUT_CHANNELS` (2) while its encoder produces rows per channel SUPPLIED, and its own
-/// `check_audio` gates only the rate — so a mono reference was refused after the full model load
-/// ("556 reference soundtrack rows against a layout reserving 1112", real-weight render
-/// 2026-09-20). `-ac` is what makes mono reachable, and it must be the one `-ac` in the command:
-/// a second one would silently win and this asserts the single occurrence.
-/// The YuE ICL decode (sc-19384) shares this command builder; the video reference path's command
-/// must stay byte-identical to what it was before that sharing: PCM-16, exact rate and channels.
+/// The video reference command stays byte-identical PCM-16 now that YuE's ICL decode shares its builder.
 #[test]
 fn reference_audio_command_is_byte_identical_pcm16_normalization() {
     use super::reference_audio::reference_audio_ffmpeg_args;
@@ -2232,6 +2222,15 @@ fn reference_audio_command_is_byte_identical_pcm16_normalization() {
     );
 }
 
+/// sc-24070: the normalization command pins the engine's CHANNEL layout as well as its rate.
+///
+/// The ffmpeg-free half of the defect, so it runs on every lane including hosted macOS CI, which
+/// ships no ffmpeg. The engine's `ref2va` layout reserves soundtrack rows for exactly
+/// `AUDIO_OUTPUT_CHANNELS` (2) while its encoder produces rows per channel SUPPLIED, and its own
+/// `check_audio` gates only the rate — so a mono reference was refused after the full model load
+/// ("556 reference soundtrack rows against a layout reserving 1112", real-weight render
+/// 2026-09-20). `-ac` is what makes mono reachable, and it must be the one `-ac` in the command:
+/// a second one would silently win and this asserts the single occurrence.
 #[test]
 fn reference_audio_normalization_pins_the_engines_channel_layout() {
     use super::reference_audio::{
