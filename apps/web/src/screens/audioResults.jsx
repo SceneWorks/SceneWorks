@@ -13,6 +13,7 @@ import {
   audioAssetRunGroups,
   audioExpectedTakes,
   audioRunGroups,
+  audioStemLabel,
   audioTakeTitle,
   formatClock,
   formatRelativeTime,
@@ -104,10 +105,30 @@ export function AudioInflightStrip({ run, onCancel, onOpenQueue }) {
   );
 }
 
+// One download per stem a segmented-song take carries (YuE vocals / instrumental, sc-19385). The
+// mix is the take itself (played + downloaded by the card's own controls); each stem is its own
+// asset, downloaded under its own label.
+function AudioStemDownloads({ stems, className, iconSize }) {
+  if (!stems?.length) {
+    return null;
+  }
+  return stems.map((stem) => (
+    <AudioDownloadButton
+      ariaLabel={`Download ${audioStemLabel(stem).toLowerCase()} stem`}
+      asset={stem}
+      className={className}
+      iconSize={iconSize}
+      key={stem.id}
+      label={audioStemLabel(stem)}
+    />
+  ));
+}
+
 /** A single take: waveform thumbnail, prompt excerpt, meta and the four asset actions. */
 export function AudioTakeCard({
   run,
   asset,
+  stems = [],
   index,
   loaded,
   playing,
@@ -158,6 +179,7 @@ export function AudioTakeCard({
           <Icon.Star filled={favorite} size={14} />
         </button>
         <AudioDownloadButton asset={asset} className="audio-icon-btn" />
+        <AudioStemDownloads className="audio-icon-btn audio-stem-btn" iconSize={14} stems={stems} />
         <button
           aria-label="Send to Video Editor"
           className="audio-icon-btn"
@@ -228,6 +250,7 @@ export function AudioRunGroup({
             playing={playing}
             progress={progress}
             run={run}
+            stems={run.stems?.[asset.id] ?? []}
           />
         ))}
       </div>
@@ -256,6 +279,7 @@ export function AudioPlayDeck({ run, asset, takeIndex, player, onRunAgain, onSen
         </strong>
         <div className="audio-deck__head-actions">
           <AudioDownloadButton asset={asset} className="secondary-action" iconSize={15} label="Download" />
+          <AudioStemDownloads className="secondary-action" iconSize={15} stems={run?.stems?.[asset.id]} />
           {onSendToVideo ? (
             <button className="secondary-action" onClick={() => onSendToVideo(asset)} type="button">
               <Icon.Editor size={15} />
@@ -355,7 +379,13 @@ export function AudioResults({
   // the surface is populated on a fresh launch rather than empty until you generate.
   const runs = useMemo(() => {
     const jobRuns = audioRunGroups(jobs, assets, models);
-    const covered = new Set(jobRuns.flatMap((run) => run.takes.map((asset) => asset.id)));
+    // A run's folded stems (sc-19385) are covered too, or the recent-clips fill would re-list them.
+    const covered = new Set(
+      jobRuns.flatMap((run) => [
+        ...run.takes.map((asset) => asset.id),
+        ...Object.values(run.stems ?? {}).flat().map((asset) => asset.id),
+      ]),
+    );
     return [...jobRuns, ...audioAssetRunGroups(recentAssets, models, covered)];
   }, [jobs, assets, recentAssets, models]);
 

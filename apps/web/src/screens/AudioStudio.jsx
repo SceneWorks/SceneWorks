@@ -18,6 +18,17 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { TierPickerField, useQuantTierPicker } from "../components/generationStudio.jsx";
+import { installedTiers, tierLabel, tierPickerOptions } from "../quantTier.js";
+import { YueGenreTags, YueLyricsEditor, YueReferenceBand } from "./audioYueControls.jsx";
+import {
+  defaultYueSections,
+  genreTagsPrompt,
+  isIclSongModel,
+  isSegmentedSongModel,
+  splitGenreTagLine,
+  yueLyricsForSubmit,
+} from "../yueSong.js";
 
 // SceneWorks Audio Studio — the navigable shell (epic 13400, C0 / sc-13407). This screen mirrors
 // the canonical studio shell (VideoStudio.jsx): page-frame > WorkPanel + .mode-tabs + AdvancedSection
@@ -109,6 +120,9 @@ function isNativeCloneGenerator(item) {
 const SAMPLING_KNOB_MODES = new Set(["sfx"]);
 // Fallback target length before the model's cap is known; always clamped to maxDurationSecs.
 const DEFAULT_TARGET_DURATION_SECS = 10;
+// Upstream YuE's `prompt_end_time` default — the ICL window end when only a start is given (the API's
+// AUDIO_ICL_DEFAULT_END_SECS, sc-19384).
+const ICL_DEFAULT_END_SECS = 30;
 
 // Multi-speaker / long-form dialogue (sc-13676). A model advertising audio.supportsMultiSpeaker
 // reveals a segmented-script editor: an ordered list of turns, each { speaker, text }. The number of
@@ -273,6 +287,32 @@ export function AudioStudio() {
   // OpenVoice conversion strength (τ), empty ⇒ the converter default (0.3).
   const [referenceAudioAssetId, setReferenceAudioAssetId] = useState(saved.referenceAudioAssetId ?? "");
   const [matchStrength, setMatchStrength] = useState(saved.matchStrength ?? "");
+  // YuE lyrics-to-song (sc-19385) — separate from ACE-Step's `lyrics` so switching music models never
+  // bleeds one model's controls into the other. `yueSections` is the section-labelled lyrics editor
+  // ({ label, text }[]); `genreTags` is the prompt (space-joined on submit). The numeric knobs are
+  // strings, empty ⇒ omitted ⇒ the model default. `outputLimiter` "" ⇒ the model default (clamp).
+  const [yueSections, setYueSections] = useState(
+    Array.isArray(saved.yueSections) ? saved.yueSections : [],
+  );
+  const [genreTags, setGenreTags] = useState(Array.isArray(saved.genreTags) ? saved.genreTags : []);
+  const [segments, setSegments] = useState(saved.segments ?? "");
+  const [maxNewTokensPerSegment, setMaxNewTokensPerSegment] = useState(
+    saved.maxNewTokensPerSegment ?? "",
+  );
+  const [repetitionPenalty, setRepetitionPenalty] = useState(saved.repetitionPenalty ?? "");
+  const [guidanceEnabled, setGuidanceEnabled] = useState(saved.guidanceEnabled ?? true);
+  const [songGuidance, setSongGuidance] = useState(saved.songGuidance ?? "");
+  const [outputLimiter, setOutputLimiter] = useState(saved.outputLimiter ?? "");
+  // YuE ICL reference (sc-19385): one mixed clip ("single") or a vocal + instrumental pair ("dual"),
+  // plus the window of it the prompt uses. Library audio asset ids, like the Voice Clone reference.
+  const [iclMode, setIclMode] = useState(saved.iclMode ?? "single");
+  const [iclReferenceAssetId, setIclReferenceAssetId] = useState(saved.iclReferenceAssetId ?? "");
+  const [iclVocalAssetId, setIclVocalAssetId] = useState(saved.iclVocalAssetId ?? "");
+  const [iclInstrumentalAssetId, setIclInstrumentalAssetId] = useState(
+    saved.iclInstrumentalAssetId ?? "",
+  );
+  const [iclStartSecs, setIclStartSecs] = useState(saved.iclStartSecs ?? "");
+  const [iclEndSecs, setIclEndSecs] = useState(saved.iclEndSecs ?? "");
   // Register-a-voice affordance (sc-13517): a name for the saved voice built from the currently
   // selected reference clip, an in-flight guard, and the post-register notice (dedup warning / info).
   const [savedVoiceName, setSavedVoiceName] = useState("");
@@ -359,13 +399,23 @@ export function AudioStudio() {
 
   // Which capability-driven controls the active mode surfaces. Speech leads with the full
   // voice/language/length triad C1 builds on; the other modes show a capability-driven scaffold.
+  // YuE lyrics-to-song (sc-19385): a Music model that sings segmented lyrics
+  // (audio.supportsSegmentedLyrics) swaps ACE-Step's describe-the-music block for its own
+  // section-labelled lyrics editor + genre tags + song knobs. Capability-driven, never an id match;
+  // `songIcl` (an `_icl` checkpoint — ReferenceAudio conditioning) is the only model the ICL
+  // reference band is enabled for. The API refuses the ACE-Step knobs for such a model
+  // (validate_audio_job_for_model), so they are hidden rather than sent.
+  const songModel = mode === "music" && isSegmentedSongModel(selectedModel);
+  const songIcl = songModel && isIclSongModel(selectedModel);
+  const showOutputLimiter = songModel && audio.supportsOutputLimiter === true;
   const showVoice = mode === "speech" && voices.length > 0;
   const showLanguage = DURATION_MODES.has(mode) && languages.length > 0;
-  const showDuration = DURATION_MODES.has(mode) && maxDurationSecs != null;
+  const showDuration = DURATION_MODES.has(mode) && maxDurationSecs != null && !songModel;
   // Music describe-the-music sub-block fields — surfaced on the Music tab. BPM/key/lyrics ride the
   // gen-core AudioParams music sub-block ACE-Step reads; they are optional, so they render whenever the
-  // Music tab is active (a music model that ignored one would simply not consume it).
-  const showMusicFields = mode === "music";
+  // Music tab is active (a music model that ignored one would simply not consume it) — except for a
+  // segmented-song model, which has its own lyrics editor and refuses BPM/key.
+  const showMusicFields = mode === "music" && !songModel;
   // The extend/edit SOURCE band is revealed ONLY when the selected model advertises audio.editModes —
   // exactly the capability that makes a model a Music model (modelEligibility.audioHasEditModes). ACE-Step
   // advertises inpaint/repaint/extend; a model without editModes never shows it. Mirrors VideoStudio's
@@ -390,8 +440,10 @@ export function AudioStudio() {
   // SAMPLING_KNOB_MODES for why SFX is mode-gated while Music reads the manifest capability flags.
   const musicSupportsGuidance = mode === "music" && Boolean(audio.supportsGuidance);
   const musicSupportsNegative = mode === "music" && Boolean(audio.supportsNegativePrompt);
-  const showSteps = SAMPLING_KNOB_MODES.has(mode) || mode === "music";
-  const showGuidance = SAMPLING_KNOB_MODES.has(mode) || musicSupportsGuidance;
+  // A segmented-song model reads no `steps` (the API refuses it) and carries guidance as its own
+  // on/off + scale pair below, so both plain knobs stay ACE-Step / MOSS-only.
+  const showSteps = SAMPLING_KNOB_MODES.has(mode) || (mode === "music" && !songModel);
+  const showGuidance = SAMPLING_KNOB_MODES.has(mode) || (musicSupportsGuidance && !songModel);
   const showNegative = musicSupportsNegative;
   // Streaming (sc-13675): the selected model renders the clip incrementally when it advertises
   // audio.supportsStreaming (backend Capabilities.supports_streaming). CAPABILITY-DRIVEN — never a
@@ -406,6 +458,31 @@ export function AudioStudio() {
   // so those modes are unperturbed. The editor offers up to `maxSpeakers` speaker labels.
   const showMultiSpeaker = mode === "speech" && Boolean(audio.supportsMultiSpeaker);
   const speakerChoices = useMemo(() => speakerOptions(maxSpeakers), [maxSpeakers]);
+
+  // Weight tier for a segmented-song model (YuE ships physical bf16 / q8 / q4 downloads, sc-19384):
+  // the shared studio tier picker — every declared tier listed, only installed ones selectable, the
+  // per-model sticky remembered under the "audio" screen. Sent as `quantTier` for a song model only.
+  const songTierItems = useMemo(
+    () => (songModel ? tierPickerOptions(selectedModel) : []),
+    [songModel, selectedModel],
+  );
+  const songAvailableTiers = useMemo(
+    () => (songModel ? installedTiers(selectedModel) : []),
+    [songModel, selectedModel],
+  );
+  const {
+    quantTier,
+    tierSwitching,
+    handleTierChange,
+  } = useQuantTierPicker({
+    screen: "audio",
+    model: selectedModel?.id ?? "",
+    selectedModel,
+    availableTiers: songAvailableTiers,
+    tierOptions: {},
+    reseedOnModelChange: true,
+    preferencesHydrated,
+  });
 
   // The voice picker's <optgroup> structure — derived from the selected model's voice bank, grouped
   // by accent + gender (sc-13408). Rebuilt only when the bank changes.
@@ -517,10 +594,38 @@ export function AudioStudio() {
   const scriptReady = scriptSegmentsForSubmit(script).length > 0;
   // Multi-speaker Speech submits the script instead of the prompt, so its content signal is a
   // non-empty script; every other mode (and single-voice Speech) still requires a prompt.
-  const contentReady = showMultiSpeaker ? scriptReady : prompt.trim().length > 0;
+  // A segmented-song model needs lyrics (at least one non-empty section) AND genre tags (its prompt).
+  const songLyrics = songModel ? yueLyricsForSubmit(yueSections) : "";
+  const songPrompt = songModel ? genreTagsPrompt(genreTags) : "";
+  const contentReady = songModel
+    ? songLyrics.length > 0 && songPrompt.length > 0
+    : showMultiSpeaker
+      ? scriptReady
+      : prompt.trim().length > 0;
   // Voice Clone additionally needs a reference-voice clip selected — the conversion has no target
-  // without it. The other wired modes carry no such extra requirement.
-  const referenceReady = mode !== "voiceclone" || referenceAudioAssetId.length > 0;
+  // without it. A YuE ICL checkpoint runs as a plain prompt run with NO reference (upstream allows it;
+  // the API accepts it), but a half-picked dual pair is refused — so the ICL fields are sent only
+  // once the chosen mode is complete, and a partial dual pick blocks Generate. The other wired modes
+  // carry no such extra requirement.
+  const iclPicked =
+    iclMode === "dual"
+      ? [iclVocalAssetId, iclInstrumentalAssetId].filter(Boolean).length
+      : iclReferenceAssetId
+        ? 1
+        : 0;
+  const iclComplete = iclMode === "dual" ? iclPicked === 2 : iclPicked === 1;
+  // The reference window rides only with a complete pick on a region-capable model; a start at or
+  // past the effective end (an empty end ⇒ upstream's 30 s) is refused by the API, so it blocks
+  // Generate here with an inline hint instead of a 400.
+  const iclWindowSent = songIcl && iclComplete && Boolean(audio.supportsReferenceRegion);
+  const iclWindowError =
+    iclWindowSent &&
+    iclStartSecs !== "" &&
+    !(Number(iclStartSecs) < (iclEndSecs === "" ? ICL_DEFAULT_END_SECS : Number(iclEndSecs)))
+      ? `The reference start must be before the end (${iclEndSecs === "" ? `${ICL_DEFAULT_END_SECS} s when no end is set` : `${iclEndSecs} s`}).`
+      : "";
+  const iclReady = (!songIcl || iclPicked === 0 || iclComplete) && !iclWindowError;
+  const referenceReady = (mode !== "voiceclone" || referenceAudioAssetId.length > 0) && iclReady;
   const canGenerate =
     WIRED_MODES.has(mode) &&
     modelReady &&
@@ -584,6 +689,13 @@ export function AudioStudio() {
         }));
       });
     }
+    // YuE (sc-19385): open the lyrics editor on a verse + chorus the first time a segmented-song
+    // model is selected; a restored / prior song is kept.
+    if (isSegmentedSongModel(selectedModel)) {
+      setYueSections((current) =>
+        Array.isArray(current) && current.length > 0 ? current : defaultYueSections(),
+      );
+    }
     // The capability arrays are derived from selectedModel; keying on its id is the intended clamp.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
@@ -615,6 +727,20 @@ export function AudioStudio() {
       editStrength,
       referenceAudioAssetId,
       matchStrength,
+      yueSections,
+      genreTags,
+      segments,
+      maxNewTokensPerSegment,
+      repetitionPenalty,
+      guidanceEnabled,
+      songGuidance,
+      outputLimiter,
+      iclMode,
+      iclReferenceAssetId,
+      iclVocalAssetId,
+      iclInstrumentalAssetId,
+      iclStartSecs,
+      iclEndSecs,
       advancedOpen,
     },
     // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
@@ -711,6 +837,39 @@ export function AudioStudio() {
         // `voice` is sent — MOSS advertises no voice surface and the floor rejects one.
         payload.guidance = guidance === "" ? undefined : Number(guidance);
         payload.steps = steps === "" ? undefined : Number(steps);
+      } else if (songModel) {
+        // YuE lyrics-to-song (sc-19385 → the sc-19384 job surface). The genre tags ARE the prompt
+        // (space-joined, upstream genre.txt); the sections ride `lyrics` as `[label]\n…` blocks. Every
+        // numeric knob is omitted when cleared so the model default applies. Guidance is an on/off
+        // switch plus an optional scale (> 1; off ⇒ no scale, the worker sends 0.0 = no CFG).
+        // No bpm / key / steps / length — the API refuses them for a segmented-song model.
+        const optionalNumber = (value) => (value === "" ? undefined : Number(value));
+        payload.prompt = songPrompt;
+        payload.lyrics = songLyrics;
+        payload.segments = optionalNumber(segments);
+        payload.maxNewTokensPerSegment = optionalNumber(maxNewTokensPerSegment);
+        payload.repetitionPenalty = optionalNumber(repetitionPenalty);
+        payload.guidanceEnabled = Boolean(guidanceEnabled);
+        if (guidanceEnabled) {
+          payload.guidance = optionalNumber(songGuidance);
+        }
+        payload.quantTier = quantTier || undefined;
+        if (showOutputLimiter) {
+          payload.outputLimiter = outputLimiter || undefined;
+        }
+        if (songIcl && iclComplete) {
+          payload.iclMode = iclMode;
+          if (iclMode === "dual") {
+            payload.iclVocalAssetId = iclVocalAssetId;
+            payload.iclInstrumentalAssetId = iclInstrumentalAssetId;
+          } else {
+            payload.iclReferenceAssetId = iclReferenceAssetId;
+          }
+          if (audio.supportsReferenceRegion) {
+            payload.iclStartSecs = optionalNumber(iclStartSecs);
+            payload.iclEndSecs = optionalNumber(iclEndSecs);
+          }
+        }
       } else if (mode === "music") {
         // Music (ACE-Step) — the describe-the-music sub-block. BPM/key/lyrics ride the gen-core
         // AudioParams music fields; steps rides the top-level request (the turbo's 8-step sampler).
@@ -829,7 +988,11 @@ export function AudioStudio() {
                   off the model) + its text; the script submits as AudioParams.script. Capability-driven
                   — every single-voice Speech model keeps the plain textarea, so those modes are
                   unperturbed. */}
-              {showMultiSpeaker ? (
+              {/* YuE (sc-19385): a segmented-song model replaces the prompt with its section-labelled
+                  lyrics editor; its prompt is the genre tags in the settings bar below. */}
+              {songModel ? (
+                <YueLyricsEditor onChange={setYueSections} sections={yueSections} />
+              ) : showMultiSpeaker ? (
                 <div
                   className="prompt-input multi-speaker-script"
                   data-testid="multi-speaker-script"
@@ -926,13 +1089,15 @@ export function AudioStudio() {
             {/* Multi-speaker turns own one refiner apiece inside their structured editor above. Plain
                 prompt modes share this single control. Key by mode + resolved model so switching either
                 aborts an in-flight request and cannot surface a stale rewrite from the previous guide. */}
+            {/* A segmented-song model's prompt is its genre-tag list, so the refiner reads and writes
+                that (a refined tag line is re-split into tags — commas, else known multi-word tags, else words). */}
             {!showMultiSpeaker && selectedModel ? (
               <RefinePromptControl
                 key={`${mode}:${selectedModel.id}`}
                 guidePath={promptGuide.path}
                 modelId={selectedModel.id}
-                onApply={setPrompt}
-                prompt={prompt}
+                onApply={songModel ? (refined) => setGenreTags(splitGenreTagLine(refined)) : setPrompt}
+                prompt={songModel ? songPrompt : prompt}
                 refinePrompt={refinePrompt}
                 refineModel={refineModel}
                 onDownloadRefineModel={
@@ -1053,7 +1218,37 @@ export function AudioStudio() {
                     />
                   </label>
                 ) : null}
+
+                {/* YuE (sc-19385): how many lyric sections to render (song length follows this and
+                    the lyrics, not a duration) and the weight tier. */}
+                {songModel ? (
+                  <label className="settings-field settings-field-segments">
+                    Sections
+                    <input
+                      max="100"
+                      min="1"
+                      onChange={(event) => setSegments(event.target.value)}
+                      placeholder="2 (default)"
+                      step="1"
+                      type="number"
+                      value={segments}
+                    />
+                  </label>
+                ) : null}
+                {songModel && songTierItems.length > 0 ? (
+                  <TierPickerField
+                    className="settings-field settings-field-tier"
+                    items={songTierItems}
+                    onChange={handleTierChange}
+                    tierLabel={tierLabel}
+                    tierSwitching={tierSwitching}
+                    title="Which installed weight tier renders the song. Higher precision uses more memory."
+                    value={quantTier}
+                  />
+                ) : null}
               </div>
+
+              {songModel ? <YueGenreTags onChange={setGenreTags} tags={genreTags} /> : null}
 
               {/* Music: optional lyrics (free-form; empty ⇒ instrumental). Rides the AudioParams
                   `lyrics` field, distinct from the describe-the-music prompt. */}
@@ -1155,6 +1350,29 @@ export function AudioStudio() {
                 spoken in that voice. A native clone-TTS generator renders it in one step; the OpenVoice
                 converter re-timbres a base clip and exposes the match-strength τ. Revealed only when the
                 selected model advertises ReferenceAudio conditioning (isVoiceCloneConverter). */}
+            {/* YuE ICL reference band (sc-19385): shown for every segmented-song model so the
+                capability is discoverable, but ENABLED only for an `_icl` checkpoint. */}
+            {songModel ? (
+              <YueReferenceBand
+                audioAssets={audioAssets}
+                enabled={songIcl}
+                endSecs={iclEndSecs}
+                iclMode={iclMode}
+                instrumentalAssetId={iclInstrumentalAssetId}
+                onEndChange={setIclEndSecs}
+                onIclModeChange={setIclMode}
+                onInstrumentalChange={setIclInstrumentalAssetId}
+                onReferenceChange={setIclReferenceAssetId}
+                onStartChange={setIclStartSecs}
+                onVocalChange={setIclVocalAssetId}
+                referenceAssetId={iclReferenceAssetId}
+                showRegion={!songIcl || Boolean(audio.supportsReferenceRegion)}
+                startSecs={iclStartSecs}
+                vocalAssetId={iclVocalAssetId}
+                windowError={iclWindowError}
+              />
+            ) : null}
+
             {showVoiceClone ? (
               <div className="studio-source-band">
                 <AssetPickerField
@@ -1322,6 +1540,68 @@ export function AudioStudio() {
                       value={steps}
                     />
                   </label>
+                ) : null}
+                {/* YuE song knobs (sc-19385, R5). Defaults are upstream's published values: guidance on
+                    (1.5 first section / 1.2 after), 3000 tokens per section, repetition penalty 1.1.
+                    Cleared ⇒ omitted ⇒ the model default. A guidance scale must be > 1 (the model
+                    reads ≤ 1 as "off"), so the switch — not a 0 scale — turns guidance off. */}
+                {songModel ? (
+                  <>
+                    <label className="checkline">
+                      <input
+                        checked={Boolean(guidanceEnabled)}
+                        onChange={(event) => setGuidanceEnabled(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Guidance (CFG)
+                    </label>
+                    <label>
+                      Guidance scale
+                      <input
+                        disabled={!guidanceEnabled}
+                        min="1.05"
+                        onChange={(event) => setSongGuidance(event.target.value)}
+                        placeholder="1.5 → 1.2 (default)"
+                        step="0.05"
+                        type="number"
+                        value={songGuidance}
+                      />
+                    </label>
+                    <label>
+                      Max tokens per section
+                      <input
+                        max="16384"
+                        min="1"
+                        onChange={(event) => setMaxNewTokensPerSegment(event.target.value)}
+                        placeholder="3000 (default)"
+                        step="100"
+                        type="number"
+                        value={maxNewTokensPerSegment}
+                      />
+                    </label>
+                    <label>
+                      Repetition penalty
+                      <input
+                        max="10"
+                        min="0.05"
+                        onChange={(event) => setRepetitionPenalty(event.target.value)}
+                        placeholder="1.1 (default)"
+                        step="0.05"
+                        type="number"
+                        value={repetitionPenalty}
+                      />
+                    </label>
+                    {showOutputLimiter ? (
+                      <label>
+                        Output limiter
+                        <select onChange={(event) => setOutputLimiter(event.target.value)} value={outputLimiter}>
+                          <option value="">Model default (clamp)</option>
+                          <option value="clamp">Clamp — hard-clip peaks</option>
+                          <option value="rescale">Rescale — normalize the whole stem</option>
+                        </select>
+                      </label>
+                    ) : null}
+                  </>
                 ) : null}
                 {/* Negative prompt — the traits to steer away from. Capability-gated: surfaced only when
                     the model advertises negative-prompt support (audio.supportsNegativePrompt). The
