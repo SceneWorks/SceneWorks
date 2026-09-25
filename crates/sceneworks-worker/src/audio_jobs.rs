@@ -108,6 +108,33 @@ struct AudioRequest {
     base_model_manifest_entry: Value,
     seed: Option<i64>,
     model_manifest_entry: Value,
+    /// Segmented-song controls (YuE, sc-19384) — ride `AudioParams::segments` /
+    /// `max_new_tokens_per_segment` / `repetition_penalty`. `None` ⇒ the model default; the gen-core
+    /// floor refuses each on a model that does not advertise reading it.
+    segments: Option<u32>,
+    max_new_tokens_per_segment: Option<u32>,
+    repetition_penalty: Option<f32>,
+    /// Guidance on/off (sc-19384). `Some(false)` sends guidance `0.0` — YuE reads `0..=1` as CFG off —
+    /// and the API refuses a scale alongside it. `None`/`Some(true)` send `guidance` as given (`None`
+    /// ⇒ the model's own schedule).
+    guidance_enabled: Option<bool>,
+    /// In-context-learning reference (YuE `_icl` checkpoints, sc-19384): `single` (one mixed clip,
+    /// `icl_reference_asset_id`) or `dual` (`icl_vocal_asset_id` + `icl_instrumental_asset_id`), over
+    /// the `icl_start_secs..icl_end_secs` window. Deliberately NOT `referenceAudioAssetId`, which
+    /// routes a job onto the voice-clone chain.
+    icl_mode: Option<String>,
+    icl_reference_asset_id: Option<String>,
+    icl_vocal_asset_id: Option<String>,
+    icl_instrumental_asset_id: Option<String>,
+    icl_start_secs: Option<f32>,
+    icl_end_secs: Option<f32>,
+    /// Requested weight tier (`bf16` / `q8` / `q4`) for a model that ships physical per-tier
+    /// downloads (YuE, sc-19384). `None` ⇒ the manifest's default tier when installed, else the first
+    /// installed tier.
+    quant_tier: Option<String>,
+    /// Output limiter (YuE `save_audio`, upstream `--rescale`, sc-19384): `clamp` (the default) or
+    /// `rescale`. `None` ⇒ the model default.
+    output_limiter: Option<String>,
 }
 
 /// Parse a `script` payload value into a multi-speaker dialogue script (sc-13676). The wire shape is
@@ -253,6 +280,122 @@ impl AudioRequest {
                 .get("modelManifestEntry")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+            segments: payload
+                .get("segments")
+                .and_then(Value::as_u64)
+                .map(|value| value.min(u64::from(u32::MAX)) as u32),
+            max_new_tokens_per_segment: payload
+                .get("maxNewTokensPerSegment")
+                .and_then(Value::as_u64)
+                .map(|value| value.min(u64::from(u32::MAX)) as u32),
+            repetition_penalty: payload
+                .get("repetitionPenalty")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            guidance_enabled: payload.get("guidanceEnabled").and_then(Value::as_bool),
+            icl_mode: string("iclMode").map(|mode| mode.to_lowercase()),
+            icl_reference_asset_id: string("iclReferenceAssetId"),
+            icl_vocal_asset_id: string("iclVocalAssetId"),
+            icl_instrumental_asset_id: string("iclInstrumentalAssetId"),
+            icl_start_secs: payload
+                .get("iclStartSecs")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            icl_end_secs: payload
+                .get("iclEndSecs")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            quant_tier: string("quantTier").map(|tier| tier.to_lowercase()),
+            output_limiter: string("outputLimiter").map(|limiter| limiter.to_lowercase()),
+        }
+    }
+
+    /// The top-level `GenerationRequest::guidance` this job sends: `0.0` when guidance is switched
+    /// off (a segmented-song model reads `0..=1` as CFG off), else the requested scale.
+    fn effective_guidance(&self) -> Option<f32> {
+        if self.guidance_enabled == Some(false) {
+            Some(0.0)
+        } else {
+            self.guidance
+        }
+    }
+
+    /// The ICL reference window (`AudioParams::reference_region`). `None` when neither end is set, so
+    /// the model's own default window applies; an open end means "to the clip end".
+    fn reference_region(&self) -> Option<TimeRegion> {
+        if self.icl_start_secs.is_none() && self.icl_end_secs.is_none() {
+            return None;
+        }
+        Some(TimeRegion {
+            start_secs: self.icl_start_secs.unwrap_or(0.0),
+            end_secs: self.icl_end_secs,
+        })
+    }
+
+    /// The ICL reference asset ids in `(stem name, asset id)` order: one unnamed clip for `single`,
+    /// the `vocals` + `instrumental` pair for `dual`. Empty when the job carries no ICL mode.
+    fn icl_references(&self) -> WorkerResult<Vec<(Option<&'static str>, &str)>> {
+        let mode = self.icl_mode.as_deref().unwrap_or_default();
+        let required = |value: &Option<String>, field: &str| -> WorkerResult<()> {
+            if value.is_none() {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "iclMode {mode:?} requires {field}."
+                )));
+            }
+            Ok(())
+        };
+        let refuse = |value: &Option<String>, field: &str| {
+            if value.is_some() {
+                Err(WorkerError::InvalidPayload(format!(
+                    "{field} does not apply to iclMode {mode:?}."
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        match self.icl_mode.as_deref() {
+            None => {
+                if self.icl_reference_asset_id.is_some()
+                    || self.icl_vocal_asset_id.is_some()
+                    || self.icl_instrumental_asset_id.is_some()
+                    || self.icl_start_secs.is_some()
+                    || self.icl_end_secs.is_some()
+                {
+                    return Err(WorkerError::InvalidPayload(
+                        "ICL reference fields need an iclMode (single or dual).".to_owned(),
+                    ));
+                }
+                Ok(Vec::new())
+            }
+            Some("single") => {
+                refuse(&self.icl_vocal_asset_id, "iclVocalAssetId")?;
+                refuse(&self.icl_instrumental_asset_id, "iclInstrumentalAssetId")?;
+                required(&self.icl_reference_asset_id, "iclReferenceAssetId")?;
+                Ok(vec![(
+                    None,
+                    self.icl_reference_asset_id.as_deref().unwrap_or_default(),
+                )])
+            }
+            Some("dual") => {
+                refuse(&self.icl_reference_asset_id, "iclReferenceAssetId")?;
+                required(&self.icl_vocal_asset_id, "iclVocalAssetId")?;
+                required(&self.icl_instrumental_asset_id, "iclInstrumentalAssetId")?;
+                Ok(vec![
+                    (
+                        Some("vocals"),
+                        self.icl_vocal_asset_id.as_deref().unwrap_or_default(),
+                    ),
+                    (
+                        Some("instrumental"),
+                        self.icl_instrumental_asset_id
+                            .as_deref()
+                            .unwrap_or_default(),
+                    ),
+                ])
+            }
+            Some(other) => Err(WorkerError::InvalidPayload(format!(
+                "iclMode must be \"single\" or \"dual\", got {other:?}."
+            ))),
         }
     }
 
@@ -424,7 +567,253 @@ fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
             "prompt (or a multi-speaker script) is required.".to_owned(),
         ));
     }
+    if let Some(limiter) = request.output_limiter.as_deref() {
+        output_limiter(limiter)?;
+    }
+    // ICL reference (sc-19384): the mode/asset-id pairing is well-formed, and it is the job's ONE
+    // reference-audio source — never combined with a voice-clone reference or an edit source.
+    if !request.icl_references()?.is_empty()
+        && (request.is_voice_clone() || request.source_audio_asset_id.is_some())
+    {
+        return Err(WorkerError::InvalidPayload(
+            "an ICL reference cannot be combined with referenceAudioAssetId or \
+             sourceAudioAssetId."
+                .to_owned(),
+        ));
+    }
     Ok(())
+}
+
+/// Parse an `outputLimiter` token (`clamp` / `rescale`, sc-19384) into the engine's
+/// [`gen_core::OutputLimiter`]. The API rejects an unknown token up front; this is the worker mirror.
+fn output_limiter(token: &str) -> WorkerResult<gen_core::OutputLimiter> {
+    match token {
+        "clamp" => Ok(gen_core::OutputLimiter::Clamp),
+        "rescale" => Ok(gen_core::OutputLimiter::Rescale),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "outputLimiter must be \"clamp\" or \"rescale\", got {other:?}."
+        ))),
+    }
+}
+
+/// The rate every YuE ICL reference reaches the engine at: xcodec's 16 kHz mono input (the upstream
+/// pipeline loads the prompt audio mono and resamples it to 16 kHz before encoding). sc-19384.
+const ICL_REFERENCE_SAMPLE_RATE: u32 = 16_000;
+const ICL_REFERENCE_CHANNELS: u16 = 1;
+
+/// A weight tier resolved for a model that ships physical per-tier downloads (`<tier>/*`, sc-19384):
+/// the tier name (also the selector for its per-tier co-requisites) and the `LoadSpec::quantize`
+/// the load asserts (`None` for bf16 — the unquantized load).
+#[derive(Clone, Debug, PartialEq)]
+struct AudioTier {
+    name: String,
+    quantize: Option<gen_core::Quant>,
+}
+
+/// The primary (non-`coRequisite`) per-tier downloads a manifest entry declares, as
+/// `(variant, subdir, default)` in manifest order. Empty for every untiered audio model.
+fn audio_tier_rows(entry: &Value) -> Vec<(String, String, bool)> {
+    entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(|downloads| {
+            downloads
+                .iter()
+                .filter(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                })
+                .filter_map(|download| {
+                    let variant = download.get("variant").and_then(Value::as_str)?.trim();
+                    if variant.is_empty() {
+                        return None;
+                    }
+                    let subdir = download
+                        .get("subdir")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|subdir| !subdir.is_empty())
+                        .unwrap_or(variant);
+                    Some((
+                        variant.to_lowercase(),
+                        subdir.to_owned(),
+                        download.get("default").and_then(Value::as_bool) == Some(true),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve the weights dir + tier for `request` under the model's snapshot `root`. An untiered model
+/// passes `root` through with no tier (every audio model before YuE). A tiered model loads from
+/// `root/<tier subdir>`: the requested `quantTier` when installed (else a clear error naming it),
+/// otherwise the manifest's default tier when installed, else the first installed tier — never a
+/// silent substitute for an explicit pick.
+fn resolve_audio_tier(
+    request: &AudioRequest,
+    root: PathBuf,
+) -> WorkerResult<(PathBuf, Option<AudioTier>)> {
+    let rows = audio_tier_rows(&request.model_manifest_entry);
+    if rows.is_empty() {
+        if let Some(tier) = &request.quant_tier {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: quantTier {tier:?} was requested, but the model ships no per-tier weights.",
+                request.model
+            )));
+        }
+        return Ok((root, None));
+    }
+    let installed = |subdir: &str| root.join(subdir).is_dir();
+    let (name, subdir) = match &request.quant_tier {
+        Some(tier) => {
+            let (variant, subdir, _) = rows
+                .iter()
+                .find(|(variant, _, _)| variant == tier)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{}: quantTier {tier:?} is not one of the model's tiers ({}).",
+                        request.model,
+                        rows.iter()
+                            .map(|(variant, _, _)| variant.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?;
+            if !installed(subdir) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{}: the {variant} tier is not installed — download it first.",
+                    request.model
+                )));
+            }
+            (variant.clone(), subdir.clone())
+        }
+        None => rows
+            .iter()
+            .filter(|(_, _, default)| *default)
+            .chain(rows.iter().filter(|(_, _, default)| !*default))
+            .find(|(_, subdir, _)| installed(subdir))
+            .map(|(variant, subdir, _)| (variant.clone(), subdir.clone()))
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{}: no weight tier is installed — download one first.",
+                    request.model
+                ))
+            })?,
+    };
+    let quantize = match name.as_str() {
+        "q4" => Some(gen_core::Quant::Q4),
+        "q8" => Some(gen_core::Quant::Q8),
+        _ => None,
+    };
+    Ok((root.join(subdir), Some(AudioTier { name, quantize })))
+}
+
+/// Resolve + decode a job's ICL reference clip(s) into ONE [`Conditioning::ReferenceAudio`]
+/// (sc-19384): a `single` mix rides as the track itself; a `dual` pair rides as a track carrying
+/// `vocals` + `instrumental` stems (the engine's dual-track carrier), with the mix field their sum.
+/// Every clip goes through the shared asset guard ([`crate::video_jobs::ltx::resolve_clip_media_path`])
+/// and the shared ffmpeg normalization onto [`ICL_REFERENCE_SAMPLE_RATE`] mono, so any container the
+/// library holds is admissible. Scratch lives in a [`tempfile::TempDir`] that is removed on EVERY exit
+/// — refusal, cancel (the ffmpeg runner returns `Canceled`), panic, or the future being dropped.
+async fn resolve_icl_reference(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    project_path: &Path,
+) -> WorkerResult<Option<Conditioning>> {
+    let references = request.icl_references()?;
+    if references.is_empty() {
+        return Ok(None);
+    }
+    let mut decoded: Vec<(Option<&'static str>, gen_core::AudioTrack)> = Vec::new();
+    for (stem, asset_id) in references {
+        let source = crate::video_jobs::ltx::resolve_clip_media_path(
+            settings,
+            &request.project_id,
+            asset_id,
+            project_path,
+        )?;
+        let track = decode_icl_clip(api, settings, &job.id, &source).await?;
+        decoded.push((stem, track));
+    }
+    Ok(Some(Conditioning::ReferenceAudio {
+        audio: assemble_icl_track(decoded),
+        strength: None,
+    }))
+}
+
+/// Decode one ICL clip inside a job-scoped scratch dir under the system temp root (see
+/// [`resolve_icl_reference`] for the cleanup contract).
+async fn decode_icl_clip(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    source: &Path,
+) -> WorkerResult<gen_core::AudioTrack> {
+    // `scratch` drops on success AND on every early return, removing the directory.
+    let scratch = icl_scratch_dir(job_id)?;
+    crate::video_jobs::reference_audio::decode_audio_normalized(
+        api,
+        settings,
+        job_id,
+        CANCEL_MESSAGE,
+        source,
+        scratch.path(),
+        ICL_REFERENCE_SAMPLE_RATE,
+        ICL_REFERENCE_CHANNELS,
+    )
+    .await
+}
+
+/// The prefix of every ICL scratch dir for `job_id` — the handle the cleanup test sweeps for.
+fn icl_scratch_prefix(job_id: &str) -> String {
+    format!("sw-yue-icl-{}-", safe_download_dir(job_id))
+}
+
+fn icl_scratch_dir(job_id: &str) -> WorkerResult<tempfile::TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix(&icl_scratch_prefix(job_id))
+        .tempdir()?)
+}
+
+/// Build the engine's ICL reference track from decoded clips: one unnamed clip passes through; a
+/// named pair becomes stems over a common length, with the mix field their sample-wise sum.
+fn assemble_icl_track(
+    mut decoded: Vec<(Option<&'static str>, gen_core::AudioTrack)>,
+) -> gen_core::AudioTrack {
+    if decoded.len() == 1 && decoded[0].0.is_none() {
+        return decoded.remove(0).1;
+    }
+    let len = decoded
+        .iter()
+        .map(|(_, track)| track.samples.len())
+        .min()
+        .unwrap_or(0);
+    let (sample_rate, channels) = decoded
+        .first()
+        .map(|(_, track)| (track.sample_rate, track.channels))
+        .unwrap_or((ICL_REFERENCE_SAMPLE_RATE, ICL_REFERENCE_CHANNELS));
+    let mut samples = vec![0.0f32; len];
+    let stems = decoded
+        .into_iter()
+        .map(|(name, mut track)| {
+            track.samples.truncate(len);
+            for (sum, sample) in samples.iter_mut().zip(&track.samples) {
+                *sum += sample;
+            }
+            gen_core::AudioStem {
+                name: name.unwrap_or("reference").to_owned(),
+                samples: track.samples,
+            }
+        })
+        .collect();
+    gen_core::AudioTrack {
+        samples,
+        sample_rate,
+        channels,
+        stems,
+    }
 }
 
 pub(crate) async fn run_audio_generate_job(
@@ -432,15 +821,28 @@ pub(crate) async fn run_audio_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    run_audio_generate_job_using(api, settings, job, crate::inference_runtime::load_audio).await
+}
+
+/// [`run_audio_generate_job`] with the single-generator lane's loader injected (sc-19384) — the same
+/// seam [`run_audio_synthesis_using`] exposes, lifted to the whole job so a test drives the REAL
+/// preflight → tier/ICL resolution → synthesis → persistence path against a stub [`Generator`] and
+/// asserts what lands in the project (the mix plus every stem the track carries). The voice-clone
+/// chains keep their own production loaders; they are not reachable from a stubbed Single job.
+async fn run_audio_generate_job_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let request = AudioRequest::from_payload(&job.payload);
     audio_preflight(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
     let plan = AudioPlan::new(&request, &project_path);
-    if let Some(parent) = plan.media_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
 
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -477,16 +879,24 @@ pub(crate) async fn run_audio_generate_job(
             AudioSynthesis::VoiceClone(plan)
         }
     } else {
-        let model_dir = resolve_audio_model_dir(settings, &request)?;
+        // A model shipping physical per-tier weights (YuE, sc-19384) loads from its tier subdir and
+        // asserts that tier on the load; every other audio model passes the snapshot through.
+        let (model_dir, tier) =
+            resolve_audio_tier(&request, resolve_audio_model_dir(settings, &request)?)?;
         // Extend/edit SOURCE band (sc-13410): resolve + decode the source track and build the
         // `Conditioning::AudioEdit` here (in async, where the project path + store are in scope), then move
         // it into the blocking synthesis. `None` ⇒ plain text-to-music. The per-model gates (edit mode ∈
         // advertised, region inside the clip, 48 kHz source) run in the generator's `validate` at synthesis.
-        let audio_edit = build_audio_edit(settings, &request, &project_path)?;
-        AudioSynthesis::Single {
+        // The ICL reference (sc-19384) is the other, mutually exclusive, conditioning source.
+        let conditioning = match build_audio_edit(settings, &request, &project_path)? {
+            Some(edit) => Some(edit),
+            None => resolve_icl_reference(api, settings, job, &request, &project_path).await?,
+        };
+        AudioSynthesis::Single(SinglePlan {
             model_dir,
-            audio_edit,
-        }
+            tier,
+            conditioning,
+        })
     };
 
     update_job(
@@ -512,11 +922,12 @@ pub(crate) async fn run_audio_generate_job(
     // Whether this run took the native single-call clone path — threaded into the asset fact so the
     // replay record omits the (unused) base-TTS model that only the conversion chain carries.
     let native_clone = matches!(synthesis, AudioSynthesis::NativeVoiceClone(_));
+    let mut resolved_tier = None;
     let track = match synthesis {
-        AudioSynthesis::Single {
-            model_dir,
-            audio_edit,
-        } => run_audio_synthesis(api, settings, job, &request, model_dir, audio_edit).await?,
+        AudioSynthesis::Single(single) => {
+            resolved_tier = single.tier.as_ref().map(|tier| tier.name.clone());
+            run_audio_synthesis_with(api, settings, job, &request, single, load_generator).await?
+        }
         AudioSynthesis::VoiceClone(plan) => {
             run_voice_clone_synthesis(api, settings, job, &request, plan).await?
         }
@@ -555,7 +966,8 @@ pub(crate) async fn run_audio_generate_job(
     // solver steps came back at peak 0.02 / RMS 0.0002 — inaudible, but not zero), so it slipped
     // through and was registered as a real asset. Gate on RMS instead: -60 dBFS is far below any
     // usable render while still admitting deliberately quiet content, which a peak test cannot
-    // distinguish because one stray sample lifts the peak arbitrarily.
+    // distinguish because one stray sample lifts the peak arbitrarily. Applied to the MIX only: a
+    // source-separated stem may legitimately be near-silent (an instrumental passage's vocal stem).
     const MIN_RMS: f32 = 1e-3; // -60 dBFS
     let rms = if sample_count == 0 {
         0.0
@@ -570,17 +982,67 @@ pub(crate) async fn run_audio_generate_job(
         )));
     }
 
-    let wav = AudioTrack {
-        samples: track.samples,
-        sample_rate,
-        channels,
-    };
-    let media_path = plan.media_path.clone();
-    tokio::task::spawn_blocking(move || write_wav_pcm16(&wav, &media_path))
-        .await
-        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    // Every source-separated stem the model genuinely emitted (YuE: `vocals` + `instrumental`,
+    // sc-19384) is persisted as its own library asset beside the mix. A stem shares the mix's rate
+    // and channel layout (the gen-core `AudioStem` contract); an empty one is refused rather than
+    // registered as a zero-length asset.
+    let stem_plans: Vec<StemPlan> = track
+        .stems
+        .iter()
+        .map(|stem| StemPlan::new(&plan, &stem.name))
+        .collect();
+    for stem in &track.stems {
+        if stem.samples.is_empty() {
+            return Err(WorkerError::Engine(format!(
+                "{}: the audio generator returned an empty `{}` stem.",
+                request.model, stem.name
+            )));
+        }
+    }
+    let mut writes = vec![(
+        plan.media_path.clone(),
+        AudioTrack {
+            samples: track.samples,
+            sample_rate,
+            channels,
+        },
+    )];
+    let mut stem_durations = Vec::with_capacity(stem_plans.len());
+    for (stem, stem_plan) in track.stems.into_iter().zip(&stem_plans) {
+        stem_durations.push(stem.samples.len() as f64 / (sample_rate as f64 * channels as f64));
+        writes.push((
+            stem_plan.media_path.clone(),
+            AudioTrack {
+                samples: stem.samples,
+                sample_rate,
+                channels,
+            },
+        ));
+    }
+    // The generation-set directory is created only now, at the first write — a job that fails or is
+    // canceled before this point leaves nothing behind in the project — and removed again if any
+    // write fails, so a half-written set never lingers.
+    let genset_dir = plan.media_path.parent().map(Path::to_path_buf);
+    let written = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        for (path, wav) in &writes {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            write_wav_pcm16(wav, path)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))
+    .and_then(|result| result);
+    if let Err(error) = written {
+        if let Some(dir) = genset_dir {
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+        return Err(error);
+    }
 
-    let fact = audio_asset_fact(
+    let mut fact = audio_asset_fact(
         &plan,
         &request,
         sample_rate,
@@ -588,7 +1050,25 @@ pub(crate) async fn run_audio_generate_job(
         duration_secs,
         native_clone,
     );
-    let result = audio_streaming_result(&plan, &request, &fact);
+    record_song_settings(&mut fact, &request, resolved_tier.as_deref());
+    let mut facts = Vec::with_capacity(1 + stem_plans.len());
+    if !stem_plans.is_empty() {
+        insert_fact_extra(
+            &mut fact,
+            json!({
+                "audioStem": "mix",
+                "stemAssetIds": stem_plans
+                    .iter()
+                    .map(|stem| json!({ "stem": stem.name, "assetId": stem.asset_id }))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+    for (stem_plan, duration) in stem_plans.iter().zip(stem_durations) {
+        facts.push(stem_asset_fact(&fact, &plan, stem_plan, duration));
+    }
+    facts.insert(0, fact);
+    let result = audio_streaming_result(&plan, &request, facts);
     update_job(
         api,
         &job.id,
@@ -605,34 +1085,179 @@ pub(crate) async fn run_audio_generate_job(
     Ok(())
 }
 
-/// Load the audio generator and run one synthesis on a blocking thread, honoring a mid-synthesis
-/// cancel through the shared [`run_blocking_with_heartbeat`] watcher (sc-13469). Returns the engine
-/// [`AudioTrack`] (`gen_core`'s) for the caller to write + register.
-async fn run_audio_synthesis(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    request: &AudioRequest,
-    model_dir: PathBuf,
-    audio_edit: Option<Conditioning>,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_audio_synthesis_using(
-        api,
-        settings,
-        job,
-        request,
-        model_dir,
-        audio_edit,
-        crate::inference_runtime::load_audio,
-    )
-    .await
+/// One source-separated stem's asset slot beside the mix (sc-19384): its own asset id and a media
+/// path in the mix's generation-set directory, suffixed with the stem name.
+struct StemPlan {
+    name: String,
+    asset_id: String,
+    media_rel: String,
+    media_path: PathBuf,
 }
 
-/// [`run_audio_synthesis`] with the generator loader injected (sc-13469), the audio sibling of
-/// [`crate::video_jobs::generate_video_using`]: with the load threaded in, a test drives the REAL
-/// synthesis path against a stub [`Generator`] and asserts the shared engine [`CancelFlag`] that
-/// reaches [`GenerationRequest::cancel`] is tripped mid-generation (not only by the post-synthesis
-/// `check_cancel` after the whole clip has rendered).
+impl StemPlan {
+    fn new(plan: &AudioPlan, name: &str) -> Self {
+        // The stem name comes from the engine; slugify it before it becomes a path component.
+        let stem_slug = slugify(name, "stem", Some(24));
+        let media_rel = match plan.media_rel.strip_suffix(".wav") {
+            Some(stem) => format!("{stem}_{stem_slug}.wav"),
+            None => format!("{}_{stem_slug}.wav", plan.media_rel),
+        };
+        let media_path = plan
+            .media_path
+            .parent()
+            .map(|parent| {
+                parent.join(
+                    Path::new(&media_rel)
+                        .file_name()
+                        .expect("stem media path has a file name"),
+                )
+            })
+            .unwrap_or_else(|| PathBuf::from(&media_rel));
+        Self {
+            name: name.to_owned(),
+            asset_id: fresh_asset_id(),
+            media_rel,
+            media_path,
+        }
+    }
+}
+
+/// Merge `extra` into the fact's `extra` object — the free-form block the sidecar persists verbatim.
+fn insert_fact_extra(fact: &mut Value, extra: Value) {
+    let Some(object) = fact.as_object_mut() else {
+        return;
+    };
+    let slot = object
+        .entry("extra".to_owned())
+        .or_insert_with(|| json!({}));
+    if let (Some(slot), Some(extra)) = (slot.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            slot.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// A stem's asset fact: the mix's replay record (same recipe, same knobs), re-addressed to the stem's
+/// own asset id + WAV, named for the stem, with the mix as its lineage parent.
+fn stem_asset_fact(mix: &Value, plan: &AudioPlan, stem: &StemPlan, duration_secs: f64) -> Value {
+    let mut fact = mix.clone();
+    let display = mix
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("Generated audio");
+    if let Some(object) = fact.as_object_mut() {
+        object.insert("assetId".to_owned(), json!(stem.asset_id));
+        object.insert("mediaPath".to_owned(), json!(stem.media_rel));
+        object.insert("duration".to_owned(), json!(duration_secs));
+        object.insert(
+            "displayName".to_owned(),
+            json!(format!("{display} ({})", stem.name)),
+        );
+        object.insert("parents".to_owned(), json!([plan.asset_id]));
+        object.insert(
+            "extra".to_owned(),
+            json!({ "audioStem": stem.name, "mixAssetId": plan.asset_id }),
+        );
+    }
+    fact
+}
+
+/// Record the segmented-song / ICL / tier knobs (sc-19384) in the asset's replay record, so a
+/// re-generate reconstructs the exact request. Written into `rawAdapterSettings` (persisted verbatim)
+/// after the fact is built — the base `json!` literal is already at the macro recursion limit.
+fn record_song_settings(fact: &mut Value, request: &AudioRequest, tier: Option<&str>) {
+    let settings = json!({
+        "segments": request.segments,
+        "maxNewTokensPerSegment": request.max_new_tokens_per_segment,
+        "repetitionPenalty": request.repetition_penalty,
+        "guidanceEnabled": request.guidance_enabled,
+        "iclMode": request.icl_mode,
+        "iclReferenceAssetId": request.icl_reference_asset_id,
+        "iclVocalAssetId": request.icl_vocal_asset_id,
+        "iclInstrumentalAssetId": request.icl_instrumental_asset_id,
+        "iclStartSecs": request.icl_start_secs,
+        "iclEndSecs": request.icl_end_secs,
+        "quantTier": tier,
+        "outputLimiter": request.output_limiter,
+    });
+    if let Some(raw) = fact
+        .get_mut("rawAdapterSettings")
+        .and_then(Value::as_object_mut)
+    {
+        for (key, value) in settings.as_object().expect("json! object literal") {
+            raw.insert(key.clone(), value.clone());
+        }
+    }
+    // The ICL reference clips are this render's lineage parents.
+    let parents: Vec<&str> = [
+        &request.icl_reference_asset_id,
+        &request.icl_vocal_asset_id,
+        &request.icl_instrumental_asset_id,
+    ]
+    .into_iter()
+    .filter_map(|id| id.as_deref())
+    .collect();
+    if !parents.is_empty() {
+        if let Some(object) = fact.as_object_mut() {
+            object.insert("parents".to_owned(), json!(parents));
+        }
+    }
+}
+
+/// A resolved single-generator job: the weights dir, the resolved tier (tiered models only), and the
+/// one conditioning the request carries (an extend/edit source OR an ICL reference).
+struct SinglePlan {
+    model_dir: PathBuf,
+    tier: Option<AudioTier>,
+    conditioning: Option<Conditioning>,
+}
+
+/// What the synthesis thread reports to the async progress pump: a streamed chunk count
+/// (sc-13675) or an engine [`Progress`] event (sc-19384 — YuE's per-segment / per-stage progress).
+enum SynthesisEvent {
+    Chunk(usize),
+    Engine(Progress),
+}
+
+/// Map an engine [`Progress`] event onto a Running job update inside the (Generating 0.2 → Saving
+/// 0.9) band: `Step { current, total }` advances the fraction proportionally (YuE reports one step
+/// per lyric segment and one per stage-2 track), `Loading` names the stage being loaded, and
+/// `Decoding` marks the codec/vocoder pass. `None` for a degenerate `total == 0` step.
+fn engine_progress_update(
+    progress: Progress,
+    last_fraction: f64,
+) -> Option<(ProgressStage, f64, String)> {
+    match progress {
+        Progress::Step { current, total } => {
+            if total == 0 {
+                return None;
+            }
+            let done = f64::from(current.min(total)) / f64::from(total);
+            Some((
+                ProgressStage::Generating,
+                0.2 + 0.65 * done,
+                format!("Generating audio ({current}/{total})."),
+            ))
+        }
+        Progress::Loading(phase) => Some((
+            ProgressStage::LoadingModel,
+            last_fraction,
+            match phase {
+                gen_core::LoadPhase::TextEncoder => "Loading the text encoder.".to_owned(),
+                gen_core::LoadPhase::Renderer => "Loading model weights.".to_owned(),
+            },
+        )),
+        Progress::Decoding => Some((
+            ProgressStage::Generating,
+            last_fraction.max(0.85),
+            "Decoding audio.".to_owned(),
+        )),
+    }
+}
+
+/// [`run_audio_synthesis_with`] for an untiered model with at most an extend/edit conditioning — the
+/// pre-sc-19384 seam the cancel/streaming/component tests drive.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_audio_synthesis_using(
     api: &ApiClient,
@@ -645,6 +1270,43 @@ async fn run_audio_synthesis_using(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_audio_synthesis_with(
+        api,
+        settings,
+        job,
+        request,
+        SinglePlan {
+            model_dir,
+            tier: None,
+            conditioning: audio_edit,
+        },
+        load_generator,
+    )
+    .await
+}
+
+/// Load the audio generator and run one synthesis on a blocking thread, honoring a mid-synthesis
+/// cancel through the shared [`run_blocking_with_heartbeat`] watcher (sc-13469), with the generator
+/// loader injected — the audio sibling of [`crate::video_jobs::generate_video_using`]: with the load
+/// threaded in, a test drives the REAL synthesis path against a stub [`Generator`] and asserts the
+/// shared engine [`CancelFlag`] that reaches [`GenerationRequest::cancel`] is tripped mid-generation
+/// (not only by the post-synthesis `check_cancel` after the whole clip has rendered). Returns the
+/// engine [`AudioTrack`] (`gen_core`'s, stems included) for the caller to write + register.
+async fn run_audio_synthesis_with(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    single: SinglePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<gen_core::AudioTrack> {
+    let SinglePlan {
+        model_dir,
+        tier,
+        conditioning,
+    } = single;
     let model_id = request.model.clone();
     let prompt = request.prompt.clone();
     let voice = request.voice.clone();
@@ -659,8 +1321,9 @@ async fn run_audio_synthesis_using(
     // top-level GenerationRequest — the flow-matching pipeline reads `req.guidance` (CFG scale) and
     // `req.steps`, not `AudioParams`. `None` ⇒ the generator's own sampler default; the shared
     // gen-core floor range-checks any value we pass. A TTS model (Kokoro) ignores them entirely, so
-    // Speech jobs — which never carry them — are unaffected.
-    let guidance = request.guidance;
+    // Speech jobs — which never carry them — are unaffected. Guidance switched OFF (sc-19384) rides
+    // as `0.0`, which a segmented-song model reads as "no CFG".
+    let guidance = request.effective_guidance();
     let steps = request.steps;
     // Music describe-the-music sub-block (ACE-Step, sc-13410). BPM/key/lyrics ride the AudioParams
     // music fields; negative_prompt rides the top-level request. A model that doesn't consume one
@@ -670,6 +1333,17 @@ async fn run_audio_synthesis_using(
     let bpm = request.bpm;
     let musical_key = request.musical_key.clone();
     let lyrics = request.lyrics.clone();
+    // Segmented-song controls (YuE, sc-19384): each is `None` unless the request set it, and the
+    // gen-core floor refuses one sent to a model that does not advertise reading it.
+    let segments = request.segments;
+    let max_new_tokens_per_segment = request.max_new_tokens_per_segment;
+    let repetition_penalty = request.repetition_penalty;
+    let reference_region = request.reference_region();
+    let output_limiter = request
+        .output_limiter
+        .as_deref()
+        .map(output_limiter)
+        .transpose()?;
     let seed = request.seed.map(|seed| seed as u64);
     // sc-13469: ONE shared engine CancelFlag — cloned into the request the blocking synthesis runs
     // AND handed to `run_blocking_with_heartbeat`, whose watcher polls the API cancel state (and a
@@ -677,25 +1351,30 @@ async fn run_audio_synthesis_using(
     // that was never tripped, so a user cancel is honored DURING the clip render — not only by the
     // post-synthesis `check_cancel` after the whole clip has already rendered.
     let cancel = CancelFlag::new();
-    // Incremental streaming progress (sc-13675). A streaming-capable Generator drives
-    // `generate_streaming` and emits an `AudioChunk` per PCM block as the AR loop decodes it; `on_chunk`
-    // forwards the running chunk count over this channel and the concurrent async pump below posts a
-    // job update as each chunk arrives, so the Audio Studio's WorkerProgressCard advances THROUGH the
-    // stream instead of sitting flat until the whole clip renders. A non-streaming model takes the
-    // one-shot `generate` path and emits nothing here, so every existing audio mode is byte-for-byte
-    // unperturbed. The reassembled chunks equal the returned one-shot track (the gen-core reassembly
-    // law), so the library asset is still the full `AudioTrack` the caller writes.
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    // Incremental progress (sc-13675 streaming chunks; sc-19384 engine Progress events). A
+    // streaming-capable Generator drives `generate_streaming` and emits an `AudioChunk` per PCM block
+    // as the AR loop decodes it; any generator may report `Progress` (YuE: one `Step` per lyric
+    // segment and per stage-2 track, `Loading` per LM stage, `Decoding` before the codec/vocoder).
+    // Both are forwarded over this channel and the concurrent async pump below posts a job update per
+    // event, so the Audio Studio's WorkerProgressCard advances THROUGH the render instead of sitting
+    // flat until the whole clip is done. The reassembled chunks equal the returned one-shot track
+    // (the gen-core reassembly law), so the library asset is still the full `AudioTrack`.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<SynthesisEvent>();
     // Named model components (epic 13657, sc-13679): resolve every coRequisite-provisioned component
-    // this model's descriptor advertises (`chatterbox_tts` → `perth` + `voice_embedding`; every other
-    // audio model advertises none → an empty map, a no-op) BEFORE the blocking load, so a missing
-    // co-requisite fails the JOB here with an actionable error rather than a mid-render hub fetch. The
-    // resolved paths are staged in `LoadSpec::components` for the generator's load-time
-    // `require_component` gate. Weights-free registry read; no-op when this build ships no audio lane.
+    // this model's descriptor advertises (`chatterbox_tts` → `perth` + `voice_embedding`; YuE →
+    // `stage2` + `xcodec`; most audio models advertise none → an empty map, a no-op) BEFORE the
+    // blocking load, so a missing co-requisite fails the JOB here with an actionable error rather
+    // than a mid-render hub fetch. A per-tier component (YuE's `stage2`, sc-19384) resolves to the
+    // SAME tier as the primary weights. The resolved paths are staged in `LoadSpec::components` for
+    // the generator's load-time `require_component` gate. Weights-free registry read; no-op when this
+    // build ships no audio lane.
     let mut components = match crate::inference_runtime::audio_descriptor(&model_id) {
-        Some(descriptor) => {
-            resolve_co_requisites(&descriptor, &request.model_manifest_entry, settings)?
-        }
+        Some(descriptor) => crate::model_jobs::resolve_co_requisites_for_tier(
+            &descriptor,
+            &request.model_manifest_entry,
+            settings,
+            tier.as_ref().map(|tier| tier.name.as_str()),
+        )?,
         None => BTreeMap::new(),
     };
     // Optional, on-demand Cover component (sc-13821): acestep's ~8.76 GB `sft_cover` snapshot — the
@@ -717,14 +1396,20 @@ async fn run_audio_synthesis_using(
             components.insert("sft_cover".to_string(), source);
         }
     }
+    let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
         let cancel = cancel.clone();
-        let chunk_tx = chunk_tx.clone();
+        let event_tx = event_tx.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
-            let spec = components.into_iter().fold(
+            let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
             );
+            // A tiered model asserts the resolved tier on the load (YuE: Q8 / Q4; bf16 is the
+            // unquantized load and asserts nothing).
+            if let Some(quant) = quantize {
+                spec = spec.with_quant(quant);
+            }
             let generator = load_generator(&model_id, &spec)
                 .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
             let req = GenerationRequest {
@@ -741,28 +1426,35 @@ async fn run_audio_synthesis_using(
                     musical_key,
                     lyrics,
                     script,
+                    segments,
+                    max_new_tokens_per_segment,
+                    repetition_penalty,
+                    reference_region,
+                    output_limiter,
                     ..Default::default()
                 }),
-                // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band
-                // was supplied; empty for plain text-to-music.
-                conditioning: audio_edit.into_iter().collect(),
+                // The request's one conditioning: an extend/edit source band
+                // (Conditioning::AudioEdit) or an ICL reference (Conditioning::ReferenceAudio);
+                // empty for plain generation.
+                conditioning: conditioning.into_iter().collect(),
                 // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
                 cancel,
                 ..Default::default()
             };
-            // The Audio Studio progress is driven around this call (Preparing → Generating → Saving);
-            // the per-stage engine callback is a no-op here — the shared keepalive watcher is what
-            // keeps the job alive during synthesis, so the engine progress doesn't need forwarding.
-            let mut on_progress = |_progress: Progress| {};
+            // Engine progress rides the same channel as streamed chunks (sc-19384). A closed channel
+            // (pump already gone) is fine — synthesis must never depend on the progress sink.
+            let progress_tx = event_tx.clone();
+            let mut on_progress = move |progress: Progress| {
+                let _ = progress_tx.send(SynthesisEvent::Engine(progress));
+            };
             // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
             // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
             // aggregate `GenerationOutput` as `generate`, so the written asset is identical either way.
             let output = if generator.descriptor().capabilities.supports_streaming {
                 let mut on_chunk = |chunk: gen_core::AudioChunk| {
-                    // The 1-based running chunk count. A closed channel (pump already gone) is fine —
-                    // synthesis must never depend on the progress sink.
-                    let _ = chunk_tx.send(chunk.index.saturating_add(1));
+                    // The 1-based running chunk count.
+                    let _ = event_tx.send(SynthesisEvent::Chunk(chunk.index.saturating_add(1)));
                 };
                 generator.generate_streaming(&req, &mut on_chunk, &mut on_progress)
             } else {
@@ -786,17 +1478,17 @@ async fn run_audio_synthesis_using(
         })
     };
     // Drop our extra sender so the channel closes the instant synthesis finishes (the blocking task's
-    // clone drops), letting the pump terminate cleanly on `recv() == None`.
-    drop(chunk_tx);
-    // Concurrent incremental-progress pump (sc-13675): posts a Running/Generating job update as each
-    // streamed chunk arrives so the UI reflects the stream. It runs ALONGSIDE
-    // `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a DIFFERENT
-    // endpoint). The cancel check stops new attempts once the shared flag is observed, but cancellation
-    // can still serialize while an already-started progress POST is awaiting the API. That race is safe
-    // because jobs_store transactionally rejects any nonterminal write after `Canceled`; the resulting
-    // 409 is deliberately ignored here because synthesis must not depend on its progress sink. The pump
-    // ends when synthesis closes the channel. Non-streaming synthesis never sends, so it exits
-    // immediately with zero posts, leaving those modes untouched.
+    // clones drop), letting the pump terminate cleanly on `recv() == None`.
+    drop(event_tx);
+    // Concurrent incremental-progress pump (sc-13675 / sc-19384): posts a Running job update as each
+    // streamed chunk or engine progress event arrives so the UI reflects the render. It runs
+    // ALONGSIDE `run_blocking_with_heartbeat` (which owns worker heartbeats + the cancel watcher on a
+    // DIFFERENT endpoint). The cancel check stops new attempts once the shared flag is observed, but
+    // cancellation can still serialize while an already-started progress POST is awaiting the API.
+    // That race is safe because jobs_store transactionally rejects any nonterminal write after
+    // `Canceled`; the resulting 409 is deliberately ignored here because synthesis must not depend on
+    // its progress sink. The pump ends when synthesis closes the channel. A generator that reports
+    // nothing never sends, so the pump exits immediately with zero posts.
     let pump = {
         let api = api.clone();
         let job_id = job.id.clone();
@@ -804,25 +1496,42 @@ async fn run_audio_synthesis_using(
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let mut count = 0usize;
-            while let Some(latest) = chunk_rx.recv().await {
+            let mut fraction = 0.2f64;
+            while let Some(event) = event_rx.recv().await {
                 if cancel.is_cancelled() {
                     break;
                 }
-                count = count.max(latest);
-                // Asymptotic fraction inside the (Generating 0.2 → Saving 0.9) band: the total chunk
-                // count is unknown ahead of time (the AR loop decides its own length via EOS), so
-                // approach but never reach 0.9 rather than claim a false denominator.
-                let fraction = 0.25 + 0.6 * (count as f64 / (count as f64 + 6.0));
-                let message = format!(
-                    "Streaming audio… ({count} chunk{})",
-                    if count == 1 { "" } else { "s" }
-                );
+                let (stage, message) = match event {
+                    SynthesisEvent::Chunk(latest) => {
+                        count = count.max(latest);
+                        // Asymptotic fraction inside the (Generating 0.2 → Saving 0.9) band: the total
+                        // chunk count is unknown ahead of time (the AR loop decides its own length via
+                        // EOS), so approach but never reach 0.9 rather than claim a false denominator.
+                        fraction = 0.25 + 0.6 * (count as f64 / (count as f64 + 6.0));
+                        (
+                            ProgressStage::Generating,
+                            format!(
+                                "Streaming audio… ({count} chunk{})",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                        )
+                    }
+                    SynthesisEvent::Engine(progress) => {
+                        match engine_progress_update(progress, fraction) {
+                            Some((stage, next, message)) => {
+                                fraction = next;
+                                (stage, message)
+                            }
+                            None => continue,
+                        }
+                    }
+                };
                 let _ = update_job(
                     &api,
                     &job_id,
                     audio_progress(
                         JobStatus::Running,
-                        ProgressStage::Generating,
+                        stage,
                         fraction,
                         &message,
                         None,
@@ -860,10 +1569,7 @@ async fn run_audio_synthesis_using(
 /// or the two-call voice-clone chain (sc-13411 C4). Resolved before the job is marked Running so a
 /// missing install / reference surfaces as a clear preflight error.
 enum AudioSynthesis {
-    Single {
-        model_dir: PathBuf,
-        audio_edit: Option<Conditioning>,
-    },
+    Single(SinglePlan),
     VoiceClone(VoiceClonePlan),
     /// Native cloned-voice TTS (sc-13412): a single-generator clone from the script + reference,
     /// chosen when the selected clone model is a Generator advertising `ReferenceAudio` conditioning
@@ -1495,21 +2201,32 @@ fn audio_asset_fact(
 
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet` fact — the audio
 /// twin of `streaming_result`. An audio job always reports exactly one asset (`expectedCount` 1).
-fn audio_streaming_result(plan: &AudioPlan, request: &AudioRequest, fact: &Value) -> JsonObject {
+fn audio_streaming_result(
+    plan: &AudioPlan,
+    request: &AudioRequest,
+    facts: Vec<Value>,
+) -> JsonObject {
+    // One asset per written WAV: the mix, then each source-separated stem (sc-19384).
+    let count = facts.len();
+    let adapter = facts
+        .first()
+        .and_then(|fact| fact.get("adapter"))
+        .cloned()
+        .unwrap_or(Value::Null);
     json!({
         "generationSetId": plan.genset_id,
-        "expectedCount": 1,
-        "adapter": fact.get("adapter").cloned().unwrap_or(Value::Null),
+        "expectedCount": count,
+        "adapter": adapter,
         "model": request.model,
         "generationSet": {
             "id": plan.genset_id,
             "mode": request.mode(),
             "model": request.model,
             "prompt": request.prompt,
-            "count": 1,
+            "count": count,
             "createdAt": plan.created_at,
         },
-        "assetWrites": [fact],
+        "assetWrites": facts,
     })
     .as_object()
     .cloned()
@@ -1774,7 +2491,7 @@ mod tests {
             .as_str()
             .is_some_and(|path| path.starts_with("assets/audios/") && path.ends_with(".wav")));
         // The streaming result wraps the fact as the sole assetWrite.
-        let result = audio_streaming_result(&plan, &request, &fact);
+        let result = audio_streaming_result(&plan, &request, vec![fact.clone()]);
         assert_eq!(result["expectedCount"], 1);
         assert_eq!(result["assetWrites"].as_array().map(Vec::len), Some(1));
         assert_eq!(result["assetWrites"][0]["type"], "audio");
@@ -2070,7 +2787,7 @@ mod tests {
         assert_eq!(fact["rawAdapterSettings"]["baseModel"], "kokoro_82m");
         assert_eq!(fact["rawAdapterSettings"]["matchStrength"], 0.5);
         // The streaming set carries the voice_clone mode too.
-        let result = audio_streaming_result(&plan, &request, &fact);
+        let result = audio_streaming_result(&plan, &request, vec![fact.clone()]);
         assert_eq!(result["generationSet"]["mode"], "voice_clone");
 
         // A non-voice-clone run leaves the voice-clone fields null and baseModel null (not "kokoro_82m").
@@ -4147,6 +4864,790 @@ mod tests {
             "DoD evidence: {}\nWAV: {}\nself={self_cosine:.4} cross={cross_cosine:.4}",
             evidence_path.display(),
             wav_path.display()
+        );
+    }
+}
+
+/// The YuE job surface (sc-19384): the full R5 control set reaches the engine request, a completed
+/// job persists the mix plus both stems, engine progress maps onto job events, and a mid-job cancel
+/// leaves no generation-set directory or ICL scratch behind. Every test drives the REAL job path
+/// through the injected-loader seam (`run_audio_generate_job_using` / `run_audio_synthesis_with`)
+/// against a stub [`Generator`] — never a replica of an engine loader.
+#[cfg(test)]
+mod yue_job_surface_tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use axum::{
+        extract::{Path as AxumPath, State},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+        Json, Router,
+    };
+
+    /// A model id no audio registry knows, so `audio_descriptor` is `None` and the test stages no
+    /// co-requisites — the loaded generator is the stub whatever inference pin is linked.
+    const STUB_MODEL: &str = "yue_stub_song";
+    const STUB_REPO: &str = "SceneWorks/yue-stub-song-candle";
+    const STUB_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+    const LYRICS: &str = "[verse]\nwalking down the empty street\n[chorus]\nsing it loud";
+
+    fn tiered_entry() -> Value {
+        json!({
+            "id": STUB_MODEL,
+            "family": "yue",
+            "type": "audio",
+            "audio": { "supportsSegmentedLyrics": true, "supportsRepetitionPenalty": true,
+                       "supportsReferenceRegion": true, "conditioning": ["ReferenceAudio"] },
+            "downloads": [
+                { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
+                  "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
+                  "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
+                  "variant": "bf16", "files": ["bf16/*"] }
+            ],
+        })
+    }
+
+    fn full_payload(project_id: &str) -> Value {
+        json!({
+            "projectId": project_id,
+            "model": STUB_MODEL,
+            "prompt": "uplifting pop female vocal airy",
+            "lyrics": LYRICS,
+            "segments": 3,
+            "maxNewTokensPerSegment": 1500,
+            "repetitionPenalty": 1.25,
+            "seed": 11,
+            "guidanceEnabled": true,
+            "guidance": 1.5,
+            "outputLimiter": "Rescale",
+            "modelManifestEntry": tiered_entry(),
+        })
+    }
+
+    fn job_snapshot(job_id: &str, payload: Value) -> JobSnapshot {
+        serde_json::from_value(job_value(job_id, payload, false))
+            .expect("audio job snapshot deserializes")
+    }
+
+    fn job_value(job_id: &str, payload: Value, cancel: bool) -> Value {
+        json!({
+            "id": job_id, "type": "audio_generate", "status": "running",
+            "projectId": null, "projectName": null, "payload": payload, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.0, "stage": "queued", "message": "queued", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": cancel,
+            "createdAt": "2026-09-24T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    #[derive(Clone)]
+    struct StubApi {
+        /// Reported as the job's `cancelRequested` — flipped mid-job by a test.
+        cancel: Arc<AtomicBool>,
+        progress: Arc<Mutex<Vec<Value>>>,
+    }
+
+    fn job_json(job_id: &str, cancel: bool) -> Value {
+        job_value(job_id, json!({}), cancel)
+    }
+
+    /// An API stub answering the job GET (cancel state), progress POST (recorded) and worker
+    /// heartbeat routes the audio job path calls.
+    async fn spawn_stub_api() -> (String, StubApi) {
+        async fn job_route(
+            State(state): State<StubApi>,
+            AxumPath(job_id): AxumPath<String>,
+        ) -> Response {
+            Json(job_json(&job_id, state.cancel.load(Ordering::SeqCst))).into_response()
+        }
+        async fn progress_route(
+            State(state): State<StubApi>,
+            AxumPath(job_id): AxumPath<String>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            state.progress.lock().expect("progress lock").push(body);
+            Json(job_json(&job_id, state.cancel.load(Ordering::SeqCst))).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            Json(json!({})).into_response()
+        }
+        let state = StubApi {
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        (format!("http://{address}"), state)
+    }
+
+    /// Settings over an isolated data dir holding a project and the stub model's staged snapshot
+    /// (`q4/` and `q8/` installed, `bf16/` not). The env guard + tempdir must outlive the test.
+    struct Staged {
+        _env: crate::test_env::EnvVars,
+        _data_dir: tempfile::TempDir,
+        settings: Settings,
+        project_id: String,
+        project_path: PathBuf,
+        snapshot: PathBuf,
+    }
+
+    fn stage(base_url: String) -> Staged {
+        let env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let snapshot =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), STUB_REPO)
+                .expect("repo cache path resolves")
+                .join("snapshots")
+                .join(STUB_REVISION);
+        for tier in ["q4", "q8"] {
+            std::fs::create_dir_all(snapshot.join(tier)).expect("tier dir");
+            std::fs::write(snapshot.join(tier).join("model.safetensors"), b"weights")
+                .expect("tier weights");
+        }
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        settings.heartbeat_seconds = 5;
+        settings.data_dir = data_dir.path().to_path_buf();
+        let project = ProjectStore::new(settings.data_dir.clone(), "worker")
+            .create_project("Song Project")
+            .expect("project creates");
+        Staged {
+            _env: env,
+            _data_dir: data_dir,
+            settings,
+            project_id: project.id,
+            project_path: PathBuf::from(project.path),
+            snapshot,
+        }
+    }
+
+    /// What the stub generator saw: the request fields the job built and the load it was handed.
+    #[derive(Default)]
+    struct Seen {
+        weights: Option<PathBuf>,
+        quantize: Option<gen_core::Quant>,
+        audio: Option<AudioParams>,
+        prompt: String,
+        seed: Option<u64>,
+        guidance: Option<f32>,
+        conditioning: Vec<Conditioning>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        /// Emit YuE-shaped progress, then return a mix + `vocals` + `instrumental`.
+        Song,
+        /// Flag `started`, then block until the request's cancel flag trips.
+        WaitForCancel,
+    }
+
+    struct StubSong {
+        descriptor: gen_core::ModelDescriptor,
+        behavior: Behavior,
+        seen: Arc<Mutex<Seen>>,
+        started: Arc<AtomicBool>,
+    }
+
+    fn tone(len: usize, freq: f32, amp: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| (i as f32 * freq * 0.001).sin() * amp)
+            .collect()
+    }
+
+    impl gen_core::Generator for StubSong {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            {
+                let mut seen = self.seen.lock().expect("seen lock");
+                seen.audio = req.audio.clone();
+                seen.prompt = req.prompt.clone();
+                seen.seed = req.seed;
+                seen.guidance = req.guidance;
+                seen.conditioning = req.conditioning.clone();
+            }
+            match self.behavior {
+                Behavior::Song => {
+                    // The YuE provider's progress contract: Loading per LM, one Step per lyric
+                    // segment and per stage-2 track (total = segments + 2), one Decoding.
+                    on_progress(Progress::Loading(gen_core::LoadPhase::Renderer));
+                    for current in 1..=2 {
+                        on_progress(Progress::Step { current, total: 4 });
+                    }
+                    on_progress(Progress::Loading(gen_core::LoadPhase::Renderer));
+                    for current in 3..=4 {
+                        on_progress(Progress::Step { current, total: 4 });
+                    }
+                    on_progress(Progress::Decoding);
+                    let len = 4_410;
+                    let vocals = tone(len, 440.0, 0.3);
+                    let instrumental = tone(len, 110.0, 0.3);
+                    let mix = vocals
+                        .iter()
+                        .zip(&instrumental)
+                        .map(|(a, b)| a + b)
+                        .collect();
+                    Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                        samples: mix,
+                        sample_rate: 44_100,
+                        channels: 1,
+                        stems: vec![
+                            gen_core::AudioStem {
+                                name: "vocals".to_owned(),
+                                samples: vocals,
+                            },
+                            gen_core::AudioStem {
+                                name: "instrumental".to_owned(),
+                                samples: instrumental,
+                            },
+                        ],
+                    }))
+                }
+                Behavior::WaitForCancel => {
+                    self.started.store(true, Ordering::SeqCst);
+                    let start = Instant::now();
+                    while !req.cancel.is_cancelled() {
+                        if start.elapsed() > Duration::from_secs(30) {
+                            return Err(gen_core::Error::Msg("cancel never tripped".to_owned()));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(gen_core::Error::Canceled)
+                }
+            }
+        }
+    }
+
+    fn stub_loader(
+        behavior: Behavior,
+        seen: Arc<Mutex<Seen>>,
+        started: Arc<AtomicBool>,
+    ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static {
+        move |_id: &str, spec: &LoadSpec| {
+            {
+                let mut record = seen.lock().expect("seen lock");
+                record.weights = match &spec.weights {
+                    WeightsSource::Dir(dir) | WeightsSource::File(dir) => Some(dir.clone()),
+                };
+                record.quantize = spec.quantize;
+            }
+            Ok(Box::new(StubSong {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "yue_stub_song",
+                    family: "yue",
+                    backend: "candle",
+                    modality: gen_core::Modality::Audio,
+                    capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                behavior,
+                seen,
+                started,
+            }) as Box<dyn Generator>)
+        }
+    }
+
+    #[test]
+    fn from_payload_reads_the_full_yue_control_set() {
+        let mut payload = full_payload("project-1");
+        payload["iclMode"] = json!("Dual");
+        payload["iclVocalAssetId"] = json!("asset_v");
+        payload["iclInstrumentalAssetId"] = json!("asset_i");
+        payload["iclStartSecs"] = json!(5.0);
+        payload["iclEndSecs"] = json!(25.0);
+        payload["quantTier"] = json!("Q8");
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        assert_eq!(request.lyrics.as_deref(), Some(LYRICS));
+        assert_eq!(request.segments, Some(3));
+        assert_eq!(request.max_new_tokens_per_segment, Some(1500));
+        assert_eq!(request.repetition_penalty, Some(1.25));
+        assert_eq!(request.seed, Some(11));
+        assert_eq!(request.guidance_enabled, Some(true));
+        assert_eq!(request.effective_guidance(), Some(1.5));
+        assert_eq!(request.icl_mode.as_deref(), Some("dual"));
+        assert_eq!(request.quant_tier.as_deref(), Some("q8"));
+        assert_eq!(request.output_limiter.as_deref(), Some("rescale"));
+        assert_eq!(
+            request.reference_region(),
+            Some(TimeRegion {
+                start_secs: 5.0,
+                end_secs: Some(25.0)
+            })
+        );
+        assert_eq!(
+            request.icl_references().expect("dual resolves"),
+            vec![
+                (Some("vocals"), "asset_v"),
+                (Some("instrumental"), "asset_i")
+            ]
+        );
+
+        // Guidance OFF rides as a 0.0 scale (YuE reads 0..=1 as CFG off).
+        let mut off = full_payload("project-1");
+        off["guidanceEnabled"] = json!(false);
+        off.as_object_mut().expect("object").remove("guidance");
+        let off = AudioRequest::from_payload(off.as_object().expect("object"));
+        assert_eq!(off.effective_guidance(), Some(0.0));
+        // No window ⇒ the model's default window; an open end ⇒ to the clip end.
+        assert_eq!(off.reference_region(), None);
+
+        // Malformed ICL pairings are refused worker-side too (a raw-enqueued job).
+        for (extra, needle) in [
+            (
+                json!({ "iclMode": "single" }),
+                "requires iclReferenceAssetId",
+            ),
+            (
+                json!({ "iclMode": "dual", "iclVocalAssetId": "v" }),
+                "requires iclInstrumentalAssetId",
+            ),
+            (
+                json!({ "iclMode": "single", "iclReferenceAssetId": "a", "iclVocalAssetId": "v" }),
+                "does not apply",
+            ),
+            (json!({ "iclReferenceAssetId": "a" }), "need an iclMode"),
+            (json!({ "iclMode": "triple" }), "must be"),
+            (
+                json!({ "outputLimiter": "normalize" }),
+                "outputLimiter must be",
+            ),
+        ] {
+            let mut payload = full_payload("project-1");
+            for (key, value) in extra.as_object().expect("object") {
+                payload[key] = value.clone();
+            }
+            let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+            let error = audio_preflight(&request).expect_err(needle);
+            assert!(error.to_string().contains(needle), "{needle}: {error}");
+        }
+    }
+
+    #[test]
+    fn tier_resolution_honors_the_request_then_the_default_then_what_is_installed() {
+        let root = tempfile::tempdir().expect("snapshot root");
+        std::fs::create_dir_all(root.path().join("q8")).expect("q8");
+        let request = |tier: Option<&str>, entry: Value| {
+            let mut payload = full_payload("p");
+            payload["modelManifestEntry"] = entry;
+            if let Some(tier) = tier {
+                payload["quantTier"] = json!(tier);
+            }
+            AudioRequest::from_payload(payload.as_object().expect("object"))
+        };
+        let root_path = root.path().to_path_buf();
+
+        // Explicit, installed: that tier's subdir, asserted on the load.
+        let (dir, tier) =
+            resolve_audio_tier(&request(Some("q8"), tiered_entry()), root_path.clone())
+                .expect("q8 resolves");
+        assert_eq!(dir, root_path.join("q8"));
+        assert_eq!(
+            tier,
+            Some(AudioTier {
+                name: "q8".to_owned(),
+                quantize: Some(gen_core::Quant::Q8)
+            })
+        );
+        // Explicit, NOT installed: a clear refusal, never a silent substitute.
+        let error = resolve_audio_tier(&request(Some("q4"), tiered_entry()), root_path.clone())
+            .expect_err("q4 is not installed");
+        assert!(
+            error.to_string().contains("q4 tier is not installed"),
+            "{error}"
+        );
+        // Unrequested: the default (q4) is not installed, so the first installed tier (q8) loads.
+        let (dir, _) = resolve_audio_tier(&request(None, tiered_entry()), root_path.clone())
+            .expect("an installed tier resolves");
+        assert_eq!(dir, root_path.join("q8"));
+        // ...and the default wins once it is installed; bf16 asserts nothing on the load.
+        std::fs::create_dir_all(root.path().join("q4")).expect("q4");
+        std::fs::create_dir_all(root.path().join("bf16")).expect("bf16");
+        let (dir, tier) = resolve_audio_tier(&request(None, tiered_entry()), root_path.clone())
+            .expect("default resolves");
+        assert_eq!(dir, root_path.join("q4"));
+        assert_eq!(tier.map(|t| t.quantize), Some(Some(gen_core::Quant::Q4)));
+        let (_, tier) =
+            resolve_audio_tier(&request(Some("bf16"), tiered_entry()), root_path.clone())
+                .expect("bf16 resolves");
+        assert_eq!(tier.map(|t| t.quantize), Some(None));
+
+        // An untiered model passes the snapshot through untouched — and refuses a tier request.
+        let untiered =
+            json!({ "id": "kokoro_82m", "downloads": [{ "repo": "hexgrad/Kokoro-82M" }] });
+        let (dir, tier) = resolve_audio_tier(&request(None, untiered.clone()), root_path.clone())
+            .expect("untiered passes through");
+        assert_eq!((dir, tier), (root_path.clone(), None));
+        assert!(resolve_audio_tier(&request(Some("q4"), untiered), root_path).is_err());
+    }
+
+    /// AC1: every R5 knob the job carries reaches the engine request / load — lyrics, genre tags,
+    /// segments, per-segment budget, repetition penalty, seed, guidance scale, the ICL reference
+    /// (dual-track: vocals + instrumental stems) and its window, and the tier (weights dir + quant).
+    #[tokio::test]
+    async fn synthesis_carries_every_yue_knob_to_the_engine() {
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        settings.heartbeat_seconds = 5;
+        let api = ApiClient::new(&settings);
+        let mut payload = full_payload("project-1");
+        payload["iclMode"] = json!("dual");
+        payload["iclVocalAssetId"] = json!("asset_v");
+        payload["iclInstrumentalAssetId"] = json!("asset_i");
+        payload["iclStartSecs"] = json!(5.0);
+        payload["iclEndSecs"] = json!(25.0);
+        let job = job_snapshot("yue-knobs", payload.clone());
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        let clip = |value: f32| gen_core::AudioTrack {
+            samples: vec![value; 1_600],
+            sample_rate: ICL_REFERENCE_SAMPLE_RATE,
+            channels: ICL_REFERENCE_CHANNELS,
+            stems: Vec::new(),
+        };
+        let reference = assemble_icl_track(vec![
+            (Some("vocals"), clip(0.25)),
+            (Some("instrumental"), clip(-0.5)),
+        ]);
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let track = run_audio_synthesis_with(
+            &api,
+            &settings,
+            &job,
+            &request,
+            SinglePlan {
+                model_dir: PathBuf::from("/staged/yue/q8"),
+                tier: Some(AudioTier {
+                    name: "q8".to_owned(),
+                    quantize: Some(gen_core::Quant::Q8),
+                }),
+                conditioning: Some(Conditioning::ReferenceAudio {
+                    audio: reference,
+                    strength: None,
+                }),
+            },
+            stub_loader(
+                Behavior::Song,
+                seen.clone(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .await
+        .expect("synthesis completes");
+        assert_eq!(track.stems.len(), 2);
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.weights.as_deref(), Some(Path::new("/staged/yue/q8")));
+        assert_eq!(seen.quantize, Some(gen_core::Quant::Q8));
+        assert_eq!(seen.prompt, "uplifting pop female vocal airy");
+        assert_eq!(seen.seed, Some(11));
+        assert_eq!(seen.guidance, Some(1.5));
+        let audio = seen.audio.as_ref().expect("audio params");
+        assert_eq!(audio.lyrics.as_deref(), Some(LYRICS));
+        assert_eq!(audio.segments, Some(3));
+        assert_eq!(audio.max_new_tokens_per_segment, Some(1500));
+        assert_eq!(audio.repetition_penalty, Some(1.25));
+        assert_eq!(audio.output_limiter, Some(gen_core::OutputLimiter::Rescale));
+        assert_eq!(
+            audio.reference_region,
+            Some(TimeRegion {
+                start_secs: 5.0,
+                end_secs: Some(25.0)
+            })
+        );
+        match seen.conditioning.as_slice() {
+            [Conditioning::ReferenceAudio { audio, strength }] => {
+                assert!(strength.is_none());
+                let names: Vec<&str> = audio.stems.iter().map(|s| s.name.as_str()).collect();
+                assert_eq!(names, ["vocals", "instrumental"]);
+                assert_eq!(audio.sample_rate, ICL_REFERENCE_SAMPLE_RATE);
+                assert!(audio.samples.iter().all(|&s| (s - (-0.25)).abs() < 1e-6));
+            }
+            other => panic!(
+                "expected one dual-track ReferenceAudio, got {} items",
+                other.len()
+            ),
+        }
+    }
+
+    /// AC2 + AC3 (progress): a completed job persists THREE audio assets — the mix, the vocal stem
+    /// and the instrumental stem, each a WAV on disk and an `assetWrite` with its own id — and the
+    /// engine's per-segment / per-stage progress is posted as Running job events.
+    #[tokio::test]
+    async fn completed_job_persists_the_mix_and_both_stems_with_segment_progress() {
+        let (base_url, api_state) = spawn_stub_api().await;
+        let staged = stage(base_url);
+        let api = ApiClient::new(&staged.settings);
+        let job = job_snapshot("yue-complete", full_payload(&staged.project_id));
+        let seen = Arc::new(Mutex::new(Seen::default()));
+
+        run_audio_generate_job_using(
+            &api,
+            &staged.settings,
+            &job,
+            stub_loader(
+                Behavior::Song,
+                seen.clone(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .await
+        .expect("the job completes");
+
+        // The default tier (q4) was installed, so the load came from its subdir asserting Q4.
+        {
+            let seen = seen.lock().expect("seen lock");
+            assert_eq!(
+                seen.weights.as_deref(),
+                Some(staged.snapshot.join("q4").as_path())
+            );
+            assert_eq!(seen.quantize, Some(gen_core::Quant::Q4));
+        }
+
+        let posts = api_state.progress.lock().expect("progress lock").clone();
+        let completed = posts
+            .iter()
+            .find(|post| post["status"] == "completed")
+            .expect("a Completed post");
+        let result = &completed["result"];
+        assert_eq!(result["expectedCount"], 3);
+        assert_eq!(result["generationSet"]["count"], 3);
+        let writes = result["assetWrites"].as_array().expect("assetWrites");
+        assert_eq!(writes.len(), 3, "mix + vocals + instrumental");
+        let mix = &writes[0];
+        let mix_id = mix["assetId"].as_str().expect("mix id");
+        assert_eq!(mix["extra"]["audioStem"], "mix");
+        assert_eq!(mix["rawAdapterSettings"]["quantTier"], "q4");
+        assert_eq!(mix["rawAdapterSettings"]["segments"], 3);
+        assert_eq!(mix["rawAdapterSettings"]["outputLimiter"], "rescale");
+        let mut ids = std::collections::BTreeSet::new();
+        let mut stems = Vec::new();
+        for write in writes {
+            assert_eq!(write["type"], "audio");
+            assert!(ids.insert(write["assetId"].as_str().expect("id").to_owned()));
+            let rel = write["mediaPath"].as_str().expect("media path");
+            let wav = staged.project_path.join(rel);
+            let decoded = read_wav_pcm16(&wav).expect("the WAV is on disk and decodes");
+            assert_eq!(decoded.sample_rate, 44_100);
+            assert_eq!(decoded.samples.len(), 4_410);
+            if write["assetId"] != mix_id {
+                assert_eq!(
+                    write["parents"],
+                    json!([mix_id]),
+                    "a stem descends from its mix"
+                );
+                assert_eq!(write["extra"]["mixAssetId"], mix_id);
+                stems.push(
+                    write["extra"]["audioStem"]
+                        .as_str()
+                        .expect("stem")
+                        .to_owned(),
+                );
+            }
+        }
+        assert_eq!(stems, ["vocals", "instrumental"]);
+
+        // Engine progress → job events: model-stage loads, each segment/track step, the decode.
+        let running: Vec<(String, String)> = posts
+            .iter()
+            .filter(|post| post["status"] == "running")
+            .map(|post| {
+                (
+                    post["stage"].as_str().unwrap_or_default().to_owned(),
+                    post["message"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            running
+                .iter()
+                .any(|(stage, message)| stage == "loading_model"
+                    && message == "Loading model weights."),
+            "{running:?}"
+        );
+        for step in 1..=4 {
+            let want = format!("Generating audio ({step}/4).");
+            assert!(
+                running
+                    .iter()
+                    .any(|(stage, message)| stage == "generating" && *message == want),
+                "missing {want}: {running:?}"
+            );
+        }
+        assert!(running
+            .iter()
+            .any(|(_, message)| message == "Decoding audio."));
+        let fractions: Vec<f64> = posts
+            .iter()
+            .filter(|post| post["status"] == "running")
+            .filter_map(|post| post["progress"].as_f64())
+            .collect();
+        assert!(
+            fractions.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress must not go backwards: {fractions:?}"
+        );
+    }
+
+    /// AC3 (cancel): a cancel requested while the engine is rendering trips the request's flag,
+    /// the job ends Canceled, and nothing is left behind — no generation-set directory in the
+    /// project (it is created only at the first write) and no ICL scratch dir.
+    #[tokio::test]
+    async fn mid_job_cancel_leaves_no_generation_dir_or_scratch() {
+        let (base_url, api_state) = spawn_stub_api().await;
+        let staged = stage(base_url);
+        let api = ApiClient::new(&staged.settings);
+        let job_id = "yue-cancel";
+        let job = job_snapshot(job_id, full_payload(&staged.project_id));
+        let started = Arc::new(AtomicBool::new(false));
+        // Flip the API's cancel state once the engine is mid-render.
+        {
+            let started = started.clone();
+            let cancel = api_state.cancel.clone();
+            tokio::spawn(async move {
+                while !started.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                cancel.store(true, Ordering::SeqCst);
+            });
+        }
+        let result = run_audio_generate_job_using(
+            &api,
+            &staged.settings,
+            &job,
+            stub_loader(
+                Behavior::WaitForCancel,
+                Arc::new(Mutex::new(Seen::default())),
+                started.clone(),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "a mid-render cancel ends the job Canceled, got {result:?}"
+        );
+        assert!(started.load(Ordering::SeqCst), "the engine was mid-render");
+        let audios = staged.project_path.join("assets/audios");
+        let leftovers: Vec<_> = std::fs::read_dir(&audios)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "no generation-set dir survives a cancel: {leftovers:?}"
+        );
+        assert!(icl_scratch_dirs(job_id).is_empty());
+        let posts = api_state.progress.lock().expect("progress lock");
+        assert!(
+            posts.iter().any(|post| post["status"] == "canceled"),
+            "{posts:?}"
+        );
+        assert!(posts.iter().all(|post| post["status"] != "completed"));
+    }
+
+    fn icl_scratch_dirs(job_id: &str) -> Vec<PathBuf> {
+        let prefix = icl_scratch_prefix(job_id);
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The ICL decode's scratch dir is removed on every exit (sc-19384): a refused decode (a source
+    /// ffmpeg cannot read, or no ffmpeg at all), a decode whose job is already canceled, and — where
+    /// ffmpeg exists — a successful decode, which also lands on xcodec's 16 kHz mono.
+    #[tokio::test]
+    async fn icl_decode_scratch_is_removed_on_every_exit() {
+        let (base_url, api_state) = spawn_stub_api().await;
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        settings.heartbeat_seconds = 5;
+        let api = ApiClient::new(&settings);
+        let dir = tempfile::tempdir().expect("source dir");
+
+        let garbage = dir.path().join("not-audio.wav");
+        std::fs::write(&garbage, b"this is not audio").expect("garbage writes");
+        let job_id = "yue-icl-scratch-refused";
+        assert!(decode_icl_clip(&api, &settings, job_id, &garbage)
+            .await
+            .is_err());
+        assert!(
+            icl_scratch_dirs(job_id).is_empty(),
+            "a refused decode leaves no scratch"
+        );
+
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!("icl_decode_scratch_is_removed_on_every_exit: ffmpeg not found, skipping the decode arms");
+            return;
+        }
+        let source = dir.path().join("voice.wav");
+        write_wav_pcm16(
+            &AudioTrack {
+                samples: (0..9_600).flat_map(|_| [0.25f32, -0.25f32]).collect(),
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            &source,
+        )
+        .expect("source writes");
+        let job_id = "yue-icl-scratch-ok";
+        let track = decode_icl_clip(&api, &settings, job_id, &source)
+            .await
+            .expect("a real clip decodes");
+        assert_eq!(track.sample_rate, ICL_REFERENCE_SAMPLE_RATE);
+        assert_eq!(track.channels, ICL_REFERENCE_CHANNELS);
+        assert!(
+            icl_scratch_dirs(job_id).is_empty(),
+            "a successful decode leaves no scratch"
+        );
+
+        api_state.cancel.store(true, Ordering::SeqCst);
+        let job_id = "yue-icl-scratch-canceled";
+        let _ = decode_icl_clip(&api, &settings, job_id, &source).await;
+        assert!(
+            icl_scratch_dirs(job_id).is_empty(),
+            "a canceled decode leaves no scratch"
         );
     }
 }

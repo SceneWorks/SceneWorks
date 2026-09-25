@@ -176,15 +176,71 @@ async fn decode_reference_audio(
     source: &Path,
     work_dir: &Path,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    decode_audio_normalized(
+        api,
+        settings,
+        &job.id,
+        CANCEL_MESSAGE,
+        source,
+        work_dir,
+        REFERENCE_AUDIO_SAMPLE_RATE,
+        REFERENCE_AUDIO_CHANNELS,
+    )
+    .await
+}
+
+/// Decode any container ffmpeg reads into a PCM-16 [`gen_core::AudioTrack`] at exactly
+/// `sample_rate` / `channels`, through the shared [`run_ffmpeg`] heartbeat + cooperative-cancel
+/// runner. The engine-agnostic half of [`decode_reference_audio`]: the audio job path's YuE ICL
+/// reference (sc-19384) normalizes onto xcodec's 16 kHz mono with the same command shape. `work_dir`
+/// is caller-owned scratch; the WAV is written inside it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decode_audio_normalized(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel_message: &str,
+    source: &Path,
+    work_dir: &Path,
+    sample_rate: u32,
+    channels: u16,
+) -> WorkerResult<gen_core::AudioTrack> {
     let wav = work_dir.join("reference.wav");
-    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    run_ffmpeg(reference_audio_ffmpeg_args(source, &wav), Some(ctx)).await?;
+    let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
+    run_ffmpeg(
+        audio_normalize_ffmpeg_args(source, &wav, sample_rate, channels),
+        Some(ctx),
+    )
+    .await?;
     crate::audio_jobs::read_wav_pcm16(&wav)
 }
 
 /// The normalization command, built apart from running it so the two engine constants it carries
 /// are assertable without an ffmpeg on the host — the hosted macOS CI lane has none.
+///
+/// Test-only: production reaches the same command through [`decode_reference_audio`] →
+/// [`decode_audio_normalized`] with these two constants.
+#[cfg(test)]
 pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<String> {
+    // The engine ships no resampler and refuses anything but its audio VAE's rate, and its packed
+    // layout reserves rows for exactly [`REFERENCE_AUDIO_CHANNELS`] channels (sc-24070), so a mono
+    // voice clip is upmixed to dual mono and a wider track is downmixed.
+    audio_normalize_ffmpeg_args(
+        source,
+        wav,
+        REFERENCE_AUDIO_SAMPLE_RATE,
+        REFERENCE_AUDIO_CHANNELS,
+    )
+}
+
+/// The rate/channel normalization command behind [`reference_audio_ffmpeg_args`], parameterized so
+/// another engine boundary (YuE's 16 kHz mono xcodec input, sc-19384) reuses the one command shape.
+pub(crate) fn audio_normalize_ffmpeg_args(
+    source: &Path,
+    wav: &Path,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<String> {
     vec![
         "ffmpeg".to_owned(),
         "-nostdin".to_owned(),
@@ -194,13 +250,10 @@ pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<Stri
         "-map".to_owned(),
         "0:a:0".to_owned(),
         "-vn".to_owned(),
-        // The engine ships no resampler and refuses anything but its audio VAE's rate.
         "-ar".to_owned(),
-        REFERENCE_AUDIO_SAMPLE_RATE.to_string(),
-        // ...and its packed layout reserves rows for exactly this many channels (sc-24070), so a
-        // mono voice clip is upmixed to dual mono and a wider track is downmixed.
+        sample_rate.to_string(),
         "-ac".to_owned(),
-        REFERENCE_AUDIO_CHANNELS.to_string(),
+        channels.to_string(),
         // `read_wav_pcm16` reads PCM s16 only.
         "-c:a".to_owned(),
         "pcm_s16le".to_owned(),

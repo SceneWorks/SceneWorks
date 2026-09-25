@@ -28174,7 +28174,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "a83cd92ce789ae3015f01745825ae638f4f2bed0fa84c19c01c9284a992d447d",
+              "sha256": "1b2861900f5302386ce8fb8f080b992a5cf394ce27bc0e3964306acb9dd9b0ce",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28203,13 +28203,13 @@
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 69413,
-                  "sha256": "e7b3bef233d919abd20583128beeeda6fdd87fa992566e02563630224dc9f358"
+                  "byteSize": 72566,
+                  "sha256": "0c8d130bcaabffc99216b44347c2fe406fbe467a30cbf4f5b87b0438e8e41142"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 135325,
-                  "sha256": "6795856b217fc457236ea01e1e79c5f65f7766424a5d9a1b1abb2e125b5f7ad8"
+                  "byteSize": 135633,
+                  "sha256": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
