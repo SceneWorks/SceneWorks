@@ -28180,7 +28180,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "cd43fe82df102fa575142d8a219f3b8144e2f68fa6db0886410080629f712240",
+              "sha256": "3857345a35b66c478f4e830dfad89cbc566341b19e997d6e5de14dca5167e649",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28199,8 +28199,8 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 251788,
-                  "sha256": "337bb3b086e2b2043fb7e1672262d69d83295b008a858e2c2ede8b78a41315fa"
+                  "byteSize": 251798,
+                  "sha256": "f2802a7fcf4abd753c642d3e815ee24c23d0cf7bd9efea419b181c6b0af57c63"
                 },
                 {
                   "path": "Cargo.toml",
@@ -28229,8 +28229,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 8876,
-                  "sha256": "e4a84ddb3ff587798da7d6889c5375570dbc3f61758bf5f466c8d404a5046733"
+                  "byteSize": 9161,
+                  "sha256": "5d0359eb5f53cf73b67043d1beeb35d078ccc395146fc47998a42fa9b73c49bf"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",

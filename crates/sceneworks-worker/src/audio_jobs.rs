@@ -725,6 +725,25 @@ fn resolve_audio_tier(
     Ok((root.join(subdir), Some(AudioTier { name, quantize })))
 }
 
+/// The facts the YuE memory gate prices (sc-19386), read off the job's own parsed request and its
+/// resolved tier — the values the synthesis arm sends, never a second parse of the payload.
+fn yue_request_facts<'a>(
+    request: &'a AudioRequest,
+    tier: Option<&AudioTier>,
+) -> crate::yue_admission::YueRequestFacts<'a> {
+    crate::yue_admission::YueRequestFacts {
+        tier: tier.and_then(|tier| crate::yue_admission::YueTier::from_key(&tier.name)),
+        segments: request.segments,
+        max_new_tokens: request.max_new_tokens_per_segment,
+        guidance: request.effective_guidance(),
+        icl_mode: request.icl_mode.as_deref(),
+        icl_start_secs: request.icl_start_secs,
+        icl_end_secs: request.icl_end_secs,
+        prompt: &request.prompt,
+        lyrics: request.lyrics.as_deref().unwrap_or_default(),
+    }
+}
+
 /// Resolve + decode a job's ICL reference clip(s) into ONE [`Conditioning::ReferenceAudio`]
 /// (sc-19384): a `single` mix rides as the track itself; a `dual` pair rides as a track carrying
 /// `vocals` + `instrumental` stems (the engine's dual-track carrier), with the mix field their sum.
@@ -856,22 +875,17 @@ async fn run_audio_generate_job_using(
 ) -> WorkerResult<()> {
     let request = AudioRequest::from_payload(&job.payload);
     audio_preflight(&request)?;
-    // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit this machine
-    // before the project, weights, reference clip or source track is touched. Reads only which tier
-    // dirs the snapshot holds (to price the tier the job will load). Skipped for non-YuE models.
+    // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit before the
+    // project, weights, reference clip or source track is touched. It prices the tier THIS job will
+    // load — the same `resolve_audio_tier` the synthesis arm runs, so a missing install or tier is
+    // refused here with that arm's own message. Skipped for non-YuE models.
     if crate::yue_admission::is_yue(&request.model_manifest_entry) {
-        let model_root = resolve_audio_model_dir(settings, &request).ok();
-        let installed = |subdir: &str| {
-            model_root
-                .as_ref()
-                .is_some_and(|root| root.join(subdir).is_dir())
-        };
+        let (_, tier) = resolve_audio_tier(&request, resolve_audio_model_dir(settings, &request)?)?;
         crate::yue_admission::check(
             &request.model,
-            &job.payload,
             &request.model_manifest_entry,
+            &yue_request_facts(&request, tier.as_ref()),
             &settings.gpu_id,
-            &installed,
         )
         .await?;
     }
@@ -4980,11 +4994,25 @@ mod yue_job_surface_tests {
                        "supportsReferenceRegion": true, "conditioning": ["ReferenceAudio"] },
             "downloads": [
                 { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
-                  "variant": "q4", "default": true, "files": ["q4/*"] },
+                  "variant": "q4", "default": true, "files": ["q4/*"],
+                  "estimatedSizeBytes": 1_000_000 },
                 { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
-                  "variant": "q8", "files": ["q8/*"] },
+                  "variant": "q8", "files": ["q8/*"], "estimatedSizeBytes": 2_000_000 },
                 { "provider": "huggingface", "repo": STUB_REPO, "revision": STUB_REVISION,
-                  "variant": "bf16", "files": ["bf16/*"] }
+                  "variant": "bf16", "files": ["bf16/*"], "estimatedSizeBytes": 4_000_000 },
+                // Sized co-requisites so the YuE memory gate (sc-19386) can price the stub render;
+                // the stub model registers no descriptor, so nothing stages them.
+                { "provider": "huggingface", "repo": "SceneWorks/yue-stub-stage2", "coRequisite": true,
+                  "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"],
+                  "estimatedSizeBytes": 500_000 },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-stub-stage2", "coRequisite": true,
+                  "componentId": "stage2", "variant": "q8", "subdir": "q8", "files": ["q8/*"],
+                  "estimatedSizeBytes": 700_000 },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-stub-stage2", "coRequisite": true,
+                  "componentId": "stage2", "variant": "bf16", "subdir": "bf16", "files": ["bf16/*"],
+                  "estimatedSizeBytes": 900_000 },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-stub-xcodec", "coRequisite": true,
+                  "componentId": "xcodec", "files": ["final_ckpt/*"], "estimatedSizeBytes": 300_000 }
             ],
         })
     }
@@ -5382,6 +5410,81 @@ mod yue_job_surface_tests {
             let request = AudioRequest::from_payload(payload.as_object().expect("object"));
             let error = audio_preflight(&request).expect_err(needle);
             assert!(error.to_string().contains(needle), "{needle}: {error}");
+        }
+    }
+
+    /// sc-19386: the YuE memory gate prices the tier `resolve_audio_tier` resolves — the SAME
+    /// function the synthesis arm loads through — and the request fields the job parsed.
+    #[test]
+    fn an_unset_tier_prices_the_tier_the_job_will_load() {
+        use crate::yue_admission::{YueRenderShape, YueTier};
+        let root = tempfile::tempdir().expect("snapshot root");
+        let root_path = root.path().to_path_buf();
+        let request = |tier: Option<&str>| {
+            let mut payload = full_payload("p");
+            payload["modelManifestEntry"] = builtin_entry("yue_en_cot");
+            if let Some(tier) = tier {
+                payload["quantTier"] = json!(tier);
+            }
+            AudioRequest::from_payload(payload.as_object().expect("object"))
+        };
+        let priced = |request: &AudioRequest| {
+            let (_, tier) =
+                resolve_audio_tier(request, root_path.clone()).expect("a tier resolves");
+            YueRenderShape::new(&yue_request_facts(request, tier.as_ref()))
+                .expect("priced")
+                .tier
+        };
+        // Only q8 installed: the default (q4) is absent, so the first installed tier is priced.
+        std::fs::create_dir_all(root.path().join("q8")).expect("q8");
+        assert_eq!(priced(&request(None)), YueTier::Q8);
+        // The default wins once installed; an explicit pick is priced as asked.
+        std::fs::create_dir_all(root.path().join("q4")).expect("q4");
+        std::fs::create_dir_all(root.path().join("bf16")).expect("bf16");
+        assert_eq!(priced(&request(None)), YueTier::Q4);
+        assert_eq!(priced(&request(Some("BF16"))), YueTier::Bf16);
+        // The rest of the shape is the job's own parse: segments / budget / guidance.
+        let request = request(None);
+        let (_, tier) = resolve_audio_tier(&request, root_path.clone()).unwrap();
+        let shape = YueRenderShape::new(&yue_request_facts(&request, tier.as_ref())).unwrap();
+        assert_eq!(shape.max_new_tokens, 1500);
+        assert!(shape.cfg, "guidance 1.5 keeps CFG on");
+        assert_eq!(
+            shape.segments,
+            3.min(crate::yue_admission::lyric_section_count(LYRICS) as u32)
+        );
+        let mut off = full_payload("p");
+        off["guidanceEnabled"] = json!(false);
+        let off = AudioRequest::from_payload(off.as_object().unwrap());
+        let shape = YueRenderShape::new(&yue_request_facts(&off, tier.as_ref())).unwrap();
+        assert!(!shape.cfg, "guidanceEnabled=false sends 0.0 ⇒ CFG off");
+    }
+
+    /// sc-19386: the YuE gate runs right after preflight, before the project, the weights, any
+    /// reference clip or source track is touched.
+    #[test]
+    fn the_audio_job_runs_the_yue_gate_before_touching_the_project_or_weights() {
+        let source = include_str!("audio_jobs.rs");
+        let body = source
+            .split_once("async fn run_audio_generate_job_using(")
+            .expect("audio job body")
+            .1;
+        let gate = body
+            .find("crate::yue_admission::check(")
+            .expect("the audio job must run the YuE admission gate");
+        let preflight = body.find("audio_preflight(&request)?").expect("preflight");
+        assert!(preflight < gate, "the gate runs after preflight");
+        for later in [
+            "get_project(",
+            "build_audio_edit(",
+            "resolve_icl_reference(",
+            "resolve_voice_clone_plan(",
+            "run_audio_synthesis_with(",
+        ] {
+            let at = body
+                .find(later)
+                .unwrap_or_else(|| panic!("{later} in the job"));
+            assert!(gate < at, "the gate must run before {later}");
         }
     }
 

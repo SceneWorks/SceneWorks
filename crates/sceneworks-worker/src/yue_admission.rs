@@ -3,20 +3,22 @@
 //! YuE is the first tiered, staged, autoregressive model on the candle audio lane, which until now
 //! had no worker-side memory gate at all (its other models carry only the web's advisory
 //! `candle.minMemoryGb` blanket). This module prices one render before anything loads and refuses
-//! a request that cannot fit this machine with the reason stated. It is deliberately NOT routed
-//! through the shared image memory ladder (`memory_strategy` / `candle_memory_strategy`), which is
-//! image-lane only by construction.
+//! a request that cannot fit with the reason stated. It is deliberately NOT routed through the
+//! shared image memory ladder (`memory_strategy` / `candle_memory_strategy`), which is image-lane
+//! only by construction.
 //!
-//! ## The estimate: max over stages, plus the KV cache the request asks for
+//! ## The estimate: max over stages, plus what the request asks for
 //!
 //! `candle-audio-yue` loads one stage at a time and releases it before the next loads (its engine
 //! drops stage 1 before stage 2 loads, and both LMs before the codec and vocoders), so the floor is
 //! the LARGEST single stage residency, never the sum:
 //!
-//! * **stage 1** — the 7B Llama at the selected tier plus its KV cache. The cache holds the whole
-//!   segment history (prompt blocks + every generated codebook-0 token), batch-of-2 under CFG, and
-//!   the engine's smart context caps it at the checkpoint's 16 384 positions. So it scales with
-//!   `n_segments × max_new_tokens_per_segment` until that cap.
+//! * **stage 1** — the 7B Llama at the selected tier, its KV cache and its per-layer attention
+//!   workspace ([`stage1_attention_workspace_bytes`]). The cache holds the whole segment history
+//!   (prompt blocks + every generated codebook-0 token), batch-of-2 under CFG, and the engine's
+//!   smart context caps it at the checkpoint's 16 384 positions. So it scales with
+//!   `n_segments × max_new_tokens_per_segment` until that cap — `n_segments` being what the engine
+//!   actually renders, `min(requested, lyric sections)` ([`lyric_section_count`]).
 //! * **stage 2** — the 1B Llama at the SAME tier (the manifest's per-tier `stage2` coRequisite)
 //!   plus a preallocated static KV cache for a batch of up to four 300-frame chunks.
 //! * **codec** — xcodec, both Vocos decoders and the HuBERT branch (the ICL encoder), stored and run
@@ -33,19 +35,21 @@
 //! ## How this relates to the engine's own admission
 //!
 //! candle-llm admits each LM *load* (`LlamaProvider::load`) against LIVE available memory — the
-//! weights only; YuE's KV caches are allocated outside `generate`, so the engine never prices them.
-//! This gate is the whole-render CAPACITY check and runs first:
+//! weights only; YuE's KV caches and attention workspace are allocated outside `generate`, so the
+//! engine never prices them. This gate prices the whole render and runs first:
 //!
-//! * a render that cannot fit this machine at all is refused HERE, once, naming the stage, the tier
-//!   and the levers — the engine is never reached, so it never adds a second, differently-worded
-//!   refusal;
-//! * a render that fits the machine but not its memory at this moment (another process holding
-//!   memory) is admitted here and refused by the engine's live load check — one refusal again.
-//!
-//! On CUDA both read the same live free VRAM, and this gate prices a superset of what the engine
-//! prices (weights + KV + the dedicated-VRAM reserve), so whenever the engine would refuse a stage
-//! load for the weights alone, this gate has already refused. On Apple silicon the capacity is the
-//! GPU's recommended working set (`recommendedMaxWorkingSetSize`), not `hw.memsize`.
+//! * **Apple silicon** — capacity: the GPU's recommended working set
+//!   (`recommendedMaxWorkingSetSize`), not `hw.memsize`. A render that cannot fit it is refused
+//!   here, once; one that fits but not the memory free at this moment is admitted here and refused
+//!   by the engine's live load check — one refusal either way.
+//! * **CUDA** — live free VRAM plus the dedicated-VRAM reserve, with the same evict-then-reclaim
+//!   every candle image lane runs (`image_jobs::base::gate_with_evict_reclaim`): when the raw
+//!   reading refuses but crediting the cached generator's pool (`vram_gate::reclaimable_pool_gb`,
+//!   clamped to the card total like `vram_gate::with_reclaimable`) admits, the cached generator is
+//!   evicted and the render admitted. A refusal says which case it is — the card is too small
+//!   (floor + reserve > total), or VRAM is held by another process or model right now. Because this
+//!   gate prices a superset of the engine's figure against the same free reading, the engine's
+//!   weights-only load check never refuses what this gate admitted for capacity.
 //!
 //! No live budget (no NVIDIA reading, a CPU host) admits: the gate never blocks without evidence,
 //! the same contract as [`crate::fit_gate::FitDecision::Unknown`], and the engine's load admission
@@ -54,13 +58,15 @@
 use serde_json::Value;
 
 use crate::fit_gate::BYTES_PER_GIB;
-use crate::{JsonObject, WorkerError};
+use crate::WorkerError;
 
 /// The manifest `family` every YuE entry declares.
 pub(crate) const YUE_FAMILY: &str = "yue";
 
 /// Stage-1 `config.json`: `num_hidden_layers`.
 const STAGE1_LAYERS: u64 = 32;
+/// Stage-1 `config.json`: `num_attention_heads` (query heads).
+const STAGE1_HEADS: u64 = 32;
 /// Stage-1 `config.json`: `num_key_value_heads` (GQA).
 const STAGE1_KV_HEADS: u64 = 4;
 /// Stage-1 head dim: `hidden_size / num_attention_heads` = 4096 / 32.
@@ -68,6 +74,12 @@ const STAGE1_HEAD_DIM: u64 = 128;
 /// Stage-1 `config.json`: `max_position_embeddings` — the smart context never lets the cache
 /// outgrow it.
 const STAGE1_CONTEXT: u64 = 16_384;
+/// candle-llm's eager-attention query tile (`primitives/attention.rs:59`
+/// `EAGER_ATTN_QUERY_CHUNK_SIZE`).
+const ATTN_QUERY_CHUNK: u64 = 256;
+/// candle-audio-yue's stage-1 prefill chunk (`stage1/lm.rs:49` `PREFILL_CHUNK`) — the query width
+/// of the CFG additive mask.
+const STAGE1_PREFILL_CHUNK: u64 = 512;
 
 /// Stage-2 `config.json`: `num_hidden_layers`.
 const STAGE2_LAYERS: u64 = 32;
@@ -117,7 +129,8 @@ impl YueTier {
         }
     }
 
-    fn from_key(key: &str) -> Option<Self> {
+    /// The tier a resolved `AudioTier::name` names (`bf16` / `q8` / `q4`).
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key {
             "bf16" => Some(Self::Bf16),
             "q8" => Some(Self::Q8),
@@ -125,6 +138,42 @@ impl YueTier {
             _ => None,
         }
     }
+}
+
+/// Lyric sections the engine renders at most one segment each: the count of
+/// `candle_audio_yue::tokenizer::split_lyrics` matches — the reference `split_lyrics`
+/// `re.findall(r"\[(\w+)\](.*?)(?=\[|\Z)", lyrics, re.DOTALL)`, ported there (and here) as
+/// `\[([\p{L}\p{N}_]+)\]([^\[]*)` because Python's Unicode `\w` is exactly `[\p{L}\p{N}_]` and a lazy
+/// `.*?` up to the next `[` is `[^\[]*`. The engine renders `min(segments, sections)`
+/// (`engine.rs`: `prompt.segments.len().min(req.segments)`).
+pub(crate) fn lyric_section_count(lyrics: &str) -> usize {
+    static SECTION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    SECTION
+        .get_or_init(|| {
+            regex::Regex::new(r"\[([\p{L}\p{N}_]+)\]([^\[]*)").expect("section pattern compiles")
+        })
+        .find_iter(lyrics)
+        .count()
+}
+
+/// What the audio job resolved for a YuE render — the sc-19384 `AudioRequest` fields and its own
+/// tier resolution (`resolve_audio_tier`), passed in rather than re-parsed so the gate prices
+/// exactly the render the job will run.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct YueRequestFacts<'a> {
+    /// The tier `resolve_audio_tier` picked (`None` ⇒ the entry declares no tiers: fail closed).
+    pub tier: Option<YueTier>,
+    pub segments: Option<u32>,
+    pub max_new_tokens: Option<u32>,
+    /// The top-level guidance the job sends (`AudioRequest::effective_guidance`): `None` ⇒ the
+    /// 1.5 / 1.2 CFG schedule, `<= 1` ⇒ CFG off, `> 1` ⇒ on (the engine's `map_request`).
+    pub guidance: Option<f32>,
+    pub icl_mode: Option<&'a str>,
+    pub icl_start_secs: Option<f32>,
+    pub icl_end_secs: Option<f32>,
+    /// Genre tags.
+    pub prompt: &'a str,
+    pub lyrics: &'a str,
 }
 
 /// The ICL reference block the stage-1 prompt head carries.
@@ -150,12 +199,11 @@ impl IclPricing {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct YueRenderShape {
     pub tier: YueTier,
-    /// Lyric segments to render (the engine caps the effective count at the lyric sections, so the
-    /// requested count is an upper bound).
+    /// Lyric segments the engine will render: `min(requested, lyric sections)`, at least 1.
     pub segments: u32,
     /// Stage-1 token budget per segment.
     pub max_new_tokens: u32,
-    /// Classifier-free guidance on ⇒ stage 1 decodes batch-of-2.
+    /// Classifier-free guidance on ⇒ stage 1 decodes batch-of-2 under an additive mask.
     pub cfg: bool,
     /// Upper bound on the stage-1 prompt tokens (every sentencepiece token covers at least one byte,
     /// so a byte count bounds the token count), including the ICL block.
@@ -165,137 +213,42 @@ pub(crate) struct YueRenderShape {
 }
 
 impl YueRenderShape {
-    /// Read the render shape from an audio job payload — the sc-19384 job surface:
-    /// * `quantTier` (`bf16` | `q8` | `q4`); unset ⇒ the manifest's default tier when `installed`,
-    ///   else the first installed tier (the order the job's own tier resolution uses);
-    /// * `segments` / `maxNewTokensPerSegment`, defaulting to the reference pipeline's 2 / 3000;
-    /// * `guidanceEnabled: false` ⇒ CFG off; otherwise `guidance` unset ⇒ the 1.5 / 1.2 schedule,
-    ///   `<= 1` ⇒ off, `> 1` ⇒ on (the engine's `map_request`);
-    /// * `iclMode` (`single` | `dual`) with the window `(iclStartSecs or 0) .. (iclEndSecs or 30)` —
-    ///   an absent end is the upstream default `prompt_end_time` of 30 s whatever the start (the API
-    ///   refuses start >= end).
-    pub(crate) fn from_payload(
-        payload: &JsonObject,
-        manifest_entry: &Value,
-        installed: &dyn Fn(&str) -> bool,
-    ) -> Self {
-        let tier = requested_tier(payload, manifest_entry, installed);
-        let segments = payload
-            .get("segments")
-            .and_then(Value::as_u64)
-            .map(|n| n.min(u64::from(u32::MAX)) as u32)
-            .unwrap_or(DEFAULT_SEGMENTS);
-        let max_new_tokens = payload
-            .get("maxNewTokensPerSegment")
-            .and_then(Value::as_u64)
-            .map(|n| n.min(u64::from(u32::MAX)) as u32)
-            .unwrap_or(DEFAULT_MAX_NEW_TOKENS);
-        let cfg = payload.get("guidanceEnabled").and_then(Value::as_bool) != Some(false)
-            && payload
-                .get("guidance")
-                .and_then(Value::as_f64)
-                .is_none_or(|g| g > 1.0);
-        let text_bytes = |key: &str| {
-            payload
-                .get(key)
-                .and_then(Value::as_str)
-                .map_or(0, |s| s.len() as u64)
-        };
-        let icl = icl_pricing(payload);
+    /// Price the render the job resolved. `None` when the tier is unknown (fail closed upstream).
+    /// The ICL window is `(iclStartSecs or 0) .. (iclEndSecs or 30)` — an absent end is upstream's
+    /// default `prompt_end_time` of 30 s whatever the start (the API refuses start >= end).
+    pub(crate) fn new(facts: &YueRequestFacts<'_>) -> Option<Self> {
+        let tier = facts.tier?;
+        let requested = facts.segments.unwrap_or(DEFAULT_SEGMENTS);
+        let sections = u32::try_from(lyric_section_count(facts.lyrics)).unwrap_or(u32::MAX);
+        let segments = requested.min(sections).max(1);
+        let max_new_tokens = facts.max_new_tokens.unwrap_or(DEFAULT_MAX_NEW_TOKENS);
+        let cfg = facts.guidance.is_none_or(|g| g > 1.0);
+        let icl = facts
+            .icl_mode
+            .map(|mode| mode.trim().to_lowercase())
+            .filter(|mode| !mode.is_empty())
+            .map(|mode| IclPricing {
+                // `single` is one mix track; `dual` (and anything the job refuses anyway) two.
+                tracks: if mode == "single" { 1 } else { 2 },
+                start_secs: f64::from(facts.icl_start_secs.unwrap_or(0.0)).max(0.0),
+                end_secs: facts.icl_end_secs.map_or(ICL_DEFAULT_END_SECS, f64::from),
+            });
         // The head carries the genre tags, the whole lyric sheet and the ICL block; every segment
         // block repeats its own section's lyrics — so the lyrics count twice.
         let prompt_tokens = PROMPT_HEAD_TOKENS
-            + text_bytes("prompt")
-            + 2 * text_bytes("lyrics")
+            + facts.prompt.len() as u64
+            + 2 * facts.lyrics.len() as u64
             + PROMPT_SEGMENT_TOKENS * u64::from(segments)
             + icl.map_or(0, |icl| icl.tokens());
-        Self {
+        Some(Self {
             tier,
             segments,
             max_new_tokens,
             cfg,
             prompt_tokens,
             icl,
-        }
-    }
-}
-
-fn icl_pricing(payload: &JsonObject) -> Option<IclPricing> {
-    let mode = payload
-        .get("iclMode")
-        .and_then(Value::as_str)
-        .map(|mode| mode.trim().to_lowercase())
-        .filter(|mode| !mode.is_empty())?;
-    // `single` is one mix track; `dual` (and anything the job will refuse anyway) prices two.
-    let tracks = if mode == "single" { 1 } else { 2 };
-    let secs = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_f64)
-            .filter(|v| v.is_finite())
-    };
-    Some(IclPricing {
-        tracks,
-        start_secs: secs("iclStartSecs").unwrap_or(0.0).max(0.0),
-        end_secs: secs("iclEndSecs").unwrap_or(ICL_DEFAULT_END_SECS),
-    })
-}
-
-/// The stage-1 tier rows (`variant`, tier subdir, default) in manifest order — the same rows the
-/// job's own tier resolution reads.
-fn tier_rows(manifest_entry: &Value) -> Vec<(YueTier, String, bool)> {
-    manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|d| d.get("coRequisite").and_then(Value::as_bool) != Some(true))
-                .filter_map(|d| {
-                    let variant = d.get("variant").and_then(Value::as_str)?.trim();
-                    let tier = YueTier::from_key(&variant.to_lowercase())?;
-                    let subdir = d
-                        .get("subdir")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(variant)
-                        .to_owned();
-                    Some((
-                        tier,
-                        subdir,
-                        d.get("default").and_then(Value::as_bool) == Some(true),
-                    ))
-                })
-                .collect()
         })
-        .unwrap_or_default()
-}
-
-fn requested_tier(
-    payload: &JsonObject,
-    manifest_entry: &Value,
-    installed: &dyn Fn(&str) -> bool,
-) -> YueTier {
-    if let Some(tier) = payload
-        .get("quantTier")
-        .and_then(Value::as_str)
-        .and_then(|tier| YueTier::from_key(&tier.trim().to_lowercase()))
-    {
-        return tier;
     }
-    // Unset (or a tier the job itself will refuse by name): default first, then manifest order;
-    // the first installed wins, and with nothing installed (the job refuses that too) the default.
-    let rows = tier_rows(manifest_entry);
-    let ordered = || {
-        rows.iter()
-            .filter(|(_, _, default)| *default)
-            .chain(rows.iter().filter(|(_, _, default)| !*default))
-    };
-    ordered()
-        .find(|(_, subdir, _)| installed(subdir))
-        .or_else(|| ordered().next())
-        .map_or(YueTier::Q4, |(tier, _, _)| *tier)
 }
 
 /// Which stage binds the floor.
@@ -322,6 +275,7 @@ pub(crate) struct YueEstimate {
     pub tier: YueTier,
     pub stage1_weights_bytes: u64,
     pub stage1_kv_bytes: u64,
+    pub stage1_attention_bytes: u64,
     pub stage2_weights_bytes: u64,
     pub stage2_kv_bytes: u64,
     pub codec_bytes: u64,
@@ -330,7 +284,9 @@ pub(crate) struct YueEstimate {
 impl YueEstimate {
     pub(crate) fn stage_bytes(&self, stage: YueStage) -> u64 {
         match stage {
-            YueStage::Stage1 => self.stage1_weights_bytes + self.stage1_kv_bytes,
+            YueStage::Stage1 => {
+                self.stage1_weights_bytes + self.stage1_kv_bytes + self.stage1_attention_bytes
+            }
             YueStage::Stage2 => self.stage2_weights_bytes + self.stage2_kv_bytes,
             YueStage::Codec => self.codec_bytes,
         }
@@ -356,14 +312,51 @@ pub(crate) fn stage1_kv_positions(shape: &YueRenderShape) -> u64 {
         .min(STAGE1_CONTEXT)
 }
 
+fn stage1_batch(shape: &YueRenderShape) -> u64 {
+    if shape.cfg {
+        2
+    } else {
+        1
+    }
+}
+
 fn stage1_kv_bytes(shape: &YueRenderShape) -> u64 {
-    let batch = if shape.cfg { 2 } else { 1 };
     2 * STAGE1_LAYERS
         * STAGE1_KV_HEADS
         * STAGE1_HEAD_DIM
         * KV_ELEMENT_BYTES
-        * batch
+        * stage1_batch(shape)
         * stage1_kv_positions(shape)
+}
+
+/// The per-layer attention workspace stage 1 holds on top of its KV cache (one layer at a time —
+/// each layer's temporaries drop before the next runs), at the full `P` = [`stage1_kv_positions`]
+/// keys (inference @ feature/sc-19373-yue-lyrics2song):
+///
+/// * **scores** — the eager attention tiles `STAGE1_HEADS` × 256 query rows × `P` keys per batch
+///   row (`candle-llm/src/primitives/attention.rs:59` `EAGER_ATTN_QUERY_CHUNK_SIZE`; `:461` for the
+///   GQA path), and three tile-sized tensors are live at once: the scaled scores, the masked
+///   scores and the softmax weights (`attention.rs:342`, `:364`, `:393`).
+/// * **CFG only** (batch-of-2 under an additive mask, `candle-audio-yue/src/stage1/lm.rs:293-324`
+///   `forward_cfg` → `decode_logits_masked`): the additive mask is not `AttnMask::Causal`, so the
+///   layer takes `repeat_kv` + eager `sdpa` (`candle-llm/src/models/llama.rs:2287-2295`) — K and V
+///   expanded from 4 to 32 heads, plus the contiguous transposed copy of the expanded keys
+///   (`attention.rs:336`): three `batch × 32 × P × 128` bf16 tensors. And the mask itself,
+///   `[batch, 1, 512, P]`, built in f32 and cast to bf16 (`lm.rs:311-323`, 512 = `PREFILL_CHUNK`,
+///   `lm.rs:49`).
+/// * CFG off decodes batch-1 under `AttnMask::Causal` through `sdpa_gqa_causal`, whose transposed
+///   keys are a view, never materialized (`attention.rs:462-463`): scores only.
+pub(crate) fn stage1_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
+    let batch = stage1_batch(shape);
+    let positions = stage1_kv_positions(shape);
+    let scores =
+        3 * batch * STAGE1_HEADS * ATTN_QUERY_CHUNK.min(positions) * positions * KV_ELEMENT_BYTES;
+    if !shape.cfg {
+        return scores;
+    }
+    let expanded = 3 * batch * STAGE1_HEADS * positions * STAGE1_HEAD_DIM * KV_ELEMENT_BYTES;
+    let mask = batch * STAGE1_PREFILL_CHUNK.min(positions) * positions * (4 + KV_ELEMENT_BYTES);
+    scores + expanded + mask
 }
 
 /// Stage-2 static KV cache for the largest chunk group. Stage 1 interleaves vocal and instrumental
@@ -418,6 +411,7 @@ pub(crate) fn estimate(
         tier: shape.tier,
         stage1_weights_bytes: stage1,
         stage1_kv_bytes: stage1_kv_bytes(shape),
+        stage1_attention_bytes: stage1_attention_workspace_bytes(shape),
         stage2_weights_bytes: stage2,
         stage2_kv_bytes: stage2_kv_bytes(shape),
         codec_bytes: codec,
@@ -430,47 +424,95 @@ pub(crate) enum YueBudget {
     /// Apple silicon: the GPU's recommended working set (bytes the process may keep resident).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     UnifiedWorkingSet { gb: f64 },
-    /// CUDA: live free VRAM on the selected card; the dedicated-VRAM allocator/context reserve is
-    /// charged on top of the estimate.
+    /// CUDA: live free VRAM on the selected card, its total, and the in-process pool evicting the
+    /// cached generator would return (`vram_gate::reclaimable_pool_gb`). The dedicated-VRAM
+    /// allocator/context reserve is charged on top of the estimate.
     #[cfg_attr(
         any(target_os = "macos", not(feature = "backend-candle")),
         allow(dead_code)
     )]
-    DedicatedVram { free_gb: f64, gpu_id: String },
+    DedicatedVram {
+        free_gb: f64,
+        total_gb: f64,
+        reclaimable_gb: f64,
+        gpu_id: String,
+    },
+}
+
+/// The admission decision.
+#[derive(Debug)]
+pub(crate) enum YueAdmission {
+    Admit,
+    /// Fits only once the resident cached generator is evicted and its pool reclaimed — the same
+    /// evict-then-reclaim every candle image lane runs (`image_jobs::base::gate_with_evict_reclaim`).
+    AdmitAfterEvict,
+    Refuse(WorkerError),
 }
 
 fn gib(bytes: u64) -> f64 {
     bytes as f64 / BYTES_PER_GIB
 }
 
-/// The admission decision: `Some(refusal)` when the floor does not fit, `None` to admit. No budget
-/// admits (no evidence ⇒ no block; the engine's own load admission still stands).
-pub(crate) fn admission_error(
+/// The pure admission decision. No budget admits (no evidence ⇒ no block; the engine's own load
+/// admission still stands).
+pub(crate) fn decide(
     model: &str,
     estimate: &YueEstimate,
     shape: &YueRenderShape,
     budget: Option<&YueBudget>,
-) -> Option<WorkerError> {
-    let budget = budget?;
-    let (stage, bytes) = estimate.floor();
-    let (needed_gb, available_gb, pool) = match budget {
-        YueBudget::UnifiedWorkingSet { gb } => {
-            (gib(bytes), *gb, "of GPU working set on this Mac".to_owned())
-        }
-        YueBudget::DedicatedVram { free_gb, gpu_id } => (
-            gib(bytes) + crate::fit_gate::dedicated_vram_reserve().gb,
-            *free_gb,
-            format!("of free VRAM on GPU {gpu_id}"),
-        ),
+) -> YueAdmission {
+    let Some(budget) = budget else {
+        return YueAdmission::Admit;
     };
-    if available_gb + f64::EPSILON >= needed_gb {
-        return None;
-    }
+    let (stage, bytes) = estimate.floor();
+    let floor_gb = gib(bytes);
+    let fits = |available: f64, needed: f64| available + f64::EPSILON >= needed;
+    let (needed_gb, shortfall) = match budget {
+        YueBudget::UnifiedWorkingSet { gb } => {
+            if fits(*gb, floor_gb) {
+                return YueAdmission::Admit;
+            }
+            (
+                floor_gb,
+                format!("but this Mac's GPU working set is only ~{gb:.1} GB"),
+            )
+        }
+        YueBudget::DedicatedVram {
+            free_gb,
+            total_gb,
+            reclaimable_gb,
+            gpu_id,
+        } => {
+            let needed = floor_gb + crate::fit_gate::dedicated_vram_reserve().gb;
+            if fits(*free_gb, needed) {
+                return YueAdmission::Admit;
+            }
+            // `vram_gate::with_reclaimable`: credit the pool the evict returns, clamped to total.
+            let reclaimed = (free_gb + reclaimable_gb.max(0.0)).min(*total_gb);
+            if *reclaimable_gb > 0.0 && fits(reclaimed, needed) {
+                return YueAdmission::AdmitAfterEvict;
+            }
+            let shortfall = if fits(*total_gb, needed) {
+                format!(
+                    "and GPU {gpu_id} has ~{total_gb:.1} GB in total — enough — but only \
+                     ~{free_gb:.1} GB is free right now: another process or model is holding \
+                     VRAM. Free it and retry"
+                )
+            } else {
+                format!("but GPU {gpu_id} has only ~{total_gb:.1} GB of VRAM in total")
+            };
+            (needed, shortfall)
+        }
+    };
     let tier = estimate.tier.key();
-    let (weights, kv) = match stage {
-        YueStage::Stage1 => (estimate.stage1_weights_bytes, estimate.stage1_kv_bytes),
-        YueStage::Stage2 => (estimate.stage2_weights_bytes, estimate.stage2_kv_bytes),
-        YueStage::Codec => (estimate.codec_bytes, 0),
+    let (weights, kv, workspace) = match stage {
+        YueStage::Stage1 => (
+            estimate.stage1_weights_bytes,
+            estimate.stage1_kv_bytes,
+            estimate.stage1_attention_bytes,
+        ),
+        YueStage::Stage2 => (estimate.stage2_weights_bytes, estimate.stage2_kv_bytes, 0),
+        YueStage::Codec => (estimate.codec_bytes, 0, 0),
     };
     let lever = match stage {
         YueStage::Stage1 if estimate.tier != YueTier::Q4 => {
@@ -495,16 +537,15 @@ pub(crate) fn admission_error(
             end = icl.end_secs,
         )
     });
-    Some(WorkerError::InvalidPayload(format!(
-        "{model} needs ~{needed:.1} GB {pool} but only ~{available:.1} GB is available. YuE loads \
-         one stage at a time and the largest is {stage_label} at the {tier} tier: ~{weights:.1} GB \
-         of weights + ~{kv:.1} GB of KV cache ({segments} segment(s) × {max_new} tokens, guidance \
-         {cfg}{icl}). {lever}",
-        needed = needed_gb,
-        available = available_gb,
+    YueAdmission::Refuse(WorkerError::InvalidPayload(format!(
+        "{model} needs ~{needed_gb:.1} GB {shortfall}. YuE loads one stage at a time and the \
+         largest is {stage_label} at the {tier} tier: ~{weights:.1} GB of weights + ~{kv:.1} GB of \
+         KV cache + ~{workspace:.1} GB of attention workspace ({segments} segment(s) × {max_new} \
+         tokens, guidance {cfg}{icl}). {lever}",
         stage_label = stage.label(),
         weights = gib(weights),
         kv = gib(kv),
+        workspace = gib(workspace),
         segments = shape.segments,
         max_new = shape.max_new_tokens,
         cfg = if shape.cfg { "on" } else { "off" },
@@ -544,6 +585,8 @@ pub(crate) async fn live_budget(gpu_id: &str) -> Option<YueBudget> {
     )?;
     Some(YueBudget::DedicatedVram {
         free_gb: budget.free_gb,
+        total_gb: budget.total_gb,
+        reclaimable_gb: crate::vram_gate::reclaimable_pool_gb(gpu_id),
         gpu_id: gpu_id.to_owned(),
     })
 }
@@ -558,30 +601,42 @@ pub(crate) fn is_yue(manifest_entry: &Value) -> bool {
     manifest_entry.get("family").and_then(Value::as_str) == Some(YUE_FAMILY)
 }
 
-/// The pre-load gate the audio job runs: `Ok(())` for a non-YuE model or an admitted render.
-/// `installed` answers whether a tier subdir is present under the model's snapshot.
+/// The pre-load gate the audio job runs: `Ok(())` for a non-YuE model or an admitted render. On
+/// CUDA a render that fits only once the cached generator's pool is reclaimed evicts it first.
 pub(crate) async fn check(
     model: &str,
-    payload: &JsonObject,
     manifest_entry: &Value,
+    facts: &YueRequestFacts<'_>,
     gpu_id: &str,
-    // `Sync` so the audio job's future stays `Send` across the budget probe's await.
-    installed: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<(), WorkerError> {
     if !is_yue(manifest_entry) {
         return Ok(());
     }
-    let shape = YueRenderShape::from_payload(payload, manifest_entry, installed);
-    let estimate = estimate(manifest_entry, &shape).map_err(|why| {
+    let cannot_price = |why: &str| {
         WorkerError::InvalidPayload(format!(
             "{model}: YuE memory admission cannot price this render ({why}); the installed \
              catalog entry is incomplete — update SceneWorks before retrying."
         ))
-    })?;
+    };
+    let shape = YueRenderShape::new(facts).ok_or_else(|| cannot_price("no tier resolved"))?;
+    let estimate = estimate(manifest_entry, &shape).map_err(|why| cannot_price(&why))?;
     let budget = live_budget(gpu_id).await;
-    match admission_error(model, &estimate, &shape, budget.as_ref()) {
-        Some(error) => Err(error),
-        None => Ok(()),
+    match decide(model, &estimate, &shape, budget.as_ref()) {
+        YueAdmission::Admit => Ok(()),
+        YueAdmission::AdmitAfterEvict => {
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                let evicted = crate::generator_cache::evict_cached_generator().await?;
+                tracing::info!(
+                    gpu_id,
+                    evicted,
+                    "YuE admission: evicted the resident generator to reclaim its cudarc pool \
+                     (sc-19386)"
+                );
+            }
+            Ok(())
+        }
+        YueAdmission::Refuse(error) => Err(error),
     }
 }
 
@@ -611,10 +666,6 @@ mod tests {
             .unwrap_or_else(|| panic!("builtin entry {id} present"))
     }
 
-    fn payload(value: Value) -> JsonObject {
-        value.as_object().expect("object").clone()
-    }
-
     fn shape(tier: YueTier, segments: u32, max_new: u32, cfg: bool) -> YueRenderShape {
         YueRenderShape {
             tier,
@@ -628,6 +679,39 @@ mod tests {
 
     fn mac(gb: f64) -> YueBudget {
         YueBudget::UnifiedWorkingSet { gb }
+    }
+
+    fn cuda(free_gb: f64, total_gb: f64, reclaimable_gb: f64) -> YueBudget {
+        YueBudget::DedicatedVram {
+            free_gb,
+            total_gb,
+            reclaimable_gb,
+            gpu_id: "0".to_owned(),
+        }
+    }
+
+    fn refusal(outcome: YueAdmission) -> String {
+        match outcome {
+            YueAdmission::Refuse(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected a user-facing refusal, got {other:?}"),
+        }
+    }
+
+    /// Four lyric sections, so the requested segment count is what renders (up to 4).
+    const FOUR_SECTIONS: &str = "[verse]\na\n[chorus]\nb\n[verse]\nc\n[outro]\nd";
+
+    fn facts<'a>(lyrics: &'a str) -> YueRequestFacts<'a> {
+        YueRequestFacts {
+            tier: Some(YueTier::Q4),
+            segments: None,
+            max_new_tokens: None,
+            guidance: None,
+            icl_mode: None,
+            icl_start_secs: None,
+            icl_end_secs: None,
+            prompt: "pop",
+            lyrics,
+        }
     }
 
     #[test]
@@ -695,6 +779,45 @@ mod tests {
         let long = shape(YueTier::Q4, 50, 3000, true);
         assert_eq!(stage1_kv_positions(&long), 16_384);
         assert_eq!(stage1_kv_bytes(&long), 2 * per_position * 16_384);
+
+        // Stage-1 residency = weights + KV + the attention workspace, which is nonzero.
+        let entry = builtin("yue_en_cot");
+        let e = estimate(&entry, &long).unwrap();
+        assert!(e.stage1_attention_bytes > 0);
+        assert_eq!(
+            e.stage_bytes(YueStage::Stage1),
+            e.stage1_weights_bytes + e.stage1_kv_bytes + e.stage1_attention_bytes
+        );
+    }
+
+    #[test]
+    fn stage1_attention_workspace_follows_the_engine_attention_path() {
+        let p = 16_384u64;
+        // CFG: batch 2 under an additive mask ⇒ repeat_kv + eager sdpa. Three 256-row score tiles,
+        // three expanded K/V-sized tensors (K, V, contiguous Kᵀ) and the f32→bf16 mask.
+        let cfg = shape(YueTier::Q4, 50, 3000, true);
+        let scores = 3 * 2 * 32 * 256 * p * 2;
+        let expanded = 3 * 2 * 32 * p * 128 * 2;
+        let mask = 2 * 512 * p * (4 + 2);
+        assert_eq!(
+            stage1_attention_workspace_bytes(&cfg),
+            scores + expanded + mask
+        );
+        // CFG off: batch 1, causal ⇒ sdpa_gqa_causal (Kᵀ is a view): the score tiles only.
+        let plain = shape(YueTier::Q4, 50, 3000, false);
+        assert_eq!(
+            stage1_attention_workspace_bytes(&plain),
+            3 * 32 * 256 * p * 2
+        );
+        // A short history tiles fewer than 256 rows.
+        let short = YueRenderShape {
+            prompt_tokens: 100,
+            ..shape(YueTier::Q4, 1, 50, false)
+        };
+        assert_eq!(
+            stage1_attention_workspace_bytes(&short),
+            3 * 32 * 150 * 150 * 2
+        );
     }
 
     #[test]
@@ -718,32 +841,88 @@ mod tests {
         let floor_gb = gib(e.floor().1);
 
         // Fits exactly at the floor on a Mac working set.
-        assert!(admission_error("yue_en_cot", &e, &s, Some(&mac(floor_gb))).is_none());
+        assert!(matches!(
+            decide("yue_en_cot", &e, &s, Some(&mac(floor_gb))),
+            YueAdmission::Admit
+        ));
         // Just below: refused, naming the binding stage, tier, and figures.
-        let refusal = admission_error("yue_en_cot", &e, &s, Some(&mac(floor_gb - 0.01)))
-            .expect("over budget must refuse");
-        let WorkerError::InvalidPayload(message) = refusal else {
-            panic!("refusal must be a user-facing InvalidPayload");
-        };
+        let message = refusal(decide("yue_en_cot", &e, &s, Some(&mac(floor_gb - 0.01))));
         assert!(message.contains("7B stage-1 LM"), "{message}");
         assert!(message.contains("q4 tier"), "{message}");
         assert!(message.contains("2 segment(s) × 3000 tokens"), "{message}");
+        assert!(message.contains("GPU working set"), "{message}");
 
         // CUDA charges the dedicated-VRAM reserve on top of the floor.
         let reserve = crate::fit_gate::dedicated_vram_reserve().gb;
-        let cuda = |free_gb| YueBudget::DedicatedVram {
-            free_gb,
-            gpu_id: "0".to_owned(),
-        };
-        assert!(admission_error("yue_en_cot", &e, &s, Some(&cuda(floor_gb + reserve))).is_none());
-        let cuda_refusal =
-            admission_error("yue_en_cot", &e, &s, Some(&cuda(floor_gb + reserve - 0.01)));
-        assert!(
-            matches!(cuda_refusal, Some(WorkerError::InvalidPayload(ref m)) if m.contains("GPU 0"))
-        );
+        assert!(matches!(
+            decide(
+                "yue_en_cot",
+                &e,
+                &s,
+                Some(&cuda(floor_gb + reserve, 96.0, 0.0))
+            ),
+            YueAdmission::Admit
+        ));
+        let message = refusal(decide(
+            "yue_en_cot",
+            &e,
+            &s,
+            Some(&cuda(floor_gb + reserve - 0.01, 96.0, 0.0)),
+        ));
+        assert!(message.contains("GPU 0"), "{message}");
 
         // No budget reading admits (no evidence ⇒ no block).
-        assert!(admission_error("yue_en_cot", &e, &s, None).is_none());
+        assert!(matches!(
+            decide("yue_en_cot", &e, &s, None),
+            YueAdmission::Admit
+        ));
+    }
+
+    #[test]
+    fn cuda_reclaims_the_cached_generator_before_refusing_and_says_why_it_refuses() {
+        let entry = builtin("yue_en_cot");
+        let s = shape(YueTier::Q4, 2, 3000, true);
+        let e = estimate(&entry, &s).unwrap();
+        let floor_gb = gib(e.floor().1);
+        let reserve = crate::fit_gate::dedicated_vram_reserve().gb;
+        let needed = floor_gb + reserve;
+
+        // Short by 1 GB of free VRAM, but evicting the cached generator returns 5 GB: admit after
+        // evicting.
+        assert!(matches!(
+            decide("yue_en_cot", &e, &s, Some(&cuda(needed - 1.0, 24.0, 5.0))),
+            YueAdmission::AdmitAfterEvict
+        ));
+        // The reclaim credit is clamped to the card total (`with_reclaimable`): a card smaller than
+        // the floor never admits on credit.
+        let clamped = refusal(decide(
+            "yue_en_cot",
+            &e,
+            &s,
+            Some(&cuda(needed - 1.0, needed - 0.5, 5.0)),
+        ));
+        assert!(clamped.contains("of VRAM in total"), "{clamped}");
+        // The card is big enough but something else holds the VRAM: say so, not "too small".
+        let busy = refusal(decide(
+            "yue_en_cot",
+            &e,
+            &s,
+            Some(&cuda(needed - 1.0, 24.0, 0.0)),
+        ));
+        assert!(
+            busy.contains("another process or model is holding VRAM"),
+            "{busy}"
+        );
+        assert!(!busy.contains("of VRAM in total"), "{busy}");
+        // The card itself is too small: capacity wording.
+        let small = refusal(decide(
+            "yue_en_cot",
+            &e,
+            &s,
+            Some(&cuda(floor_gb - 1.0, needed - 1.0, 0.0)),
+        ));
+        assert!(small.contains("of VRAM in total"), "{small}");
+        assert!(!small.contains("another process"), "{small}");
     }
 
     #[test]
@@ -754,9 +933,12 @@ mod tests {
         let bf16 = shape(YueTier::Bf16, 2, 3000, true);
         let e4 = estimate(&entry, &q4).unwrap();
         let e16 = estimate(&entry, &bf16).unwrap();
-        assert!(admission_error("yue_en_cot", &e4, &q4, Some(&budget)).is_none());
-        let refusal = admission_error("yue_en_cot", &e16, &bf16, Some(&budget)).unwrap();
-        assert!(refusal.to_string().contains("smaller tier"), "{refusal}");
+        assert!(matches!(
+            decide("yue_en_cot", &e4, &q4, Some(&budget)),
+            YueAdmission::Admit
+        ));
+        let message = refusal(decide("yue_en_cot", &e16, &bf16, Some(&budget)));
+        assert!(message.contains("smaller tier"), "{message}");
     }
 
     #[test]
@@ -780,159 +962,133 @@ mod tests {
         });
         let e = estimate(&synthetic, &s).unwrap();
         assert_eq!(e.floor().0, YueStage::Stage2);
-        let refusal = admission_error("x", &e, &s, Some(&mac(1.0))).unwrap();
-        assert!(refusal.to_string().contains("1B stage-2 LM"), "{refusal}");
-    }
-
-    fn all_installed(_: &str) -> bool {
-        true
-    }
-
-    fn from(value: Value, entry: &Value) -> YueRenderShape {
-        YueRenderShape::from_payload(&payload(value), entry, &all_installed)
+        let message = refusal(decide("x", &e, &s, Some(&mac(1.0))));
+        assert!(message.contains("1B stage-2 LM"), "{message}");
     }
 
     #[test]
-    fn payload_shape_follows_the_sc19384_job_surface() {
-        let entry = builtin("yue_en_cot");
-        let defaults = from(json!({}), &entry);
-        assert_eq!(
-            defaults.tier,
-            YueTier::Q4,
-            "manifest default tier, installed"
-        );
+    fn the_shape_prices_what_the_job_resolved() {
+        let defaults = YueRenderShape::new(&facts(FOUR_SECTIONS)).unwrap();
+        assert_eq!(defaults.tier, YueTier::Q4);
         assert_eq!((defaults.segments, defaults.max_new_tokens), (2, 3000));
         assert!(defaults.cfg, "unset guidance ⇒ the 1.5/1.2 schedule");
         assert_eq!(defaults.icl, None, "no iclMode ⇒ no reference block");
-
-        let custom = from(
-            json!({
-                "segments": 5,
-                "maxNewTokensPerSegment": 800,
-                "guidance": 1.0,
-                "quantTier": "Q8",
-                "lyrics": "[verse]\nabc",
-                "prompt": "pop"
-            }),
-            &entry,
+        // Head allowance + genre bytes + the lyrics twice + per-segment framing.
+        assert_eq!(
+            defaults.prompt_tokens,
+            64 + 3 + 2 * FOUR_SECTIONS.len() as u64 + 32 * 2
         );
-        assert_eq!(custom.tier, YueTier::Q8, "quantTier, case-insensitive");
-        assert_eq!((custom.segments, custom.max_new_tokens), (5, 800));
-        assert!(!custom.cfg, "guidance <= 1 turns CFG off");
-        assert_eq!(custom.prompt_tokens, 64 + 3 + 2 * 11 + 32 * 5);
 
-        let bf16 = from(json!({"quantTier": "bf16", "guidance": 3.0}), &entry);
-        assert_eq!(bf16.tier, YueTier::Bf16);
-        assert!(bf16.cfg, "guidance > 1 keeps CFG on");
-        // `guidanceEnabled: false` switches CFG off whatever the scale says.
-        let off = from(json!({"guidanceEnabled": false, "guidance": 3.0}), &entry);
-        assert!(!off.cfg);
-        let on = from(json!({"guidanceEnabled": true}), &entry);
-        assert!(on.cfg);
-        // The legacy image-lane knob is not the audio tier key.
-        let legacy = from(json!({"advanced": {"mlxQuantize": 8}}), &entry);
-        assert_eq!(legacy.tier, YueTier::Q4);
+        let custom = YueRenderShape::new(&YueRequestFacts {
+            tier: Some(YueTier::Q8),
+            segments: Some(3),
+            max_new_tokens: Some(800),
+            guidance: Some(1.0),
+            ..facts(FOUR_SECTIONS)
+        })
+        .unwrap();
+        assert_eq!(custom.tier, YueTier::Q8);
+        assert_eq!((custom.segments, custom.max_new_tokens), (3, 800));
+        assert!(
+            !custom.cfg,
+            "guidance <= 1 (incl. the 0.0 guidanceEnabled=false sends) ⇒ off"
+        );
+        let on = YueRenderShape::new(&YueRequestFacts {
+            guidance: Some(3.0),
+            ..facts(FOUR_SECTIONS)
+        })
+        .unwrap();
+        assert!(on.cfg, "guidance > 1 keeps CFG on");
+        // No tier resolved ⇒ nothing to price (the gate fails closed).
+        assert!(YueRenderShape::new(&YueRequestFacts {
+            tier: None,
+            ..facts(FOUR_SECTIONS)
+        })
+        .is_none());
     }
 
     #[test]
-    fn an_unset_tier_prices_the_tier_the_job_will_load() {
-        let entry = builtin("yue_en_cot");
-        let only = |dir: &'static str| move |subdir: &str| subdir == dir;
-        let q8_only = only("q8");
-        let shape = YueRenderShape::from_payload(&payload(json!({})), &entry, &q8_only);
-        assert_eq!(
-            shape.tier,
-            YueTier::Q8,
-            "default (q4) not installed ⇒ first installed"
-        );
-        let bf16_only = only("bf16");
-        let shape = YueRenderShape::from_payload(&payload(json!({})), &entry, &bf16_only);
-        assert_eq!(shape.tier, YueTier::Bf16);
-        let none = |_: &str| false;
-        let shape = YueRenderShape::from_payload(&payload(json!({})), &entry, &none);
-        assert_eq!(shape.tier, YueTier::Q4, "nothing installed ⇒ the default");
-        // The default wins over manifest order when it is installed.
-        let reordered = json!({"downloads": [
-            {"variant": "bf16"},
-            {"variant": "q8", "default": true},
-            {"variant": "q4"},
-        ]});
-        let shape = YueRenderShape::from_payload(&payload(json!({})), &reordered, &all_installed);
-        assert_eq!(shape.tier, YueTier::Q8);
-        // An explicit tier is priced as asked, installed or not (the job refuses a missing one).
-        let shape =
-            YueRenderShape::from_payload(&payload(json!({"quantTier": "bf16"})), &entry, &q8_only);
-        assert_eq!(shape.tier, YueTier::Bf16);
+    fn segments_are_capped_at_the_lyric_sections_the_engine_renders() {
+        let two_sections = "[verse]\nhello\n[chorus]\nworld";
+        let eight = YueRenderShape::new(&YueRequestFacts {
+            segments: Some(8),
+            ..facts(two_sections)
+        })
+        .unwrap();
+        let two = YueRenderShape::new(&YueRequestFacts {
+            segments: Some(2),
+            ..facts(two_sections)
+        })
+        .unwrap();
+        assert_eq!(eight.segments, 2);
+        assert_eq!(stage1_kv_positions(&eight), stage1_kv_positions(&two));
+        // Never below one (the engine refuses section-less lyrics itself).
+        let none = YueRenderShape::new(&YueRequestFacts {
+            segments: Some(4),
+            ..facts("no sections here")
+        })
+        .unwrap();
+        assert_eq!(none.segments, 1);
+    }
+
+    #[test]
+    fn lyric_sections_follow_the_reference_split() {
+        // `\w+` labels only: `[verse 1]` is not a section (a space is not `\w`) and ends nothing.
+        assert_eq!(lyric_section_count("[verse]\na\n[chorus]\nb"), 2);
+        assert_eq!(lyric_section_count("[verse 1]\na\n[chorus]\nb"), 1);
+        // Unicode letters and numbers are `\w` (Python's `re` semantics): CJK, digits, underscore.
+        assert_eq!(lyric_section_count("[副歌]\n啊\n[verse_2]\nb\n[２]\nc"), 3);
+        // Empty label, unclosed bracket, and text before the first section are not sections.
+        assert_eq!(lyric_section_count("intro text [] [open\n[outro]\nz"), 1);
+        assert_eq!(lyric_section_count(""), 0);
     }
 
     #[test]
     fn icl_is_priced_by_the_actual_window_and_track_count() {
-        let entry = builtin("yue_en_icl");
-        let base = from(json!({}), &entry).prompt_tokens;
-        let icl = |value: Value| from(value, &entry);
+        let base = YueRenderShape::new(&facts(FOUR_SECTIONS))
+            .unwrap()
+            .prompt_tokens;
+        let icl = |mode: &'static str, start: Option<f32>, end: Option<f32>| {
+            YueRenderShape::new(&YueRequestFacts {
+                icl_mode: Some(mode),
+                icl_start_secs: start,
+                icl_end_secs: end,
+                ..facts(FOUR_SECTIONS)
+            })
+            .unwrap()
+        };
         let window = |shape: &YueRenderShape| {
             let p = shape.icl.expect("ICL priced");
             (p.tracks, p.start_secs, p.end_secs, p.window_secs())
         };
 
         // Both ends absent: the upstream 0–30 s default; dual = 2 × 50 tokens/s.
-        let default = icl(json!({"iclMode": "Dual"}));
+        let default = icl("Dual", None, None);
         assert_eq!(window(&default), (2, 0.0, 30.0, 30.0));
         assert_eq!(default.prompt_tokens, base + 3000);
-
         // Explicit window, single mix: 20 s × 50 = 1000 tokens.
-        let explicit = icl(json!({"iclMode": "single", "iclStartSecs": 5.0, "iclEndSecs": 25.0}));
+        let explicit = icl("single", Some(5.0), Some(25.0));
         assert_eq!(window(&explicit), (1, 5.0, 25.0, 20.0));
         assert_eq!(explicit.prompt_tokens, base + 1000);
-
         // Absent end = the upstream default end of 30 s whatever the start: 30 − 10 = 20 s.
-        let open_end = icl(json!({"iclMode": "dual", "iclStartSecs": 10.0}));
+        let open_end = icl("dual", Some(10.0), None);
         assert_eq!(window(&open_end), (2, 10.0, 30.0, 20.0));
         assert_eq!(open_end.prompt_tokens, base + 2000);
-
         // Absent start = 0: a long explicit end is priced in full (0–90 s dual = 9000 tokens).
-        let long_window = icl(json!({"iclMode": "dual", "iclEndSecs": 90.0}));
+        let long_window = icl("dual", None, Some(90.0));
         assert_eq!(window(&long_window), (2, 0.0, 90.0, 90.0));
         assert_eq!(long_window.prompt_tokens, base + 9000);
 
-        // A longer window moves the estimate (the stage-1 KV grows with it), and the refusal
-        // names the window it priced.
+        // A longer window moves the estimate, and the refusal names the window it priced.
+        let entry = builtin("yue_en_icl");
         let short = estimate(&entry, &explicit).unwrap();
         let long = estimate(&entry, &long_window).unwrap();
         assert!(long.stage1_kv_bytes > short.stage1_kv_bytes);
-        let refusal = admission_error("yue_en_icl", &long, &long_window, Some(&mac(1.0))).unwrap();
+        let message = refusal(decide("yue_en_icl", &long, &long_window, Some(&mac(1.0))));
         assert!(
-            refusal
-                .to_string()
-                .contains("2-track ICL reference window of 90.0 s (0.0–90.0 s)"),
-            "{refusal}"
+            message.contains("2-track ICL reference window of 90.0 s (0.0–90.0 s)"),
+            "{message}"
         );
-
-        // No iclMode ⇒ no reference block, whatever the window fields say.
-        assert_eq!(icl(json!({"iclEndSecs": 90.0})).icl, None);
-    }
-
-    #[test]
-    fn the_audio_job_runs_the_gate_before_touching_the_project_or_weights() {
-        let source = include_str!("audio_jobs.rs");
-        let body = source
-            .split_once("pub(crate) async fn run_audio_generate_job(")
-            .expect("audio job entry point")
-            .1;
-        let gate = body
-            .find("crate::yue_admission::check(")
-            .expect("the audio job must run the YuE admission gate");
-        for later in [
-            "get_project(",
-            "build_audio_edit(",
-            "resolve_voice_clone_plan(",
-            "run_audio_synthesis(",
-        ] {
-            let at = body
-                .find(later)
-                .unwrap_or_else(|| panic!("{later} in the job"));
-            assert!(gate < at, "the gate must run before {later}");
-        }
     }
 
     #[test]
@@ -946,25 +1102,21 @@ mod tests {
         let mut yue = entry.clone();
         yue["family"] = json!("yue");
         let err = rt
-            .block_on(check(
-                "yue_en_cot",
-                &payload(json!({})),
-                &yue,
-                "0",
-                &all_installed,
-            ))
+            .block_on(check("yue_en_cot", &yue, &facts(FOUR_SECTIONS), "0"))
             .unwrap_err();
         assert!(err.to_string().contains("cannot price"), "{err}");
+        let untiered = YueRequestFacts {
+            tier: None,
+            ..facts(FOUR_SECTIONS)
+        };
+        let err = rt
+            .block_on(check("yue_en_cot", &builtin("yue_en_cot"), &untiered, "0"))
+            .unwrap_err();
+        assert!(err.to_string().contains("no tier resolved"), "{err}");
         // A non-YuE model is never touched by this gate.
         assert!(!is_yue(&json!({"family": "ace"})));
         assert!(rt
-            .block_on(check(
-                "ace_step",
-                &payload(json!({})),
-                &json!({"family": "ace"}),
-                "0",
-                &all_installed,
-            ))
+            .block_on(check("ace_step", &json!({"family": "ace"}), &untiered, "0"))
             .is_ok());
     }
 }
