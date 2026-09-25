@@ -736,7 +736,8 @@ mod tests {
                     e.stage2_weights_bytes < e.stage1_weights_bytes,
                     "{id} {tier:?}"
                 );
-                assert!(e.codec_bytes > GIB, "{id}: xcodec f32 component");
+                // The trimmed xcodec coRequisite (the three files the engine opens), shared by all six.
+                assert_eq!(e.codec_bytes, 888_703_120, "{id}: xcodec f32 component");
             }
         }
     }
@@ -748,7 +749,7 @@ mod tests {
         // The shipped q4 sizes (manifest `estimatedSizeBytes`).
         assert_eq!(e.stage1_weights_bytes, 4_497_628_709);
         assert_eq!(e.stage2_weights_bytes, 1_604_865_100);
-        assert_eq!(e.codec_bytes, 1_273_277_645);
+        assert_eq!(e.codec_bytes, 888_703_120);
         let (stage, bytes) = e.floor();
         let stages = [
             e.stage_bytes(YueStage::Stage1),
