@@ -2204,6 +2204,34 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
 /// ("556 reference soundtrack rows against a layout reserving 1112", real-weight render
 /// 2026-09-20). `-ac` is what makes mono reachable, and it must be the one `-ac` in the command:
 /// a second one would silently win and this asserts the single occurrence.
+/// The YuE ICL decode (sc-19384) shares this command builder; the video reference path's command
+/// must stay byte-identical to what it was before that sharing: PCM-16, exact rate and channels.
+#[test]
+fn reference_audio_command_is_byte_identical_pcm16_normalization() {
+    use super::reference_audio::reference_audio_ffmpeg_args;
+    let args = reference_audio_ffmpeg_args(Path::new("/in/voice.wav"), Path::new("/out/ref.wav"));
+    assert_eq!(
+        args,
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-i",
+            "/in/voice.wav",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ar",
+            "32000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "/out/ref.wav",
+        ]
+    );
+}
+
 #[test]
 fn reference_audio_normalization_pins_the_engines_channel_layout() {
     use super::reference_audio::{

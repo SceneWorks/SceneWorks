@@ -764,12 +764,18 @@ async fn resolve_icl_reference(
 /// exactly as upstream `load_audio_mono` does, so any worker-side conversion would bypass that
 /// golden-verified path.
 ///
+/// Every clip is decoded as 32-bit float (`pcm_f32le`), as upstream's torchaudio load does, so no
+/// 16-bit rounding lands before the xcodec encoder.
+///
 /// The one exception is a `dual` pair whose stems differ in format: the engine's dual-track carrier
 /// is ONE [`gen_core::AudioTrack`] with one sample rate and one interleaved channel count for both
 /// stems. Only then is each clip that differs re-decoded onto the pair's common format — the HIGHER
-/// rate (an upsample, so neither stem loses band before the engine's own resample) and the higher
-/// channel count (a mono stem is duplicated, whose channel mean is the mono signal itself). See
-/// [`icl_common_format`].
+/// rate (an upsample, so neither stem loses band before the engine's own resample) and, when the
+/// channel counts differ, MONO: each multi-channel stem is averaged with an exact per-frame mean
+/// (`pan`, gain `1/n` per channel), which is the value the engine's `torch.mean` downmix would have
+/// produced from it, while a mono stem is left untouched at full level. (Upmixing the mono stem
+/// instead would not be neutral: ffmpeg's mono→stereo `-ac 2` puts it at 1/√2 per channel, −3 dB
+/// after the engine's mean.) See [`icl_common_format`].
 async fn decode_icl_clips(
     api: &ApiClient,
     settings: &Settings,
@@ -780,23 +786,41 @@ async fn decode_icl_clips(
     for (stem, source) in &sources {
         decoded.push((
             *stem,
-            decode_icl_clip(api, settings, job_id, source, None).await?,
+            decode_icl_clip(api, settings, job_id, source, ICL_SOURCE_DECODE).await?,
         ));
     }
     let tracks: Vec<&gen_core::AudioTrack> = decoded.iter().map(|(_, track)| track).collect();
-    if let Some(common) = icl_common_format(&tracks) {
+    if let Some((rate, channels)) = icl_common_format(&tracks) {
         for ((_, track), (_, source)) in decoded.iter_mut().zip(&sources) {
-            if (track.sample_rate, track.channels) != common {
-                *track = decode_icl_clip(api, settings, job_id, source, Some(common)).await?;
+            if (track.sample_rate, track.channels) != (rate, channels) {
+                let decode = icl_redecode(track, rate, channels);
+                *track = decode_icl_clip(api, settings, job_id, source, decode).await?;
             }
         }
     }
     Ok(decoded)
 }
 
+/// The float32 decode that brings one clip (decoded at `track`'s source format) onto the pair's
+/// common `(rate, channels)`: `-ar` only when its rate differs, and an exact channel-mean downmix
+/// only when its channel count differs (the common count is then 1 — see [`icl_common_format`]).
+fn icl_redecode(
+    track: &gen_core::AudioTrack,
+    rate: u32,
+    channels: u16,
+) -> crate::video_jobs::reference_audio::AudioDecode {
+    crate::video_jobs::reference_audio::AudioDecode {
+        sample_rate: (track.sample_rate != rate).then_some(rate),
+        channels: None,
+        mean_downmix_from: (track.channels != channels).then_some(track.channels),
+        float32: true,
+    }
+}
+
 /// The `(sample_rate, channels)` every clip of a multi-clip ICL reference must be brought to, or
 /// `None` when they already agree (or there is only one clip) and every clip stays at its source
-/// format. The common format is the highest rate and the highest channel count among the clips.
+/// format. The common format is the highest rate, and the clips' shared channel count — or mono
+/// when their channel counts differ (see [`decode_icl_clips`] for why never an upmix).
 fn icl_common_format(tracks: &[&gen_core::AudioTrack]) -> Option<(u32, u16)> {
     let first = tracks.first()?;
     if tracks
@@ -806,19 +830,32 @@ fn icl_common_format(tracks: &[&gen_core::AudioTrack]) -> Option<(u32, u16)> {
         return None;
     }
     let rate = tracks.iter().map(|track| track.sample_rate).max()?;
-    let channels = tracks.iter().map(|track| track.channels).max()?;
+    let channels = if tracks.iter().all(|track| track.channels == first.channels) {
+        first.channels
+    } else {
+        1
+    };
     Some((rate, channels))
 }
 
+/// The ICL decode at the source's own rate and channel count, as 32-bit float.
+const ICL_SOURCE_DECODE: crate::video_jobs::reference_audio::AudioDecode =
+    crate::video_jobs::reference_audio::AudioDecode {
+        sample_rate: None,
+        channels: None,
+        mean_downmix_from: None,
+        float32: true,
+    };
+
 /// Decode one ICL clip inside a job-scoped scratch dir under the system temp root (see
-/// [`resolve_icl_reference`] for the cleanup contract): at its source format when `format` is
-/// `None`, else onto exactly `(sample_rate, channels)`.
+/// [`resolve_icl_reference`] for the cleanup contract) per `decode` ([`ICL_SOURCE_DECODE`], or a
+/// dual pair's [`icl_redecode`]).
 async fn decode_icl_clip(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     source: &Path,
-    format: Option<(u32, u16)>,
+    decode: crate::video_jobs::reference_audio::AudioDecode,
 ) -> WorkerResult<gen_core::AudioTrack> {
     // `scratch` drops on success AND on every early return, removing the directory.
     let scratch = icl_scratch_dir(job_id)?;
@@ -829,8 +866,7 @@ async fn decode_icl_clip(
         CANCEL_MESSAGE,
         source,
         scratch.path(),
-        format.map(|(rate, _)| rate),
-        format.map(|(_, channels)| channels),
+        decode,
     )
     .await
 }
@@ -2140,6 +2176,24 @@ fn audio_edit_region(
 /// (`audio_format == 1`) 16-bit samples, and converts interleaved `i16` to `f32` in `[-1, 1)`.
 /// Non-PCM / non-16-bit inputs are a clear `Unsupported` rather than a silent mis-decode.
 pub(crate) fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> {
+    read_wav(path, WavSamples::Pcm16)
+}
+
+/// Decode a 32-bit IEEE-float WAV (`WAVE_FORMAT_IEEE_FLOAT`, or `WAVE_FORMAT_EXTENSIBLE` with the
+/// float sub-format — what ffmpeg's `pcm_f32le` writes) into a [`gen_core::AudioTrack`] with the
+/// samples exactly as stored. The YuE ICL reference reader (sc-19384): upstream decodes its prompt
+/// audio to float, so no 16-bit rounding may land before the xcodec encoder.
+pub(crate) fn read_wav_f32(path: &Path) -> WorkerResult<gen_core::AudioTrack> {
+    read_wav(path, WavSamples::Float32)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WavSamples {
+    Pcm16,
+    Float32,
+}
+
+fn read_wav(path: &Path, want: WavSamples) -> WorkerResult<gen_core::AudioTrack> {
     let bytes = std::fs::read(path)?;
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(WorkerError::InvalidPayload(format!(
@@ -2158,8 +2212,13 @@ pub(crate) fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> 
         let body = pos + 8;
         let end = body.saturating_add(size).min(bytes.len());
         if id == b"fmt " && size >= 16 && body + 16 <= bytes.len() {
+            let mut format = le16(&bytes, body);
+            // WAVE_FORMAT_EXTENSIBLE: the real format is the first two bytes of the sub-format GUID.
+            if format == 0xFFFE && size >= 40 && body + 26 <= bytes.len() {
+                format = le16(&bytes, body + 24);
+            }
             fmt = Some((
-                le16(&bytes, body),
+                format,
                 le16(&bytes, body + 2),
                 le32(&bytes, body + 4),
                 le16(&bytes, body + 14),
@@ -2173,9 +2232,13 @@ pub(crate) fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> 
     let (audio_format, channels, sample_rate, bits) = fmt.ok_or_else(|| {
         WorkerError::InvalidPayload(format!("source audio {} has no fmt chunk", path.display()))
     })?;
-    if audio_format != 1 || bits != 16 {
+    let (expected, label) = match want {
+        WavSamples::Pcm16 => ((1, 16), "PCM 16-bit"),
+        WavSamples::Float32 => ((3, 32), "IEEE float 32-bit"),
+    };
+    if (audio_format, bits) != expected {
         return Err(WorkerError::InvalidPayload(format!(
-            "source audio {} must be PCM 16-bit (got format {audio_format}, {bits}-bit)",
+            "source audio {} must be {label} (got format {audio_format}, {bits}-bit)",
             path.display()
         )));
     }
@@ -2188,10 +2251,16 @@ pub(crate) fn read_wav_pcm16(path: &Path) -> WorkerResult<gen_core::AudioTrack> 
     let (start, end) = data.ok_or_else(|| {
         WorkerError::InvalidPayload(format!("source audio {} has no data chunk", path.display()))
     })?;
-    let samples: Vec<f32> = bytes[start..end]
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0)
-        .collect();
+    let samples: Vec<f32> = match want {
+        WavSamples::Pcm16 => bytes[start..end]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0)
+            .collect(),
+        WavSamples::Float32 => bytes[start..end]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    };
     if samples.is_empty() {
         return Err(WorkerError::InvalidPayload(format!(
             "source audio {} decoded to zero samples",
@@ -5834,10 +5903,70 @@ mod yue_job_surface_tests {
         }
     }
 
+    /// Write a 32-bit IEEE-float WAV (`WAVE_FORMAT_IEEE_FLOAT`) holding `samples` at `path`.
+    fn write_f32_wav(path: &Path, samples: &[f32], sample_rate: u32, channels: u16) {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let block = channels * 4;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * u32::from(block)).to_le_bytes());
+        wav.extend_from_slice(&block.to_le_bytes());
+        wav.extend_from_slice(&32u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(path, wav).expect("float wav writes");
+    }
+
+    /// Resolve a dual reference over two already-imported assets.
+    async fn resolved_dual_track(
+        staged: &Staged,
+        api: &ApiClient,
+        vocal: &str,
+        instrumental: &str,
+    ) -> gen_core::AudioTrack {
+        resolved_icl_track(
+            staged,
+            api,
+            json!({
+                "iclMode": "dual",
+                "iclVocalAssetId": vocal,
+                "iclInstrumentalAssetId": instrumental,
+            }),
+        )
+        .await
+    }
+
+    /// Every sample of `stem` away from the resampler's edges (`margin` samples each side) is within
+    /// 1e-3 of `level`.
+    fn assert_stem_level(stem: &gen_core::AudioStem, channels: u16, level: f32, margin: usize) {
+        // What the engine encodes: the per-frame channel mean (`icl::downmix`, `torch.mean`).
+        let mono: Vec<f32> = stem
+            .samples
+            .chunks_exact(usize::from(channels))
+            .map(|frame| frame.iter().sum::<f32>() / f32::from(channels))
+            .collect();
+        let interior = &mono[margin..mono.len() - margin];
+        assert!(!interior.is_empty());
+        let worst = interior
+            .iter()
+            .map(|s| (s - level).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "{}: off {level} by {worst}", stem.name);
+    }
+
     /// A dual ICL pair whose stems differ in format is brought onto ONE common format (the
-    /// engine's dual-track carrier has one rate and one channel count): the HIGHER rate and the
-    /// higher channel count. A 22.05 kHz mono vocal beside a 44.1 kHz stereo instrumental both
-    /// reach the engine at 44.1 kHz stereo, over the same duration.
+    /// engine's dual-track carrier has one rate and one channel count): the HIGHER rate and — the
+    /// channel counts differing — MONO. A 22.05 kHz mono vocal beside a 44.1 kHz stereo instrumental
+    /// both reach the engine at 44.1 kHz mono over the same duration, and the mono vocal keeps its
+    /// FULL level (0.25) — what the engine's `torch.mean` downmix of the untouched clip would give —
+    /// not the −3 dB (0.177) an `-ac 2` upmix would leave after that mean.
     #[tokio::test]
     async fn dual_icl_stems_with_mismatched_rates_meet_at_the_higher_rate() {
         if !crate::video_jobs::tests::ffmpeg_reachable() {
@@ -5865,63 +5994,158 @@ mod yue_job_surface_tests {
                 channels: 2,
             },
         );
-        let audio = resolved_icl_track(
-            &staged,
-            &api,
-            json!({
-                "iclMode": "dual",
-                "iclVocalAssetId": vocal,
-                "iclInstrumentalAssetId": instrumental,
-            }),
-        )
-        .await;
-        assert_eq!((audio.sample_rate, audio.channels), (44_100, 2));
+        let audio = resolved_dual_track(&staged, &api, &vocal, &instrumental).await;
+        // Levels first, as the engine sees them after its channel mean: the mono vocal at FULL level.
+        assert_stem_level(&audio.stems[0], audio.channels, 0.25, 512);
+        assert_stem_level(&audio.stems[1], audio.channels, -0.125, 512);
+        assert_eq!((audio.sample_rate, audio.channels), (44_100, 1));
         let names: Vec<&str> = audio.stems.iter().map(|stem| stem.name.as_str()).collect();
         assert_eq!(names, ["vocals", "instrumental"]);
-        // Both stems span the same 1 s at 44.1 kHz stereo (ffmpeg's resampler may trim a few edge
-        // samples of the upsampled vocal; the pair is cut to the shorter one).
+        // Both stems span the same 1 s at 44.1 kHz (ffmpeg's resampler may trim a few edge samples
+        // of the upsampled vocal; the pair is cut to the shorter one).
         let len = audio.samples.len();
-        assert!(len.abs_diff(44_100 * 2) <= 256, "{len} samples");
+        assert!(len.abs_diff(44_100) <= 256, "{len} samples");
         assert!(audio.stems.iter().all(|stem| stem.samples.len() == len));
     }
 
-    /// The ffmpeg-free half (hosted macOS CI has no ffmpeg): a source-format decode carries no
-    /// `-ar` / `-ac` at all, and still writes the PCM-16 WAV `read_wav_pcm16` decodes.
+    /// The mixed-channel case at one rate: a mono vocal beside a stereo instrumental whose channels
+    /// differ. Both reach the engine mono at the shared rate; the vocal is untouched at full level and
+    /// the instrumental is its exact per-frame channel mean ((0.5 + −0.25) / 2 = 0.125) — the value
+    /// the engine's own `torch.mean` downmix would have produced from the stereo clip.
+    #[tokio::test]
+    async fn dual_icl_mono_beside_stereo_keeps_the_mono_stem_at_full_level() {
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!("dual_icl_mono_beside_stereo_keeps_the_mono_stem_at_full_level: ffmpeg not found, skipping");
+            return;
+        }
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let staged = stage(base_url);
+        let api = ApiClient::new(&staged.settings);
+        let frames = 4_410;
+        let vocal = import_wav_asset(
+            &staged,
+            "vocal-mono.wav",
+            &AudioTrack {
+                samples: vec![0.25f32; frames],
+                sample_rate: 44_100,
+                channels: 1,
+            },
+        );
+        let instrumental = import_wav_asset(
+            &staged,
+            "inst-stereo.wav",
+            &AudioTrack {
+                samples: (0..frames).flat_map(|_| [0.5f32, -0.25f32]).collect(),
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        );
+        let audio = resolved_dual_track(&staged, &api, &vocal, &instrumental).await;
+        assert_stem_level(&audio.stems[0], audio.channels, 0.25, 0);
+        assert_stem_level(&audio.stems[1], audio.channels, 0.125, 0);
+        assert_eq!((audio.sample_rate, audio.channels), (44_100, 1));
+        assert_eq!(audio.samples.len(), frames);
+    }
+
+    /// Upstream decodes the prompt audio to float (torchaudio), so the ICL decode must not round its
+    /// input to 16 bits: a float32 source whose detail sits far below one 16-bit step (~3.05e-5)
+    /// comes out of the decode sample-for-sample. (Library assets are stored PCM-16 by the import
+    /// normalization, sc-18650, which this decode reads exactly; the float output is what keeps a
+    /// dual pair's resample / channel mean from being re-rounded.)
+    #[tokio::test]
+    async fn icl_decode_keeps_float_detail_below_one_16_bit_step() {
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!(
+                "icl_decode_keeps_float_detail_below_one_16_bit_step: ffmpeg not found, skipping"
+            );
+            return;
+        }
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let mut settings = Settings::from_env();
+        settings.api_url = base_url;
+        settings.worker_id = "test-worker".to_owned();
+        settings.heartbeat_seconds = 5;
+        let api = ApiClient::new(&settings);
+        let dir = tempfile::tempdir().expect("source dir");
+        let source = dir.path().join("ref-f32.wav");
+        let samples: Vec<f32> = (0..2_000).map(|i| 0.25 + (i % 7) as f32 * 1.0e-6).collect();
+        write_f32_wav(&source, &samples, 44_100, 1);
+        let track = decode_icl_clip(&api, &settings, "yue-icl-float", &source, ICL_SOURCE_DECODE)
+            .await
+            .expect("a float clip decodes");
+        assert_eq!((track.sample_rate, track.channels), (44_100, 1));
+        assert_eq!(track.samples.len(), samples.len());
+        for (got, want) in track.samples.iter().zip(&samples) {
+            assert!((got - want).abs() < 1e-7, "{got} vs {want}");
+        }
+    }
+
+    /// The ffmpeg-free half (hosted macOS CI has no ffmpeg): the ICL source decode carries no
+    /// `-ar` / `-ac` / filter at all and writes float32 PCM; a dual pair's re-decode resamples and
+    /// averages the channels with an exact `1/n` pan, never `-ac`.
     #[test]
-    fn source_format_decode_command_carries_no_rate_or_channel_flag() {
-        let args = crate::video_jobs::reference_audio::audio_normalize_ffmpeg_args(
+    fn icl_decode_commands_keep_the_source_format_as_float() {
+        use crate::video_jobs::reference_audio::audio_normalize_ffmpeg_args;
+        let args = audio_normalize_ffmpeg_args(
             Path::new("/in/ref.flac"),
             Path::new("/out/ref.wav"),
-            None,
-            None,
+            ICL_SOURCE_DECODE,
         );
         assert!(
-            !args.iter().any(|arg| arg == "-ar" || arg == "-ac"),
+            !args
+                .iter()
+                .any(|arg| arg == "-ar" || arg == "-ac" || arg == "-af"),
             "{args:?}"
         );
         assert!(args
             .windows(2)
-            .any(|w| w[0] == "-c:a" && w[1] == "pcm_s16le"));
+            .any(|w| w[0] == "-c:a" && w[1] == "pcm_f32le"));
         assert_eq!(args.last().map(String::as_str), Some("/out/ref.wav"));
+
+        let stereo = gen_core::AudioTrack {
+            samples: Vec::new(),
+            sample_rate: 22_050,
+            channels: 2,
+            stems: Vec::new(),
+        };
+        let args = audio_normalize_ffmpeg_args(
+            Path::new("/in/ref.flac"),
+            Path::new("/out/ref.wav"),
+            icl_redecode(&stereo, 44_100, 1),
+        );
+        assert!(!args.iter().any(|arg| arg == "-ac"), "{args:?}");
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-af" && w[1] == "pan=mono|c0=0.5*c0+0.5*c1"));
+        assert!(args.windows(2).any(|w| w[0] == "-ar" && w[1] == "44100"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-c:a" && w[1] == "pcm_f32le"));
     }
 
     /// The common-format rule itself: `None` (every clip keeps its source format) when the clips
-    /// agree or there is one clip; else the highest rate and the highest channel count.
+    /// agree or there is one clip; else the highest rate, and mono whenever the channel counts differ.
     #[test]
-    fn icl_common_format_is_the_higher_rate_and_channel_count_only_on_mismatch() {
+    fn icl_common_format_is_the_higher_rate_and_mono_on_a_channel_mismatch() {
         let track = |sample_rate: u32, channels: u16| gen_core::AudioTrack {
             samples: Vec::new(),
             sample_rate,
             channels,
             stems: Vec::new(),
         };
-        let (a, b, c) = (track(22_050, 1), track(44_100, 2), track(48_000, 1));
+        let (a, b, c, d) = (
+            track(22_050, 1),
+            track(44_100, 2),
+            track(48_000, 1),
+            track(32_000, 2),
+        );
         assert_eq!(icl_common_format(&[]), None);
         assert_eq!(icl_common_format(&[&b]), None);
         assert_eq!(icl_common_format(&[&b, &b]), None);
-        assert_eq!(icl_common_format(&[&a, &b]), Some((44_100, 2)));
-        assert_eq!(icl_common_format(&[&b, &a]), Some((44_100, 2)));
-        assert_eq!(icl_common_format(&[&b, &c]), Some((48_000, 2)));
+        assert_eq!(icl_common_format(&[&a, &b]), Some((44_100, 1)));
+        assert_eq!(icl_common_format(&[&b, &a]), Some((44_100, 1)));
+        assert_eq!(icl_common_format(&[&b, &c]), Some((48_000, 1)));
+        assert_eq!(icl_common_format(&[&b, &d]), Some((44_100, 2)));
     }
 
     /// The ICL decode's scratch dir is removed on every exit (sc-19384): a refused decode (a source
@@ -5940,9 +6164,11 @@ mod yue_job_surface_tests {
         let garbage = dir.path().join("not-audio.wav");
         std::fs::write(&garbage, b"this is not audio").expect("garbage writes");
         let job_id = "yue-icl-scratch-refused";
-        assert!(decode_icl_clip(&api, &settings, job_id, &garbage, None)
-            .await
-            .is_err());
+        assert!(
+            decode_icl_clip(&api, &settings, job_id, &garbage, ICL_SOURCE_DECODE)
+                .await
+                .is_err()
+        );
         assert!(
             icl_scratch_dirs(job_id).is_empty(),
             "a refused decode leaves no scratch"
@@ -5963,7 +6189,7 @@ mod yue_job_surface_tests {
         )
         .expect("source writes");
         let job_id = "yue-icl-scratch-ok";
-        let track = decode_icl_clip(&api, &settings, job_id, &source, None)
+        let track = decode_icl_clip(&api, &settings, job_id, &source, ICL_SOURCE_DECODE)
             .await
             .expect("a real clip decodes");
         // Decoded at the SOURCE format: the engine owns the downmix + resample.
@@ -5988,7 +6214,8 @@ mod yue_job_surface_tests {
         .expect("long source writes");
         api_state.cancel.store(true, Ordering::SeqCst);
         let job_id = "yue-icl-scratch-canceled";
-        let canceled = decode_icl_clip(&api, &settings, job_id, &long_source, None).await;
+        let canceled =
+            decode_icl_clip(&api, &settings, job_id, &long_source, ICL_SOURCE_DECODE).await;
         assert!(
             matches!(canceled, Err(WorkerError::Canceled(_))),
             "a decode whose job is canceled ends Canceled, got {canceled:?}"

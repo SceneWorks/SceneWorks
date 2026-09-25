@@ -183,19 +183,42 @@ async fn decode_reference_audio(
         CANCEL_MESSAGE,
         source,
         work_dir,
-        Some(REFERENCE_AUDIO_SAMPLE_RATE),
-        Some(REFERENCE_AUDIO_CHANNELS),
+        AudioDecode::pcm16(REFERENCE_AUDIO_SAMPLE_RATE, REFERENCE_AUDIO_CHANNELS),
     )
     .await
 }
 
-/// Decode any container ffmpeg reads into a PCM-16 [`gen_core::AudioTrack`], through the shared
-/// [`run_ffmpeg`] heartbeat + cooperative-cancel runner. `Some(sample_rate)` / `Some(channels)`
-/// normalize onto exactly that rate / channel count (the video reference path, whose engine ships no
-/// resampler); `None` keeps the SOURCE's rate / channel count (the YuE ICL reference, sc-19384,
-/// whose engine owns the downmix + resample). `work_dir` is caller-owned scratch; the WAV is written
-/// inside it.
-#[allow(clippy::too_many_arguments)]
+/// How [`decode_audio_normalized`] converts a source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioDecode {
+    /// `Some` resamples onto exactly this rate (`-ar`); `None` keeps the source's.
+    pub sample_rate: Option<u32>,
+    /// `Some` remaps onto exactly this channel count with ffmpeg's `-ac`; `None` keeps the source's.
+    pub channels: Option<u16>,
+    /// `Some(n)`: the source has `n` channels; average them into ONE (`pan`, each at gain `1/n` —
+    /// exactly `torch.mean` over channels) instead of ffmpeg's `-ac` remix, whose stereo→mono and
+    /// mono→stereo matrices are not a plain mean.
+    pub mean_downmix_from: Option<u16>,
+    /// Write + read 32-bit float PCM (no 16-bit rounding) instead of PCM s16.
+    pub float32: bool,
+}
+
+impl AudioDecode {
+    /// PCM-16 onto exactly `sample_rate` / `channels` — the video reference path.
+    pub(crate) fn pcm16(sample_rate: u32, channels: u16) -> Self {
+        Self {
+            sample_rate: Some(sample_rate),
+            channels: Some(channels),
+            ..Self::default()
+        }
+    }
+}
+
+/// Decode any container ffmpeg reads into a [`gen_core::AudioTrack`] per `decode`, through the
+/// shared [`run_ffmpeg`] heartbeat + cooperative-cancel runner: the video reference path normalizes
+/// onto its engine's exact rate / channel count as PCM-16 ([`AudioDecode::pcm16`]); the YuE ICL
+/// reference (sc-19384) keeps the source rate / channels as float32, since its engine owns the
+/// downmix + resample. `work_dir` is caller-owned scratch; the WAV is written inside it.
 pub(crate) async fn decode_audio_normalized(
     api: &ApiClient,
     settings: &Settings,
@@ -203,17 +226,16 @@ pub(crate) async fn decode_audio_normalized(
     cancel_message: &str,
     source: &Path,
     work_dir: &Path,
-    sample_rate: Option<u32>,
-    channels: Option<u16>,
+    decode: AudioDecode,
 ) -> WorkerResult<gen_core::AudioTrack> {
     let wav = work_dir.join("reference.wav");
     let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
-    run_ffmpeg(
-        audio_normalize_ffmpeg_args(source, &wav, sample_rate, channels),
-        Some(ctx),
-    )
-    .await?;
-    crate::audio_jobs::read_wav_pcm16(&wav)
+    run_ffmpeg(audio_normalize_ffmpeg_args(source, &wav, decode), Some(ctx)).await?;
+    if decode.float32 {
+        crate::audio_jobs::read_wav_f32(&wav)
+    } else {
+        crate::audio_jobs::read_wav_pcm16(&wav)
+    }
 }
 
 /// The normalization command, built apart from running it so the two engine constants it carries
@@ -229,31 +251,47 @@ pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<Stri
     audio_normalize_ffmpeg_args(
         source,
         wav,
-        Some(REFERENCE_AUDIO_SAMPLE_RATE),
-        Some(REFERENCE_AUDIO_CHANNELS),
+        AudioDecode::pcm16(REFERENCE_AUDIO_SAMPLE_RATE, REFERENCE_AUDIO_CHANNELS),
     )
 }
 
 /// The decode command behind [`reference_audio_ffmpeg_args`], parameterized so another engine
-/// boundary reuses the one command shape: `None` omits `-ar` / `-ac`, so ffmpeg keeps the source's
-/// rate / channel layout (YuE's ICL reference, sc-19384, whose engine downmixes + resamples itself).
+/// boundary reuses the one command shape: a `None` rate / channel count omits `-ar` / `-ac`, so
+/// ffmpeg keeps the source's (YuE's ICL reference, sc-19384, whose engine downmixes + resamples
+/// itself); `mean_downmix_from` averages the channels with an exact `pan`; `float32` writes
+/// `pcm_f32le` instead of `pcm_s16le`.
 pub(crate) fn audio_normalize_ffmpeg_args(
     source: &Path,
     wav: &Path,
-    sample_rate: Option<u32>,
-    channels: Option<u16>,
+    decode: AudioDecode,
 ) -> Vec<String> {
     let mut args: Vec<String> = ["ffmpeg", "-nostdin", "-y", "-i"].map(str::to_owned).into();
     args.push(source.display().to_string());
     args.extend(["-map", "0:a:0", "-vn"].map(str::to_owned));
-    if let Some(rate) = sample_rate {
+    if let Some(n) = decode.mean_downmix_from.filter(|&n| n > 1) {
+        args.extend(["-af".to_owned(), mean_downmix_filter(n)]);
+    }
+    if let Some(rate) = decode.sample_rate {
         args.extend(["-ar".to_owned(), rate.to_string()]);
     }
-    if let Some(channels) = channels {
+    if let Some(channels) = decode.channels {
         args.extend(["-ac".to_owned(), channels.to_string()]);
     }
-    // `read_wav_pcm16` reads PCM s16 only.
-    args.extend(["-c:a", "pcm_s16le"].map(str::to_owned));
+    // The readers: `read_wav_pcm16` (PCM s16) / `read_wav_f32` (IEEE float 32).
+    let codec = if decode.float32 {
+        "pcm_f32le"
+    } else {
+        "pcm_s16le"
+    };
+    args.extend(["-c:a".to_owned(), codec.to_owned()]);
     args.push(wav.display().to_string());
     args
+}
+
+/// `pan=mono|c0=g*c0+g*c1+…` with `g = 1/n`: the per-frame channel mean (`torch.mean(dim=0)`). `=`
+/// (not `<`) keeps the gains exactly as written — no renormalization.
+fn mean_downmix_filter(n: u16) -> String {
+    let gain = 1.0 / f64::from(n);
+    let terms: Vec<String> = (0..n).map(|c| format!("{gain}*c{c}")).collect();
+    format!("pan=mono|c0={}", terms.join("+"))
 }
