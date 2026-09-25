@@ -6507,7 +6507,6 @@ mod yue_job_surface_tests {
     }
 
     /// The shipped manifest entry for `model_id`.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     fn builtin_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
