@@ -28184,7 +28184,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "3857345a35b66c478f4e830dfad89cbc566341b19e997d6e5de14dca5167e649",
+              "sha256": "5fc6fa921841e0df62bf9455b2e03ddb13571150c271caa19efb9ce8f9edc7b3",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28203,13 +28203,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 251798,
-                  "sha256": "f2802a7fcf4abd753c642d3e815ee24c23d0cf7bd9efea419b181c6b0af57c63"
+                  "byteSize": 252128,
+                  "sha256": "3ddc63334d709b5c9dd246622e64af36d4c6e4704d296f9f04fa34edbbdc9fbc"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "97e099232b150eac3bc75df948d31bfc9d940f16e8f64b65ac54657dc2679a04"
+                  "sha256": "5a4e96bddea5e74851f92ee427e20b24aa514764d0cc493139b9322eb558aa79"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -28234,7 +28234,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 9161,
-                  "sha256": "5d0359eb5f53cf73b67043d1beeb35d078ccc395146fc47998a42fa9b73c49bf"
+                  "sha256": "d2867a0ec723a42195928864f466f98a3e7b4972f77cf897b3bfa6f2f239a75f"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
