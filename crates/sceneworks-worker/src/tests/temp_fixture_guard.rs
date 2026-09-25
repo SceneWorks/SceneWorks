@@ -52,9 +52,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ),
     (
         "src/audio_jobs.rs",
-        2,
+        3,
         "deliberate: SCENEWORKS_DOD_OUT fallback for a DoD .wav a human listens to afterwards — \
-         a guard would delete it before it could be played",
+         a guard would delete it before it could be played (2); and the YuE ICL cleanup test's \
+         READ-ONLY sweep of the temp root for leftover `sw-yue-icl-<job>-*` scratch dirs, the \
+         subject of its assertion rather than a fixture (sc-19384)",
     ),
     (
         "src/catalog_image_fetch.rs",

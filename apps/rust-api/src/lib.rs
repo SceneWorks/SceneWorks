@@ -5515,6 +5515,263 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
         }
     }
     validate_model_id(&payload.base_model)?;
+    validate_audio_song_fields(payload)?;
+    Ok(())
+}
+
+/// The ICL reference modes a YuE `_icl` checkpoint accepts (sc-19384): one mixed clip, or a
+/// vocal + instrumental pair.
+const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
+/// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
+const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
+/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
+const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
+/// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
+const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
+
+/// Payload-shape floor for the segmented-song / ICL / tier fields (YuE, sc-19384), before the model
+/// is known: numeric knobs finite and in a sane blanket range, guidance on/off coherent with the
+/// scale, the ICL mode a known token with exactly its own asset ids, and the reference window
+/// well-ordered. [`validate_audio_job_for_model`] then gates each field on the model's declared
+/// capability once the manifest entry is resolved.
+fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
+    if let Some(segments) = payload.segments {
+        if !(1..=100).contains(&segments) {
+            return Err(ApiError::bad_request("segments must be between 1 and 100"));
+        }
+    }
+    if let Some(tokens) = payload.max_new_tokens_per_segment {
+        // YuE's stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1` of
+        // them for its prompt, which must be at least 1 — so 16382 is the largest budget the engine
+        // accepts. Refused here rather than after admission, the ICL encode and the 7B load.
+        if !(1..=16_382).contains(&tokens) {
+            return Err(ApiError::bad_request(
+                "maxNewTokensPerSegment must be between 1 and 16382",
+            ));
+        }
+    }
+    if let Some(penalty) = payload.repetition_penalty {
+        if !penalty.is_finite() || penalty <= 0.0 || penalty > 10.0 {
+            return Err(ApiError::bad_request(
+                "repetitionPenalty must be greater than 0 and at most 10",
+            ));
+        }
+    }
+    if payload.guidance_enabled == Some(false) && payload.guidance.is_some() {
+        return Err(ApiError::bad_request(
+            "guidance (CFG scale) cannot be set while guidanceEnabled is false",
+        ));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        if !AUDIO_QUANT_TIERS.contains(&tier.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "quantTier must be one of {AUDIO_QUANT_TIERS:?}"
+            )));
+        }
+    }
+    if let Some(limiter) = payload.output_limiter.as_deref() {
+        if !AUDIO_OUTPUT_LIMITERS.contains(&limiter.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "outputLimiter must be one of {AUDIO_OUTPUT_LIMITERS:?}"
+            )));
+        }
+    }
+    let present = |value: &Option<String>| value.as_deref().is_some_and(|id| !id.trim().is_empty());
+    let single = present(&payload.icl_reference_asset_id);
+    let vocal = present(&payload.icl_vocal_asset_id);
+    let instrumental = present(&payload.icl_instrumental_asset_id);
+    let window = payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some();
+    match payload
+        .icl_mode
+        .as_deref()
+        .map(|mode| mode.trim().to_lowercase())
+        .filter(|mode| !mode.is_empty())
+        .as_deref()
+    {
+        None => {
+            if single || vocal || instrumental || window {
+                return Err(ApiError::bad_request(
+                    "ICL reference fields need an iclMode (\"single\" or \"dual\")",
+                ));
+            }
+        }
+        Some("single") => {
+            if !single || vocal || instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"single\" takes exactly iclReferenceAssetId (no vocal/instrumental ids)",
+                ));
+            }
+        }
+        Some("dual") => {
+            if single || !vocal || !instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"dual\" takes both iclVocalAssetId and iclInstrumentalAssetId (no \
+                     iclReferenceAssetId)",
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "iclMode must be one of {AUDIO_ICL_MODES:?}"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("iclStartSecs", payload.icl_start_secs),
+        ("iclEndSecs", payload.icl_end_secs),
+    ] {
+        if let Some(secs) = value {
+            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
+                return Err(ApiError::bad_request(format!(
+                    "{field} must be between 0 and 3600"
+                )));
+            }
+        }
+    }
+    // A window with only a start ends at upstream YuE's `prompt_end_time` default (30 s), so a start
+    // at or past 30 s with no end is as ill-ordered as an explicit end <= start.
+    if let Some(start) = payload.icl_start_secs {
+        let end = payload.icl_end_secs.unwrap_or(AUDIO_ICL_DEFAULT_END_SECS);
+        if end <= start {
+            return Err(ApiError::bad_request(format!(
+                "iclEndSecs must be greater than iclStartSecs (the window ends at \
+                 {AUDIO_ICL_DEFAULT_END_SECS} s when iclEndSecs is omitted)"
+            )));
+        }
+    }
+    if payload.icl_mode.is_some()
+        && (present(&payload.reference_audio_asset_id) || present(&payload.source_audio_asset_id))
+    {
+        return Err(ApiError::bad_request(
+            "an ICL reference cannot be combined with referenceAudioAssetId or sourceAudioAssetId",
+        ));
+    }
+    Ok(())
+}
+
+/// Gate the segmented-song / ICL / tier fields on the resolved model's DECLARED audio capabilities
+/// (sc-19384) — the manifest mirrors the engine's `Capabilities` flags, so a request the engine
+/// would refuse is a 400 here instead of a failed job. In particular an ICL mode is reachable only
+/// on an in-context-learning checkpoint (`audio.supportsSegmentedLyrics` + `ReferenceAudio`
+/// conditioning — the YuE `_icl` variants); such a checkpoint may also run WITHOUT one, as a plain
+/// prompt run, as upstream allows. A segmented-lyrics
+/// model also refuses the knobs it does not read (it sings lyrics to genre tags; length follows the
+/// lyrics and `segments`) rather than silently dropping them.
+pub(crate) fn validate_audio_job_for_model(
+    payload: &AudioJobRequest,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    let model = &payload.model;
+    let audio = entry.get("audio");
+    let flag = |key: &str| {
+        audio
+            .and_then(|audio| audio.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let segmented = flag("supportsSegmentedLyrics");
+    let repetition = flag("supportsRepetitionPenalty");
+    let region = flag("supportsReferenceRegion");
+    let reference_audio = audio
+        .and_then(|audio| audio.get("conditioning"))
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "ReferenceAudio"));
+    let icl_model = segmented && reference_audio;
+
+    if (payload.segments.is_some() || payload.max_new_tokens_per_segment.is_some()) && !segmented {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
+        )));
+    }
+    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take an outputLimiter"
+        )));
+    }
+    if payload.repetition_penalty.is_some() && !repetition {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a repetitionPenalty"
+        )));
+    }
+    if payload.icl_mode.is_some() && !icl_model {
+        return Err(ApiError::bad_request(format!(
+            "iclMode needs an in-context-learning (`_icl`) checkpoint; {model} is not one"
+        )));
+    }
+    if (payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some()) && !region {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a reference window (iclStartSecs / iclEndSecs)"
+        )));
+    }
+    // An `_icl` checkpoint WITHOUT a reference is a plain prompt run, exactly as upstream YuE allows
+    // (epic R1); only the reverse — ICL fields on a CoT checkpoint — is refused above.
+    if segmented {
+        if payload
+            .lyrics
+            .as_deref()
+            .is_none_or(|lyrics| lyrics.trim().is_empty())
+        {
+            return Err(ApiError::bad_request(format!(
+                "{model} sings structured lyrics — lyrics are required"
+            )));
+        }
+        let refused = [
+            ("steps", payload.steps.is_some()),
+            ("targetDurationSecs", payload.target_duration_secs.is_some()),
+            ("bpm", payload.bpm.is_some()),
+            ("musicalKey", payload.musical_key.is_some()),
+            ("voice", payload.voice.is_some()),
+            ("script", payload.script.is_some()),
+            (
+                "sourceAudioAssetId",
+                payload.source_audio_asset_id.is_some(),
+            ),
+            (
+                "referenceAudioAssetId",
+                payload.reference_audio_asset_id.is_some(),
+            ),
+        ];
+        if let Some((field, _)) = refused.iter().find(|(_, present)| *present) {
+            return Err(ApiError::bad_request(format!(
+                "{field} is not a control of {model} (put tempo, key and voice in the genre tags; \
+                 song length follows the lyrics and segments)"
+            )));
+        }
+        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
+        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
+        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
+            return Err(ApiError::bad_request(format!(
+                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
+                 turn guidance off)"
+            )));
+        }
+    } else if payload.guidance_enabled.is_some() {
+        // The on/off switch is the segmented-song contract (a `0.0` scale reads as "no CFG" there);
+        // on any other model a `0.0` scale is a range error, so refuse the switch up front.
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take guidanceEnabled (set a guidance scale instead)"
+        )));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        let tier = tier.trim().to_lowercase();
+        let offered = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|downloads| {
+                downloads.iter().any(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                        && download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .is_some_and(|variant| variant.eq_ignore_ascii_case(&tier))
+                })
+            });
+        if !offered {
+            return Err(ApiError::bad_request(format!(
+                "{model} does not ship a {tier} tier"
+            )));
+        }
+    }
     Ok(())
 }
 
