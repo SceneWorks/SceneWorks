@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd",
+    "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -3005,7 +3005,13 @@
       "chatterbox_tts",
       "mmaudio_small_16k",
       "mmaudio_large_44k",
-      "moss_ttsd_v05"
+      "moss_ttsd_v05",
+      "yue_en_cot",
+      "yue_en_icl",
+      "yue_zh_cot",
+      "yue_zh_icl",
+      "yue_jp_kr_cot",
+      "yue_jp_kr_icl"
     ],
     "audio_generator_capabilities": [
       {
@@ -3302,6 +3308,120 @@
         "supports_lora": false,
         "supports_lokr": false,
         "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_en_cot",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_en_icl",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_zh_cot",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_zh_icl",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_jp_kr_cot",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue_jp_kr_icl",
+        "family": "yue",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [
+          "referenceAudio"
+        ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
         "samplers": [],
