@@ -151,6 +151,10 @@ const SPECIAL_AREAS = new Map([
   // obligations.
   ["crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs", "joycaption-source"],
   ["crates/media/mlx-gen/src/caption/joycaption.rs", "joycaption-source"],
+  // candle-gen's build script is first-party: its only marker is the word "vendored" naming the
+  // in-repo `vendor/candle-kernels/build.rs` whose -gencode flags it parses (sc-19545). It sits
+  // outside `src/`, so the default rule would fold it into the crate's architecture-port area.
+  ["crates/media/candle-gen/candle-gen/build.rs", "first-party:crates/media/candle-gen/candle-gen/build.rs"],
 ]);
 
 function sha256(text) {
