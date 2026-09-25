@@ -6167,6 +6167,29 @@ mod yue_job_surface_tests {
         assert_stem_level(&audio.stems[1], audio.channels, 0.125, 0);
         assert_eq!((audio.sample_rate, audio.channels), (44_100, 1));
         assert_eq!(audio.samples.len(), frames);
+
+        // An ODD channel sum on the PCM-16 library asset: L = 1 LSB, R = 0. The exact mean is half an
+        // LSB (1/65536); a mean computed in s16 would round it to 0 or a whole LSB.
+        let odd = import_wav_asset(
+            &staged,
+            "inst-stereo-odd-lsb.wav",
+            &AudioTrack {
+                samples: (0..frames)
+                    .flat_map(|_| [1.0f32 / f32::from(i16::MAX), 0.0f32])
+                    .collect(),
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        );
+        let audio = resolved_dual_track(&staged, &api, &vocal, &odd).await;
+        assert_eq!((audio.sample_rate, audio.channels), (44_100, 1));
+        let half_lsb = 1.0f32 / 65_536.0;
+        let worst = audio.stems[1]
+            .samples
+            .iter()
+            .map(|s| (s - half_lsb).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-9, "half-LSB mean off by {worst}");
     }
 
     /// Upstream decodes the prompt audio to float (torchaudio), so the ICL decode must not round its
@@ -6238,7 +6261,7 @@ mod yue_job_surface_tests {
         assert!(!args.iter().any(|arg| arg == "-ac"), "{args:?}");
         assert!(args
             .windows(2)
-            .any(|w| w[0] == "-af" && w[1] == "pan=mono|c0=0.5*c0+0.5*c1"));
+            .any(|w| w[0] == "-af" && w[1] == "aformat=sample_fmts=flt,pan=mono|c0=0.5*c0+0.5*c1"));
         assert!(args.windows(2).any(|w| w[0] == "-ar" && w[1] == "44100"));
         assert!(args
             .windows(2)
