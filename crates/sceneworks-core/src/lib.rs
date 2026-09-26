@@ -61,6 +61,7 @@ pub mod workflow_parameters;
 pub mod workflow_png;
 pub mod workflow_resolution;
 pub mod workflow_share;
+pub mod yue2_score;
 
 pub const API_PREFIX: &str = "/api/v1";
 pub const HEALTH_ROUTE: &str = "/health";

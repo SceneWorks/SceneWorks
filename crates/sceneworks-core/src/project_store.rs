@@ -2612,6 +2612,18 @@ impl ProjectStore {
             .delete_saved_voice(project_id, voice_id)
     }
 
+    /// The project's YuE2 score version/render/comparison records (sc-22997).
+    pub fn yue2_score_store(
+        &self,
+        project_id: &str,
+    ) -> ProjectStoreResult<crate::yue2_score::store::Yue2ScoreStore> {
+        let project_path = self.find_project_path(project_id)?;
+        Ok(crate::yue2_score::store::Yue2ScoreStore::new(
+            project_path,
+            project_id,
+        ))
+    }
+
     /// Resolve a library asset id to its absolute media file path, guarded against path traversal.
     /// Used by the saved-voice register flow to hand the reference clip to the worker embed path
     /// (sc-13517). Mirrors `get_asset`'s resolution but returns the on-disk path rather than the JSON.
