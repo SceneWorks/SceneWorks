@@ -53,10 +53,12 @@
 //! * **ICL encode** — the reference encoder runs over the WHOLE clip (HuBERT attends globally), so its
 //!   phase grows with the clip, not the window ([`unified_icl_encoder_bytes`]); the job prices the
 //!   window end before it touches the clip and re-prices the decoded clip before any weights load.
-//! * **codec decode** — xcodec decodes each whole track at once through a DAC decoder whose widest
-//!   activations are 64 ch × 16 kHz f32 (256 B per output sample); with the pooled pow2 allocator
-//!   the phase is ~31–32 such tensors (priced as 35), each rounded up to a power of two
-//!   ([`unified_codec_activation_bytes`]). This is the binding stage of any song longer than ~1 min.
+//! * **codec decode** — since inference 1744de6e xcodec and both Vocos upsamplers decode in
+//!   [`DECODE_CHUNK_FRAMES`]-frame chunks with receptive-field context, so the network activations are
+//!   bounded by ONE chunk window, independent of song length; what still grows with the song is the
+//!   whole-song host arrays (embeddings, 16 kHz waves, 44.1 kHz stems, the splice) and their pooled
+//!   device copies ([`unified_codec_activation_bytes`]). The decode stage now peaks near 2–3 GiB and
+//!   no longer binds any request the API admits.
 //!
 //! [`YueLane::Dedicated`] (CUDA) keeps the analytic figures: cudarc neither rounds to pow2 nor holds a
 //! host copy in VRAM, and no CUDA capture exists yet to calibrate its codec/ICL activations.
@@ -169,14 +171,30 @@ const UNIFIED_ICL_ENCODER_BASE_BYTES: f64 = 1.9 * BYTES_PER_GIB;
 /// … plus a per-second-of-clip part (HuBERT's global attention keys and the clip's features) —
 /// measured 2.49 GiB for a 60 s dual reference, 4.14 GiB for a 218 s one.
 const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
-/// Codec decode phase, in pow2-rounded widest-activation tensors. Fit per capture (phase peak less
-/// the codec weights, ÷ the pow2 bucket): 31.7–31.9 at 60 s (bucket fill φ = 0.92 of 256 MiB), 89 s
-/// (φ = 0.68 of 512 MiB) and 205–218 s (φ = 0.84–0.89 of 1 GiB) — flat in φ, which is what whole
-/// pow2 buffers predict (the 89 s render was predicted from the others before it ran). 35 is ~10%
-/// over the max fit: only q4 was captured inside the 512 MiB bucket (a heavier tier's pooled residue
-/// there is unmeasured), and the 1 GiB bucket also holds the 240 s bound no capture reached.
-/// This term — and [`unified_codec_activation_bytes`] — is the one a chunked codec decode replaces.
-const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 35;
+// ---- Codec decode (chunked, inference 1744de6e). Everything the decode stage prices lives here and in
+// [`unified_codec_activation_bytes`].
+
+/// `candle_audio_yue::codec::DECODE_CHUNK_FRAMES`: codec frames (5 s) per xcodec / Vocos chunk.
+const DECODE_CHUNK_FRAMES: u64 = 250;
+/// `candle_audio_yue::codec::DECODER_CONTEXT_FRAMES`: xcodec context frames on each side of a chunk.
+const XCODEC_CONTEXT_FRAMES: u64 = 12;
+/// The Vocos upsamplers' context frames on each side of a chunk (`vocoder::context_frames`, 31).
+const VOCOS_CONTEXT_FRAMES: u64 = 31;
+/// Decode-phase activations, in pow2-rounded widest-activation tensors of ONE chunk window (the
+/// widest window, Vocos': 250 + 2 × 31 = 312 frames → 25.6 MB → a 32 MiB buffer). Fit together
+/// with the two terms below over the six chunked captures (intercept ≈ 11 tensors); priced at 16.
+const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 16;
+/// Fraction of the stage-2 weights still pooled while the decode runs (the decode-phase peak rises
+/// with the tier: at ~205 s, q8 +0.17 GiB and bf16 +0.63 GiB over q4, i.e. 0.22–0.29 of the extra
+/// stage-2 weights); priced at 0.35.
+const UNIFIED_STAGE2_RESIDUE: f64 = 0.35;
+/// Decode-phase bytes per second of song that still scale with length: the enumerated whole-song
+/// host arrays — 2 × 1024-d f32 embeddings (204.8 KB/s each), 2 × 16 kHz f32 waves (64 KB/s each),
+/// 2 Vocos stems + 3 splice outputs + 1 splice resample at 44.1 kHz f32 (176.4 KB/s each), 1.52 MiB/s
+/// in all — plus their pooled device-side copies. Measured slope of the decode-phase peak across the
+/// chunked captures (60 / 63 / 89 / 218 s, q4): ~5.1 MiB/s; priced at 5.6 MiB/s. With the chunk and
+/// stage-2 residue terms, every captured decode phase is covered by ≥ 1.13×.
+const UNIFIED_CODEC_BYTES_PER_SONG_SEC: u64 = 5_872_026; // 5.6 MiB
 
 /// The LM tier both stage 1 and stage 2 load at (epic R2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,8 +401,10 @@ pub(crate) struct YueEstimate {
     pub unified_icl_clip_excess_bytes: u64,
     /// Stage-1 weights still pooled while stage 2 runs.
     pub unified_stage1_residue_bytes: u64,
-    /// The codec decode's activations for the longest song the request can produce.
+    /// The codec decode's working set for the longest song the request can produce.
     pub unified_codec_activation_bytes: u64,
+    /// Stage-2 weights still pooled while the decode runs.
+    pub unified_stage2_residue_bytes: u64,
     /// The longest song (seconds) the request can produce — what the codec term prices.
     pub song_secs_bound: f64,
 }
@@ -415,7 +435,11 @@ impl YueEstimate {
                     + self.stage2_weights_bytes
                     + self.stage2_kv_bytes
             }
-            YueStage::Codec => self.codec_bytes + self.unified_codec_activation_bytes,
+            YueStage::Codec => {
+                self.codec_bytes
+                    + self.unified_stage2_residue_bytes
+                    + self.unified_codec_activation_bytes
+            }
         }
     }
 
@@ -436,12 +460,18 @@ fn song_frames_bound(shape: &YueRenderShape) -> u64 {
     (u64::from(shape.segments) * u64::from(shape.max_new_tokens) / 2).max(1)
 }
 
-/// Metal codec-decode activations for a song of `frames` codec frames per track:
-/// [`UNIFIED_CODEC_ACTIVATION_TENSORS`] widest-activation tensors, each rounded up to a power of two
-/// as candle-Metal allocates it.
+/// Metal codec-decode working set for a song of `frames` codec frames per track (above the codec
+/// weights): [`UNIFIED_CODEC_ACTIVATION_TENSORS`] widest-activation tensors of one chunk window, each
+/// rounded up to a power of two as candle-Metal allocates it (a song shorter than a window decodes
+/// in one smaller window), plus [`UNIFIED_CODEC_BYTES_PER_SONG_SEC`] per second of song.
 pub(crate) fn unified_codec_activation_bytes(frames: u64) -> u64 {
-    let widest = frames * CODEC_SAMPLES_PER_FRAME * CODEC_WIDEST_BYTES_PER_SAMPLE;
-    UNIFIED_CODEC_ACTIVATION_TENSORS.saturating_mul(widest.next_power_of_two())
+    let window =
+        frames.min(DECODE_CHUNK_FRAMES + 2 * XCODEC_CONTEXT_FRAMES.max(VOCOS_CONTEXT_FRAMES));
+    let widest = window * CODEC_SAMPLES_PER_FRAME * CODEC_WIDEST_BYTES_PER_SAMPLE;
+    let chunk = UNIFIED_CODEC_ACTIVATION_TENSORS.saturating_mul(widest.next_power_of_two());
+    let song = (frames as f64 / CODEC_FRAMES_PER_SEC * UNIFIED_CODEC_BYTES_PER_SONG_SEC as f64)
+        .ceil() as u64;
+    chunk.saturating_add(song)
 }
 
 /// Metal ICL-encoder phase for a reference clip of `clip_secs`.
@@ -603,6 +633,7 @@ pub(crate) fn estimate(
         })),
         unified_stage1_residue_bytes: metal(scale(stage1, UNIFIED_STAGE1_RESIDUE)),
         unified_codec_activation_bytes: metal(unified_codec_activation_bytes(frames)),
+        unified_stage2_residue_bytes: metal(scale(stage2, UNIFIED_STAGE2_RESIDUE)),
         song_secs_bound: frames as f64 / CODEC_FRAMES_PER_SEC,
     })
 }
@@ -799,6 +830,10 @@ fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
             );
             part(estimate.codec_bytes, "weights");
             part(estimate.unified_codec_activation_bytes, &activations);
+            part(
+                estimate.unified_stage2_residue_bytes,
+                "memory held over from stage 2",
+            );
         }
     }
     parts.join(" + ")
@@ -871,6 +906,9 @@ pub(crate) async fn check(
         ))
     };
     let shape = YueRenderShape::new(facts).ok_or_else(|| cannot_price("no tier resolved"))?;
+    // An entry that cannot be priced fails closed BEFORE the hardware is probed (the envelope does
+    // not change which catalog facts are required, so either lane answers this).
+    estimate(manifest_entry, &shape, YueLane::Dedicated).map_err(|why| cannot_price(&why))?;
     let budget = live_budget(gpu_id).await;
     let lane = match budget {
         Some(YueBudget::UnifiedWorkingSet { .. }) => YueLane::Unified,
@@ -1411,6 +1449,7 @@ mod tests {
         assert_eq!(cuda.unified_icl_encoder_bytes, 0);
         assert_eq!(cuda.unified_stage1_residue_bytes, 0);
         assert_eq!(cuda.unified_codec_activation_bytes, 0);
+        assert_eq!(cuda.unified_stage2_residue_bytes, 0);
         assert_eq!(
             cuda.stage_bytes(YueStage::Stage1),
             cuda.stage1_weights_bytes + cuda.stage1_kv_bytes + cuda.stage1_attention_bytes
@@ -1426,30 +1465,41 @@ mod tests {
     }
 
     #[test]
-    fn metal_codec_activations_round_each_tensor_up_to_a_power_of_two() {
-        // 3000 frames/track (the default 60 s song) → 3000 × 320 × 256 B = 245.8 MB → 256 MiB.
-        assert_eq!(unified_codec_activation_bytes(3000), 35 * (1 << 28));
-        // Past 65.5 s the widest tensor crosses 256 MiB, and Metal allocates 512 MiB for it.
-        assert_eq!(unified_codec_activation_bytes(3500), 35 * (1 << 29));
-        // The 218 s capture (10 884 frames) and the 8 × 3000 bound (12 000) share the 1 GiB bucket.
-        assert_eq!(unified_codec_activation_bytes(10_884), 35 * (1 << 30));
-        assert_eq!(unified_codec_activation_bytes(12_000), 35 * (1 << 30));
-        // A longer song decodes in more memory: the Metal codec stage follows the song-length bound.
+    fn metal_codec_decode_is_one_chunk_window_plus_a_small_per_second_term() {
+        const MIB: u64 = 1 << 20;
+        let per_sec = UNIFIED_CODEC_BYTES_PER_SONG_SEC;
+        // The chunk window (250 + 2 × 31 = 312 frames → 25.6 MB) allocates a 32 MiB buffer per
+        // tensor at any song length; only the per-second host term grows.
+        let chunk = 16 * 32 * MIB;
+        assert_eq!(unified_codec_activation_bytes(3_000), chunk + 60 * per_sec);
+        assert_eq!(
+            unified_codec_activation_bytes(12_000),
+            chunk + 240 * per_sec
+        );
+        // A song shorter than one window decodes in one smaller window: 100 frames → 8.2 MB → 8 MiB.
+        assert_eq!(
+            unified_codec_activation_bytes(100),
+            16 * 8 * MIB + 2 * per_sec
+        );
+        // The chunk part is flat in length — a 4× longer song adds only 180 s of the per-second term.
+        assert_eq!(
+            unified_codec_activation_bytes(12_000) - unified_codec_activation_bytes(3_000),
+            180 * per_sec
+        );
+
+        // The 8 × 3000 song (240 s bound) no longer binds: stage 1 does.
         let entry = builtin("yue_en_cot");
-        let two = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true), YueLane::Unified).unwrap();
         let eight = estimate(&entry, &shape(YueTier::Q4, 8, 3000, true), YueLane::Unified).unwrap();
-        assert_eq!(two.song_secs_bound, 60.0);
         assert_eq!(eight.song_secs_bound, 240.0);
-        assert!(eight.stage_bytes(YueStage::Codec) > two.stage_bytes(YueStage::Codec));
-        assert_eq!(eight.floor().0, YueStage::Codec);
-        let message = refusal(decide(
-            "yue_en_cot",
-            &eight,
-            &shape(YueTier::Q4, 8, 3000, true),
-            Some(&mac(24.0)),
-        ));
+        assert_eq!(eight.floor().0, YueStage::Stage1);
+        assert!(gib(eight.stage_bytes(YueStage::Codec)) < 4.0);
+        // Only an extreme budget the API still admits (100 × 16 382 tokens ≈ 4.5 h of song) makes
+        // the decode bind; the refusal then says so and names the lever.
+        let huge = shape(YueTier::Q4, 100, 16_382, true);
+        let e = estimate(&entry, &huge, YueLane::Unified).unwrap();
+        assert_eq!(e.floor().0, YueStage::Codec);
+        let message = refusal(decide("yue_en_cot", &e, &huge, Some(&mac(64.0))));
         assert!(message.contains("xcodec/Vocos decode"), "{message}");
-        assert!(message.contains("song of up to ~240 s"), "{message}");
         assert!(message.contains("shorter song"), "{message}");
     }
 
@@ -1512,7 +1562,8 @@ mod tests {
     }
 
     /// The Metal envelope against every render the sc-19387 campaign captured through the API +
-    /// worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b): the kernel's
+    /// worker job path on an M-series Mac (candle-Metal; inference @ d5b18019b, and @ 1744de6e for the
+    /// song-length-dependent rows re-captured after the chunked codec decode landed): the kernel's
     /// lifetime-max `phys_footprint` of a fresh worker per render, in GiB. Each row is the exact
     /// request the campaign submitted (genre tags, lyrics, segments, token budget, ICL window, the
     /// decoded clip length). The invariant is coverage — the Metal estimate never prices a captured
@@ -1572,7 +1623,7 @@ mod tests {
                 None,
                 None,
                 None,
-                8.532,
+                8.419,
             ),
             row(
                 "en_cot q8 default",
@@ -1612,9 +1663,11 @@ mod tests {
                 Some(2),
                 Some(3500),
                 None,
-                8.575,
+                8.423,
             ),
-            // 89 s: the widest codec tensor crosses 256 MiB, and the phase doubles (pow2 rounding).
+            // The song-length-dependent rows (q4 default, 2x3500, this 89 s one and the three
+            // 205–218 s songs) were re-captured at inference 1744de6e (chunked decode); stage 1
+            // binds each of them now.
             row(
                 "en_cot q4 89 s",
                 "yue_en_cot",
@@ -1623,7 +1676,7 @@ mod tests {
                 Some(3),
                 None,
                 None,
-                15.837,
+                8.418,
             ),
             row(
                 "en_cot q4 218 s",
@@ -1633,7 +1686,7 @@ mod tests {
                 Some(8),
                 None,
                 None,
-                32.233,
+                10.329,
             ),
             row(
                 "en_cot q8 205 s",
@@ -1643,7 +1696,7 @@ mod tests {
                 Some(8),
                 None,
                 None,
-                32.368,
+                13.580,
             ),
             row(
                 "en_cot bf16 205 s",
@@ -1653,7 +1706,7 @@ mod tests {
                 Some(8),
                 None,
                 None,
-                32.759,
+                18.077,
             ),
             row(
                 "en_icl q8 default",
@@ -1740,6 +1793,39 @@ mod tests {
                 c.measured_gib
             );
             assert!(analytic < c.measured_gib, "{}: {analytic:.2}", c.name);
+        }
+    }
+
+    /// The chunked decode stage (inference 1744de6e) against its captured phase peaks: the max
+    /// `phys_footprint` inside the job's "Decoding audio" interval, in GiB, for the six chunked
+    /// re-captures (en_cot; seconds = the song the render produced, `max_new_tokens` the budget the
+    /// gate prices). The stage never binds these renders, so the render-level test above cannot see
+    /// it; this one holds the decode term to ≥ 1.1× its own phase.
+    #[test]
+    fn every_measured_chunked_decode_phase_is_covered_with_margin() {
+        use YueTier::{Bf16, Q4, Q8};
+        // (tier, segments, max_new_tokens, measured decode-phase peak GiB)
+        let phases = [
+            (Q4, 2, 3000, 1.913),   // 60.0 s
+            (Q4, 2, 3500, 1.930),   // 63.1 s of a 70 s budget
+            (Q4, 3, 3000, 2.069),   // 88.9 s
+            (Q4, 8, 3000, 2.702),   // 217.7 s
+            (Q8, 8, 3000, 2.800),   // 205.2 s
+            (Bf16, 8, 3000, 3.261), // 205.2 s
+        ];
+        let entry = builtin("yue_en_cot");
+        for (tier, segments, max_new, measured) in phases {
+            let e = estimate(
+                &entry,
+                &shape(tier, segments, max_new, true),
+                YueLane::Unified,
+            )
+            .unwrap();
+            let priced = gib(e.stage_bytes(YueStage::Codec));
+            assert!(
+                priced >= 1.1 * measured,
+                "{tier:?} {segments}x{max_new}: decode priced {priced:.2} GiB < 1.1 x {measured:.2}"
+            );
         }
     }
 }
