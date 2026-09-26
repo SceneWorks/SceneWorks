@@ -601,6 +601,108 @@ fn melody_edit_is_confined_to_its_declared_window() {
 }
 
 #[test]
+fn melody_window_fixes_notes_tied_across_its_edges() {
+    let ins_bars = |from, to| ReplaceAllowance {
+        melody: Some(MelodyScope {
+            voices: vec![VoiceName::Ins],
+            from_bar: from,
+            to_bar: to,
+        }),
+        ..ReplaceAllowance::default()
+    };
+    // Review repro: a note that STARTS in bar 1 but is tied through bar 4.
+    let tied_out = SCORE.replacen("V: Ins\nZ4|", "V: Ins\nc16-|c16-|c16-|c16|", 1);
+    let found = violations(apply(SCORE, &replace(&tied_out, ins_bars(1, 1))).unwrap_err());
+    assert!(
+        found.iter().any(|v| v.starts_with("notes:Ins")),
+        "{found:?}"
+    );
+    // The same note kept inside bar 1 is a legitimate melody edit.
+    let inside = SCORE.replacen("V: Ins\nZ4|", "V: Ins\nc16|Z3|", 1);
+    apply(SCORE, &replace(&inside, ins_bars(1, 1))).expect("confined to the window");
+    // A SOURCE note tied out of the window cannot be re-pitched from inside it.
+    let source = native("4/4", "16", "C", &[("% verse", "Z2|", "c16-|c16|")]);
+    let repitched = source.replacen("c16-|c16|", "d16-|d16|", 1);
+    let found = violations(apply(&source, &replace(&repitched, ins_bars(1, 1))).unwrap_err());
+    assert!(
+        found.iter().any(|v| v.starts_with("notes:Ins")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn key_signature_is_fixed_unless_harmony_or_melody_is_declared() {
+    // K:C -> K:Am keeps every sounding pitch but changes the conditioning text.
+    let lyrics_only = ScoreEditOperation::ReplaceScore {
+        abc: SCORE.replacen("K:C", "K:Am", 1),
+        allow: ReplaceAllowance::default(),
+        lyrics: Some("[Verse]\nnew words".into()),
+        style: None,
+        cot: None,
+    };
+    let found = violations(apply(SCORE, &lyrics_only).unwrap_err());
+    assert_eq!(found, ["keySignatures: the key-signature timeline differs"]);
+    let outcome = apply(
+        SCORE,
+        &replace(&SCORE_JAZZ.replacen("K:C", "K:Am", 1), harmony_only()),
+    )
+    .expect("a declared harmony edit may respell the key");
+    let key_check = outcome
+        .report
+        .checks
+        .iter()
+        .find(|check| check.name == "keySignatures")
+        .unwrap();
+    assert_eq!(key_check.status, CheckStatus::ChangedAsDeclared);
+}
+
+#[test]
+fn every_operation_output_is_size_bounded() {
+    let bars = "\"C\"E2G2A2G2E2D2C4|".repeat(4);
+    let groups: Vec<(&str, &str, &str)> = (0..30)
+        .map(|index| {
+            (
+                if index == 0 { "% verse" } else { "" },
+                bars.as_str(),
+                "Z4|",
+            )
+        })
+        .collect();
+    let abc = native("4/4", "16", "C", &groups);
+    assert!(abc.len() * 128 > super::MAX_ABC_BYTES && abc.len() < super::MAX_ABC_BYTES);
+    let operation = ScoreEditOperation::ArrangeSections {
+        section_order: vec![0; 128],
+        lyrics: "[Verse]\nx".into(),
+        style: None,
+    };
+    let error = apply(&abc, &operation).unwrap_err();
+    assert!(
+        matches!(&error, Yue2ScoreError::BadRequest(detail) if detail.contains("the limit is")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn oversized_measures_are_refused_before_any_expansion() {
+    // Review repro: an unbounded meter let one measure hold millions of units.
+    let huge = native("20000/4", "1024", "C", &[("% verse", "Z|", "Z|")]);
+    let error = parse_score(&huge).unwrap_err();
+    assert!(error.message.contains("meter numerator 20000"), "{error}");
+    // Within the meter bound, a chord in a very long full-measure rest is refused rather than
+    // expanded (64/4 at L:1/1024 is 16384 units).
+    let long = native("64/4", "1024", "C", &[("% verse", "Z|", "Z|")]);
+    let operation = ScoreEditOperation::Reharmonize {
+        changes: vec![ChordChange {
+            bar: 1,
+            onset_quarters: "0".into(),
+            chord: Some("C".into()),
+        }],
+    };
+    let error = apply(&long, &operation).unwrap_err();
+    assert!(error.to_string().contains("at most 4096 units"), "{error}");
+}
+
+#[test]
 fn form_edit_moves_whole_sections_and_nothing_else() {
     let operation = ScoreEditOperation::ArrangeSections {
         section_order: vec![1, 0, 1],
@@ -680,6 +782,31 @@ fn form_edit_restates_the_key_a_moved_section_inherited() {
         .map(|n| n.pitch)
         .collect();
     assert_eq!(pitches, [66, 64]);
+
+    // Respelling the moved verse's restated key (C -> Am keeps E natural) is a form violation.
+    let respelled = outcome
+        .score
+        .text
+        .replace("V: Vocal\nK:C\n", "V: Vocal\nK:Am\n")
+        .replace("V: Ins\nK:C\n", "V: Ins\nK:Am\n");
+    let contract = ChangeContract {
+        form: Some(FormChange {
+            section_order: vec![1, 0],
+        }),
+        lyrics: true,
+        ..ChangeContract::default()
+    };
+    let edited = parse_score(&respelled).unwrap();
+    assert_eq!(edited.voices[0].notes, outcome.score.voices[0].notes);
+    let report = check_edit(&contract, &source, &request(), &edited, &outcome.request);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|v| v.contains("key signatures differ")),
+        "{:?}",
+        report.violations
+    );
 }
 
 #[test]
@@ -806,10 +933,11 @@ fn audio_asset(store: &ProjectStore, project_id: &str, asset_id: &str) {
         .unwrap();
 }
 
-fn render(sha: &str, audio: &str, truncated: Truncation) -> RenderInput {
+fn render(sha: &str, request_sha: &str, audio: &str, truncated: Truncation) -> RenderInput {
     RenderInput {
         status: RenderStatus::Completed,
         score_sha256: sha.to_owned(),
+        request_sha256: request_sha.to_owned(),
         truncated,
         model: ComponentIdentity {
             id: "m-a-p/YuE2-3B".into(),
@@ -971,6 +1099,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
             &child.id,
             render(
                 &root.score.sha256,
+                &root.request_sha256,
                 "audio_after",
                 Truncation {
                     abc: false,
@@ -990,6 +1119,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
             &child.id,
             render(
                 &child.score.sha256,
+                &child.request_sha256,
                 "nope",
                 Truncation {
                     abc: false,
@@ -1002,6 +1132,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
     // Truncation has no default.
     let mut no_truncation = serde_json::to_value(render(
         &child.score.sha256,
+        &child.request_sha256,
         "audio_after",
         Truncation {
             abc: false,
@@ -1018,6 +1149,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
             &root.id,
             render(
                 &root.score.sha256,
+                &root.request_sha256,
                 "audio_before",
                 Truncation {
                     abc: false,
@@ -1032,6 +1164,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
             &child.id,
             render(
                 &child.score.sha256,
+                &child.request_sha256,
                 "audio_after",
                 Truncation {
                     abc: false,
@@ -1105,4 +1238,93 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
         })
         .unwrap_err();
     assert!(error.to_string().contains("belongs to version"), "{error}");
+
+    // The render must also come from the version's exact request (409 like the score hash).
+    let other_request = SongRequest {
+        seed: 7,
+        ..child.request.clone()
+    };
+    let error = projects
+        .record_yue2_render(
+            &project.id,
+            &child.id,
+            render(
+                &child.score.sha256,
+                &super::request_sha256(&other_request),
+                "audio_after",
+                Truncation {
+                    abc: false,
+                    semantic: false,
+                },
+            ),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Yue2ScoreError::Conflict(detail) if detail.contains("request")),
+        "{error:?}"
+    );
+
+    // A failed render has no recording, so it cannot name one.
+    let mut failed = render(
+        &child.score.sha256,
+        &child.request_sha256,
+        "audio_after",
+        Truncation {
+            abc: false,
+            semantic: false,
+        },
+    );
+    failed.status = RenderStatus::Failed;
+    failed.error = Some("decoder ran out of memory".into());
+    let error = projects
+        .record_yue2_render(&project.id, &child.id, failed)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cannot name an audio asset"),
+        "{error}"
+    );
+
+    // Stored render and comparison snapshots are integrity-checked on read.
+    let render_file = store
+        .project_path()
+        .join(format!("yue2/renders/{}.json", after.id));
+    let original = std::fs::read(&render_file).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    tampered["scoreAbc"] = json!(SCORE);
+    std::fs::write(&render_file, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(store
+        .get_render(&after.id)
+        .unwrap_err()
+        .to_string()
+        .contains("corrupt"));
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    tampered["request"]["seed"] = json!(7);
+    std::fs::write(&render_file, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(store
+        .get_render(&after.id)
+        .unwrap_err()
+        .to_string()
+        .contains("corrupt"));
+    std::fs::write(&render_file, &original).unwrap();
+
+    let comparison_file = store
+        .project_path()
+        .join(format!("yue2/comparisons/{}.json", comparison.id));
+    let original = std::fs::read(&comparison_file).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    tampered["b"]["scoreAbc"] = json!(SCORE);
+    std::fs::write(&comparison_file, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let error = store
+        .get_comparison(&comparison.id)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("side B is corrupt"), "{error}");
+    let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    tampered["a"]["request"]["lyrics"] = json!("rewritten");
+    std::fs::write(&comparison_file, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let error = store
+        .get_comparison(&comparison.id)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("side A is corrupt"), "{error}");
 }

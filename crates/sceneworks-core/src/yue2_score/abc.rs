@@ -26,6 +26,9 @@ pub const VOICE_NAMES: [&str; 2] = ["Vocal", "Ins"];
 /// Supported per-token duration multipliers of the `L:` unit.
 pub const DURATIONS: [u32; 11] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48];
 
+/// Largest accepted meter numerator (`M:n/d`).
+pub const MAX_METER_NUMERATOR: u32 = 64;
+
 /// The native quoted chord-quality vocabulary (`""` = major).
 pub const CHORD_QUALITIES: [&str; 15] = [
     "", "m", "dim", "aug", "7", "maj7", "m7", "dim7", "m7b5", "sus4", "sus2", "6", "m6", "7sus4",
@@ -308,6 +311,13 @@ pub(crate) fn meter_value(text: &str) -> Result<Meter, AbcError> {
     })?;
     fail(!is_power_of_two_upto_1024(denominator), || {
         format!("Unsupported meter denominator {denominator}")
+    })?;
+    // SceneWorks bound (upstream accepts any numerator): real native meters are single or low
+    // double digits, and an unbounded one lets a single measure hold millions of units.
+    fail(numerator > MAX_METER_NUMERATOR, || {
+        format!(
+            "Unsupported meter numerator {numerator}; at most {MAX_METER_NUMERATOR} beats per bar"
+        )
     })?;
     Ok(Meter {
         numerator,

@@ -51,10 +51,16 @@ fn seed_audio_asset(
         .unwrap();
 }
 
-fn render_body(score_sha256: &str, audio: &str, semantic_truncated: bool) -> Value {
+fn render_body(
+    score_sha256: &str,
+    request_sha256: &str,
+    audio: &str,
+    semantic_truncated: bool,
+) -> Value {
     json!({
         "status": "completed",
         "scoreSha256": score_sha256,
+        "requestSha256": request_sha256,
         "truncated": { "abc": false, "semantic": semantic_truncated },
         "model": { "id": "m-a-p/YuE2-3B", "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19" },
         "decoder": { "id": "m-a-p/YuE2-Vae", "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8" },
@@ -202,11 +208,23 @@ async fn yue2_score_routes_round_trip_edit_render_and_compare() {
     // Renders of both versions, then a persisted A/B comparison.
     let root_sha = root["score"]["sha256"].as_str().unwrap();
     let child_sha = child["score"]["sha256"].as_str().unwrap();
+    let root_request = root["requestSha256"].as_str().unwrap();
+    let child_request = child["requestSha256"].as_str().unwrap();
+    // A render that reports another request identity is a 409, like a score mismatch.
     let (status, mismatch) = request(
         app.clone(),
         "POST",
         &format!("{base}/score-versions/{child_id}/renders"),
-        render_body(root_sha, "audio_jazz", false),
+        render_body(child_sha, &"0".repeat(64), "audio_jazz", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
+    assert!(mismatch["detail"].as_str().unwrap().contains("request"));
+    let (status, mismatch) = request(
+        app.clone(),
+        "POST",
+        &format!("{base}/score-versions/{child_id}/renders"),
+        render_body(root_sha, child_request, "audio_jazz", false),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{mismatch}");
@@ -214,7 +232,7 @@ async fn yue2_score_routes_round_trip_edit_render_and_compare() {
         app.clone(),
         "POST",
         &format!("{base}/score-versions/{root_id}/renders"),
-        render_body(root_sha, "audio_source", false),
+        render_body(root_sha, root_request, "audio_source", false),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{render_a}");
@@ -222,7 +240,7 @@ async fn yue2_score_routes_round_trip_edit_render_and_compare() {
         app.clone(),
         "POST",
         &format!("{base}/score-versions/{child_id}/renders"),
-        render_body(child_sha, "audio_jazz", true),
+        render_body(child_sha, child_request, "audio_jazz", true),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{render_b}");
@@ -343,6 +361,8 @@ async fn mcp_agent_round_trips_yue2_score_tools() {
         "yue2_create_score_version",
         "yue2_edit_score",
         "yue2_compare_versions",
+        "yue2_list_comparisons",
+        "yue2_get_comparison",
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
@@ -454,6 +474,35 @@ async fn mcp_agent_round_trips_yue2_score_tools() {
         .as_str()
         .unwrap()
         .contains("symbolic only"));
+
+    // Earlier listening comparisons are retrievable by the agent.
+    let comparisons = client
+        .call_tool(call(
+            "yue2_list_comparisons",
+            json!({ "projectId": project.id }),
+        ))
+        .await
+        .expect("list comparisons call");
+    assert_ne!(comparisons.is_error, Some(true), "{comparisons:?}");
+    let comparisons = mcp_tool_content_json(&comparisons);
+    assert_eq!(comparisons["items"], json!([compared.clone()]));
+    let fetched = client
+        .call_tool(call(
+            "yue2_get_comparison",
+            json!({ "projectId": project.id, "comparisonId": compared["id"] }),
+        ))
+        .await
+        .expect("get comparison call");
+    assert_ne!(fetched.is_error, Some(true), "{fetched:?}");
+    assert_eq!(mcp_tool_content_json(&fetched), compared);
+    let missing = client
+        .call_tool(call(
+            "yue2_get_comparison",
+            json!({ "projectId": project.id, "comparisonId": "yue2c_missing" }),
+        ))
+        .await
+        .expect("a missing comparison is a tool result");
+    assert_eq!(missing.is_error, Some(true));
 
     let listed = client
         .call_tool(call(

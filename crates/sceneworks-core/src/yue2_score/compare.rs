@@ -131,8 +131,6 @@ pub enum CheckStatus {
     DeclaredUnchanged,
     /// Changed although the contract fixes it.
     Violated,
-    /// Reported for the record; never decides the match.
-    Informational,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -269,6 +267,31 @@ fn in_window(onset: Frac, window: (Frac, Frac)) -> bool {
     window.0 <= onset && onset < window.1
 }
 
+/// Whether the whole sounding note (onset through its tied end) lies inside `window`.
+fn lies_within(note: &Note, window: (Frac, Frac)) -> bool {
+    window.0 <= note.onset && note.onset + note.duration <= window.1
+}
+
+/// Key events of `track` over `[start, start+length)`, relative to `start`: the key in effect at
+/// `start`, then every change inside the span.
+fn relative_keys(track: &VoiceTrack, start: Frac, length: Frac) -> Vec<(Frac, String)> {
+    let mut keys: Vec<(Frac, String)> = track
+        .keys
+        .iter()
+        .rfind(|event| event.onset <= start)
+        .map(|event| (Frac::ZERO, event.key.clone()))
+        .into_iter()
+        .collect();
+    keys.extend(
+        track
+            .keys
+            .iter()
+            .filter(|event| start < event.onset && event.onset < start + length)
+            .map(|event| (event.onset - start, event.key.clone())),
+    );
+    keys
+}
+
 /// Events of `track` inside `[start, start+length)`, shifted to be relative to `start`.
 fn relative_notes(track: &VoiceTrack, start: Frac, length: Frac) -> Vec<Note> {
     track
@@ -347,20 +370,6 @@ fn check_requests(
     );
 }
 
-fn check_keys(checker: &mut Checker, before: &Score, after: &Score) {
-    if before.voices[0].keys != after.voices[0].keys {
-        checker.push(
-            "keySignatures",
-            CheckStatus::Informational,
-            Some(
-                "the key-signature timeline differs; sounding pitches are what the note checks \
-                 compare"
-                    .to_owned(),
-            ),
-        );
-    }
-}
-
 fn check_score_in_place(
     checker: &mut Checker,
     contract: &ChangeContract,
@@ -415,11 +424,13 @@ fn check_score_in_place(
             .is_some_and(|scope| scope.voices.iter().any(|voice| voice.index() == index));
         if scoped {
             let window = window.expect("melody scope has a window");
+            // A note is free only when it lies ENTIRELY inside the window, on either side: a note
+            // that starts inside but is tied past the window end (or starts before it) is fixed.
             let outside = |track: &VoiceTrack| -> Vec<Note> {
                 track
                     .notes
                     .iter()
-                    .filter(|note| !in_window(note.onset, window))
+                    .filter(|note| !lies_within(note, window))
                     .copied()
                     .collect()
             };
@@ -458,6 +469,14 @@ fn check_score_in_place(
             );
         }
     }
+    // The key signature is part of the model's conditioning text, so it is fixed unless the
+    // edit declares a harmony or melody change.
+    checker.aspect(
+        "keySignatures",
+        contract.harmony || contract.melody.is_some(),
+        before.voices[0].keys != after.voices[0].keys,
+        Some("the key-signature timeline differs".to_owned()),
+    );
     let chords_changed = before.voices[0].chords != after.voices[0].chords;
     checker.aspect(
         "harmony",
@@ -530,6 +549,11 @@ fn check_form(checker: &mut Checker, form: &FormChange, before: &Score, after: &
             {
                 problems.push("chord symbols differ".to_owned());
             }
+            if relative_keys(&before.voices[0], source.start, source.length)
+                != relative_keys(&after.voices[0], edited.start, edited.length)
+            {
+                problems.push("key signatures differ".to_owned());
+            }
         }
         if problems.is_empty() {
             checker.push(name, CheckStatus::Unchanged, None);
@@ -560,7 +584,6 @@ pub fn check_edit(
         Some(form) => check_form(&mut checker, form, source_score, edited_score),
         None => check_score_in_place(&mut checker, contract, source_score, edited_score),
     }
-    check_keys(&mut checker, source_score, edited_score);
     check_requests(&mut checker, contract, source_request, edited_request);
     let violations: Vec<String> = checker
         .checks

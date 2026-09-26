@@ -769,6 +769,26 @@ impl SceneWorksMcp {
         crate::yue2::compare(&self.api, args).await
     }
 
+    #[tool(
+        description = "YuE2: list a project's persisted A/B listening comparisons (oldest first), each with both versions' requests, scores and edit briefs, lineage, symbolic differences, renders with truncation flags, warnings and listening notes."
+    )]
+    async fn yue2_list_comparisons(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::list_comparisons(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: get one persisted A/B listening comparison by id. Each side's render is a complete regeneration of that version, not a waveform-preserving edit of the other."
+    )]
+    async fn yue2_get_comparison(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ComparisonArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_comparison(&self.api, args).await
+    }
+
     /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
     /// `/api/v1` are the SAME axum app, so the host the client used to reach
     /// `/mcp` is exactly the host that serves the media — derive it from the

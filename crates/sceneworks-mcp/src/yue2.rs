@@ -97,6 +97,16 @@ pub struct Yue2EditArgs {
     pub agent_name: Option<String>,
 }
 
+/// Arguments for `yue2_get_comparison`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Yue2ComparisonArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "Comparison id from yue2_list_comparisons or yue2_compare_versions.")]
+    pub comparison_id: String,
+}
+
 /// Arguments for `yue2_compare_versions`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -305,6 +315,33 @@ pub(crate) async fn edit(api: &ApiClient, args: Yue2EditArgs) -> Result<CallTool
     outcome(api.post_json(&path, &edit_body(&args)?).await)
 }
 
+/// Route for one persisted comparison, with both ids validated before they are spliced in.
+pub(crate) fn comparison_path(args: &Yue2ComparisonArgs) -> Result<String, ErrorData> {
+    Ok(format!(
+        "/api/v1/projects/{}/yue2/comparisons/{}",
+        project_id(&args.project_id)?,
+        record_id(&args.comparison_id, "comparisonId")?
+    ))
+}
+
+pub(crate) async fn list_comparisons(
+    api: &ApiClient,
+    args: Yue2ProjectArgs,
+) -> Result<CallToolResult, ErrorData> {
+    let path = format!(
+        "/api/v1/projects/{}/yue2/comparisons",
+        project_id(&args.project_id)?
+    );
+    outcome(api.get_json(&path, &[]).await)
+}
+
+pub(crate) async fn get_comparison(
+    api: &ApiClient,
+    args: Yue2ComparisonArgs,
+) -> Result<CallToolResult, ErrorData> {
+    outcome(api.get_json(&comparison_path(&args)?, &[]).await)
+}
+
 pub(crate) async fn compare(
     api: &ApiClient,
     args: Yue2CompareArgs,
@@ -392,6 +429,20 @@ mod tests {
             body["request"].get("seed").is_none(),
             "the API owns the default seed"
         );
+    }
+
+    #[test]
+    fn comparison_path_validates_both_ids() {
+        let args = |project: &str, comparison: &str| Yue2ComparisonArgs {
+            project_id: project.into(),
+            comparison_id: comparison.into(),
+        };
+        assert_eq!(
+            comparison_path(&args("p1", "yue2c_ab")).unwrap(),
+            "/api/v1/projects/p1/yue2/comparisons/yue2c_ab"
+        );
+        assert!(comparison_path(&args("p1", "../versions/x")).is_err());
+        assert!(comparison_path(&args("p/1", "yue2c_ab")).is_err());
     }
 
     #[test]

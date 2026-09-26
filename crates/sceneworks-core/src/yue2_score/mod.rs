@@ -86,6 +86,14 @@ pub struct SongRequest {
     pub cfg_scale: Option<f64>,
 }
 
+/// Identity of a request: SHA-256 of its canonical JSON (`serde_json` compact encoding in the
+/// struct's declared field order — style, lyrics, cot, seed, then cfgScale when set). A render
+/// reports this for the request it actually generated with.
+pub fn request_sha256(request: &SongRequest) -> String {
+    let canonical = serde_json::to_string(request).expect("SongRequest serializes");
+    abc::sha256_hex(&canonical)
+}
+
 /// Errors from score inspection, editing and version storage.
 #[derive(Debug)]
 pub enum Yue2ScoreError {

@@ -164,6 +164,8 @@ pub struct ScoreVersionRecord {
     pub root_version_id: String,
     pub origin: VersionOrigin,
     pub request: SongRequest,
+    /// [`super::request_sha256`] of `request`: the identity a render must report back.
+    pub request_sha256: String,
     pub score: ScoreRecord,
     pub edit: Option<EditRecord>,
     pub provenance: Provenance,
@@ -219,6 +221,9 @@ pub struct RenderInput {
     pub status: RenderStatus,
     /// The score hash the job actually rendered; must equal the version's.
     pub score_sha256: String,
+    /// [`super::request_sha256`] of the request the job actually rendered; must equal the
+    /// version's `requestSha256`.
+    pub request_sha256: String,
     /// Required — there is no default truncation state.
     pub truncated: Truncation,
     pub model: ComponentIdentity,
@@ -248,6 +253,7 @@ pub struct RenderRecord {
     pub root_version_id: String,
     pub status: RenderStatus,
     pub request: SongRequest,
+    pub request_sha256: String,
     /// The exact ABC score rendered (a self-contained receipt, like upstream's `score.abc`).
     pub score_abc: String,
     pub score_sha256: String,
@@ -273,6 +279,7 @@ pub struct ComparisonSide {
     pub parent_version_id: Option<String>,
     pub origin: VersionOrigin,
     pub request: SongRequest,
+    pub request_sha256: String,
     pub score_abc: String,
     pub score_sha256: String,
     pub edit_operation: Option<String>,
@@ -423,6 +430,27 @@ fn summarize(score: &Score) -> Value {
     })
 }
 
+/// A stored score/request snapshot must still hash to its recorded identities.
+fn verify_snapshot(
+    what: &str,
+    abc: &str,
+    score_sha256: &str,
+    request: &SongRequest,
+    request_sha256: &str,
+) -> Result<()> {
+    if sha256_hex(abc) != score_sha256 {
+        return Err(Yue2ScoreError::Conflict(format!(
+            "{what} is corrupt: its score ABC no longer matches the recorded sha256"
+        )));
+    }
+    if super::request_sha256(request) != request_sha256 {
+        return Err(Yue2ScoreError::Conflict(format!(
+            "{what} is corrupt: its request no longer matches the recorded sha256"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_record_id(id: &str, prefix: &str, what: &str) -> Result<()> {
     if !id.starts_with(prefix) || !is_safe_id(id) || id.len() > 64 {
         return Err(Yue2ScoreError::NotFound(format!("{what} not found")));
@@ -500,6 +528,11 @@ impl Yue2ScoreStore {
                 "score version {id} is corrupt: its ABC no longer matches the recorded sha256"
             )));
         }
+        if super::request_sha256(&record.request) != record.request_sha256 {
+            return Err(Yue2ScoreError::Conflict(format!(
+                "score version {id} is corrupt: its request no longer matches the recorded sha256"
+            )));
+        }
         Ok(record)
     }
 
@@ -550,6 +583,7 @@ impl Yue2ScoreStore {
             created_at: utc_now(),
             parent_version_id: parent.map(|parent| parent.id.clone()),
             origin,
+            request_sha256: super::request_sha256(&request),
             request,
             score: ScoreRecord {
                 abc: score.text.clone(),
@@ -683,9 +717,13 @@ impl Yue2ScoreStore {
         })
     }
 
-    /// Record one rendering of a version. Prefer [`ProjectStore::record_yue2_render`], which also
-    /// verifies the audio asset.
-    pub fn record_render(&self, version_id: &str, input: RenderInput) -> Result<RenderRecord> {
+    /// Record one rendering of a version. Crate-private: the public entry point is
+    /// [`ProjectStore::record_yue2_render`], which also verifies the audio asset.
+    pub(crate) fn record_render(
+        &self,
+        version_id: &str,
+        input: RenderInput,
+    ) -> Result<RenderRecord> {
         let version = self.get_version_record(version_id)?;
         input.provenance.validate()?;
         input.model.validate("model")?;
@@ -697,6 +735,13 @@ impl Yue2ScoreStore {
                 "the render reports score {} but version {version_id} has score {}; a render \
                  must come from this version's exact score",
                 input.score_sha256, version.score.sha256
+            )));
+        }
+        if input.request_sha256 != version.request_sha256 {
+            return Err(Yue2ScoreError::Conflict(format!(
+                "the render reports request {} but version {version_id} has request {}; a render \
+                 must use this version's exact style, lyrics, cot, seed and cfgScale",
+                input.request_sha256, version.request_sha256
             )));
         }
         for (field, value) in [
@@ -721,12 +766,19 @@ impl Yue2ScoreStore {
                     return Err(bad("a completed render cannot carry an error"));
                 }
             }
-            RenderStatus::Failed => match &input.error {
-                Some(error) if !error.trim().is_empty() => {
-                    check_text("error", error, MAX_FAILURE_CHARS)?;
+            RenderStatus::Failed => {
+                if input.audio_asset_id.is_some() {
+                    return Err(bad(
+                        "a failed render has no recording; it cannot name an audio asset",
+                    ));
                 }
-                _ => return Err(bad("a failed render must say why it failed")),
-            },
+                match &input.error {
+                    Some(error) if !error.trim().is_empty() => {
+                        check_text("error", error, MAX_FAILURE_CHARS)?;
+                    }
+                    _ => return Err(bad("a failed render must say why it failed")),
+                }
+            }
         }
         if let Some(settings) = &input.effective_settings {
             if !settings.is_object() {
@@ -749,6 +801,7 @@ impl Yue2ScoreStore {
             root_version_id: version.root_version_id.clone(),
             status: input.status,
             request: version.request.clone(),
+            request_sha256: version.request_sha256.clone(),
             score_abc: version.score.abc.clone(),
             score_sha256: version.score.sha256.clone(),
             edit_brief: version.edit.as_ref().map(|edit| edit.brief.clone()),
@@ -775,6 +828,13 @@ impl Yue2ScoreStore {
                 "render file {id} does not describe {id} in this project"
             )));
         }
+        verify_snapshot(
+            &format!("render {id}"),
+            &record.score_abc,
+            &record.score_sha256,
+            &record.request,
+            &record.request_sha256,
+        )?;
         Ok(record)
     }
 
@@ -890,6 +950,7 @@ impl Yue2ScoreStore {
             parent_version_id: version.parent_version_id.clone(),
             origin: version.origin,
             request: version.request.clone(),
+            request_sha256: version.request_sha256.clone(),
             score_abc: version.score.abc.clone(),
             score_sha256: version.score.sha256.clone(),
             edit_operation: version.edit.as_ref().and_then(|edit| {
@@ -930,6 +991,15 @@ impl Yue2ScoreStore {
             return Err(Yue2ScoreError::Conflict(format!(
                 "comparison file {id} does not describe {id} in this project"
             )));
+        }
+        for (label, side) in [("A", &record.a), ("B", &record.b)] {
+            verify_snapshot(
+                &format!("comparison {id} side {label}"),
+                &side.score_abc,
+                &side.score_sha256,
+                &side.request,
+                &side.request_sha256,
+            )?;
         }
         Ok(record)
     }

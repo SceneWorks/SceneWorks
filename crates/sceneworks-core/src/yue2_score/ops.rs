@@ -23,6 +23,9 @@ use super::{Cot, SongRequest, Yue2ScoreError};
 pub const MAX_CHORD_CHANGES: usize = 1024;
 /// Upper bound on entries in an `arrange_sections` order.
 pub const MAX_SECTION_ORDER: usize = 128;
+/// Largest full-measure rest (in `L:` units) `reharmonize` will expand into rest tokens to place
+/// a chord in it — 4096 units is a 4/4 bar at `L:1/1024`, the finest supported grid.
+pub const MAX_REST_EXPANSION_UNITS: i128 = 4096;
 
 /// One chord-symbol change: set (or, with `chord: null`, remove) the chord starting at
 /// `onsetQuarters` (exact quarter-note offset inside the 1-based measure `bar`).
@@ -237,13 +240,15 @@ pub fn apply_operation(
             if let Some(cot) = cot {
                 request.cot = *cot;
             }
-            super::check_abc_size(abc)?;
             abc.clone()
         }
     };
     contract
         .validate(source_score)
         .map_err(Yue2ScoreError::BadRequest)?;
+    // Every operation's OUTPUT is bounded, not only submitted text: a structured edit (repeated
+    // sections, chords splitting long rests) can grow a score past what the store will read back.
+    super::check_abc_size(&abc)?;
     let score = parse_score(&abc).map_err(Yue2ScoreError::Notation)?;
     super::validate_request(&request, &score)?;
     if let ScoreEditOperation::StripChords { keep_voice } = operation {
@@ -355,9 +360,9 @@ fn split_token(token: &Token, parts: &[u64]) -> Vec<Token> {
     };
     let mut pieces = Vec::new();
     for (part_index, part) in parts.iter().enumerate() {
-        for (piece_index, piece) in duration_pieces(*part).iter().enumerate() {
-            let last =
-                part_index + 1 == parts.len() && piece_index + 1 == duration_pieces(*part).len();
+        let part_pieces = duration_pieces(*part);
+        for (piece_index, piece) in part_pieces.iter().enumerate() {
+            let last = part_index + 1 == parts.len() && piece_index + 1 == part_pieces.len();
             pieces.push(Token::Note {
                 accidental: *accidental,
                 note: *note,
@@ -549,6 +554,14 @@ fn reharmonize(score: &Score, changes: &[ChordChange]) -> Result<String, Yue2Sco
                         "bar {}: this full-measure rest is not a whole number of L: units, so a \
                          chord cannot be placed in it",
                         global + 1
+                    )));
+                }
+                if bar_units.numer() > MAX_REST_EXPANSION_UNITS {
+                    return Err(bad(format!(
+                        "bar {}: this full-measure rest spans {} L: units; a chord can be placed \
+                         in a rest of at most {MAX_REST_EXPANSION_UNITS} units",
+                        global + 1,
+                        bar_units.numer()
                     )));
                 }
                 split_token(
