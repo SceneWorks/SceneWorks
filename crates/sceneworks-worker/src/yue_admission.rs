@@ -15,10 +15,11 @@
 //!
 //! * **stage 1** — the 7B Llama at the selected tier, its KV cache and its per-layer attention
 //!   workspace ([`stage1_attention_workspace_bytes`]). The cache holds the whole segment history
-//!   (prompt blocks + every generated codebook-0 token), batch-of-2 under CFG, and the engine's
-//!   smart context caps it at the checkpoint's 16 384 positions. So it scales with
-//!   `n_segments × max_new_tokens_per_segment` until that cap — `n_segments` being what the engine
-//!   actually renders, `min(requested, lyric sections)` ([`lyric_section_count`]).
+//!   (prompt blocks + every generated codebook-0 token and each segment's closing `<EOA>`),
+//!   batch-of-2 under CFG, sized once to the render bound and capped at the checkpoint's 16 384
+//!   positions. So it scales with `n_segments × (max_new_tokens_per_segment + 1)` until that cap —
+//!   `n_segments` being what the engine actually renders, `min(requested, lyric sections)`
+//!   ([`lyric_section_count`]).
 //! * **stage 2** — the 1B Llama at the SAME tier (the manifest's per-tier `stage2` coRequisite)
 //!   plus a preallocated static KV cache for a batch of up to four 300-frame chunks.
 //! * **codec** — xcodec, both Vocos decoders and the HuBERT branch (the ICL encoder), stored and run
@@ -74,10 +75,10 @@ const STAGE1_HEAD_DIM: u64 = 128;
 /// Stage-1 `config.json`: `max_position_embeddings` — the smart context never lets the cache
 /// outgrow it.
 const STAGE1_CONTEXT: u64 = 16_384;
-/// candle-llm's eager-attention query tile (`primitives/attention.rs:59`
+/// candle-llm's eager-attention query tile (`primitives/attention.rs:60`
 /// `EAGER_ATTN_QUERY_CHUNK_SIZE`).
 const ATTN_QUERY_CHUNK: u64 = 256;
-/// candle-audio-yue's stage-1 prefill chunk (`stage1/lm.rs:49` `PREFILL_CHUNK`) — the query width
+/// candle-audio-yue's stage-1 prefill chunk (`stage1/lm.rs:59` `PREFILL_CHUNK`) — the query width
 /// of the CFG additive mask.
 const STAGE1_PREFILL_CHUNK: u64 = 512;
 
@@ -303,9 +304,14 @@ impl YueEstimate {
     }
 }
 
-/// Stage-1 KV positions: the whole history up to the checkpoint context.
+/// Stage-1 KV positions — the engine's render bound, which is what it sizes its static KV cache to
+/// (inference @ d5b18019b, `candle-audio-yue/src/stage1.rs:53-62` `render_positions`, called by
+/// `engine.rs:300`): Σ(segment prompt blocks) + segments × (`max_new_tokens` + 1), the `+ 1` being
+/// each segment's closing `<EOA>` (sampled or forced), capped at the checkpoint context
+/// (`stage1/lm.rs:402`). `prompt_tokens` is an upper bound on Σ blocks (it also counts the head,
+/// which segment 0's block carries).
 pub(crate) fn stage1_kv_positions(shape: &YueRenderShape) -> u64 {
-    let generated = u64::from(shape.segments) * u64::from(shape.max_new_tokens);
+    let generated = u64::from(shape.segments) * (u64::from(shape.max_new_tokens) + 1);
     shape
         .prompt_tokens
         .saturating_add(generated)
@@ -331,21 +337,23 @@ fn stage1_kv_bytes(shape: &YueRenderShape) -> u64 {
 
 /// The per-layer attention workspace stage 1 holds on top of its KV cache (one layer at a time —
 /// each layer's temporaries drop before the next runs), at the full `P` = [`stage1_kv_positions`]
-/// keys (inference @ feature/sc-19373-yue-lyrics2song):
+/// keys (inference @ d5b18019b):
 ///
 /// * **scores** — the eager attention tiles `STAGE1_HEADS` × 256 query rows × `P` keys per batch
-///   row (`candle-llm/src/primitives/attention.rs:59` `EAGER_ATTN_QUERY_CHUNK_SIZE`; `:461` for the
-///   GQA path), and three tile-sized tensors are live at once: the scaled scores, the masked
-///   scores and the softmax weights (`attention.rs:342`, `:364`, `:393`).
-/// * **CFG only** (batch-of-2 under an additive mask, `candle-audio-yue/src/stage1/lm.rs:293-324`
-///   `forward_cfg` → `decode_logits_masked`): the additive mask is not `AttnMask::Causal`, so the
-///   layer takes `repeat_kv` + eager `sdpa` (`candle-llm/src/models/llama.rs:2287-2295`) — K and V
-///   expanded from 4 to 32 heads, plus the contiguous transposed copy of the expanded keys
-///   (`attention.rs:336`): three `batch × 32 × P × 128` bf16 tensors. And the mask itself,
-///   `[batch, 1, 512, P]`, built in f32 and cast to bf16 (`lm.rs:311-323`, 512 = `PREFILL_CHUNK`,
-///   `lm.rs:49`).
-/// * CFG off decodes batch-1 under `AttnMask::Causal` through `sdpa_gqa_causal`, whose transposed
-///   keys are a view, never materialized (`attention.rs:462-463`): scores only.
+///   row (`candle-llm/src/primitives/attention.rs:60` `EAGER_ATTN_QUERY_CHUNK_SIZE`, tiled by
+///   `sdpa_gqa` at `:576`), and three tile-sized tensors are live at once: the scaled scores, the
+///   masked scores and the softmax weights (`attention.rs:590`, `:621`, `:624`).
+/// * Both paths attend the static cache's K/V **un-expanded** through `sdpa_gqa`: no `repeat_kv`
+///   expansion and no transposed-key copy (`attention.rs:579` — a static cache's `Kᵀ` view is read
+///   in place). CFG off decodes batch-1 under `AttnMask::Causal` (`sdpa_gqa_causal`,
+///   `attention.rs:476`). CFG (batch-of-2 under an additive mask) runs `forward_cfg` →
+///   `CausalLm::decode_logits_masked_gqa` (`candle-audio-yue/src/stage1/lm.rs:345-366`,
+///   `candle-llm/src/models/llama.rs:1317`), whose layers take the `sdpa_gqa` arm
+///   (`llama.rs:2327-2331`), never the `repeat_kv` fallback (`:2333-2335`).
+/// * **CFG masks** — a prefill chunk's `[batch, 1, 512, P]` additive mask, built in f32 and cast to
+///   bf16 (`lm.rs:370-392`, 512 = `PREFILL_CHUNK`, `lm.rs:59`), plus the segment's resident
+///   `[batch, 1, 1, P]` bf16 step mask, built once per segment before its prefill
+///   (`lm.rs:246-259`, `:492`) and only narrowed per decode step (`lm.rs:294-299`).
 pub(crate) fn stage1_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
     let batch = stage1_batch(shape);
     let positions = stage1_kv_positions(shape);
@@ -354,9 +362,10 @@ pub(crate) fn stage1_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
     if !shape.cfg {
         return scores;
     }
-    let expanded = 3 * batch * STAGE1_HEADS * positions * STAGE1_HEAD_DIM * KV_ELEMENT_BYTES;
-    let mask = batch * STAGE1_PREFILL_CHUNK.min(positions) * positions * (4 + KV_ELEMENT_BYTES);
-    scores + expanded + mask
+    let prefill_mask =
+        batch * STAGE1_PREFILL_CHUNK.min(positions) * positions * (4 + KV_ELEMENT_BYTES);
+    let step_mask = batch * positions * KV_ELEMENT_BYTES;
+    scores + prefill_mask + step_mask
 }
 
 /// Stage-2 static KV cache for the largest chunk group. Stage 1 interleaves vocal and instrumental
@@ -771,8 +780,9 @@ mod tests {
         let per_position = 2 * 32 * 4 * 128 * 2;
         let one = shape(YueTier::Q4, 1, 1000, false);
         let two = shape(YueTier::Q4, 2, 1000, false);
-        assert_eq!(stage1_kv_bytes(&one), per_position * (256 + 1000));
-        assert_eq!(stage1_kv_bytes(&two), per_position * (256 + 2000));
+        // Each segment's budget carries its closing `<EOA>` (the engine's `render_positions`).
+        assert_eq!(stage1_kv_bytes(&one), per_position * (256 + 1001));
+        assert_eq!(stage1_kv_bytes(&two), per_position * (256 + 2002));
         // CFG doubles it (batch-of-2).
         let cfg = shape(YueTier::Q4, 2, 1000, true);
         assert_eq!(stage1_kv_bytes(&cfg), 2 * stage1_kv_bytes(&two));
@@ -794,15 +804,16 @@ mod tests {
     #[test]
     fn stage1_attention_workspace_follows_the_engine_attention_path() {
         let p = 16_384u64;
-        // CFG: batch 2 under an additive mask ⇒ repeat_kv + eager sdpa. Three 256-row score tiles,
-        // three expanded K/V-sized tensors (K, V, contiguous Kᵀ) and the f32→bf16 mask.
+        // CFG: batch 2 under an additive mask ⇒ decode_logits_masked_gqa → sdpa_gqa, K/V read
+        // un-expanded (no repeat_kv, no Kᵀ copy). Three 256-row score tiles, the f32→bf16 prefill
+        // mask and the resident bf16 step mask.
         let cfg = shape(YueTier::Q4, 50, 3000, true);
         let scores = 3 * 2 * 32 * 256 * p * 2;
-        let expanded = 3 * 2 * 32 * p * 128 * 2;
-        let mask = 2 * 512 * p * (4 + 2);
+        let prefill_mask = 2 * 512 * p * (4 + 2);
+        let step_mask = 2 * p * 2;
         assert_eq!(
             stage1_attention_workspace_bytes(&cfg),
-            scores + expanded + mask
+            scores + prefill_mask + step_mask
         );
         // CFG off: batch 1, causal ⇒ sdpa_gqa_causal (Kᵀ is a view): the score tiles only.
         let plain = shape(YueTier::Q4, 50, 3000, false);
@@ -817,7 +828,7 @@ mod tests {
         };
         assert_eq!(
             stage1_attention_workspace_bytes(&short),
-            3 * 32 * 150 * 150 * 2
+            3 * 32 * 151 * 151 * 2
         );
     }
 
