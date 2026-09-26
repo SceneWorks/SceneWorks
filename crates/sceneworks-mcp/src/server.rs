@@ -709,6 +709,86 @@ impl SceneWorksMcp {
         .await
     }
 
+    #[tool(
+        description = "YuE2 (experimental, noncommercial): inspect a score in the supported native two-voice ABC dialect — a stored version (projectId + versionId) or raw abc text. Returns exact events: per-voice sounding notes after merging ties (onset/duration in quarter notes, MIDI pitch), bar grids, chord symbols with onsets, key changes, sections and tempo. Notation outside the dialect (tuplets, grace notes, chord stacks, repeats, w: lyrics, unsupported chords/keys) is reported as unsupported, which does not mean the ABC is invalid in general."
+    )]
+    async fn yue2_inspect_score(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2InspectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::inspect(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: list a project's score versions (oldest first) with their lineage (parentVersionId/rootVersionId), origin, edit operation and brief, score hash, summary and render count. Every edit is a separate version; originals are never overwritten."
+    )]
+    async fn yue2_list_score_versions(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::list_versions(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: get one score version in full — its ABC score, request (style, lyrics, cot, seed), edit record (operation, brief, contract, invariant report), provenance, and every render of it (audio asset, model/decoder identity, truncation flags)."
+    )]
+    async fn yue2_get_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2VersionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: save a score (from a plan, a transcription or an import) as a new root version with its style, lyrics and cot. The score must be in the supported native ABC dialect; cot=melody requires a chord-free score."
+    )]
+    async fn yue2_create_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CreateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::create_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: apply ONE bounded edit operation to a score version and save the result as a NEW version linked to its source (the source is never modified). Operations: reharmonize, strip_chords, set_tempo, arrange_sections, set_lyrics, set_style, replace_score. Each declares what it may change; the server re-parses the result and checks the parsed musical invariants — sounding notes, durations, bars, sections, tempo, chords, lyrics, style — against the source, and refuses the edit (isError with the invariant report) if anything undeclared changed. Use dryRun to check first. Rendering the new version later regenerates the WHOLE recording from score, style and lyrics; it does not edit or preserve the earlier waveform, so audio can differ outside the edited bars."
+    )]
+    async fn yue2_edit_score(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2EditArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::edit(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: persist an A/B listening comparison between two score versions, optionally naming one completed render of each. Records both requests, scores, edit briefs, lineage, every symbolic difference (parsed events, not text), the edit's invariant report when B was edited from A, the renders' audio assets and truncation flags (truncated renders are flagged), and your listening notes. Each render is a complete regeneration, not a waveform-preserving edit — compare complete recordings, and do not report listening you did not do."
+    )]
+    async fn yue2_compare_versions(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CompareArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::compare(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: list a project's persisted A/B listening comparisons (oldest first), each with both versions' requests, scores and edit briefs, lineage, symbolic differences, renders with truncation flags, warnings and listening notes."
+    )]
+    async fn yue2_list_comparisons(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::list_comparisons(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: get one persisted A/B listening comparison by id. Each side's render is a complete regeneration of that version, not a waveform-preserving edit of the other."
+    )]
+    async fn yue2_get_comparison(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ComparisonArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_comparison(&self.api, args).await
+    }
+
     /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
     /// `/api/v1` are the SAME axum app, so the host the client used to reach
     /// `/mcp` is exactly the host that serves the media — derive it from the
@@ -906,7 +986,10 @@ impl ServerHandler for SceneWorksMcp {
              list_loras for LoRA adapters compatible with a model family. generate_image \
              blocks until the images are ready; video runs minutes, so use \
              submit_video_job, poll get_job_status, then get_job_result for ticketed \
-             download links (get_job_status/get_job_result work for image jobs too).",
+             download links (get_job_status/get_job_result work for image jobs too). \
+             YuE2 score tools (yue2_*) inspect native ABC scores, apply one bounded, \
+             invariant-checked edit per new version, and persist A/B listening comparisons; \
+             rendering a version regenerates the whole recording.",
         )
     }
 }

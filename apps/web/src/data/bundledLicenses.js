@@ -136,6 +136,9 @@ import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.tx
 // prompt taxonomy. This is fpgaminer/joycaption's own LICENSE file, kept verbatim because it
 // carries the upstream copyright line the generic Apache template does not (sc-15191 review).
 import joycaptionApache20 from "../../../desktop/licenses/joycaption-source/Apache-2.0.txt?url&no-inline";
+// Upstream algorithm + vocabulary ported into sceneworks-core's YuE2 score tools (sc-22997): the
+// yue2-music skill's own LICENSE file, kept verbatim.
+import yue2ScoreToolsApache20 from "../../../desktop/licenses/yue2-score-tools-source/Apache-2.0.txt?url&no-inline";
 
 // Maps each manifest document key to its bundled text asset URL. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -219,6 +222,7 @@ const DOCUMENT_URL = {
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
   "joycaption-source-apache": joycaptionApache20,
+  "yue2-score-tools-source-apache": yue2ScoreToolsApache20,
 };
 
 export const bundledLicenses = (manifest.components ?? []).map((component) => ({

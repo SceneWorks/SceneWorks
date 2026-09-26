@@ -1299,6 +1299,16 @@
       "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
     },
     {
+      "id": "yue2-score-tools-source",
+      "models": [],
+      "name": "YuE2 music skill score tools (abc_tools.py)",
+      "publisher": "the YuE2 authors (multimodal-art-projection)",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/multimodal-art-projection/YuE/tree/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e/skills/yue2-music",
+      "usage": "SceneWorks' YuE2 score inspection and editing (sceneworks-core yue2_score) is a native Rust port of the bounded two-voice ABC dialect helper skills/yue2-music/scripts/abc_tools.py and the rules in skills/yue2-music/references/abc-editing.md at YuE commit 92a73cc7652fcc1f937855e4b765e0a0edd7ff2e: its parser, accidental/tie interpretation, chord-quality and key vocabularies, structural error messages, chord stripping and sounding-note comparison. SceneWorks MODIFIED and extended it (section map, change contracts, structured edit operations, version records). Copyright (c) 2026 the YuE2 authors; the skill ships its own Apache-2.0 LICENSE and no NOTICE file. This entry covers that SOURCE only; the YuE2 model weights are CC BY-NC 4.0 and are not covered here.",
+      "documents": [{"label": "Apache License 2.0", "key": "yue2-score-tools-source-apache"}]
+    },
+    {
       "id": "sam3",
       "models": [
         "sam3_person_segment"

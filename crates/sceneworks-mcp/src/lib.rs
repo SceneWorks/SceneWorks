@@ -14,6 +14,7 @@
 
 pub mod api_client;
 pub mod server;
+pub mod yue2;
 
 use std::sync::Arc;
 
