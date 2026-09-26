@@ -61,9 +61,10 @@
 //!   no longer binds any request the API admits.
 //!
 //! [`YueLane::Dedicated`] (CUDA) prices the analytic device residency — cudarc neither rounds to pow2
-//! nor holds a host copy in VRAM — with one measured term: cudarc's caching pool reserves a little
+//! nor holds a host copy in VRAM — with two measured terms: cudarc's caching pool reserves a little
 //! above what is live, so each stage's non-weight working set (KV + attention workspace) is priced
-//! with [`DEDICATED_POOL_ENVELOPE`]. Calibrated by the sc-19387 CUDA capture (inference#1083, run
+//! with [`DEDICATED_POOL_ENVELOPE`]; and stage 2 holds a per-tier non-KV working set (dequantization
+//! scratch, pool slack) priced by [`CUDA_STAGE2_NON_KV_WORKING_SET_GIB`]. Calibrated by the sc-19387 CUDA capture (inference#1083, run
 //! 36258288357, RTX PRO 6000 Blackwell, `candle-audio-yue/tests/cuda_memory_real_weights.rs`, the
 //! Metal campaign's request shapes): the analytic stage-1 / stage-2 / codec figures each cover their
 //! phase's pool peak, and the render's floor plus the dedicated-VRAM reserve
@@ -189,6 +190,16 @@ const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
 /// 5% envelope on each stage's non-weight working set (the weights load as sized: measured 4.19 /
 /// 6.78 / 11.62 GiB pool vs 4.19 / 6.77 / 11.60 GiB q4 / q8 / bf16 files).
 const DEDICATED_POOL_ENVELOPE: f64 = 1.05;
+/// CUDA stage-2 non-KV working set, per tier (GiB): what the stage-2 phase held above its weights,
+/// its static KV cache and the prefill tile — dequantization scratch and cudarc pool slack, not
+/// attention. Measured (run 36258288357, the phase's max of nvidia-smi / device − 0.6 GiB context /
+/// pool reserved, less weights + KV): up to 0.27 q4, 0.30 q8, 0.13 bf16; priced with the envelope's
+/// 5% margin. CUDA-scoped: Metal's stage 2 is priced by its own measured terms.
+const CUDA_STAGE2_NON_KV_WORKING_SET_GIB: [(YueTier, f64); 3] = [
+    (YueTier::Q4, 0.29),
+    (YueTier::Q8, 0.32),
+    (YueTier::Bf16, 0.14),
+];
 
 // ---- Codec decode (chunked, inference 1744de6e). Everything the decode stage prices lives here and in
 // [`unified_codec_activation_bytes`].
@@ -411,13 +422,16 @@ pub(crate) struct YueEstimate {
     pub stage1_attention_bytes: u64,
     pub stage2_weights_bytes: u64,
     pub stage2_kv_bytes: u64,
-    /// Stage 2's per-layer attention workspace (the batch-of-4 chunk prefill's score tiles).
+    /// Stage 2's attention workspace: the chunk-prefix prefill's score tiles (tiny — the static
+    /// cache's views are narrowed to the filled length, so the prefill attends only the prefix).
     pub stage2_attention_bytes: u64,
     pub codec_bytes: u64,
     /// CUDA: cudarc's pool above the live stage-1 / stage-2 KV + workspace (0 on Metal, whose own
     /// envelope is [`Self::unified_workspace_envelope_bytes`]).
     pub dedicated_pool_stage1_bytes: u64,
     pub dedicated_pool_stage2_bytes: u64,
+    /// CUDA: [`CUDA_STAGE2_NON_KV_WORKING_SET_GIB`] for the tier (0 on Metal).
+    pub dedicated_stage2_non_kv_bytes: u64,
     /// Stage-1 load peak above its weights (host bytes + Metal copy held at once).
     pub unified_load_transient_bytes: u64,
     /// Stage-1 KV + workspace above the analytic figure (pow2 rounding + pooled buffers).
@@ -467,6 +481,7 @@ impl YueEstimate {
                     + self.stage2_kv_bytes
                     + self.stage2_attention_bytes
                     + self.dedicated_pool_stage2_bytes
+                    + self.dedicated_stage2_non_kv_bytes
             }
             YueStage::Codec => {
                 self.codec_bytes
@@ -583,29 +598,40 @@ pub(crate) fn stage1_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
 /// Stage-2 static KV cache for the largest chunk group. Stage 1 interleaves vocal and instrumental
 /// codebook-0 tokens, so each track carries half the generated tokens as frames.
 fn stage2_kv_bytes(shape: &YueRenderShape) -> u64 {
-    let (rows, capacity) = stage2_group(shape);
+    let (rows, _, capacity) = stage2_group(shape);
     2 * STAGE2_LAYERS * STAGE2_KV_HEADS * STAGE2_HEAD_DIM * KV_ELEMENT_BYTES * rows * capacity
 }
 
-/// The largest stage-2 chunk group: its rows (chunks decoded together) and each row's static-cache
-/// capacity.
-fn stage2_group(shape: &YueRenderShape) -> (u64, u64) {
+/// The largest stage-2 chunk group: its rows (chunks decoded together), its chunk frames and each
+/// row's static-cache capacity.
+fn stage2_group(shape: &YueRenderShape) -> (u64, u64, u64) {
     let frames = (u64::from(shape.segments) * u64::from(shape.max_new_tokens) / 2).max(1);
     let rows = frames.div_ceil(STAGE2_CHUNK_FRAMES).clamp(1, STAGE2_BATCH);
     let chunk = frames.min(STAGE2_CHUNK_FRAMES);
     // `stage2::chunk_capacity`: the prefix, then eight tokens per frame, less the last residual.
-    (rows, chunk + 3 + NUM_CODEBOOKS * chunk - 1)
+    (rows, chunk, chunk + 3 + NUM_CODEBOOKS * chunk - 1)
 }
 
-/// Stage 2's per-layer attention workspace: each group opens with a prefill of the chunk prefix
-/// (`<SOA> <stage_1> cb0… <stage_2>` + the first frame, ~304 tokens × `rows`) against the static
-/// cache, which candle-llm's eager attention tiles 256 query rows at a time with three tile-sized
-/// tensors live (scaled scores, masked scores, softmax) — the stage-1 workspace law at batch
-/// `rows`, 16 heads, no CFG. Missing before sc-19387's CUDA capture, which measured the stage-2
-/// phase 0.2–0.3 GiB above weights + KV.
+/// Stage 2's attention workspace. `decode_group` (candle-audio-yue `stage2.rs`) prefills each
+/// group's chunk prompt — `chunk_prefix` (`<SOA> <stage_1> cb0… <stage_2>`, chunk + 3 tokens) plus
+/// the first frame's codebook-0 token, chunk + 4 tokens × `rows` — then steps one token at a time.
+/// The static cache hands attention views narrowed to the filled length (candle-llm
+/// `StaticKvCache::update`), so the widest step is the prefill attending its own prefix: three
+/// 256-row score tiles (scaled, masked, softmax) of `min(256, prefix) × prefix` per head — ~0.03 GiB
+/// at 4 × 304 tokens, on either lane.
 fn stage2_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
-    let (rows, capacity) = stage2_group(shape);
-    3 * rows * STAGE2_HEADS * ATTN_QUERY_CHUNK.min(capacity) * capacity * KV_ELEMENT_BYTES
+    let (rows, chunk, _) = stage2_group(shape);
+    let prefix = chunk + 4;
+    3 * rows * STAGE2_HEADS * ATTN_QUERY_CHUNK.min(prefix) * prefix * KV_ELEMENT_BYTES
+}
+
+/// The tier's [`CUDA_STAGE2_NON_KV_WORKING_SET_GIB`] row, in bytes.
+fn cuda_stage2_non_kv_bytes(tier: YueTier) -> u64 {
+    let gib = CUDA_STAGE2_NON_KV_WORKING_SET_GIB
+        .iter()
+        .find(|(t, _)| *t == tier)
+        .map_or(0.0, |&(_, gib)| gib);
+    (gib * BYTES_PER_GIB).ceil() as u64
 }
 
 fn download_bytes(download: &Value) -> Option<u64> {
@@ -672,6 +698,7 @@ pub(crate) fn estimate(
         codec_bytes: codec,
         dedicated_pool_stage1_bytes: cuda(scale(kv + workspace, DEDICATED_POOL_ENVELOPE - 1.0)),
         dedicated_pool_stage2_bytes: cuda(scale(kv2 + workspace2, DEDICATED_POOL_ENVELOPE - 1.0)),
+        dedicated_stage2_non_kv_bytes: cuda(cuda_stage2_non_kv_bytes(shape.tier)),
         unified_load_transient_bytes: metal(scale(stage1, load_factor - 1.0)),
         unified_workspace_envelope_bytes: metal(scale(
             kv + workspace,
@@ -875,6 +902,10 @@ fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
             part(estimate.stage2_kv_bytes, "KV cache");
             part(estimate.stage2_attention_bytes, "attention workspace");
             part(estimate.dedicated_pool_stage2_bytes, "CUDA pool envelope");
+            part(
+                estimate.dedicated_stage2_non_kv_bytes,
+                "stage-2 non-KV working set (measured, CUDA)",
+            );
             part(
                 estimate.unified_stage1_residue_bytes,
                 "memory held over from stage 1",
@@ -1544,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dedicated_lane_prices_only_the_analytic_residency() {
+    fn the_dedicated_lane_prices_analytic_residency_plus_measured_cuda_terms() {
         let entry = builtin("yue_en_icl");
         let s = YueRenderShape::new(&YueRequestFacts {
             icl_mode: Some("dual"),
@@ -1574,6 +1605,16 @@ mod tests {
         );
         assert_eq!(metal.dedicated_pool_stage1_bytes, 0);
         assert_eq!(metal.dedicated_pool_stage2_bytes, 0);
+        // The measured CUDA stage-2 allowance is CUDA-scoped: Metal carries none of it.
+        assert_eq!(metal.dedicated_stage2_non_kv_bytes, 0);
+        assert_eq!(
+            cuda.dedicated_stage2_non_kv_bytes,
+            cuda_stage2_non_kv_bytes(cuda.tier)
+        );
+        assert!(cuda.dedicated_stage2_non_kv_bytes > 0);
+        // The stage-2 prefill tile is physical and tiny on both lanes (4 × 304 tokens ≈ 0.03 GiB).
+        assert_eq!(metal.stage2_attention_bytes, cuda.stage2_attention_bytes);
+        assert!(gib(cuda.stage2_attention_bytes) < 0.05);
         // The same render on Metal prices strictly more at every LM/codec stage.
         for stage in [YueStage::Stage1, YueStage::Stage2, YueStage::Codec] {
             assert!(

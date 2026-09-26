@@ -26882,7 +26882,9 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-cot-candle"
       },
-      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // CARRIED OVER from yue_en_cot (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
       // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
       // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
       // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
@@ -27016,7 +27018,9 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-icl-candle"
       },
-      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // CARRIED OVER from yue_en_icl (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
       // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
       // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
       // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
@@ -27149,7 +27153,9 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle"
       },
-      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // CARRIED OVER from yue_en_cot (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
       // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
       // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
       // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
@@ -27283,7 +27289,9 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle"
       },
-      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // CARRIED OVER from yue_en_icl (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
       // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
       // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
       // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
