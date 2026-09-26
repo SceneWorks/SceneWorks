@@ -26615,23 +26615,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
-      // q4 / q8 / bf16 = 8.42 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
       "candle": {
-        "minMemoryGb": 18,
-        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
-        "measured": false
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-cot",
       "ui": {
@@ -26752,23 +26749,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
-      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
       "candle": {
-        "minMemoryGb": 21,
-        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-icl",
       "ui": {
@@ -26888,23 +26882,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-cot-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
-      // q4 / q8 / bf16 = 8.42 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
       "candle": {
-        "minMemoryGb": 18,
-        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
-        "measured": false
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-cot",
       "ui": {
@@ -27025,23 +27016,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-icl-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
-      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
       "candle": {
-        "minMemoryGb": 21,
-        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-icl",
       "ui": {
@@ -27161,23 +27149,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
-      // q4 / q8 / bf16 = 8.42 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
       "candle": {
-        "minMemoryGb": 18,
-        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
-        "measured": false
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-cot",
       "ui": {
@@ -27298,23 +27283,20 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle"
       },
-      // METAL unified-memory floors (sc-19387, epic 19373's terminal campaign): the lifetime-max footprint of
-      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b; the
-      // song-length-dependent q4 CoT captures re-taken @ 1744de6e after the chunked codec decode),
-      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
-      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
-      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
-      // conservative fallback for an unlisted tier. The peak is stage 1 (its load transient, or a long
-      // song's KV cache); the chunked decode stays near 2-3 GiB at any length (a 218 s q4 song peaked at
-      // 10.3 GiB, in stage 1). The worker's yue_admission gate prices each request; these floors describe
-      // the default request only.
-      // NOT a candle/CUDA calibration — hence `measured: false`: on a CUDA card these floors OVER-state
-      // (no host copy in VRAM, no pow2 pool) until the CUDA capture replaces them. As on qwen_image_2_1,
-      // minMemoryGbByTier carries no evidence class of its own.
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
       "candle": {
-        "minMemoryGb": 21,
-        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-icl",
       "ui": {

@@ -60,8 +60,17 @@
 //!   device copies ([`unified_codec_activation_bytes`]). The decode stage now peaks near 2–3 GiB and
 //!   no longer binds any request the API admits.
 //!
-//! [`YueLane::Dedicated`] (CUDA) keeps the analytic figures: cudarc neither rounds to pow2 nor holds a
-//! host copy in VRAM, and no CUDA capture exists yet to calibrate its codec/ICL activations.
+//! [`YueLane::Dedicated`] (CUDA) prices the analytic device residency — cudarc neither rounds to pow2
+//! nor holds a host copy in VRAM — with one measured term: cudarc's caching pool reserves a little
+//! above what is live, so each stage's non-weight working set (KV + attention workspace) is priced
+//! with [`DEDICATED_POOL_ENVELOPE`]. Calibrated by the sc-19387 CUDA capture (inference#1083, run
+//! 36258288357, RTX PRO 6000 Blackwell, `candle-audio-yue/tests/cuda_memory_real_weights.rs`, the
+//! Metal campaign's request shapes): the analytic stage-1 / stage-2 / codec figures each cover their
+//! phase's pool peak, and the render's floor plus the dedicated-VRAM reserve
+//! ([`crate::fit_gate::dedicated_vram_reserve`], 2.0 GB — it covers the ~0.6 GiB CUDA context,
+//! cuBLAS and module images that nvidia-smi counts on top of the pool) covers the nvidia-smi peak by
+//! ≥ 1.1× in every case (`every_measured_cuda_render_is_covered`). The ICL encoder and codec pools
+//! are freed on CUDA before the LM stages run, so the Dedicated lane carries no residue terms.
 //!
 //! ## How this relates to the engine's own admission
 //!
@@ -118,6 +127,8 @@ const STAGE2_LAYERS: u64 = 32;
 const STAGE2_KV_HEADS: u64 = 16;
 /// Stage-2 head dim: 2048 / 16.
 const STAGE2_HEAD_DIM: u64 = 128;
+/// Stage-2 `config.json`: `num_attention_heads` (16 × 128 = 2048).
+const STAGE2_HEADS: u64 = 16;
 /// `candle_audio_yue::stage2::CHUNK_FRAMES` — 6 s at 50 frames/s.
 const STAGE2_CHUNK_FRAMES: u64 = 300;
 /// `candle_audio_yue::stage2::DEFAULT_BATCH_SIZE` — full chunks decoded together.
@@ -171,6 +182,14 @@ const UNIFIED_ICL_ENCODER_BASE_BYTES: f64 = 1.9 * BYTES_PER_GIB;
 /// … plus a per-second-of-clip part (HuBERT's global attention keys and the clip's features) —
 /// measured 2.49 GiB for a 60 s dual reference, 4.14 GiB for a 218 s one.
 const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
+// ---- Dedicated (CUDA) lane, measured by the sc-19387 CUDA capture (see the module doc).
+
+/// cudarc's caching pool: reserved ÷ used at the render peak was 1.014–1.034 over the 12 CUDA
+/// captures; the stage phases' pool peaks sit 0–3% above the analytic KV + workspace. Priced as a
+/// 5% envelope on each stage's non-weight working set (the weights load as sized: measured 4.19 /
+/// 6.78 / 11.62 GiB pool vs 4.19 / 6.77 / 11.60 GiB q4 / q8 / bf16 files).
+const DEDICATED_POOL_ENVELOPE: f64 = 1.05;
+
 // ---- Codec decode (chunked, inference 1744de6e). Everything the decode stage prices lives here and in
 // [`unified_codec_activation_bytes`].
 
@@ -392,7 +411,13 @@ pub(crate) struct YueEstimate {
     pub stage1_attention_bytes: u64,
     pub stage2_weights_bytes: u64,
     pub stage2_kv_bytes: u64,
+    /// Stage 2's per-layer attention workspace (the batch-of-4 chunk prefill's score tiles).
+    pub stage2_attention_bytes: u64,
     pub codec_bytes: u64,
+    /// CUDA: cudarc's pool above the live stage-1 / stage-2 KV + workspace (0 on Metal, whose own
+    /// envelope is [`Self::unified_workspace_envelope_bytes`]).
+    pub dedicated_pool_stage1_bytes: u64,
+    pub dedicated_pool_stage2_bytes: u64,
     /// Stage-1 load peak above its weights (host bytes + Metal copy held at once).
     pub unified_load_transient_bytes: u64,
     /// Stage-1 KV + workspace above the analytic figure (pow2 rounding + pooled buffers).
@@ -421,6 +446,7 @@ impl YueEstimate {
             + self.stage1_kv_bytes
             + self.stage1_attention_bytes
             + self.unified_workspace_envelope_bytes
+            + self.dedicated_pool_stage1_bytes
     }
 
     /// Stage-1 while it loads (Metal only exceeds the weights).
@@ -439,6 +465,8 @@ impl YueEstimate {
                     + self.unified_stage1_residue_bytes
                     + self.stage2_weights_bytes
                     + self.stage2_kv_bytes
+                    + self.stage2_attention_bytes
+                    + self.dedicated_pool_stage2_bytes
             }
             YueStage::Codec => {
                 self.codec_bytes
@@ -555,12 +583,29 @@ pub(crate) fn stage1_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
 /// Stage-2 static KV cache for the largest chunk group. Stage 1 interleaves vocal and instrumental
 /// codebook-0 tokens, so each track carries half the generated tokens as frames.
 fn stage2_kv_bytes(shape: &YueRenderShape) -> u64 {
+    let (rows, capacity) = stage2_group(shape);
+    2 * STAGE2_LAYERS * STAGE2_KV_HEADS * STAGE2_HEAD_DIM * KV_ELEMENT_BYTES * rows * capacity
+}
+
+/// The largest stage-2 chunk group: its rows (chunks decoded together) and each row's static-cache
+/// capacity.
+fn stage2_group(shape: &YueRenderShape) -> (u64, u64) {
     let frames = (u64::from(shape.segments) * u64::from(shape.max_new_tokens) / 2).max(1);
     let rows = frames.div_ceil(STAGE2_CHUNK_FRAMES).clamp(1, STAGE2_BATCH);
     let chunk = frames.min(STAGE2_CHUNK_FRAMES);
     // `stage2::chunk_capacity`: the prefix, then eight tokens per frame, less the last residual.
-    let capacity = chunk + 3 + NUM_CODEBOOKS * chunk - 1;
-    2 * STAGE2_LAYERS * STAGE2_KV_HEADS * STAGE2_HEAD_DIM * KV_ELEMENT_BYTES * rows * capacity
+    (rows, chunk + 3 + NUM_CODEBOOKS * chunk - 1)
+}
+
+/// Stage 2's per-layer attention workspace: each group opens with a prefill of the chunk prefix
+/// (`<SOA> <stage_1> cb0… <stage_2>` + the first frame, ~304 tokens × `rows`) against the static
+/// cache, which candle-llm's eager attention tiles 256 query rows at a time with three tile-sized
+/// tensors live (scaled scores, masked scores, softmax) — the stage-1 workspace law at batch
+/// `rows`, 16 heads, no CFG. Missing before sc-19387's CUDA capture, which measured the stage-2
+/// phase 0.2–0.3 GiB above weights + KV.
+fn stage2_attention_workspace_bytes(shape: &YueRenderShape) -> u64 {
+    let (rows, capacity) = stage2_group(shape);
+    3 * rows * STAGE2_HEADS * ATTN_QUERY_CHUNK.min(capacity) * capacity * KV_ELEMENT_BYTES
 }
 
 fn download_bytes(download: &Value) -> Option<u64> {
@@ -606,8 +651,11 @@ pub(crate) fn estimate(
     let kv = stage1_kv_bytes(shape);
     let workspace = stage1_attention_workspace_bytes(shape);
     let frames = song_frames_bound(shape);
+    let kv2 = stage2_kv_bytes(shape);
+    let workspace2 = stage2_attention_workspace_bytes(shape);
     let unified = lane == YueLane::Unified;
     let metal = |bytes: u64| if unified { bytes } else { 0 };
+    let cuda = |bytes: u64| if unified { 0 } else { bytes };
     let load_factor = match shape.tier {
         YueTier::Bf16 => UNIFIED_BF16_LOAD_FACTOR,
         YueTier::Q8 | YueTier::Q4 => UNIFIED_QUANTIZED_LOAD_FACTOR,
@@ -619,8 +667,11 @@ pub(crate) fn estimate(
         stage1_kv_bytes: kv,
         stage1_attention_bytes: workspace,
         stage2_weights_bytes: stage2,
-        stage2_kv_bytes: stage2_kv_bytes(shape),
+        stage2_kv_bytes: kv2,
+        stage2_attention_bytes: workspace2,
         codec_bytes: codec,
+        dedicated_pool_stage1_bytes: cuda(scale(kv + workspace, DEDICATED_POOL_ENVELOPE - 1.0)),
+        dedicated_pool_stage2_bytes: cuda(scale(kv2 + workspace2, DEDICATED_POOL_ENVELOPE - 1.0)),
         unified_load_transient_bytes: metal(scale(stage1, load_factor - 1.0)),
         unified_workspace_envelope_bytes: metal(scale(
             kv + workspace,
@@ -815,12 +866,15 @@ fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
                     estimate.unified_workspace_envelope_bytes,
                     "Metal allocator envelope",
                 );
+                part(estimate.dedicated_pool_stage1_bytes, "CUDA pool envelope");
             }
             part(estimate.unified_icl_encoder_bytes, icl_residue);
         }
         YueStage::Stage2 => {
             part(estimate.stage2_weights_bytes, "weights");
             part(estimate.stage2_kv_bytes, "KV cache");
+            part(estimate.stage2_attention_bytes, "attention workspace");
+            part(estimate.dedicated_pool_stage2_bytes, "CUDA pool envelope");
             part(
                 estimate.unified_stage1_residue_bytes,
                 "memory held over from stage 1",
@@ -1106,13 +1160,17 @@ mod tests {
         assert_eq!(stage1_kv_positions(&long), 16_384);
         assert_eq!(stage1_kv_bytes(&long), 2 * per_position * 16_384);
 
-        // Stage-1 residency = weights + KV + the attention workspace, which is nonzero.
+        // Stage-1 residency = weights + KV + the attention workspace (nonzero) + the CUDA pool
+        // envelope on the latter two.
         let entry = builtin("yue_en_cot");
         let e = estimate(&entry, &long, YueLane::Dedicated).unwrap();
         assert!(e.stage1_attention_bytes > 0);
         assert_eq!(
             e.stage_bytes(YueStage::Stage1),
-            e.stage1_weights_bytes + e.stage1_kv_bytes + e.stage1_attention_bytes
+            e.stage1_weights_bytes
+                + e.stage1_kv_bytes
+                + e.stage1_attention_bytes
+                + e.dedicated_pool_stage1_bytes
         );
     }
 
@@ -1495,18 +1553,28 @@ mod tests {
         })
         .unwrap();
         let cuda = estimate(&entry, &s, YueLane::Dedicated).unwrap();
+        let metal = estimate(&entry, &s, YueLane::Unified).unwrap();
         assert_eq!(cuda.unified_load_transient_bytes, 0);
         assert_eq!(cuda.unified_workspace_envelope_bytes, 0);
         assert_eq!(cuda.unified_icl_encoder_bytes, 0);
         assert_eq!(cuda.unified_stage1_residue_bytes, 0);
         assert_eq!(cuda.unified_codec_activation_bytes, 0);
         assert_eq!(cuda.unified_stage2_residue_bytes, 0);
+        // CUDA prices the analytic residency plus cudarc's 5% pool envelope on the non-weight part.
         assert_eq!(
             cuda.stage_bytes(YueStage::Stage1),
-            cuda.stage1_weights_bytes + cuda.stage1_kv_bytes + cuda.stage1_attention_bytes
+            cuda.stage1_weights_bytes
+                + cuda.stage1_kv_bytes
+                + cuda.stage1_attention_bytes
+                + cuda.dedicated_pool_stage1_bytes
         );
+        assert_eq!(
+            cuda.dedicated_pool_stage1_bytes,
+            scale(cuda.stage1_kv_bytes + cuda.stage1_attention_bytes, 0.05)
+        );
+        assert_eq!(metal.dedicated_pool_stage1_bytes, 0);
+        assert_eq!(metal.dedicated_pool_stage2_bytes, 0);
         // The same render on Metal prices strictly more at every LM/codec stage.
-        let metal = estimate(&entry, &s, YueLane::Unified).unwrap();
         for stage in [YueStage::Stage1, YueStage::Stage2, YueStage::Codec] {
             assert!(
                 metal.stage_bytes(stage) > cuda.stage_bytes(stage),
@@ -1878,6 +1946,117 @@ mod tests {
             assert!(
                 priced >= 1.1 * measured,
                 "{tier:?} {segments}x{max_new}: decode priced {priced:.2} GiB < 1.1 x {measured:.2}"
+            );
+        }
+    }
+
+    /// The Dedicated (CUDA) lane against every render of the sc-19387 CUDA capture (inference#1083,
+    /// run 36258288357: RTX PRO 6000 Blackwell, `candle-audio-yue/tests/cuda_memory_real_weights.rs`,
+    /// the Metal campaign's genre tags, lyrics and shapes). Each measured value is GiB above the
+    /// card's pre-run baseline — so it includes the ~0.6 GiB CUDA context — taken as the max of the
+    /// 500 ms nvidia-smi series, the 20 ms device series and the candle pool's reserved high + 0.6
+    /// (the 500 ms series under-reads short phases such as the bf16 load). `stage2_load` is not a row:
+    /// its window holds stage 1's teardown (`engine.rs:193`), i.e. stage 1's resident set.
+    ///
+    /// The gate compares floor + the dedicated-VRAM reserve (2.0 GB: context, cuBLAS, modules,
+    /// fragmentation) against free VRAM, so that is what each measurement is held to: every phase
+    /// is covered by its stage + reserve (≥ 1.0×), and every render's peak by floor + reserve
+    /// ≥ 1.1×.
+    #[test]
+    fn every_measured_cuda_render_is_covered() {
+        const TAGS: &str = "inspiring female uplifting pop airy vocal electronic bright vocal";
+        const VERSE: &str = "Morning light is falling on the harbor wall\nEvery gull is calling and I hear it all\nPaper boats are drifting where the river bends\nCarry every promise to the waiting friends";
+        const CHORUS: &str = "Hold on, hold on, the tide is turning home\nSing it loud, sing it out, you are not alone\nHold on, hold on, the lights are coming through\nEvery road I wander brings me back to you";
+        const BRIDGE: &str = "Quiet in the evening when the lanterns glow\nCounting all the reasons that I never know";
+        let two = format!("[verse]\n{VERSE}\n\n[chorus]\n{CHORUS}");
+        let eight = [
+            "verse", "chorus", "verse", "chorus", "bridge", "chorus", "verse", "chorus",
+        ]
+        .iter()
+        .map(|label| {
+            let text = match *label {
+                "verse" => VERSE,
+                "chorus" => CHORUS,
+                _ => BRIDGE,
+            };
+            format!("[{label}]\n{text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+        let reserve = crate::fit_gate::dedicated_vram_reserve().gb;
+        use YueTier::{Bf16, Q4, Q8};
+        // (case, tier, peak, stage1_load, stage1_decode, stage2, decode) — GiB above baseline.
+        let rows = [
+            ("cot_default", Q4, 5.711, 4.787, 5.711, 4.963, 1.276),
+            ("cot_default", Q8, 8.336, 7.381, 8.336, 5.743, 1.307),
+            ("cot_default", Bf16, 13.118, 12.225, 13.118, 7.026, 1.245),
+            ("icl_default", Q4, 6.346, 4.813, 6.346, 5.003, 1.276),
+            ("icl_default", Q8, 8.940, 7.407, 8.940, 5.753, 1.307),
+            ("icl_default", Bf16, 13.784, 12.251, 13.784, 7.034, 1.245),
+            ("cot_worst", Q4, 8.213, 4.787, 8.213, 4.995, 1.432),
+            ("cot_worst", Q8, 10.807, 7.381, 10.807, 5.682, 1.401),
+            ("cot_worst", Bf16, 15.618, 12.225, 15.618, 7.026, 1.307),
+            ("icl_long", Q4, 8.253, 4.813, 8.253, 5.003, 1.307),
+            ("icl_long", Q8, 10.815, 7.407, 10.815, 5.784, 1.338),
+            ("icl_long", Bf16, 15.721, 12.251, 15.721, 7.034, 1.213),
+        ];
+        for (case, tier, peak, load, s1, s2, decode) in rows {
+            let (model, lyrics, segments, max_new, icl) = match case {
+                "cot_default" => ("yue_en_cot", &two, None, None, None),
+                "icl_default" => ("yue_en_icl", &two, None, None, Some((None, None))),
+                "cot_worst" => ("yue_en_cot", &eight, Some(8), None, None),
+                _ => (
+                    "yue_en_icl",
+                    &two,
+                    Some(2),
+                    Some(2000),
+                    Some((Some(0.0), Some(120.0))),
+                ),
+            };
+            let shape = YueRenderShape::new(&YueRequestFacts {
+                tier: Some(tier),
+                segments,
+                max_new_tokens: max_new,
+                guidance: None,
+                icl_mode: icl.map(|_| "dual"),
+                icl_start_secs: icl.and_then(|(start, _)| start),
+                icl_end_secs: icl.and_then(|(_, end)| end),
+                icl_clip_secs: None,
+                prompt: TAGS,
+                lyrics,
+            })
+            .unwrap();
+            let e = estimate(&builtin(model), &shape, YueLane::Dedicated).unwrap();
+            let with_reserve = |bytes: u64| gib(bytes) + reserve;
+            for (phase, priced, measured) in [
+                ("stage1_load", with_reserve(e.stage1_load_bytes()), load),
+                ("stage1_decode", with_reserve(e.stage1_run_bytes()), s1),
+                ("stage2", with_reserve(e.stage_bytes(YueStage::Stage2)), s2),
+                (
+                    "decode",
+                    with_reserve(e.stage_bytes(YueStage::Codec)),
+                    decode,
+                ),
+            ] {
+                assert!(
+                    priced >= measured,
+                    "{case} {tier:?} {phase}: priced {priced:.2} < measured {measured:.2} GiB"
+                );
+            }
+            // The stage residencies alone cover each phase's pool (the measurement less the context).
+            for (phase, priced, measured) in [
+                ("stage1_decode", gib(e.stage1_run_bytes()), s1 - 0.6),
+                ("stage2", gib(e.stage_bytes(YueStage::Stage2)), s2 - 0.6),
+            ] {
+                assert!(
+                    priced >= measured,
+                    "{case} {tier:?} {phase} pool: priced {priced:.2} < {measured:.2} GiB"
+                );
+            }
+            let floor = with_reserve(e.floor().1);
+            assert!(
+                floor >= 1.1 * peak,
+                "{case} {tier:?}: floor + reserve {floor:.2} < 1.1 x peak {peak:.2} GiB"
             );
         }
     }
