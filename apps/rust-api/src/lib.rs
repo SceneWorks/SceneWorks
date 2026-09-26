@@ -95,6 +95,13 @@ mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
 use saved_voices::{create_saved_voice, delete_saved_voice, list_saved_voices};
+mod yue2_scores;
+use yue2_scores::{
+    create_yue2_comparison, create_yue2_score_version, edit_yue2_score_version,
+    get_yue2_comparison, get_yue2_score_version, inspect_yue2_score, inspect_yue2_score_version,
+    list_yue2_comparisons, list_yue2_score_renders, list_yue2_score_versions,
+    record_yue2_score_render,
+};
 mod characters;
 use characters::{
     add_character_reference, archive_character, attach_character_lora, create_character,
@@ -1705,6 +1712,36 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/voices/:voice_id",
             delete(delete_saved_voice),
+        )
+        // YuE2 score inspection, bounded edits, renders and listening comparisons (sc-22997).
+        .route("/api/v1/yue2/score/inspect", post(inspect_yue2_score))
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions",
+            get(list_yue2_score_versions).post(create_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id",
+            get(get_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/inspection",
+            get(inspect_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/edits",
+            post(edit_yue2_score_version),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/renders",
+            get(list_yue2_score_renders).post(record_yue2_score_render),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/comparisons",
+            get(list_yue2_comparisons).post(create_yue2_comparison),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/comparisons/:comparison_id",
+            get(get_yue2_comparison),
         )
         .route(
             "/api/v1/projects/:project_id/characters",
