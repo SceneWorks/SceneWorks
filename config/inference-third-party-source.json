@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 012d5ca5 (inference main, merge of PR #1069 — epic sc-19373, YuE-v1 lyrics2song). The delta from the previously pinned revision ffea1439 also carries PR #1044/#1046/#1048 (sc-24140 runtime-2026.09.1 terminal, evidence and CUDA fixes), PR #1047 (sc-24164 Lens load), PR #1064 (Krea realtime smoke repair) and PR #1045/#1055/#1066 (runtime-2026.09.1-rc.1..rc.3 release bookkeeping). It adds one production crate, crates/audio/candle-audio-yue, classified as an architecture-reimplementation-existing-terms portedSourceArea (Apache-2.0 ports of YuE-v1 and of the codec half of m-a-p/xcodec_mini_infer), and nine provenance candidates: that crate's six marker-bearing files plus three shared building blocks the epic lifted into crates/audio/candle-audio (vocos.rs, neural_codec.rs, dsp.rs resampler), classified file-by-file; it retires no ported-source marker. This revision of the audit also classifies four items the checker already reported at earlier pins: the two MiniMax-H3 crates (crates/media/candle-gen/candle-gen-minimax-h3, crates/media/mlx-gen/mlx-gen-minimax-h3) as architecture-reimplementation-existing-terms portedSourceAreas under the About manifest's minimax-h3 component; the root workspace prefix \".\" (sole file crates/media/sam3_box_prompt_cases.rs, a test-only table) as first-party-original; and two first-party false-positive candidates, candle-gen's build.rs (routed by the scanner to its own first-party area) and core-llm-testkit's src/comparison.rs. Current reviewed population: 709 provenance candidates and 101 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
-  "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
-  "auditDigest": "de2f10c3b2df6bc7768f77ec15c28af58e65b0a3a0e20eab8b5a433ee6bd3843",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision d5b18019 (inference main, merge of PR #1072 — epic sc-19373, YuE-v1 stage-1 decode performance). The delta from the previously pinned revision 012d5ca5 carries PR #1070 and #1071 (workflow-only: the dispatch-only real-weights-yue.yml lane and the real-weights.yml restructure) and PR #1072 (YuE stage-1 static KV cache sized to the render bound, the candle-llm sdpa_gqa additive-mask path and decode_logits_masked_gqa, and round-to-nearest in candle-audio's PCM16 WAV writer). It adds no production crate and no provenance candidate and retires no ported-source marker: the only candidate rows that changed are content-only edits to three already-classified candle-llm files (models/llama.rs, primitives/attention.rs, primitives/mod.rs), whose architecture:crates/llm/candle-llm classification is unchanged. Current reviewed population: 709 provenance candidates and 101 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
+  "inferenceRevision": "d5b18019ba48c7fddb5bd6c4a76e48ab1abb6d86",
+  "auditDigest": "d59c6059c94cda4a69c7f2e70cf5e4121e4fc022b6a988a72b937cdf2fb1192c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
+    "revision": "d5b18019ba48c7fddb5bd6c4a76e48ab1abb6d86",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 709,
-    "populationSha256": "c403180d65d5c308d142cee9b8d0264aae5cd8387db58e5192a9dac43770e9ef"
+    "populationSha256": "3ebb5a778b28abbab63bd09b854b8dd8881f1f8c73c064b65228d6574b2071bf"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
+    "revision": "d5b18019ba48c7fddb5bd6c4a76e48ab1abb6d86",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 101,
     "cratePopulationSha256": "4631a29691f072707598d5406338b283f3175d40bcce28799f584e91cb74f7c3"
