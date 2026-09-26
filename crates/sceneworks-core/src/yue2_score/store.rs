@@ -248,6 +248,8 @@ pub struct RenderRecord {
     pub root_version_id: String,
     pub status: RenderStatus,
     pub request: SongRequest,
+    /// The exact ABC score rendered (a self-contained receipt, like upstream's `score.abc`).
+    pub score_abc: String,
     pub score_sha256: String,
     pub edit_brief: Option<String>,
     pub truncated: Truncation,
@@ -271,6 +273,7 @@ pub struct ComparisonSide {
     pub parent_version_id: Option<String>,
     pub origin: VersionOrigin,
     pub request: SongRequest,
+    pub score_abc: String,
     pub score_sha256: String,
     pub edit_operation: Option<String>,
     pub edit_brief: Option<String>,
@@ -653,7 +656,26 @@ impl Yue2ScoreStore {
                 Err(error) => unreadable.push(format!("versions/{id}.json: {error}")),
             }
         }
-        items.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        // Timestamps have one-second resolution, so a source and its edit can share one; lineage
+        // depth breaks the tie so a parent always lists before its children.
+        let parents: std::collections::HashMap<String, Option<String>> = items
+            .iter()
+            .map(|item| (item.id.clone(), item.parent_version_id.clone()))
+            .collect();
+        let depth = |id: &str| {
+            let mut depth = 0usize;
+            let mut current = parents.get(id).cloned().flatten();
+            while let Some(parent) = current {
+                depth += 1;
+                if depth > parents.len() {
+                    break;
+                }
+                current = parents.get(&parent).cloned().flatten();
+            }
+            depth
+        };
+        items
+            .sort_by_cached_key(|item| (item.created_at.clone(), depth(&item.id), item.id.clone()));
         Ok(Listing {
             items,
             unreadable,
@@ -727,6 +749,7 @@ impl Yue2ScoreStore {
             root_version_id: version.root_version_id.clone(),
             status: input.status,
             request: version.request.clone(),
+            score_abc: version.score.abc.clone(),
             score_sha256: version.score.sha256.clone(),
             edit_brief: version.edit.as_ref().map(|edit| edit.brief.clone()),
             truncated: input.truncated,
@@ -867,6 +890,7 @@ impl Yue2ScoreStore {
             parent_version_id: version.parent_version_id.clone(),
             origin: version.origin,
             request: version.request.clone(),
+            score_abc: version.score.abc.clone(),
             score_sha256: version.score.sha256.clone(),
             edit_operation: version.edit.as_ref().and_then(|edit| {
                 edit.operation

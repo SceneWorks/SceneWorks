@@ -228,6 +228,7 @@ async fn yue2_score_routes_round_trip_edit_render_and_compare() {
     assert_eq!(status, StatusCode::CREATED, "{render_b}");
     assert_eq!(render_b["editBrief"], child["edit"]["brief"]);
     assert_eq!(render_b["request"], child["request"]);
+    assert_eq!(render_b["scoreAbc"], SCORE_JAZZ);
     assert_eq!(render_b["wholeRecordingRegenerated"], true);
     assert_eq!(render_b["truncated"]["semantic"], true);
 

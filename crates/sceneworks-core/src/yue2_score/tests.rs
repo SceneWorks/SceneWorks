@@ -902,6 +902,11 @@ fn edits_create_linked_versions_and_never_touch_the_source() {
     assert!(matches!(error, Yue2ScoreError::Invariant(_)));
     let listing = store.list_versions().unwrap();
     assert_eq!(listing.items.len(), 2);
+    // Parent before child even when both were created in the same second.
+    assert_eq!(
+        (listing.items[0].id.as_str(), listing.items[1].id.as_str()),
+        (root.id.as_str(), child.id.as_str())
+    );
     assert!(listing.unreadable.is_empty());
 
     // A blank brief is refused: every edit states what it changes.
@@ -1037,6 +1042,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
         .unwrap();
     assert_eq!(after.request, child.request);
     assert_eq!(after.score_sha256, child.score.sha256);
+    assert_eq!(after.score_abc, SCORE_JAZZ);
     assert_eq!(after.edit_brief.as_deref(), Some(brief));
     assert_eq!(after.parent_version_id.as_deref(), Some(root.id.as_str()));
     assert!(after.whole_recording_regenerated);
@@ -1064,6 +1070,13 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
     );
     assert_eq!(comparison.edit_invariants.as_ref().unwrap()["match"], true);
     assert_eq!(comparison.b.edit_brief.as_deref(), Some(brief));
+    assert_eq!(
+        (
+            comparison.a.score_abc.as_str(),
+            comparison.b.score_abc.as_str()
+        ),
+        (SCORE, SCORE_JAZZ)
+    );
     assert_eq!(
         comparison.b.render.as_ref().unwrap().audio_asset_id,
         "audio_after"
