@@ -26615,12 +26615,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle"
       },
-      // Advisory default-tier (q4) floor, NOT yet measured: stages load one at a time and the largest is
-      // stage 1 — ~4.5 GB of q4 weights plus a ~2.1 GB bf16 KV cache for the CFG batch-of-2 at 16k
-      // context. The estimator (sc-19386) and the epic's terminal calibration campaign replace it.
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 = 8.53 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-cot",
       "ui": {
@@ -26741,9 +26748,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle"
       },
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 21,
+        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-icl",
       "ui": {
@@ -26863,9 +26880,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-cot-candle"
       },
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 = 8.53 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-cot",
       "ui": {
@@ -26986,9 +27013,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-icl-candle"
       },
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 21,
+        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-icl",
       "ui": {
@@ -27108,9 +27145,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle"
       },
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 = 8.53 / 13.58 / 14.10 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 11, "q8": 17, "bf16": 18 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-cot",
       "ui": {
@@ -27231,9 +27278,19 @@
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle"
       },
+      // MEASURED (sc-19387, epic 19373's terminal campaign): the lifetime-max process footprint of
+      // the real API + worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b),
+      // at the Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 = 10.53 / 15.72 / 16.71 GiB (all six YuE ids measured; siblings agree within 0.1 GiB).
+      // Floors = ceil(peak x 1.25) per tier (the qwen_image_2_1 rule); the scalar is the densest tier, the
+      // conservative fallback for an unlisted tier. The peak is the stage-1 load transient (q8/bf16) or
+      // the codec decode (q4) — and the codec GROWS with song length (a 218 s song peaked at 32 GiB), which
+      // the worker's yue_admission gate prices per request; these floors describe the default request only.
+      // Metal-measured: no CUDA capture exists yet (CUDA VRAM expected lower — no host copy, no pow2 pool).
       "candle": {
-        "minMemoryGb": 8,
-        "measured": false
+        "minMemoryGb": 21,
+        "minMemoryGbByTier": { "q4": 14, "q8": 20, "bf16": 21 },
+        "measured": true
       },
       "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-icl",
       "ui": {

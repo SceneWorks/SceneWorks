@@ -735,8 +735,20 @@ fn yue_request_facts<'a>(
         icl_mode: request.icl_mode.as_deref(),
         icl_start_secs: request.icl_start_secs,
         icl_end_secs: request.icl_end_secs,
+        icl_clip_secs: None,
         prompt: &request.prompt,
         lyrics: request.lyrics.as_deref().unwrap_or_default(),
+    }
+}
+
+/// Seconds of audio in a decoded ICL reference track (every stem of a `dual` pair is truncated to
+/// the shared length by [`assemble_icl_track`], so the track's own samples give the clip length).
+fn icl_clip_secs(track: &gen_core::AudioTrack) -> f64 {
+    let per_sec = f64::from(track.sample_rate) * f64::from(track.channels.max(1));
+    if per_sec > 0.0 {
+        track.samples.len() as f64 / per_sec
+    } else {
+        0.0
     }
 }
 
@@ -1032,6 +1044,24 @@ async fn run_audio_generate_job_using(
             Some(edit) => Some(edit),
             None => resolve_icl_reference(api, settings, job, &request, &project_path).await?,
         };
+        // YuE ICL (sc-19387): the reference encoder runs over the WHOLE decoded clip, not only the
+        // window, so re-price the render with the clip's real length before any weights load — the
+        // pre-load gate above could only assume the window end.
+        if let Some(Conditioning::ReferenceAudio { audio, .. }) = &conditioning {
+            if crate::yue_admission::is_yue(&request.model_manifest_entry) {
+                let facts = crate::yue_admission::YueRequestFacts {
+                    icl_clip_secs: Some(icl_clip_secs(audio)),
+                    ..yue_request_facts(&request, tier.as_ref())
+                };
+                crate::yue_admission::check(
+                    &request.model,
+                    &request.model_manifest_entry,
+                    &facts,
+                    &settings.gpu_id,
+                )
+                .await?;
+            }
+        }
         AudioSynthesis::Single(SinglePlan {
             model_dir,
             tier,
@@ -5614,6 +5644,41 @@ mod yue_job_surface_tests {
                 .unwrap_or_else(|| panic!("{later} in the job"));
             assert!(gate < at, "the gate must run before {later}");
         }
+    }
+
+    /// sc-19387: the ICL encoder runs over the whole decoded clip, so the job re-prices the render
+    /// with the clip's length after decoding it and before the synthesis loads any weights.
+    #[test]
+    fn the_audio_job_reprices_a_yue_icl_render_with_the_decoded_clip_before_loading() {
+        let source = include_str!("audio_jobs.rs");
+        let body = source
+            .split_once("async fn run_audio_generate_job_using(")
+            .expect("audio job body")
+            .1;
+        let decode = body
+            .find("resolve_icl_reference(")
+            .expect("ICL decode in the job");
+        let reprice = body
+            .find("icl_clip_secs: Some(icl_clip_secs(audio))")
+            .expect("the job must re-price the decoded ICL clip");
+        let recheck = body[reprice..]
+            .find("crate::yue_admission::check(")
+            .map(|at| reprice + at)
+            .expect("the re-price runs the YuE gate");
+        let synth = body
+            .find("run_audio_synthesis_with(")
+            .expect("synthesis in the job");
+        assert!(decode < reprice, "re-priced after the clip is decoded");
+        assert!(recheck < synth, "re-priced before any weights load");
+
+        // Clip length = samples / (rate × channels).
+        let track = gen_core::AudioTrack {
+            samples: vec![0.0; 44_100 * 2 * 3],
+            sample_rate: 44_100,
+            channels: 2,
+            ..Default::default()
+        };
+        assert!((icl_clip_secs(&track) - 3.0).abs() < 1e-9);
     }
 
     #[test]

@@ -33,6 +33,34 @@
 //! schedule constants are `candle-audio-yue`'s. The KV element is bf16: candle-llm's compute dtype
 //! on CUDA and Metal, the only lanes this gate has a budget for.
 //!
+//! ## The Metal (unified-memory) envelope — measured, sc-19387
+//!
+//! The analytic stages above are what a device allocator that frees on drop would hold. On Apple
+//! silicon the whole process footprint is the budget, and the epic's terminal campaign measured it
+//! through the real API + worker job path (M-series, candle-Metal, inference @ d5b18019b, the kernel's
+//! lifetime-max `phys_footprint` of a fresh worker per render; raw captures in the sc-19387 PR). The
+//! analytic figure under-priced every measured shape — q4 default 5.7 GiB priced vs 8.5 GiB measured,
+//! a 218 s song 7.8 GiB vs 32.2 GiB — for four reasons, each priced on [`YueLane::Unified`] only:
+//!
+//! * **load transient** — loading a GGML q4/q8 checkpoint holds the host bytes and the Metal copy at
+//!   once: the stage-1 load peaks at ~2.01× its weights (bf16 safetensors: ~1.22×)
+//!   ([`UNIFIED_QUANTIZED_LOAD_FACTOR`], [`UNIFIED_BF16_LOAD_FACTOR`]).
+//! * **allocator envelope** — candle's Metal allocator rounds every buffer up to a power of two and
+//!   keeps freed buffers pooled until the next command-buffer flush, so a stage's non-weight working
+//!   set (KV + attention workspace, incl. the smart-context re-prefill) runs up to ~1.9× the analytic
+//!   figure ([`UNIFIED_WORKSPACE_ENVELOPE`]), and a released stage leaves a residue that the next stage
+//!   stacks on ([`UNIFIED_STAGE1_RESIDUE`], and the ICL encoder's whole phase).
+//! * **ICL encode** — the reference encoder runs over the WHOLE clip (HuBERT attends globally), so its
+//!   phase grows with the clip, not the window ([`unified_icl_encoder_bytes`]); the job prices the
+//!   window end before it touches the clip and re-prices the decoded clip before any weights load.
+//! * **codec decode** — xcodec decodes each whole track at once through a DAC decoder whose widest
+//!   activations are 64 ch × 16 kHz f32 (256 B per output sample); with the pooled pow2 allocator
+//!   the phase is ~31–32 such tensors (priced as 33), each rounded up to a power of two
+//!   ([`unified_codec_activation_bytes`]). This is the binding stage of any song longer than ~1 min.
+//!
+//! [`YueLane::Dedicated`] (CUDA) keeps the analytic figures: cudarc neither rounds to pow2 nor holds a
+//! host copy in VRAM, and no CUDA capture exists yet to calibrate its codec/ICL activations.
+//!
 //! ## How this relates to the engine's own admission
 //!
 //! candle-llm admits each LM *load* (`LlamaProvider::load`) against LIVE available memory — the
@@ -113,6 +141,37 @@ const ICL_DEFAULT_END_SECS: f64 = 30.0;
 /// reference interleaves two tracks (vocal + instrumental) per frame, a `single` mix one.
 const ICL_FRAMES_PER_SEC: f64 = 50.0;
 
+/// xcodec output samples per codec frame: the DAC decoder's upsample rates `[8, 5, 4, 2]`
+/// (`candle_audio_yue::codec::DECODER_RATES`), 50 frames/s → 16 kHz.
+const CODEC_SAMPLES_PER_FRAME: u64 = 320;
+/// Codec frames per second of audio (`tokens::FRAMES_PER_SECOND`).
+const CODEC_FRAMES_PER_SEC: f64 = 50.0;
+/// Bytes per output sample of the codec decoder's widest activation: 64 channels × f32 at 16 kHz
+/// (equivalently 128 ch at 8 kHz) — the last blocks of `DacDecoder(256, 1024, [8, 5, 4, 2])`.
+const CODEC_WIDEST_BYTES_PER_SAMPLE: u64 = 64 * 4;
+
+// ---- Metal (unified-memory) envelope, measured by sc-19387 (see the module doc). Each constant is
+// the smallest round value that covers every captured phase; the captured values are pinned against
+// the formula in `every_measured_metal_render_is_covered`.
+
+/// Stage-1 load peak ÷ weights for a GGML q4/q8 checkpoint (measured 2.010 q4, 2.007 q8).
+const UNIFIED_QUANTIZED_LOAD_FACTOR: f64 = 2.02;
+/// Stage-1 load peak ÷ weights for the bf16 safetensors shards (measured 1.215).
+const UNIFIED_BF16_LOAD_FACTOR: f64 = 1.22;
+/// Measured non-weight stage-1 working set ÷ the analytic KV + attention workspace (max measured
+/// 1.89, at the 16 384-position cap with a 12 000-token ICL prefill, q8).
+const UNIFIED_WORKSPACE_ENVELOPE: f64 = 2.0;
+/// Fraction of the stage-1 weights still pooled when stage 2 runs (measured ≤ 0.55).
+const UNIFIED_STAGE1_RESIDUE: f64 = 0.6;
+/// ICL encoder phase: a fixed part (xcodec encoder + HuBERT weights and chunk working set) …
+const UNIFIED_ICL_ENCODER_BASE_BYTES: f64 = 1.9 * BYTES_PER_GIB;
+/// … plus a per-second-of-clip part (HuBERT's global attention keys and the clip's features) —
+/// measured 2.49 GiB for a 60 s dual reference, 4.14 GiB for a 218 s one.
+const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
+/// Codec decode phase, in pow2-rounded widest-activation tensors (max fit 31.9, bf16 205 s; 10 s, 60 s and
+/// 218 s captures; the 89 s capture, which crosses a pow2 bucket, was predicted by it before it ran).
+const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 33;
+
 /// The LM tier both stage 1 and stage 2 load at (epic R2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum YueTier {
@@ -172,6 +231,10 @@ pub(crate) struct YueRequestFacts<'a> {
     pub icl_mode: Option<&'a str>,
     pub icl_start_secs: Option<f32>,
     pub icl_end_secs: Option<f32>,
+    /// Length of the decoded ICL reference clip, once the job has decoded it (`None` before: the
+    /// window end stands in, the shortest clip the window admits). The encoder runs over the WHOLE
+    /// clip, so the second, post-decode pricing uses this.
+    pub icl_clip_secs: Option<f64>,
     /// Genre tags.
     pub prompt: &'a str,
     pub lyrics: &'a str,
@@ -184,6 +247,8 @@ pub(crate) struct IclPricing {
     pub tracks: u64,
     pub start_secs: f64,
     pub end_secs: f64,
+    /// The clip the encoder runs over: the decoded clip's length, else the window end.
+    pub clip_secs: f64,
 }
 
 impl IclPricing {
@@ -228,11 +293,15 @@ impl YueRenderShape {
             .icl_mode
             .map(|mode| mode.trim().to_lowercase())
             .filter(|mode| !mode.is_empty())
-            .map(|mode| IclPricing {
-                // `single` is one mix track; `dual` (and anything the job refuses anyway) two.
-                tracks: if mode == "single" { 1 } else { 2 },
-                start_secs: f64::from(facts.icl_start_secs.unwrap_or(0.0)).max(0.0),
-                end_secs: facts.icl_end_secs.map_or(ICL_DEFAULT_END_SECS, f64::from),
+            .map(|mode| {
+                let end_secs = facts.icl_end_secs.map_or(ICL_DEFAULT_END_SECS, f64::from);
+                IclPricing {
+                    // `single` is one mix track; `dual` (and anything the job refuses anyway) two.
+                    tracks: if mode == "single" { 1 } else { 2 },
+                    start_secs: f64::from(facts.icl_start_secs.unwrap_or(0.0)).max(0.0),
+                    end_secs,
+                    clip_secs: facts.icl_clip_secs.unwrap_or(end_secs).max(0.0),
+                }
             });
         // The head carries the genre tags, the whole lyric sheet and the ICL block; every segment
         // block repeats its own section's lyrics — so the lyrics count twice.
@@ -255,6 +324,7 @@ impl YueRenderShape {
 /// Which stage binds the floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum YueStage {
+    IclEncoder,
     Stage1,
     Stage2,
     Codec,
@@ -263,6 +333,7 @@ pub(crate) enum YueStage {
 impl YueStage {
     fn label(self) -> &'static str {
         match self {
+            Self::IclEncoder => "the ICL reference encode",
             Self::Stage1 => "the 7B stage-1 LM",
             Self::Stage2 => "the 1B stage-2 LM",
             Self::Codec => "the xcodec/Vocos decode",
@@ -270,38 +341,111 @@ impl YueStage {
     }
 }
 
-/// The priced render: each stage's residency and the floor (their max).
+/// Which memory the budget describes, and so which envelope the estimate prices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum YueLane {
+    /// Apple silicon: the process footprint in unified memory, candle-Metal's allocator envelope
+    /// included (measured, sc-19387).
+    Unified,
+    /// A dedicated-VRAM card (CUDA): the analytic device residency.
+    Dedicated,
+}
+
+/// The priced render: each stage's residency and the floor (their max). The `unified_*` terms are
+/// zero on [`YueLane::Dedicated`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct YueEstimate {
     pub tier: YueTier,
+    pub lane: YueLane,
     pub stage1_weights_bytes: u64,
     pub stage1_kv_bytes: u64,
     pub stage1_attention_bytes: u64,
     pub stage2_weights_bytes: u64,
     pub stage2_kv_bytes: u64,
     pub codec_bytes: u64,
+    /// Stage-1 load peak above its weights (host bytes + Metal copy held at once).
+    pub unified_load_transient_bytes: u64,
+    /// Stage-1 KV + workspace above the analytic figure (pow2 rounding + pooled buffers).
+    pub unified_workspace_envelope_bytes: u64,
+    /// The ICL encoder phase, and the pool it leaves behind for the LM stages (0 without ICL).
+    pub unified_icl_encoder_bytes: u64,
+    /// Stage-1 weights still pooled while stage 2 runs.
+    pub unified_stage1_residue_bytes: u64,
+    /// The codec decode's activations for the longest song the request can produce.
+    pub unified_codec_activation_bytes: u64,
+    /// The longest song (seconds) the request can produce — what the codec term prices.
+    pub song_secs_bound: f64,
 }
 
 impl YueEstimate {
+    /// Stage-1 while it runs: weights + KV + attention workspace, grown by the Metal envelope.
+    fn stage1_run_bytes(&self) -> u64 {
+        self.stage1_weights_bytes
+            + self.stage1_kv_bytes
+            + self.stage1_attention_bytes
+            + self.unified_workspace_envelope_bytes
+    }
+
+    /// Stage-1 while it loads (Metal only exceeds the weights).
+    fn stage1_load_bytes(&self) -> u64 {
+        self.stage1_weights_bytes + self.unified_load_transient_bytes
+    }
+
     pub(crate) fn stage_bytes(&self, stage: YueStage) -> u64 {
         match stage {
+            YueStage::IclEncoder => self.unified_icl_encoder_bytes,
             YueStage::Stage1 => {
-                self.stage1_weights_bytes + self.stage1_kv_bytes + self.stage1_attention_bytes
+                self.unified_icl_encoder_bytes
+                    + self.stage1_run_bytes().max(self.stage1_load_bytes())
             }
-            YueStage::Stage2 => self.stage2_weights_bytes + self.stage2_kv_bytes,
-            YueStage::Codec => self.codec_bytes,
+            YueStage::Stage2 => {
+                self.unified_icl_encoder_bytes
+                    + self.unified_stage1_residue_bytes
+                    + self.stage2_weights_bytes
+                    + self.stage2_kv_bytes
+            }
+            YueStage::Codec => self.codec_bytes + self.unified_codec_activation_bytes,
         }
     }
 
     /// The binding stage and its residency — the floor. Stages load one at a time, so this is the
-    /// max, not the sum.
+    /// max, not the sum (on Metal each stage carries the pooled residue of the ones before it).
     pub(crate) fn floor(&self) -> (YueStage, u64) {
-        [YueStage::Stage1, YueStage::Stage2, YueStage::Codec]
-            .into_iter()
-            .map(|stage| (stage, self.stage_bytes(stage)))
-            .max_by_key(|&(_, bytes)| bytes)
-            .expect("three stages")
+        [
+            YueStage::IclEncoder,
+            YueStage::Stage1,
+            YueStage::Stage2,
+            YueStage::Codec,
+        ]
+        .into_iter()
+        .map(|stage| (stage, self.stage_bytes(stage)))
+        .max_by_key(|&(_, bytes)| bytes)
+        .expect("four stages")
     }
+}
+
+/// The longest song (seconds) a request can produce: stage 1 interleaves vocal and instrumental
+/// codebook-0 tokens, so each track gets at most half the generated budget as 50 Hz frames.
+fn song_frames_bound(shape: &YueRenderShape) -> u64 {
+    (u64::from(shape.segments) * u64::from(shape.max_new_tokens) / 2).max(1)
+}
+
+/// Metal codec-decode activations for a song of `frames` codec frames per track:
+/// [`UNIFIED_CODEC_ACTIVATION_TENSORS`] widest-activation tensors, each rounded up to a power of two
+/// as candle-Metal allocates it.
+pub(crate) fn unified_codec_activation_bytes(frames: u64) -> u64 {
+    let widest = frames * CODEC_SAMPLES_PER_FRAME * CODEC_WIDEST_BYTES_PER_SAMPLE;
+    UNIFIED_CODEC_ACTIVATION_TENSORS.saturating_mul(widest.next_power_of_two())
+}
+
+/// Metal ICL-encoder phase for a reference clip of `clip_secs`.
+pub(crate) fn unified_icl_encoder_bytes(clip_secs: f64) -> u64 {
+    (UNIFIED_ICL_ENCODER_BASE_BYTES + UNIFIED_ICL_ENCODER_BYTES_PER_SEC * clip_secs.max(0.0)).ceil()
+        as u64
+}
+
+fn scale(bytes: u64, factor: f64) -> u64 {
+    (bytes as f64 * factor).ceil() as u64
 }
 
 /// Stage-1 KV positions — the engine's render bound, which is what it sizes its static KV cache to
@@ -388,10 +532,13 @@ fn download_bytes(download: &Value) -> Option<u64> {
 }
 
 /// Price a render from the manifest entry's per-tier downloads. `Err` names the missing catalog
-/// fact (a YuE entry that does not price is a catalog defect, so the caller fails closed).
+/// fact (a YuE entry that does not price is a catalog defect, so the caller fails closed). `lane`
+/// selects the envelope: the measured Metal terms on [`YueLane::Unified`], none on
+/// [`YueLane::Dedicated`].
 pub(crate) fn estimate(
     manifest_entry: &Value,
     shape: &YueRenderShape,
+    lane: YueLane,
 ) -> Result<YueEstimate, String> {
     let downloads = manifest_entry
         .get("downloads")
@@ -416,14 +563,37 @@ pub(crate) fn estimate(
     let codec = find(Some("xcodec"), None)
         .and_then(download_bytes)
         .ok_or("no sized xcodec coRequisite")?;
+    let kv = stage1_kv_bytes(shape);
+    let workspace = stage1_attention_workspace_bytes(shape);
+    let frames = song_frames_bound(shape);
+    let unified = lane == YueLane::Unified;
+    let metal = |bytes: u64| if unified { bytes } else { 0 };
+    let load_factor = match shape.tier {
+        YueTier::Bf16 => UNIFIED_BF16_LOAD_FACTOR,
+        YueTier::Q8 | YueTier::Q4 => UNIFIED_QUANTIZED_LOAD_FACTOR,
+    };
     Ok(YueEstimate {
         tier: shape.tier,
+        lane,
         stage1_weights_bytes: stage1,
-        stage1_kv_bytes: stage1_kv_bytes(shape),
-        stage1_attention_bytes: stage1_attention_workspace_bytes(shape),
+        stage1_kv_bytes: kv,
+        stage1_attention_bytes: workspace,
         stage2_weights_bytes: stage2,
         stage2_kv_bytes: stage2_kv_bytes(shape),
         codec_bytes: codec,
+        unified_load_transient_bytes: metal(scale(stage1, load_factor - 1.0)),
+        unified_workspace_envelope_bytes: metal(scale(
+            kv + workspace,
+            UNIFIED_WORKSPACE_ENVELOPE - 1.0,
+        )),
+        unified_icl_encoder_bytes: metal(
+            shape
+                .icl
+                .map_or(0, |icl| unified_icl_encoder_bytes(icl.clip_secs)),
+        ),
+        unified_stage1_residue_bytes: metal(scale(stage1, UNIFIED_STAGE1_RESIDUE)),
+        unified_codec_activation_bytes: metal(unified_codec_activation_bytes(frames)),
+        song_secs_bound: frames as f64 / CODEC_FRAMES_PER_SEC,
     })
 }
 
@@ -514,15 +684,7 @@ pub(crate) fn decide(
         }
     };
     let tier = estimate.tier.key();
-    let (weights, kv, workspace) = match stage {
-        YueStage::Stage1 => (
-            estimate.stage1_weights_bytes,
-            estimate.stage1_kv_bytes,
-            estimate.stage1_attention_bytes,
-        ),
-        YueStage::Stage2 => (estimate.stage2_weights_bytes, estimate.stage2_kv_bytes, 0),
-        YueStage::Codec => (estimate.codec_bytes, 0, 0),
-    };
+    let breakdown = stage_breakdown(estimate, stage);
     let lever = match stage {
         YueStage::Stage1 if estimate.tier != YueTier::Q4 => {
             "Select a smaller tier (q4 is the lightest), or render fewer segments / fewer tokens \
@@ -535,7 +697,15 @@ pub(crate) fn decide(
         YueStage::Stage2 if estimate.tier != YueTier::Q4 => {
             "Select a smaller tier (q4 is the lightest)."
         }
-        _ => "Run on a machine with more memory.",
+        YueStage::Codec => {
+            "Render fewer segments or fewer tokens per segment: the decode holds the whole song, \
+             so a shorter song needs less memory."
+        }
+        YueStage::IclEncoder => {
+            "Use a shorter reference clip: the encoder runs over the whole clip, not just the \
+             window."
+        }
+        YueStage::Stage2 => "Run on a machine with more memory.",
     };
     let icl = shape.icl.map_or(String::new(), |icl| {
         format!(
@@ -548,17 +718,62 @@ pub(crate) fn decide(
     });
     YueAdmission::Refuse(WorkerError::InvalidPayload(format!(
         "{model} needs ~{needed_gb:.1} GB {shortfall}. YuE loads one stage at a time and the \
-         largest is {stage_label} at the {tier} tier: ~{weights:.1} GB of weights + ~{kv:.1} GB of \
-         KV cache + ~{workspace:.1} GB of attention workspace ({segments} segment(s) × {max_new} \
-         tokens, guidance {cfg}{icl}). {lever}",
+         largest is {stage_label} at the {tier} tier: {breakdown} ({segments} segment(s) × \
+         {max_new} tokens, guidance {cfg}{icl}). {lever}",
         stage_label = stage.label(),
-        weights = gib(weights),
-        kv = gib(kv),
-        workspace = gib(workspace),
         segments = shape.segments,
         max_new = shape.max_new_tokens,
         cfg = if shape.cfg { "on" } else { "off" },
     )))
+}
+
+/// The binding stage's parts, in GB, for the refusal message.
+fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut part = |bytes: u64, what: &str| {
+        if bytes > 0 {
+            parts.push(format!("~{:.1} GB of {what}", gib(bytes)));
+        }
+    };
+    let icl_residue = "memory held over from the ICL encode";
+    match stage {
+        YueStage::IclEncoder => part(
+            estimate.unified_icl_encoder_bytes,
+            "ICL encoder working set",
+        ),
+        YueStage::Stage1 => {
+            part(estimate.stage1_weights_bytes, "weights");
+            if estimate.stage1_load_bytes() > estimate.stage1_run_bytes() {
+                part(estimate.unified_load_transient_bytes, "load transient");
+            } else {
+                part(estimate.stage1_kv_bytes, "KV cache");
+                part(estimate.stage1_attention_bytes, "attention workspace");
+                part(
+                    estimate.unified_workspace_envelope_bytes,
+                    "Metal allocator envelope",
+                );
+            }
+            part(estimate.unified_icl_encoder_bytes, icl_residue);
+        }
+        YueStage::Stage2 => {
+            part(estimate.stage2_weights_bytes, "weights");
+            part(estimate.stage2_kv_bytes, "KV cache");
+            part(
+                estimate.unified_stage1_residue_bytes,
+                "memory held over from stage 1",
+            );
+            part(estimate.unified_icl_encoder_bytes, icl_residue);
+        }
+        YueStage::Codec => {
+            let activations = format!(
+                "decode activations for a song of up to ~{:.0} s",
+                estimate.song_secs_bound
+            );
+            part(estimate.codec_bytes, "weights");
+            part(estimate.unified_codec_activation_bytes, &activations);
+        }
+    }
+    parts.join(" + ")
 }
 
 /// Read this host's budget for the candle audio lane.
@@ -628,8 +843,12 @@ pub(crate) async fn check(
         ))
     };
     let shape = YueRenderShape::new(facts).ok_or_else(|| cannot_price("no tier resolved"))?;
-    let estimate = estimate(manifest_entry, &shape).map_err(|why| cannot_price(&why))?;
     let budget = live_budget(gpu_id).await;
+    let lane = match budget {
+        Some(YueBudget::UnifiedWorkingSet { .. }) => YueLane::Unified,
+        _ => YueLane::Dedicated,
+    };
+    let estimate = estimate(manifest_entry, &shape, lane).map_err(|why| cannot_price(&why))?;
     match decide(model, &estimate, &shape, budget.as_ref()) {
         YueAdmission::Admit => Ok(()),
         YueAdmission::AdmitAfterEvict => {
@@ -718,6 +937,7 @@ mod tests {
             icl_mode: None,
             icl_start_secs: None,
             icl_end_secs: None,
+            icl_clip_secs: None,
             prompt: "pop",
             lyrics,
         }
@@ -737,7 +957,8 @@ mod tests {
             assert_eq!(entry["family"], json!(YUE_FAMILY), "{id}");
             let mut previous = 0;
             for tier in [YueTier::Q4, YueTier::Q8, YueTier::Bf16] {
-                let e = estimate(&entry, &shape(tier, 2, 3000, true)).expect(id);
+                let e =
+                    estimate(&entry, &shape(tier, 2, 3000, true), YueLane::Dedicated).expect(id);
                 // Each tier is priced by ITS OWN download (R2): heavier tier ⇒ heavier stages.
                 assert!(e.stage1_weights_bytes > previous, "{id} {tier:?}");
                 previous = e.stage1_weights_bytes;
@@ -754,7 +975,12 @@ mod tests {
     #[test]
     fn floor_is_the_max_stage_not_the_sum_and_uses_the_tier_sizes() {
         let entry = builtin("yue_en_cot");
-        let e = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true)).unwrap();
+        let e = estimate(
+            &entry,
+            &shape(YueTier::Q4, 2, 3000, true),
+            YueLane::Dedicated,
+        )
+        .unwrap();
         // The shipped q4 sizes (manifest `estimatedSizeBytes`).
         assert_eq!(e.stage1_weights_bytes, 4_497_628_709);
         assert_eq!(e.stage2_weights_bytes, 1_604_865_100);
@@ -769,7 +995,12 @@ mod tests {
         assert!(bytes < stages.iter().sum::<u64>());
         assert_eq!(stage, YueStage::Stage1);
 
-        let bf16 = estimate(&entry, &shape(YueTier::Bf16, 2, 3000, true)).unwrap();
+        let bf16 = estimate(
+            &entry,
+            &shape(YueTier::Bf16, 2, 3000, true),
+            YueLane::Dedicated,
+        )
+        .unwrap();
         assert_eq!(bf16.stage1_weights_bytes, 12_456_344_476);
         assert_eq!(bf16.stage2_weights_bytes, 3_932_179_917);
     }
@@ -793,7 +1024,7 @@ mod tests {
 
         // Stage-1 residency = weights + KV + the attention workspace, which is nonzero.
         let entry = builtin("yue_en_cot");
-        let e = estimate(&entry, &long).unwrap();
+        let e = estimate(&entry, &long, YueLane::Dedicated).unwrap();
         assert!(e.stage1_attention_bytes > 0);
         assert_eq!(
             e.stage_bytes(YueStage::Stage1),
@@ -849,7 +1080,7 @@ mod tests {
     fn over_budget_is_refused_with_the_reason_and_a_fitting_render_is_admitted() {
         let entry = builtin("yue_en_cot");
         let s = shape(YueTier::Q4, 2, 3000, true);
-        let e = estimate(&entry, &s).unwrap();
+        let e = estimate(&entry, &s, YueLane::Dedicated).unwrap();
         let floor_gb = gib(e.floor().1);
 
         // Fits exactly at the floor on a Mac working set.
@@ -894,7 +1125,7 @@ mod tests {
     fn cuda_reclaims_the_cached_generator_before_refusing_and_says_why_it_refuses() {
         let entry = builtin("yue_en_cot");
         let s = shape(YueTier::Q4, 2, 3000, true);
-        let e = estimate(&entry, &s).unwrap();
+        let e = estimate(&entry, &s, YueLane::Dedicated).unwrap();
         let floor_gb = gib(e.floor().1);
         let reserve = crate::fit_gate::dedicated_vram_reserve().gb;
         let needed = floor_gb + reserve;
@@ -943,8 +1174,8 @@ mod tests {
         let budget = mac(10.5); // ~2/3 of 16 GB: the M-series recommended working set.
         let q4 = shape(YueTier::Q4, 2, 3000, true);
         let bf16 = shape(YueTier::Bf16, 2, 3000, true);
-        let e4 = estimate(&entry, &q4).unwrap();
-        let e16 = estimate(&entry, &bf16).unwrap();
+        let e4 = estimate(&entry, &q4, YueLane::Unified).unwrap();
+        let e16 = estimate(&entry, &bf16, YueLane::Unified).unwrap();
         assert!(matches!(
             decide("yue_en_cot", &e4, &q4, Some(&budget)),
             YueAdmission::Admit
@@ -958,7 +1189,7 @@ mod tests {
         // Shipped entry, short render: the floor is the largest stage, whichever it is.
         let entry = builtin("yue_en_cot");
         let s = shape(YueTier::Q4, 1, 100, false);
-        let e = estimate(&entry, &s).unwrap();
+        let e = estimate(&entry, &s, YueLane::Dedicated).unwrap();
         let (stage, bytes) = e.floor();
         assert_eq!(bytes, e.stage_bytes(stage));
         for other in [YueStage::Stage1, YueStage::Stage2, YueStage::Codec] {
@@ -972,7 +1203,7 @@ mod tests {
                 {"coRequisite": true, "componentId": "xcodec", "estimatedSizeBytes": GIB},
             ]
         });
-        let e = estimate(&synthetic, &s).unwrap();
+        let e = estimate(&synthetic, &s, YueLane::Dedicated).unwrap();
         assert_eq!(e.floor().0, YueStage::Stage2);
         let message = refusal(decide("x", &e, &s, Some(&mac(1.0))));
         assert!(message.contains("1B stage-2 LM"), "{message}");
@@ -1093,8 +1324,8 @@ mod tests {
 
         // A longer window moves the estimate, and the refusal names the window it priced.
         let entry = builtin("yue_en_icl");
-        let short = estimate(&entry, &explicit).unwrap();
-        let long = estimate(&entry, &long_window).unwrap();
+        let short = estimate(&entry, &explicit, YueLane::Dedicated).unwrap();
+        let long = estimate(&entry, &long_window, YueLane::Dedicated).unwrap();
         assert!(long.stage1_kv_bytes > short.stage1_kv_bytes);
         let message = refusal(decide("yue_en_icl", &long, &long_window, Some(&mac(1.0))));
         assert!(
@@ -1106,7 +1337,12 @@ mod tests {
     #[test]
     fn an_incomplete_catalog_entry_fails_closed_with_a_reason() {
         let entry = json!({"downloads": [{"variant": "q4", "estimatedSizeBytes": GIB}]});
-        let why = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true)).unwrap_err();
+        let why = estimate(
+            &entry,
+            &shape(YueTier::Q4, 2, 3000, true),
+            YueLane::Dedicated,
+        )
+        .unwrap_err();
         assert!(why.contains("stage-2"), "{why}");
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1130,5 +1366,324 @@ mod tests {
         assert!(rt
             .block_on(check("ace_step", &json!({"family": "ace"}), &untiered, "0"))
             .is_ok());
+    }
+
+    #[test]
+    fn the_dedicated_lane_prices_only_the_analytic_residency() {
+        let entry = builtin("yue_en_icl");
+        let s = YueRenderShape::new(&YueRequestFacts {
+            icl_mode: Some("dual"),
+            icl_clip_secs: Some(240.0),
+            ..facts(FOUR_SECTIONS)
+        })
+        .unwrap();
+        let cuda = estimate(&entry, &s, YueLane::Dedicated).unwrap();
+        assert_eq!(cuda.unified_load_transient_bytes, 0);
+        assert_eq!(cuda.unified_workspace_envelope_bytes, 0);
+        assert_eq!(cuda.unified_icl_encoder_bytes, 0);
+        assert_eq!(cuda.unified_stage1_residue_bytes, 0);
+        assert_eq!(cuda.unified_codec_activation_bytes, 0);
+        assert_eq!(
+            cuda.stage_bytes(YueStage::Stage1),
+            cuda.stage1_weights_bytes + cuda.stage1_kv_bytes + cuda.stage1_attention_bytes
+        );
+        // The same render on Metal prices strictly more at every LM/codec stage.
+        let metal = estimate(&entry, &s, YueLane::Unified).unwrap();
+        for stage in [YueStage::Stage1, YueStage::Stage2, YueStage::Codec] {
+            assert!(
+                metal.stage_bytes(stage) > cuda.stage_bytes(stage),
+                "{stage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_codec_activations_round_each_tensor_up_to_a_power_of_two() {
+        // 3000 frames/track (the default 60 s song) → 3000 × 320 × 256 B = 245.8 MB → 256 MiB.
+        assert_eq!(unified_codec_activation_bytes(3000), 33 * (1 << 28));
+        // Past 65.5 s the widest tensor crosses 256 MiB, and Metal allocates 512 MiB for it.
+        assert_eq!(unified_codec_activation_bytes(3500), 33 * (1 << 29));
+        // The 218 s capture (10 884 frames) and the 8 × 3000 bound (12 000) share the 1 GiB bucket.
+        assert_eq!(unified_codec_activation_bytes(10_884), 33 * (1 << 30));
+        assert_eq!(unified_codec_activation_bytes(12_000), 33 * (1 << 30));
+        // A longer song decodes in more memory: the Metal codec stage follows the song-length bound.
+        let entry = builtin("yue_en_cot");
+        let two = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true), YueLane::Unified).unwrap();
+        let eight = estimate(&entry, &shape(YueTier::Q4, 8, 3000, true), YueLane::Unified).unwrap();
+        assert_eq!(two.song_secs_bound, 60.0);
+        assert_eq!(eight.song_secs_bound, 240.0);
+        assert!(eight.stage_bytes(YueStage::Codec) > two.stage_bytes(YueStage::Codec));
+        assert_eq!(eight.floor().0, YueStage::Codec);
+        let message = refusal(decide(
+            "yue_en_cot",
+            &eight,
+            &shape(YueTier::Q4, 8, 3000, true),
+            Some(&mac(24.0)),
+        ));
+        assert!(message.contains("xcodec/Vocos decode"), "{message}");
+        assert!(message.contains("song of up to ~240 s"), "{message}");
+        assert!(message.contains("shorter song"), "{message}");
+    }
+
+    #[test]
+    fn the_metal_icl_encoder_is_priced_by_the_whole_clip_not_the_window() {
+        let entry = builtin("yue_en_icl");
+        let icl = |clip: Option<f64>| {
+            YueRenderShape::new(&YueRequestFacts {
+                icl_mode: Some("dual"),
+                icl_clip_secs: clip,
+                ..facts(FOUR_SECTIONS)
+            })
+            .unwrap()
+        };
+        // Before the clip is decoded, the window end (30 s) stands in for it.
+        let pre = icl(None);
+        assert_eq!(pre.icl.unwrap().clip_secs, 30.0);
+        let long = icl(Some(600.0));
+        assert_eq!(long.icl.unwrap().window_secs(), 30.0, "same window");
+        let pre = estimate(&entry, &pre, YueLane::Unified).unwrap();
+        let long = estimate(&entry, &long, YueLane::Unified).unwrap();
+        assert_eq!(
+            pre.unified_icl_encoder_bytes,
+            unified_icl_encoder_bytes(30.0)
+        );
+        assert!(long.unified_icl_encoder_bytes > pre.unified_icl_encoder_bytes);
+        // The encoder's pool stays with the LM stages that follow it.
+        assert!(long.stage_bytes(YueStage::Stage1) > pre.stage_bytes(YueStage::Stage1));
+        // No ICL ⇒ no encoder phase.
+        let plain = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true), YueLane::Unified).unwrap();
+        assert_eq!(plain.unified_icl_encoder_bytes, 0);
+    }
+
+    /// The Metal envelope against every render the sc-19387 campaign captured through the API +
+    /// worker job path on an M-series Mac (candle-Metal, inference @ d5b18019b): the kernel's
+    /// lifetime-max `phys_footprint` of a fresh worker per render, in GiB. Each row is the exact
+    /// request the campaign submitted (genre tags, lyrics, segments, token budget, ICL window, the
+    /// decoded clip length). The invariant is coverage — the Metal estimate never prices a captured
+    /// render below what it used — plus that the analytic (CUDA) figure under-priced every one,
+    /// which is why the Metal terms exist.
+    #[test]
+    fn every_measured_metal_render_is_covered() {
+        const TAGS: &str = "inspiring female uplifting pop airy vocal electronic bright vocal";
+        const VERSE: &str = "Morning light is falling on the harbor wall\nEvery gull is calling and I hear it all\nPaper boats are drifting where the river bends\nCarry every promise to the waiting friends";
+        const CHORUS: &str = "Hold on, hold on, the tide is turning home\nSing it loud, sing it out, you are not alone\nHold on, hold on, the lights are coming through\nEvery road I wander brings me back to you";
+        const BRIDGE: &str = "Quiet in the evening when the lanterns glow\nCounting all the reasons that I never know";
+        let two = format!("[verse]\n{VERSE}\n\n[chorus]\n{CHORUS}");
+        let three = format!("{two}\n\n[verse]\n{VERSE}");
+        let eight = [
+            "verse", "chorus", "verse", "chorus", "bridge", "chorus", "verse", "chorus",
+        ]
+        .iter()
+        .map(|label| {
+            let text = match *label {
+                "verse" => VERSE,
+                "chorus" => CHORUS,
+                _ => BRIDGE,
+            };
+            format!("[{label}]\n{text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+        struct Capture<'a> {
+            name: &'a str,
+            model: &'a str,
+            tier: YueTier,
+            lyrics: &'a str,
+            segments: Option<u32>,
+            max_new_tokens: Option<u32>,
+            /// (window start, window end, decoded clip seconds) of a dual reference.
+            icl: Option<(Option<f32>, Option<f32>, f64)>,
+            measured_gib: f64,
+        }
+        let row =
+            |name, model, tier, lyrics, segments, max_new_tokens, icl, measured_gib| Capture {
+                name,
+                model,
+                tier,
+                lyrics,
+                segments,
+                max_new_tokens,
+                icl,
+                measured_gib,
+            };
+        use YueTier::{Bf16, Q4, Q8};
+        let captures = [
+            row(
+                "en_cot q4 default",
+                "yue_en_cot",
+                Q4,
+                &two,
+                None,
+                None,
+                None,
+                8.532,
+            ),
+            row(
+                "en_cot q8 default",
+                "yue_en_cot",
+                Q8,
+                &two,
+                None,
+                None,
+                None,
+                13.580,
+            ),
+            row(
+                "en_cot bf16 default",
+                "yue_en_cot",
+                Bf16,
+                &two,
+                None,
+                None,
+                None,
+                14.095,
+            ),
+            row(
+                "en_cot q4 10 s",
+                "yue_en_cot",
+                Q4,
+                &two,
+                Some(1),
+                Some(1000),
+                None,
+                8.419,
+            ),
+            row(
+                "en_cot q4 2x3500",
+                "yue_en_cot",
+                Q4,
+                &two,
+                Some(2),
+                Some(3500),
+                None,
+                8.575,
+            ),
+            // 89 s: the widest codec tensor crosses 256 MiB, and the phase doubles (pow2 rounding).
+            row(
+                "en_cot q4 89 s",
+                "yue_en_cot",
+                Q4,
+                &three,
+                Some(3),
+                None,
+                None,
+                15.837,
+            ),
+            row(
+                "en_cot q4 218 s",
+                "yue_en_cot",
+                Q4,
+                &eight,
+                Some(8),
+                None,
+                None,
+                32.233,
+            ),
+            row(
+                "en_cot q8 205 s",
+                "yue_en_cot",
+                Q8,
+                &eight,
+                Some(8),
+                None,
+                None,
+                32.368,
+            ),
+            row(
+                "en_cot bf16 205 s",
+                "yue_en_cot",
+                Bf16,
+                &eight,
+                Some(8),
+                None,
+                None,
+                32.759,
+            ),
+            row(
+                "en_icl q8 default",
+                "yue_en_icl",
+                Q8,
+                &two,
+                None,
+                None,
+                Some((None, None, 60.0)),
+                15.722,
+            ),
+            row(
+                "en_icl bf16 default",
+                "yue_en_icl",
+                Bf16,
+                &two,
+                None,
+                None,
+                Some((None, None, 60.0)),
+                16.706,
+            ),
+            row(
+                "en_icl q4 default",
+                "yue_en_icl",
+                Q4,
+                &two,
+                None,
+                None,
+                Some((None, None, 60.0)),
+                10.533,
+            ),
+            row(
+                "en_icl q4 0-120 s",
+                "yue_en_icl",
+                Q4,
+                &two,
+                Some(2),
+                Some(2000),
+                Some((Some(0.0), Some(120.0), 217.68)),
+                14.381,
+            ),
+            row(
+                "en_icl q8 0-120 s",
+                "yue_en_icl",
+                Q8,
+                &two,
+                Some(2),
+                Some(2000),
+                Some((Some(0.0), Some(120.0), 217.68)),
+                17.239,
+            ),
+            row(
+                "en_icl bf16 0-120 s",
+                "yue_en_icl",
+                Bf16,
+                &two,
+                Some(2),
+                Some(2000),
+                Some((Some(0.0), Some(120.0), 217.68)),
+                20.965,
+            ),
+        ];
+        for c in &captures {
+            let s = YueRenderShape::new(&YueRequestFacts {
+                tier: Some(c.tier),
+                segments: c.segments,
+                max_new_tokens: c.max_new_tokens,
+                guidance: None,
+                icl_mode: c.icl.map(|_| "dual"),
+                icl_start_secs: c.icl.and_then(|(start, _, _)| start),
+                icl_end_secs: c.icl.and_then(|(_, end, _)| end),
+                icl_clip_secs: c.icl.map(|(_, _, clip)| clip),
+                prompt: TAGS,
+                lyrics: c.lyrics,
+            })
+            .unwrap();
+            let entry = builtin(c.model);
+            let metal = gib(estimate(&entry, &s, YueLane::Unified).unwrap().floor().1);
+            let analytic = gib(estimate(&entry, &s, YueLane::Dedicated).unwrap().floor().1);
+            assert!(
+                metal >= c.measured_gib,
+                "{}: Metal estimate {metal:.2} GiB < measured {:.2} GiB",
+                c.name,
+                c.measured_gib
+            );
+            assert!(analytic < c.measured_gib, "{}: {analytic:.2}", c.name);
+        }
     }
 }

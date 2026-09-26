@@ -1365,14 +1365,7 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "moss_ttsd_v05",
         "openvoice_v2",
         "wan_2_2_vace_fun_14b",
-        // YuE lyrics2song (sc-19383): an advisory q4 floor until the epic-19373 estimator
-        // (sc-19386) and terminal calibration replace it.
-        "yue_en_cot",
-        "yue_en_icl",
-        "yue_zh_cot",
-        "yue_zh_icl",
-        "yue_jp_kr_cot",
-        "yue_jp_kr_icl",
+        // The six YuE entries left this set in sc-19387: their per-tier floors are measured.
       ].sort(),
     );
     // MiniMax-H3 is no longer part of the unmeasured population: SC-20754 supplies its measured
