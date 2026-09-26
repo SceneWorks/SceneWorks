@@ -177,12 +177,16 @@ const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
 /// `candle_audio_yue::codec::DECODE_CHUNK_FRAMES`: codec frames (5 s) per xcodec / Vocos chunk.
 const DECODE_CHUNK_FRAMES: u64 = 250;
 /// `candle_audio_yue::codec::DECODER_CONTEXT_FRAMES`: xcodec context frames on each side of a chunk.
+/// The widest decode activation is xcodec's DAC decoder at 64 ch × 320 samples per frame (f32) over
+/// the 250 + 2 × 12 = 274-frame window ≈ 22.4 MB → a 32 MiB buffer. (Vocos' 31-frame context does
+/// not matter here: Vocos runs at frame rate, so its activations are small.)
 const XCODEC_CONTEXT_FRAMES: u64 = 12;
-/// The Vocos upsamplers' context frames on each side of a chunk (`vocoder::context_frames`, 31).
-const VOCOS_CONTEXT_FRAMES: u64 = 31;
-/// Decode-phase activations, in pow2-rounded widest-activation tensors of ONE chunk window (the
-/// widest window, Vocos': 250 + 2 × 31 = 312 frames → 25.6 MB → a 32 MiB buffer). Fit together
-/// with the two terms below over the six chunked captures (intercept ≈ 11 tensors); priced at 16.
+/// Decode-phase activations, in 32 MiB-bucket units of the widest window. A fit (intercept ≈ 11 over
+/// the chunked captures, together with the two terms below), priced at 16 and physically: one k7
+/// `conv1d_im2col` buffer on Metal — [87 680 × 448] f32 = 157 MB → the 256 MiB bucket = 8 units —
+/// plus ≤ 8 widest-activation buffers of the 274-frame window (input, matmul output, the
+/// transpose-contiguous copy, the residual). Raising `DECODE_CHUNK_FRAMES` past ~468 frames pushes
+/// that im2col buffer into the 512 MiB bucket, so this constant must be re-derived with it.
 const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 16;
 /// Fraction of the stage-2 weights still pooled while the decode runs (the decode-phase peak rises
 /// with the tier: at ~205 s, q8 +0.17 GiB and bf16 +0.63 GiB over q4, i.e. 0.22–0.29 of the extra
@@ -193,7 +197,8 @@ const UNIFIED_STAGE2_RESIDUE: f64 = 0.35;
 /// 2 Vocos stems + 3 splice outputs + 1 splice resample at 44.1 kHz f32 (176.4 KB/s each), 1.52 MiB/s
 /// in all — plus their pooled device-side copies. Measured slope of the decode-phase peak across the
 /// chunked captures (60 / 63 / 89 / 218 s, q4): ~5.1 MiB/s; priced at 5.6 MiB/s. With the chunk and
-/// stage-2 residue terms, every captured decode phase is covered by ≥ 1.13×.
+/// stage-2 residue terms, every captured decode phase (all 8 chunked re-captures) is covered by
+/// ≥ 1.13× measured; the test asserts ≥ 1.1×.
 const UNIFIED_CODEC_BYTES_PER_SONG_SEC: u64 = 5_872_026; // 5.6 MiB
 
 /// The LM tier both stage 1 and stage 2 load at (epic R2).
@@ -465,8 +470,7 @@ fn song_frames_bound(shape: &YueRenderShape) -> u64 {
 /// rounded up to a power of two as candle-Metal allocates it (a song shorter than a window decodes
 /// in one smaller window), plus [`UNIFIED_CODEC_BYTES_PER_SONG_SEC`] per second of song.
 pub(crate) fn unified_codec_activation_bytes(frames: u64) -> u64 {
-    let window =
-        frames.min(DECODE_CHUNK_FRAMES + 2 * XCODEC_CONTEXT_FRAMES.max(VOCOS_CONTEXT_FRAMES));
+    let window = frames.min(DECODE_CHUNK_FRAMES + 2 * XCODEC_CONTEXT_FRAMES);
     let widest = window * CODEC_SAMPLES_PER_FRAME * CODEC_WIDEST_BYTES_PER_SAMPLE;
     let chunk = UNIFIED_CODEC_ACTIVATION_TENSORS.saturating_mul(widest.next_power_of_two());
     let song = (frames as f64 / CODEC_FRAMES_PER_SEC * UNIFIED_CODEC_BYTES_PER_SONG_SEC as f64)
@@ -839,6 +843,19 @@ fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
     parts.join(" + ")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Hardware budget probes [`check`] made on this thread (test-only; `check` runs on the
+    /// caller's current-thread runtime, so a thread-local is exact under parallel tests).
+    static BUDGET_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a hardware budget probe (a no-op outside tests).
+fn note_budget_probe() {
+    #[cfg(test)]
+    BUDGET_PROBES.with(|probes| probes.set(probes.get() + 1));
+}
+
 /// Read this host's budget for the candle audio lane.
 #[cfg(target_os = "macos")]
 pub(crate) async fn live_budget(_gpu_id: &str) -> Option<YueBudget> {
@@ -909,6 +926,7 @@ pub(crate) async fn check(
     // An entry that cannot be priced fails closed BEFORE the hardware is probed (the envelope does
     // not change which catalog facts are required, so either lane answers this).
     estimate(manifest_entry, &shape, YueLane::Dedicated).map_err(|why| cannot_price(&why))?;
+    note_budget_probe();
     let budget = live_budget(gpu_id).await;
     let lane = match budget {
         Some(YueBudget::UnifiedWorkingSet { .. }) => YueLane::Unified,
@@ -1400,6 +1418,36 @@ mod tests {
         );
     }
 
+    /// An entry that cannot be priced is refused BEFORE the hardware budget is probed — on every
+    /// lane (a CUDA probe shells out to nvidia-smi; a Mac probe reads the unified-memory total).
+    #[test]
+    fn an_unpriceable_entry_is_refused_before_any_hardware_probe() {
+        let mut entry = json!({"downloads": [{"variant": "q4", "estimatedSizeBytes": GIB}]});
+        entry["family"] = json!("yue");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let before = BUDGET_PROBES.with(std::cell::Cell::get);
+        let err = rt
+            .block_on(check("yue_en_cot", &entry, &facts(FOUR_SECTIONS), "0"))
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot price"), "{err}");
+        assert_eq!(
+            BUDGET_PROBES.with(std::cell::Cell::get),
+            before,
+            "the hardware budget was probed before the catalog entry was priced"
+        );
+        // A priceable entry does probe (so the counter is live, not vacuous).
+        let _ = rt.block_on(check(
+            "yue_en_cot",
+            &builtin("yue_en_cot"),
+            &facts(FOUR_SECTIONS),
+            "0",
+        ));
+        assert_eq!(BUDGET_PROBES.with(std::cell::Cell::get), before + 1);
+    }
+
     #[test]
     fn an_incomplete_catalog_entry_fails_closed_with_a_reason() {
         let entry = json!({"downloads": [{"variant": "q4", "estimatedSizeBytes": GIB}]});
@@ -1410,7 +1458,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(why.contains("stage-2"), "{why}");
+        // Timers + IO enabled so a hardware probe (nvidia-smi under a timeout) could run here
+        // without panicking: the test must fail on WHAT is checked, not on the runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap();
         let mut yue = entry.clone();
@@ -1468,7 +1519,7 @@ mod tests {
     fn metal_codec_decode_is_one_chunk_window_plus_a_small_per_second_term() {
         const MIB: u64 = 1 << 20;
         let per_sec = UNIFIED_CODEC_BYTES_PER_SONG_SEC;
-        // The chunk window (250 + 2 × 31 = 312 frames → 25.6 MB) allocates a 32 MiB buffer per
+        // The xcodec chunk window (250 + 2 × 12 = 274 frames → 22.4 MB) allocates a 32 MiB buffer per
         // tensor at any song length; only the per-second host term grows.
         let chunk = 16 * 32 * MIB;
         assert_eq!(unified_codec_activation_bytes(3_000), chunk + 60 * per_sec);
@@ -1797,26 +1848,28 @@ mod tests {
     }
 
     /// The chunked decode stage (inference 1744de6e) against its captured phase peaks: the max
-    /// `phys_footprint` inside the job's "Decoding audio" interval, in GiB, for the six chunked
-    /// re-captures (en_cot; seconds = the song the render produced, `max_new_tokens` the budget the
+    /// `phys_footprint` inside the job's "Decoding audio" interval, in GiB, for all eight chunked
+    /// re-captures (CoT; seconds = the song the render produced, `max_new_tokens` the budget the
     /// gate prices). The stage never binds these renders, so the render-level test above cannot see
-    /// it; this one holds the decode term to ≥ 1.1× its own phase.
+    /// it; this one asserts the decode term prices each phase at ≥ 1.1× (≥ 1.13× measured).
     #[test]
     fn every_measured_chunked_decode_phase_is_covered_with_margin() {
         use YueTier::{Bf16, Q4, Q8};
-        // (tier, segments, max_new_tokens, measured decode-phase peak GiB)
+        // (model, tier, segments, max_new_tokens, measured decode-phase peak GiB) — all 8 chunked
+        // re-captures.
         let phases = [
-            (Q4, 2, 3000, 1.913),   // 60.0 s
-            (Q4, 2, 3500, 1.930),   // 63.1 s of a 70 s budget
-            (Q4, 3, 3000, 2.069),   // 88.9 s
-            (Q4, 8, 3000, 2.702),   // 217.7 s
-            (Q8, 8, 3000, 2.800),   // 205.2 s
-            (Bf16, 8, 3000, 3.261), // 205.2 s
+            ("yue_en_cot", Q4, 2, 3000, 1.913),    // 60.0 s
+            ("yue_zh_cot", Q4, 2, 3000, 1.832),    // 60.0 s
+            ("yue_jp_kr_cot", Q4, 2, 3000, 1.882), // 60.0 s
+            ("yue_en_cot", Q4, 2, 3500, 1.930),    // 63.1 s of a 70 s budget
+            ("yue_en_cot", Q4, 3, 3000, 2.069),    // 88.9 s
+            ("yue_en_cot", Q4, 8, 3000, 2.702),    // 217.7 s
+            ("yue_en_cot", Q8, 8, 3000, 2.800),    // 205.2 s
+            ("yue_en_cot", Bf16, 8, 3000, 3.261),  // 205.2 s
         ];
-        let entry = builtin("yue_en_cot");
-        for (tier, segments, max_new, measured) in phases {
+        for (model, tier, segments, max_new, measured) in phases {
             let e = estimate(
-                &entry,
+                &builtin(model),
                 &shape(tier, segments, max_new, true),
                 YueLane::Unified,
             )
