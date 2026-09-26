@@ -43,7 +43,7 @@
 //! a 218 s song 7.8 GiB vs 32.2 GiB — for four reasons, each priced on [`YueLane::Unified`] only:
 //!
 //! * **load transient** — loading a GGML q4/q8 checkpoint holds the host bytes and the Metal copy at
-//!   once: the stage-1 load peaks at ~2.01× its weights (bf16 safetensors: ~1.22×)
+//!   once: the stage-1 load peaks at ~2.01× its weights (bf16 safetensors: ~1.22×; priced 2.05× / 1.25×)
 //!   ([`UNIFIED_QUANTIZED_LOAD_FACTOR`], [`UNIFIED_BF16_LOAD_FACTOR`]).
 //! * **allocator envelope** — candle's Metal allocator rounds every buffer up to a power of two and
 //!   keeps freed buffers pooled until the next command-buffer flush, so a stage's non-weight working
@@ -55,7 +55,7 @@
 //!   window end before it touches the clip and re-prices the decoded clip before any weights load.
 //! * **codec decode** — xcodec decodes each whole track at once through a DAC decoder whose widest
 //!   activations are 64 ch × 16 kHz f32 (256 B per output sample); with the pooled pow2 allocator
-//!   the phase is ~31–32 such tensors (priced as 33), each rounded up to a power of two
+//!   the phase is ~31–32 such tensors (priced as 35), each rounded up to a power of two
 //!   ([`unified_codec_activation_bytes`]). This is the binding stage of any song longer than ~1 min.
 //!
 //! [`YueLane::Dedicated`] (CUDA) keeps the analytic figures: cudarc neither rounds to pow2 nor holds a
@@ -150,14 +150,15 @@ const CODEC_FRAMES_PER_SEC: f64 = 50.0;
 /// (equivalently 128 ch at 8 kHz) — the last blocks of `DacDecoder(256, 1024, [8, 5, 4, 2])`.
 const CODEC_WIDEST_BYTES_PER_SAMPLE: u64 = 64 * 4;
 
-// ---- Metal (unified-memory) envelope, measured by sc-19387 (see the module doc). Each constant is
-// the smallest round value that covers every captured phase; the captured values are pinned against
-// the formula in `every_measured_metal_render_is_covered`.
+// ---- Metal (unified-memory) envelope, measured by sc-19387 (see the module doc). Each constant covers
+// every captured phase with a margin for what one machine/driver cannot show; the captured values
+// are pinned against the formula in `every_measured_metal_render_is_covered`.
 
-/// Stage-1 load peak ÷ weights for a GGML q4/q8 checkpoint (measured 2.010 q4, 2.007 q8).
-const UNIFIED_QUANTIZED_LOAD_FACTOR: f64 = 2.02;
-/// Stage-1 load peak ÷ weights for the bf16 safetensors shards (measured 1.215).
-const UNIFIED_BF16_LOAD_FACTOR: f64 = 1.22;
+/// Stage-1 load peak ÷ weights for a GGML q4/q8 checkpoint (measured 2.010 q4, 2.007 q8; ~2% margin
+/// because every capture ran on one Mac and one Metal driver).
+const UNIFIED_QUANTIZED_LOAD_FACTOR: f64 = 2.05;
+/// Stage-1 load peak ÷ weights for the bf16 safetensors shards (measured 1.215; same margin).
+const UNIFIED_BF16_LOAD_FACTOR: f64 = 1.25;
 /// Measured non-weight stage-1 working set ÷ the analytic KV + attention workspace (max measured
 /// 1.89, at the 16 384-position cap with a 12 000-token ICL prefill, q8).
 const UNIFIED_WORKSPACE_ENVELOPE: f64 = 2.0;
@@ -168,9 +169,14 @@ const UNIFIED_ICL_ENCODER_BASE_BYTES: f64 = 1.9 * BYTES_PER_GIB;
 /// … plus a per-second-of-clip part (HuBERT's global attention keys and the clip's features) —
 /// measured 2.49 GiB for a 60 s dual reference, 4.14 GiB for a 218 s one.
 const UNIFIED_ICL_ENCODER_BYTES_PER_SEC: f64 = 0.011 * BYTES_PER_GIB;
-/// Codec decode phase, in pow2-rounded widest-activation tensors (max fit 31.9, bf16 205 s; 10 s, 60 s and
-/// 218 s captures; the 89 s capture, which crosses a pow2 bucket, was predicted by it before it ran).
-const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 33;
+/// Codec decode phase, in pow2-rounded widest-activation tensors. Fit per capture (phase peak less
+/// the codec weights, ÷ the pow2 bucket): 31.7–31.9 at 60 s (bucket fill φ = 0.92 of 256 MiB), 89 s
+/// (φ = 0.68 of 512 MiB) and 205–218 s (φ = 0.84–0.89 of 1 GiB) — flat in φ, which is what whole
+/// pow2 buffers predict (the 89 s render was predicted from the others before it ran). 35 is ~10%
+/// over the max fit: only q4 was captured inside the 512 MiB bucket (a heavier tier's pooled residue
+/// there is unmeasured), and the 1 GiB bucket also holds the 240 s bound no capture reached.
+/// This term — and [`unified_codec_activation_bytes`] — is the one a chunked codec decode replaces.
+const UNIFIED_CODEC_ACTIVATION_TENSORS: u64 = 35;
 
 /// The LM tier both stage 1 and stage 2 load at (epic R2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +255,8 @@ pub(crate) struct IclPricing {
     pub end_secs: f64,
     /// The clip the encoder runs over: the decoded clip's length, else the window end.
     pub clip_secs: f64,
+    /// Whether `clip_secs` is the decoded clip (the post-decode pricing) rather than the stand-in.
+    pub clip_decoded: bool,
 }
 
 impl IclPricing {
@@ -301,6 +309,7 @@ impl YueRenderShape {
                     start_secs: f64::from(facts.icl_start_secs.unwrap_or(0.0)).max(0.0),
                     end_secs,
                     clip_secs: facts.icl_clip_secs.unwrap_or(end_secs).max(0.0),
+                    clip_decoded: facts.icl_clip_secs.is_some(),
                 }
             });
         // The head carries the genre tags, the whole lyric sheet and the ICL block; every segment
@@ -324,7 +333,6 @@ impl YueRenderShape {
 /// Which stage binds the floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum YueStage {
-    IclEncoder,
     Stage1,
     Stage2,
     Codec,
@@ -333,7 +341,6 @@ pub(crate) enum YueStage {
 impl YueStage {
     fn label(self) -> &'static str {
         match self {
-            Self::IclEncoder => "the ICL reference encode",
             Self::Stage1 => "the 7B stage-1 LM",
             Self::Stage2 => "the 1B stage-2 LM",
             Self::Codec => "the xcodec/Vocos decode",
@@ -367,8 +374,13 @@ pub(crate) struct YueEstimate {
     pub unified_load_transient_bytes: u64,
     /// Stage-1 KV + workspace above the analytic figure (pow2 rounding + pooled buffers).
     pub unified_workspace_envelope_bytes: u64,
-    /// The ICL encoder phase, and the pool it leaves behind for the LM stages (0 without ICL).
+    /// The ICL encoder's pool, held while the LM stages run (0 without ICL). The encoder phase itself
+    /// is never the floor — stage 1 always carries this pool plus its own weights — so it is not a
+    /// stage of its own.
     pub unified_icl_encoder_bytes: u64,
+    /// The part of [`Self::unified_icl_encoder_bytes`] the decoded clip adds over its window (0
+    /// before the clip is decoded): what a shorter reference clip would give back.
+    pub unified_icl_clip_excess_bytes: u64,
     /// Stage-1 weights still pooled while stage 2 runs.
     pub unified_stage1_residue_bytes: u64,
     /// The codec decode's activations for the longest song the request can produce.
@@ -393,7 +405,6 @@ impl YueEstimate {
 
     pub(crate) fn stage_bytes(&self, stage: YueStage) -> u64 {
         match stage {
-            YueStage::IclEncoder => self.unified_icl_encoder_bytes,
             YueStage::Stage1 => {
                 self.unified_icl_encoder_bytes
                     + self.stage1_run_bytes().max(self.stage1_load_bytes())
@@ -411,16 +422,11 @@ impl YueEstimate {
     /// The binding stage and its residency — the floor. Stages load one at a time, so this is the
     /// max, not the sum (on Metal each stage carries the pooled residue of the ones before it).
     pub(crate) fn floor(&self) -> (YueStage, u64) {
-        [
-            YueStage::IclEncoder,
-            YueStage::Stage1,
-            YueStage::Stage2,
-            YueStage::Codec,
-        ]
-        .into_iter()
-        .map(|stage| (stage, self.stage_bytes(stage)))
-        .max_by_key(|&(_, bytes)| bytes)
-        .expect("four stages")
+        [YueStage::Stage1, YueStage::Stage2, YueStage::Codec]
+            .into_iter()
+            .map(|stage| (stage, self.stage_bytes(stage)))
+            .max_by_key(|&(_, bytes)| bytes)
+            .expect("three stages")
     }
 }
 
@@ -591,6 +597,10 @@ pub(crate) fn estimate(
                 .icl
                 .map_or(0, |icl| unified_icl_encoder_bytes(icl.clip_secs)),
         ),
+        unified_icl_clip_excess_bytes: metal(shape.icl.map_or(0, |icl| {
+            let window_only = unified_icl_encoder_bytes(icl.clip_secs.min(icl.end_secs));
+            unified_icl_encoder_bytes(icl.clip_secs).saturating_sub(window_only)
+        })),
         unified_stage1_residue_bytes: metal(scale(stage1, UNIFIED_STAGE1_RESIDUE)),
         unified_codec_activation_bytes: metal(unified_codec_activation_bytes(frames)),
         song_secs_bound: frames as f64 / CODEC_FRAMES_PER_SEC,
@@ -646,11 +656,28 @@ pub(crate) fn decide(
     let (stage, bytes) = estimate.floor();
     let floor_gb = gib(bytes);
     let fits = |available: f64, needed: f64| available + f64::EPSILON >= needed;
+    // Would the render fit if the reference clip were no longer than its window? Only the LM
+    // stages carry the encoder's pool, so the codec stage is unchanged by it.
+    let floor_without_clip_excess_gb = gib([
+        estimate
+            .stage_bytes(YueStage::Stage1)
+            .saturating_sub(estimate.unified_icl_clip_excess_bytes),
+        estimate
+            .stage_bytes(YueStage::Stage2)
+            .saturating_sub(estimate.unified_icl_clip_excess_bytes),
+        estimate.stage_bytes(YueStage::Codec),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(bytes));
+    let mut shorter_clip_fits = false;
     let (needed_gb, shortfall) = match budget {
         YueBudget::UnifiedWorkingSet { gb } => {
             if fits(*gb, floor_gb) {
                 return YueAdmission::Admit;
             }
+            shorter_clip_fits = estimate.unified_icl_clip_excess_bytes > 0
+                && fits(*gb, floor_without_clip_excess_gb);
             (
                 floor_gb,
                 format!("but this Mac's GPU working set is only ~{gb:.1} GB"),
@@ -686,6 +713,10 @@ pub(crate) fn decide(
     let tier = estimate.tier.key();
     let breakdown = stage_breakdown(estimate, stage);
     let lever = match stage {
+        _ if shorter_clip_fits => {
+            "Use a shorter reference clip (or trim it to the window): the encoder runs over the \
+             whole clip, not just the window, and its memory stays held while the LMs run."
+        }
         YueStage::Stage1 if estimate.tier != YueTier::Q4 => {
             "Select a smaller tier (q4 is the lightest), or render fewer segments / fewer tokens \
              per segment to shrink the stage-1 KV cache."
@@ -701,15 +732,16 @@ pub(crate) fn decide(
             "Render fewer segments or fewer tokens per segment: the decode holds the whole song, \
              so a shorter song needs less memory."
         }
-        YueStage::IclEncoder => {
-            "Use a shorter reference clip: the encoder runs over the whole clip, not just the \
-             window."
-        }
         YueStage::Stage2 => "Run on a machine with more memory.",
     };
     let icl = shape.icl.map_or(String::new(), |icl| {
+        let clip = if icl.clip_decoded {
+            format!(" of a decoded clip of {:.0} s", icl.clip_secs)
+        } else {
+            String::new()
+        };
         format!(
-            ", plus a {tracks}-track ICL reference window of {secs:.1} s ({start:.1}–{end:.1} s)",
+            ", plus a {tracks}-track ICL reference window of {secs:.1} s ({start:.1}–{end:.1} s){clip}",
             tracks = icl.tracks,
             secs = icl.window_secs(),
             start = icl.start_secs,
@@ -737,10 +769,6 @@ fn stage_breakdown(estimate: &YueEstimate, stage: YueStage) -> String {
     };
     let icl_residue = "memory held over from the ICL encode";
     match stage {
-        YueStage::IclEncoder => part(
-            estimate.unified_icl_encoder_bytes,
-            "ICL encoder working set",
-        ),
         YueStage::Stage1 => {
             part(estimate.stage1_weights_bytes, "weights");
             if estimate.stage1_load_bytes() > estimate.stage1_run_bytes() {
@@ -1400,12 +1428,12 @@ mod tests {
     #[test]
     fn metal_codec_activations_round_each_tensor_up_to_a_power_of_two() {
         // 3000 frames/track (the default 60 s song) → 3000 × 320 × 256 B = 245.8 MB → 256 MiB.
-        assert_eq!(unified_codec_activation_bytes(3000), 33 * (1 << 28));
+        assert_eq!(unified_codec_activation_bytes(3000), 35 * (1 << 28));
         // Past 65.5 s the widest tensor crosses 256 MiB, and Metal allocates 512 MiB for it.
-        assert_eq!(unified_codec_activation_bytes(3500), 33 * (1 << 29));
+        assert_eq!(unified_codec_activation_bytes(3500), 35 * (1 << 29));
         // The 218 s capture (10 884 frames) and the 8 × 3000 bound (12 000) share the 1 GiB bucket.
-        assert_eq!(unified_codec_activation_bytes(10_884), 33 * (1 << 30));
-        assert_eq!(unified_codec_activation_bytes(12_000), 33 * (1 << 30));
+        assert_eq!(unified_codec_activation_bytes(10_884), 35 * (1 << 30));
+        assert_eq!(unified_codec_activation_bytes(12_000), 35 * (1 << 30));
         // A longer song decodes in more memory: the Metal codec stage follows the song-length bound.
         let entry = builtin("yue_en_cot");
         let two = estimate(&entry, &shape(YueTier::Q4, 2, 3000, true), YueLane::Unified).unwrap();
@@ -1423,6 +1451,34 @@ mod tests {
         assert!(message.contains("xcodec/Vocos decode"), "{message}");
         assert!(message.contains("song of up to ~240 s"), "{message}");
         assert!(message.contains("shorter song"), "{message}");
+    }
+
+    #[test]
+    fn a_long_reference_clip_is_refused_with_the_shorter_clip_lever() {
+        let entry = builtin("yue_en_icl");
+        let facts_with = |clip: Option<f64>| YueRequestFacts {
+            icl_mode: Some("dual"),
+            icl_clip_secs: clip,
+            ..facts(FOUR_SECTIONS)
+        };
+        let budget = mac(12.0);
+        // Before decoding, the window end (30 s) stands in for the clip: admitted.
+        let pre = YueRenderShape::new(&facts_with(None)).unwrap();
+        let e = estimate(&entry, &pre, YueLane::Unified).unwrap();
+        assert!(matches!(
+            decide("yue_en_icl", &e, &pre, Some(&budget)),
+            YueAdmission::Admit
+        ));
+        // The decoded clip is 600 s: refused, and the lever is the clip — trimming it would fit.
+        let post = YueRenderShape::new(&facts_with(Some(600.0))).unwrap();
+        let e = estimate(&entry, &post, YueLane::Unified).unwrap();
+        assert!(e.unified_icl_clip_excess_bytes > 0);
+        let message = refusal(decide("yue_en_icl", &e, &post, Some(&budget)));
+        assert!(message.contains("shorter reference clip"), "{message}");
+        assert!(message.contains("decoded clip of 600 s"), "{message}");
+        // A render too big even with a window-length clip keeps its own stage lever.
+        let message = refusal(decide("yue_en_icl", &e, &post, Some(&mac(8.0))));
+        assert!(!message.contains("shorter reference clip"), "{message}");
     }
 
     #[test]

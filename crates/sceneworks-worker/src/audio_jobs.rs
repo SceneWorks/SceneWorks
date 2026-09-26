@@ -5270,11 +5270,18 @@ mod yue_job_surface_tests {
     }
 
     fn stage(base_url: String) -> Staged {
-        let env = crate::test_env::EnvVars::set(&[
+        stage_with_env(base_url, &[])
+    }
+
+    /// [`stage`] with extra env vars pinned under the same (non-reentrant) env guard.
+    fn stage_with_env(base_url: String, extra: &[(&str, &str)]) -> Staged {
+        let mut vars = vec![
             ("HF_HUB_CACHE", ""),
             ("HUGGINGFACE_HUB_CACHE", ""),
             ("HF_HOME", ""),
-        ]);
+        ];
+        vars.extend_from_slice(extra);
+        let env = crate::test_env::EnvVars::set(&vars);
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let snapshot =
             sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), STUB_REPO)
@@ -5648,29 +5655,70 @@ mod yue_job_surface_tests {
 
     /// sc-19387: the ICL encoder runs over the whole decoded clip, so the job re-prices the render
     /// with the clip's length after decoding it and before the synthesis loads any weights.
-    #[test]
-    fn the_audio_job_reprices_a_yue_icl_render_with_the_decoded_clip_before_loading() {
-        let source = include_str!("audio_jobs.rs");
-        let body = source
-            .split_once("async fn run_audio_generate_job_using(")
-            .expect("audio job body")
-            .1;
-        let decode = body
-            .find("resolve_icl_reference(")
-            .expect("ICL decode in the job");
-        let reprice = body
-            .find("icl_clip_secs: Some(icl_clip_secs(audio))")
-            .expect("the job must re-price the decoded ICL clip");
-        let recheck = body[reprice..]
-            .find("crate::yue_admission::check(")
-            .map(|at| reprice + at)
-            .expect("the re-price runs the YuE gate");
-        let synth = body
-            .find("run_audio_synthesis_with(")
-            .expect("synthesis in the job");
-        assert!(decode < reprice, "re-priced after the clip is decoded");
-        assert!(recheck < synth, "re-priced before any weights load");
+    ///
+    /// Behavioural: the Mac budget is capped (`SCENEWORKS_MLX_MEMORY_CAP_GB`) between the pre-decode
+    /// estimate (window end stands in for the clip) and the post-decode one (a 600 s clip), so the
+    /// pre-load gate admits, the post-decode re-price refuses, and the loader is never called.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_long_icl_clip_is_refused_after_decode_before_the_loader_runs() {
+        if !crate::video_jobs::tests::ffmpeg_reachable() {
+            eprintln!("a_long_icl_clip_is_refused_after_decode_before_the_loader_runs: ffmpeg not found, skipping");
+            return;
+        }
+        let (base_url, _api_state) = spawn_stub_api().await;
+        let staged = stage_with_env(base_url, &[("SCENEWORKS_MLX_MEMORY_CAP_GB", "8")]);
+        let api = ApiClient::new(&staged.settings);
+        // A 600 s mono reference at 16 kHz; the window stays the default 0–30 s.
+        let asset = import_wav_asset(
+            &staged,
+            "long-ref.wav",
+            &AudioTrack {
+                samples: vec![0.1f32; 16_000 * 600],
+                sample_rate: 16_000,
+                channels: 1,
+            },
+        );
+        let mut payload = full_payload(&staged.project_id);
+        payload["iclMode"] = json!("single");
+        payload["iclReferenceAssetId"] = json!(asset);
+        let request = AudioRequest::from_payload(payload.as_object().expect("object"));
+        // The two prices straddle the 8 GB cap: the pre-load gate admits, the decoded clip does not.
+        let facts = |clip: Option<f64>| crate::yue_admission::YueRequestFacts {
+            icl_clip_secs: clip,
+            tier: Some(crate::yue_admission::YueTier::Q4),
+            ..yue_request_facts(&request, None)
+        };
+        let price = |clip: Option<f64>| {
+            let shape = crate::yue_admission::YueRenderShape::new(&facts(clip)).unwrap();
+            let e = crate::yue_admission::estimate(
+                &request.model_manifest_entry,
+                &shape,
+                crate::yue_admission::YueLane::Unified,
+            )
+            .unwrap();
+            e.floor().1 as f64 / crate::fit_gate::BYTES_PER_GIB
+        };
+        assert!(price(None) < 8.0 && price(Some(600.0)) > 8.0);
 
+        let job = job_snapshot("yue-long-clip", payload);
+        let loaded = Arc::new(AtomicBool::new(false));
+        let flag = loaded.clone();
+        let error = run_audio_generate_job_using(&api, &staged.settings, &job, move |_, _| {
+            flag.store(true, Ordering::SeqCst);
+            Err(gen_core::Error::Msg("the loader must not run".into()))
+        })
+        .await
+        .expect_err("the decoded clip is too long for the capped budget");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("shorter reference clip"), "{message}");
+        assert!(message.contains("600 s"), "{message}");
+        assert!(!loaded.load(Ordering::SeqCst), "no weights may load");
+    }
+
+    #[test]
+    fn icl_clip_secs_is_samples_over_rate_and_channels() {
         // Clip length = samples / (rate × channels).
         let track = gen_core::AudioTrack {
             samples: vec![0.0; 44_100 * 2 * 3],
