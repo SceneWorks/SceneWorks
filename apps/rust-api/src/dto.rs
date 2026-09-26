@@ -1258,6 +1258,12 @@ pub(crate) struct ModelDownloadRequest {
     /// acknowledgment must be affirmatively asserted, never assumed.
     #[serde(default)]
     pub(crate) license_acknowledged: bool,
+    /// The option to install for each co-requisite choice group the model declares (sc-22998),
+    /// e.g. `{"decoder": "legacy"}` for YuE2. A group left out installs its manifest default; an
+    /// unknown group or option is a 400, never replaced by another option. Only model downloads
+    /// read it: the LoRA route that shares this body refuses a non-empty map.
+    #[serde(default)]
+    pub(crate) choices: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

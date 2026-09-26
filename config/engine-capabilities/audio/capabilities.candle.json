@@ -2,7 +2,7 @@
   "registry": "audio",
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd",
+    "inferenceRevision": "f695a35990237152451dabdf888b2bbac434af4c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities [--no-default-features --features backend-candle]"
   },
   "engines": [
@@ -73,6 +73,41 @@
     },
     {
       "id": "stable_audio_3_small_sfx_base",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue2",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_en_cot",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_en_icl",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_jp_kr_cot",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_jp_kr_icl",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_zh_cot",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue_zh_icl",
       "modality": "audio",
       "supportsPreview": false
     }

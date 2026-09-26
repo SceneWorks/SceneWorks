@@ -524,6 +524,12 @@ fn model_requires_license_acknowledgment(model: &Value) -> bool {
 /// being refused for a field the typed route never wrote.
 pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
 
+/// Error code for a fetch of a repo a catalog entry declares as a BLOCKED conditional component
+/// (sc-22998: YuE2's SheetSage2 / MERT-v2-FullSong cover closure). Distinct from
+/// [`LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE`] because no acknowledgment clears it: the block is an
+/// owner decision the user cannot make from a checkbox.
+pub(crate) const COMPONENT_BLOCKED_CODE: &str = "component_blocked";
+
 /// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
 /// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
 /// and `owner/name` to the same repository, so treating them as different would be a bypass.
@@ -581,6 +587,13 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// encoder and both VAEs come straight from `MiniMaxAI/MiniMax-H3`, which is the repo the review's
 /// bypass named, and a primary-only index would have missed it.
 ///
+/// Also every `conditionalComponents[].repo` (sc-22998). Those repos are not `downloads[]` rows, so
+/// no install fetches them, but every repo-keyed door (`POST /api/v1/jobs`, `/models/import`,
+/// `/loras/import`, `/loras/:id/download`) takes a caller-supplied repo verbatim, so the gate must
+/// know them. A component carrying `blocked` is indexed for EVERY entry, acknowledgment or not, and
+/// is refused outright by [`ensure_license_acknowledged_for_source`]; a blocked entry takes
+/// precedence over an acknowledgment entry for the same repo.
+///
 /// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
 /// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
 /// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
@@ -593,11 +606,16 @@ async fn license_acknowledgment_repo_index(
     state: &AppState,
 ) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
     let (models, _) = merged_model_manifest_entries(state).await?;
-    let mut index = std::collections::BTreeMap::new();
+    Ok(license_acknowledgment_index_for(&models))
+}
+
+/// [`license_acknowledgment_repo_index`] over already-loaded manifest entries.
+fn license_acknowledgment_index_for(
+    models: &[Value],
+) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
+    let mut index: std::collections::BTreeMap<String, LicenseAcknowledgmentSource> =
+        std::collections::BTreeMap::new();
     for model in models {
-        if !model_requires_license_acknowledgment(&model) {
-            continue;
-        }
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -606,28 +624,76 @@ async fn license_acknowledgment_repo_index(
             .and_then(Value::as_str)
             .unwrap_or(model_id)
             .to_owned();
-        for download in model
-            .get("downloads")
+        let source = |blocked: Option<BlockedComponent>| LicenseAcknowledgmentSource {
+            model_id: model_id.to_owned(),
+            model_name: model_name.clone(),
+            blocked,
+        };
+        let conditional = model
+            .get("conditionalComponents")
             .and_then(Value::as_array)
             .into_iter()
-            .flatten()
-        {
-            let Some(key) = download
+            .flatten();
+        // Blocked conditional components first, for EVERY entry: no acknowledgment unblocks them.
+        for component in conditional.clone() {
+            let Some(block) = component.get("blocked") else {
+                continue;
+            };
+            let Some(key) = component
                 .get("repo")
                 .and_then(Value::as_str)
                 .and_then(huggingface_repo_key)
             else {
                 continue;
             };
-            index
-                .entry(key)
-                .or_insert_with(|| LicenseAcknowledgmentSource {
-                    model_id: model_id.to_owned(),
-                    model_name: model_name.clone(),
-                });
+            let text = |field: &str| {
+                block
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            index.insert(
+                key,
+                source(Some(BlockedComponent {
+                    component_id: component
+                        .get("componentId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    reason: text("reason"),
+                    unblock: text("unblock"),
+                })),
+            );
+        }
+        if !model_requires_license_acknowledgment(model) {
+            continue;
+        }
+        let downloads = model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for row in downloads.chain(conditional) {
+            let Some(key) = row
+                .get("repo")
+                .and_then(Value::as_str)
+                .and_then(huggingface_repo_key)
+            else {
+                continue;
+            };
+            index.entry(key).or_insert_with(|| source(None));
         }
     }
-    Ok(index)
+    index
+}
+
+/// A conditional component a catalog entry declares as `blocked` (sc-22998).
+#[derive(Clone)]
+pub(crate) struct BlockedComponent {
+    pub(crate) component_id: String,
+    pub(crate) reason: String,
+    pub(crate) unblock: String,
 }
 
 /// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
@@ -638,6 +704,9 @@ async fn license_acknowledgment_repo_index(
 pub(crate) struct LicenseAcknowledgmentSource {
     pub(crate) model_id: String,
     pub(crate) model_name: String,
+    /// Set when the repo is a BLOCKED conditional component (sc-22998): refused whatever the
+    /// caller asserts.
+    pub(crate) blocked: Option<BlockedComponent>,
 }
 
 /// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
@@ -685,7 +754,10 @@ pub(crate) async fn annotate_license_acknowledgment_sources(
         return Ok(());
     }
     for (position, key) in keyed {
-        let Some(source) = index.get(key.as_str()) else {
+        let Some(source) = index
+            .get(key.as_str())
+            .filter(|source| source.blocked.is_none())
+        else {
             continue;
         };
         let Some(object) = rows[position].as_object_mut() else {
@@ -743,6 +815,30 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
         return Ok(());
     }
     let index = license_acknowledgment_repo_index(state).await?;
+    // A blocked conditional component is refused before anything else, and an acknowledgment does
+    // not clear it (sc-22998).
+    if let Some((requested, source, blocked)) = candidates.iter().find_map(|(named, key)| {
+        index.get(key.as_str()).and_then(|source| {
+            source
+                .blocked
+                .as_ref()
+                .map(|blocked| (named, source, blocked))
+        })
+    }) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "'{requested}' is the '{component}' component of '{model_id}', which is blocked: \
+                 {reason} Unblock condition: {unblock}",
+                component = blocked.component_id,
+                model_id = source.model_id,
+                reason = blocked.reason,
+                unblock = blocked.unblock,
+            ),
+            code: Some(COMPONENT_BLOCKED_CODE),
+            context: None,
+        });
+    }
     let Some((requested, source)) = candidates
         .iter()
         .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
@@ -870,6 +966,25 @@ pub(crate) async fn create_model_download_job(
                 .unwrap_or("selected")
         )));
     }
+    // sc-22998: a locally derived tier (YuE2 q8 / q4) is not an artifact anyone can download — it is
+    // produced on this machine from the `fromVariant` original. Its row's `files` name the ORIGINAL,
+    // so queueing it would fetch bf16 and label the receipt with the derived tier. Refused with the
+    // reason until the worker's deriver exists (sc-22999) rather than "installing" nothing.
+    if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(&download) {
+        let variant = download
+            .get("variant")
+            .and_then(Value::as_str)
+            .unwrap_or("selected");
+        let from =
+            sceneworks_core::model_artifacts::artifact_selection::local_derivation(&download)
+                .map(|derivation| derivation.from_variant)
+                .unwrap_or_else(|| "original".to_owned());
+        return Err(ApiError::conflict(format!(
+            "Model '{model_id}': the '{variant}' tier is derived on this machine from the \
+             '{from}' original, not downloaded, and this build has no deriver for it yet. Install \
+             the '{from}' tier instead."
+        )));
+    }
     // The selected `download` is always the primary/tier entry — `model_download` and
     // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
     // installed as if it were the model itself.
@@ -888,8 +1003,39 @@ pub(crate) async fn create_model_download_job(
         .get("variant")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Choice groups (sc-22998): of a group's options — YuE2's standard / legacy decoder — only the
+    // one the request names (else the manifest default) is queued; the others stay add-ons. An
+    // unknown group or option is refused rather than answered with a different option.
+    //
+    // The request's choices are validated first (an unknown group or option is refused), then any
+    // group the request leaves unset takes the option already partly on disk before the default, so
+    // a REPAIR of a half-downloaded legacy decoder completes it instead of fetching the standard one.
+    sceneworks_core::model_artifacts::artifact_selection::resolve_co_requisite_choices(
+        &model,
+        selected_variant.as_deref(),
+        &payload.choices,
+    )
+    .map_err(|error| ApiError::bad_request(format!("Model '{model_id}': {error}")))?;
+    let repair_choices =
+        sceneworks_core::model_artifacts::artifact_selection::co_requisite_choices_for_repair(
+            &model,
+            selected_variant.as_deref(),
+            &payload.choices,
+            |download| co_requisite_presence(&state.settings.data_dir, download),
+        );
+    let choices =
+        sceneworks_core::model_artifacts::artifact_selection::resolve_co_requisite_choices(
+            &model,
+            selected_variant.as_deref(),
+            &repair_choices,
+        )
+        .map_err(|error| ApiError::bad_request(format!("Model '{model_id}': {error}")))?;
     let co_requisites =
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+        sceneworks_core::model_artifacts::artifact_selection::model_co_requisite_downloads_for_selection(
+            &model,
+            selected_variant.as_deref(),
+            &choices,
+        );
 
     // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
     // in the PATH, so it fires only when the entry that id names declares
@@ -2191,7 +2337,47 @@ pub(crate) async fn delete_model_variant(
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
-    let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
+    let derived = model_download_for_variant(&model, &variant).filter(|download| {
+        sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(download)
+    });
+    let removal_result = if let Some(download) = derived {
+        // sc-22998: a locally derived tier owns ONLY its derived snapshot. Its row's `files` are the
+        // original's, which belong to the `fromVariant` tier and are never touched here.
+        let snapshot = sceneworks_core::model_artifacts::artifact_selection::local_derivation(
+            &download,
+        )
+        .and_then(|derivation| {
+            sceneworks_core::model_artifacts::artifact_selection::local_derivation_snapshot_dir(
+                data_dir,
+                &model_id,
+                &variant,
+                &derivation,
+            )
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Tier '{variant}' declares a malformed local derivation"
+            ))
+        })?;
+        if !snapshot.is_dir() {
+            return Err(ApiError::bad_request(format!(
+                "Tier '{variant}' is not installed"
+            )));
+        }
+        let reclaimable = converted_tier_real_bytes(&snapshot);
+        remove_owned_artifacts(vec![snapshot], &allowed_roots, true)
+            .await
+            .map(|removal| TierRemoval {
+                reclaimed_bytes: if removal.removed_paths.is_empty() {
+                    0
+                } else {
+                    reclaimable
+                },
+                removed_paths: removal.removed_paths,
+                retained_paths: removal.retained_paths,
+                trash_failed_paths: removal.trash_failed_paths,
+            })
+    } else if let Some(download) = model_download_for_variant(&model, &variant) {
         let scope = tier_delete_scope(&model, &download, &variant)?;
         let repo_cache = huggingface_repo_cache_path(data_dir, &scope.repo);
         let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&scope.repo)));
@@ -2352,6 +2538,11 @@ pub(crate) fn tier_delete_scope(
         .flatten()
         .filter(|entry| {
             !is_co_requisite_download(entry)
+                // sc-22998: a locally derived tier's `files` name the ORIGINAL it is derived from;
+                // it does not own them, so deleting the original must not "retain" them for it.
+                && !sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                    entry,
+                )
                 && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
                 && entry
                     .get("variant")
@@ -3693,8 +3884,39 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
             &state.settings.data_dir,
             &state.settings.external_model_roots,
         )?;
+        annotate_commercial_use_alternatives(model, &selection_catalog);
     }
     Ok(models)
+}
+
+/// Resolve a declared `commercialUse` pointer against this catalog (sc-22998): a model whose
+/// weights are not commercially eligible gets `commercialUse.alternatives`, the ids of its
+/// `alternativeFamily` that are themselves eligible here — YuE2 lists the YuE1 entries. The declared
+/// block is otherwise passed through untouched, and nothing here reroutes anything.
+///
+/// This EXPOSES the verdict; it enforces nothing. SceneWorks has no commercial-use route yet: the
+/// verdict (`model_usage_policy::commercial_use_verdict`) is published here for routes to enforce,
+/// and sc-22999 wires the refusal into its YuE2 job/export routes and persists the licence
+/// acknowledgment and noncommercial policy into provenance and exports.
+fn annotate_commercial_use_alternatives(model: &mut Value, catalog: &[Value]) {
+    if model.get("commercialUse").is_none() {
+        return;
+    }
+    let Some(id) = model.get("id").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    if let Ok(sceneworks_core::model_usage_policy::CommercialUseVerdict::Refused {
+        alternatives,
+        ..
+    }) = sceneworks_core::model_usage_policy::commercial_use_verdict(catalog, &id)
+    {
+        if let Some(block) = model
+            .get_mut("commercialUse")
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("alternatives".to_owned(), json!(alternatives));
+        }
+    }
 }
 
 /// Add runtime-only text-encoder choices to the public model catalog. The worker owns enumeration so
@@ -6980,10 +7202,16 @@ fn install_state_for(
                 );
             }
         }
-        for co_requisite in model_co_requisite_downloads(model)
-            .into_iter()
-            .filter(|download| co_requisite_variant(download).is_none())
-        {
+        // A choice group (sc-22998, YuE2's decoder) is satisfied by ANY installed option; when none
+        // is, a partially installed option (the one a repair completes), else the default, is what
+        // the install reports missing.
+        for co_requisite in co_requisite_rows_gating_install(
+            model_co_requisite_downloads(model)
+                .into_iter()
+                .filter(|download| co_requisite_variant(download).is_none())
+                .collect(),
+            |download| co_requisite_presence(data_dir, download),
+        ) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
@@ -7036,6 +7264,19 @@ fn install_state_for(
             missing_required_files: Vec::new(),
             update_available: false,
         }
+    }
+}
+
+/// [`co_requisite_cache_health`] as the three-way presence choice-group gating reads (sc-22998).
+fn co_requisite_presence(
+    data_dir: &FsPath,
+    download: &Value,
+) -> sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    match co_requisite_cache_health(data_dir, download) {
+        Some(health) if health.installed => CoRequisitePresence::Installed,
+        Some(health) if health.incomplete => CoRequisitePresence::Incomplete,
+        _ => CoRequisitePresence::Absent,
     }
 }
 
@@ -7176,6 +7417,10 @@ struct ModelVariantState {
     /// must not offer a per-tier delete for it. Both answers come from [`tier_delete_scope`]'s own
     /// rule, so the button and the route cannot disagree.
     tier_deletable: bool,
+    /// sc-22998: `Some` only for a locally derived tier (`downloads[].localDerivation`). `true` while
+    /// no snapshot verified against the pinned derived weights exists at its location — the tier
+    /// is then not installed and not installable (no deriver ships yet, sc-22999).
+    derivation_pending: Option<bool>,
 }
 
 // Whether `model`'s `downloads` array is a quant-matrix — i.e. at least one supported entry carries
@@ -7366,14 +7611,61 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // sc-22998: a locally derived tier's `files` are its ORIGINAL's, so the cache probe
+            // above describes the original, never the tier. It is installed only when a derived
+            // snapshot at its declared location verifies against the pinned derived weights (and
+            // its companions, checked below, are present); otherwise it is `derivationPending`.
+            let mut derivation_pending = None;
+            let mut derived_path = None;
+            let mut derived_exists = false;
+            if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                entry,
+            ) {
+                use sceneworks_core::model_artifacts::artifact_selection::{
+                    derived_snapshot_state, local_derivation, local_derivation_snapshot_dir,
+                    DerivedSnapshotState,
+                };
+                let variant = entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let located = local_derivation(entry).and_then(|derivation| {
+                    local_derivation_snapshot_dir(data_dir, model_id, variant, &derivation)
+                        .map(|dir| (dir, derivation))
+                });
+                let state = match &located {
+                    Some((dir, derivation)) => derived_snapshot_state(dir, derivation),
+                    None => DerivedSnapshotState::Invalid(
+                        "the tier declares a malformed local derivation".to_owned(),
+                    ),
+                };
+                missing_required_files.clear();
+                cache_incomplete = false;
+                let verified = state == DerivedSnapshotState::Verified;
+                derived_exists = !matches!(state, DerivedSnapshotState::Absent);
+                if let DerivedSnapshotState::Invalid(why) = &state {
+                    missing_required_files.push(format!("derived {variant} snapshot: {why}"));
+                }
+                // The companion check below still applies to a verified derived tier.
+                installed = verified;
+                derivation_pending = Some(!verified);
+                derived_path = located
+                    .filter(|_| derived_exists)
+                    .map(|(dir, _)| dir.display().to_string());
+            }
+
             // A tier is usable only with its own required companions. Checking these only at
             // model level let a complete q4 encoder certify bf16 and hid its repair action.
             // An absent primary remains absent even if shared files from another tier exist.
             let mut dependencies_missing = false;
             if installed || cache_incomplete {
-                for download in model_co_requisite_downloads_for_variant(
-                    model,
-                    entry.get("variant").and_then(Value::as_str),
+                // Any installed option of a choice group satisfies it (sc-22998).
+                for download in co_requisite_rows_gating_install(
+                    model_co_requisite_downloads_for_variant_all_options(
+                        model,
+                        entry.get("variant").and_then(Value::as_str),
+                    ),
+                    |download| co_requisite_presence(data_dir, download),
                 )
                 .into_iter()
                 .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
@@ -7426,7 +7718,11 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "default".to_owned()),
                 installed,
-                installed_path: installed_path.map(|path| path.display().to_string()),
+                installed_path: if derivation_pending.is_some() {
+                    derived_path
+                } else {
+                    installed_path.map(|path| path.display().to_string())
+                },
                 cache_incomplete,
                 dependencies_missing,
                 missing_required_files,
@@ -7435,7 +7731,13 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
                 pending_artifact,
                 tier_deletable: !pending_artifact
-                    && (!files.is_empty() || is_sole_repo_tier(model, entry)),
+                    && if derivation_pending.is_some() {
+                        // Only the derived snapshot is ever deleted, so only one that exists.
+                        derived_exists
+                    } else {
+                        !files.is_empty() || is_sole_repo_tier(model, entry)
+                    },
+                derivation_pending,
             }
         })
         .collect()
@@ -7507,7 +7809,7 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
     let variants = model_variant_states(&model, data_dir)
         .into_iter()
         .map(|variant| {
-            json!({
+            let mut row = json!({
                 "variant": variant.variant,
                 "installed": variant.installed,
                 // sc-24112: a pending tier is neither installed nor installable. `"pending"` is a
@@ -7518,6 +7820,11 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
                     "pending"
                 } else if variant.installed {
                     "installed"
+                } else if variant.derivation_pending == Some(true) {
+                    // sc-22998: a locally derived tier with no verified derived snapshot. A distinct
+                    // state so the web offers neither a download (there is nothing to fetch) nor
+                    // "missing" (which it would read as "download me").
+                    "derivationPending"
                 } else {
                     "missing"
                 },
@@ -7540,7 +7847,13 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
                     .map(|value| json!(value))
                     .unwrap_or(Value::Null),
                 "footprint": variant.footprint,
-            })
+            });
+            // Emitted only on a locally derived tier, so every other model's variant rows keep
+            // their existing shape.
+            if let (Some(pending), Some(row)) = (variant.derivation_pending, row.as_object_mut()) {
+                row.insert("derivationPending".to_owned(), Value::Bool(pending));
+            }
+            row
         })
         .collect::<Vec<_>>();
     object.insert("hasVariantMatrix".to_owned(), Value::Bool(has_matrix));
@@ -9649,8 +9962,9 @@ pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requi
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
 pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
-    co_requisite_variant, is_pending_artifact_download, model_co_requisite_downloads,
-    model_co_requisite_downloads_for_variant, model_download_for_variant,
+    co_requisite_rows_gating_install, co_requisite_variant, is_pending_artifact_download,
+    model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_co_requisite_downloads_for_variant_all_options, model_download_for_variant,
 };
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't

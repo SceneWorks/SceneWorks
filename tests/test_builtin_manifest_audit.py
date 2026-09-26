@@ -1671,6 +1671,185 @@ def test_builtin_manifest_ships_the_seeded_audio_models():
     assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
 
 
+# sc-22998 (epic sc-22988). YuE1 (epic sc-19373) is not on this branch, so its side of every V1/V2
+# separation check is a fixture in the exact shape the YuE1 epic ships: family `yue`, ids
+# `yue_{en,zh,jp_kr}_{cot,icl}`, `SceneWorks/yue-*-candle` re-hosts (epic acceptance test 5).
+def _yue1_fixture(model_id: str) -> dict:
+    return {
+        "id": model_id,
+        "family": "yue",
+        "type": "audio",
+        "downloads": [
+            {
+                "provider": "huggingface",
+                "repo": f"SceneWorks/{model_id.replace('_', '-')}-candle",
+                "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
+                "variant": "q4",
+                "default": True,
+                "files": ["q4/*"],
+            },
+            {
+                "provider": "huggingface",
+                "repo": "SceneWorks/xcodec-mini-infer",
+                "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+                "coRequisite": True,
+                "componentId": "xcodec",
+                "files": ["final_ckpt/ckpt_00360000.safetensors"],
+            },
+        ],
+        "paths": {"model": f"${{HF_CACHE}}/SceneWorks/{model_id.replace('_', '-')}-candle"},
+    }
+
+
+def _model_repos(model: dict) -> set[str]:
+    rows = list(model.get("downloads", [])) + list(model.get("conditionalComponents", []))
+    return {row["repo"] for row in rows if row.get("repo")}
+
+
+def _yue_family_separation_violations(models: list[dict]) -> list[str]:
+    """Everything that could let YuE2 stand in for YuE1 (or the reverse) at a resolution point: a
+    shared id, a family claim, a shared download/cache repo, a shared install path, or a YuE2 row
+    that is not the pinned upstream original (a re-host would need a recorded distribution basis)."""
+    v1 = [m for m in models if m.get("family") == "yue"]
+    v2 = [m for m in models if m.get("family") == "yue2"]
+    violations: list[str] = []
+    for model in v1:
+        if not re.fullmatch(r"yue_(en|zh|jp_kr)_(cot|icl)", model["id"]):
+            violations.append(f"{model['id']}: family yue claimed by a non-YuE1 id")
+    for model in v2:
+        if model["id"] != "yue2":
+            violations.append(f"{model['id']}: family yue2 claimed by a non-YuE2 id")
+    if any(m["id"] == "yue2" and m.get("family") != "yue2" for m in models):
+        violations.append("yue2: not in family yue2")
+    v1_repos = set().union(*(_model_repos(m) for m in v1)) if v1 else set()
+    for model in v2:
+        shared = _model_repos(model) & v1_repos
+        if shared:
+            violations.append(f"{model['id']}: shares repos with YuE1: {sorted(shared)}")
+        for repo in _model_repos(model):
+            if not repo.startswith("m-a-p/"):
+                violations.append(f"{model['id']}: {repo} is not the upstream original")
+        v1_paths = {m.get("paths", {}).get("model") for m in v1}
+        if model.get("paths", {}).get("model") in v1_paths:
+            violations.append(f"{model['id']}: install path collides with YuE1")
+        pointer = model.get("commercialUse", {}).get("alternativeFamily")
+        if pointer != "yue":
+            violations.append(f"{model['id']}: commercial pointer {pointer!r} is not YuE1")
+    return violations
+
+
+def test_yue2_is_explicitly_experimental_noncommercial_and_licence_gated():
+    """AC2: the CC BY-NC 4.0 restriction is carried by the fields the pre-download gate, the model
+    card and the Simple UI read (`requiresLicenseAcknowledgment` + `licenseNotice`, `nonCommercial`,
+    `experimental`), and a commercial-use route is refused with a pointer to YuE1 that claims no
+    unrelated rights clearance.
+
+    *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` (the API then fetches without
+    the notice), or rewording the pointer note to imply the alternative clears output rights.
+    """
+    yue2 = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "yue2")
+    assert yue2["experimental"] is True
+    assert yue2["nonCommercial"] is True
+    assert yue2["requiresLicenseAcknowledgment"] is True
+    notice = yue2["licenseNotice"]
+    for term in ("EXPERIMENTAL", "NONCOMMERCIAL", "CC BY-NC 4.0", "Tongyi Qianwen", "YuE1"):
+        assert term in notice, term
+    assert "does not clear rights" in notice
+    assert yue2["commercialUse"]["eligible"] is False
+    assert "does not clear rights" in yue2["commercialUse"]["alternativeNote"]
+    assert yue2["ui"]["description"].startswith("EXPERIMENTAL · NONCOMMERCIAL (CC BY-NC 4.0)")
+
+
+def test_yue1_and_yue2_identities_stay_disjoint_with_swapped_model_negative_fixtures():
+    """AC1 / E1: ids, families, download + cache repos and install paths never overlap, so no
+    upgrade, fallback, rehost alias or saved recipe can resolve one family to the other.
+
+    *Mutation that reds this:* pointing a YuE2 row at a `SceneWorks/yue-*` re-host, or relabelling
+    the entry's family to `yue`.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    v1_ids = [f"yue_{lang}_{mode}" for lang in ("en", "zh", "jp_kr") for mode in ("cot", "icl")]
+    live = models + [_yue1_fixture(model_id) for model_id in v1_ids]
+    assert _yue_family_separation_violations(live) == []
+
+    yue2 = next(m for m in models if m["id"] == "yue2")
+    # The checker is not vacuous: each swapped-model fixture below must be caught.
+    v1_claims_v2_family = _yue1_fixture("yue_en_cot") | {"family": "yue2"}
+    v2_claims_v1_family = copy.deepcopy(yue2) | {"family": "yue"}
+    v2_on_v1_rehost = copy.deepcopy(yue2)
+    v2_on_v1_rehost["downloads"][0]["repo"] = "SceneWorks/yue-en-cot-candle"
+    v1_on_v2_weights = _yue1_fixture("yue_zh_cot")
+    v1_on_v2_weights["downloads"][0]["repo"] = "m-a-p/YuE2-3B"
+    v2_pointing_at_itself = copy.deepcopy(yue2)
+    v2_pointing_at_itself["commercialUse"]["alternativeFamily"] = "yue2"
+    for label, swapped in [
+        ("V1 claims family yue2", [yue2, v1_claims_v2_family]),
+        ("V2 claims family yue", [v2_claims_v1_family, _yue1_fixture("yue_en_cot")]),
+        ("V2 row on a V1 re-host", [v2_on_v1_rehost, _yue1_fixture("yue_en_cot")]),
+        ("V1 row on the V2 weights", [yue2, v1_on_v2_weights]),
+        ("V2 commercial pointer at itself", [v2_pointing_at_itself]),
+    ]:
+        assert _yue_family_separation_violations(swapped), label
+
+
+def test_locally_derived_tiers_fetch_exactly_their_source_variant():
+    """AC3 / E7: a `localDerivation` tier downloads the verified original it is derived from — the
+    same repo, revision and files as that variant's row — so no tier selection can fetch a re-host.
+
+    *Mutation that reds this:* pointing the q4 row at `SceneWorks/yue2-3b-q4` or at `q4/*` files.
+    """
+    derived = 0
+    for model in _load_builtin_models_manifest()["models"]:
+        rows = model.get("downloads", [])
+        for row in rows:
+            derivation = row.get("localDerivation")
+            if not derivation:
+                continue
+            derived += 1
+            source = [
+                r
+                for r in rows
+                if r.get("variant") == derivation["fromVariant"] and not r.get("coRequisite")
+            ]
+            assert len(source) == 1, (model["id"], row["variant"])
+            assert "localDerivation" not in source[0]
+            for key in ("provider", "repo", "revision", "files", "platforms"):
+                assert row.get(key) == source[0].get(key), (model["id"], row["variant"], key)
+            assert row["footprint"]["diskSizeBytes"] > source[0]["footprint"]["diskSizeBytes"]
+    # Shape, not population: the catalog declares at least one derived tier (so the loop above
+    # judged something), and every one of them resolved its `fromVariant` row above.
+    assert derived >= 1, "the catalog declares no locally derived tier; this test judged nothing"
+
+
+def test_choice_groups_declare_one_default_and_cover_components_are_never_downloads():
+    """AC3: YuE2 installs YuE2-3B + its tokenizer + ONE decoder. The two decoders are one choice
+    group with exactly one default, and the cover closure (SheetSage2 + MERT-v2-FullSong) is a
+    blocked conditional component that no install, tier or co-requisite path can reach.
+
+    *Mutation that reds this:* marking both decoders `default`, or moving SheetSage2 into
+    `downloads`.
+    """
+    yue2 = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "yue2")
+    choices = [row["choice"] for row in yue2["downloads"] if "choice" in row]
+    assert sorted(c["option"] for c in choices) == ["legacy", "standard"]
+    assert {c["group"] for c in choices} == {"decoder"}
+    assert [c["option"] for c in choices if c.get("default")] == ["standard"]
+    by_option = {row["choice"]["option"]: row for row in yue2["downloads"] if "choice" in row}
+    assert by_option["standard"]["componentId"] == "vae"
+    assert by_option["legacy"]["componentId"] == "vae_legacy"
+
+    cover = yue2["conditionalComponents"]
+    assert {c["componentId"] for c in cover} == {"yue2_sheetsage2", "yue2_mert_v2_fullsong"}
+    download_repos = {row["repo"] for row in yue2["downloads"]}
+    for component in cover:
+        assert component["requiredFor"] == ["cover"]
+        assert component["repo"] not in download_repos
+        assert component["blocked"]["reason"].startswith(
+            "blocked: owner licensing decision for SheetSage2/MERT port code"
+        )
+        assert component["blocked"]["unblock"]
+
+
 def _duplicate_default_downloads(manifest: dict) -> list[str]:
     """Return model/platform pairs with ambiguous primary download selection."""
     ambiguous: list[str] = []

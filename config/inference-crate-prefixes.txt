@@ -15,8 +15,11 @@ crates/audio/candle-audio-moss-sfx
 crates/audio/candle-audio-moss-tts
 crates/audio/candle-audio-moss-tts-realtime
 crates/audio/candle-audio-openvoice
+crates/audio/candle-audio-sheetsage2
 crates/audio/candle-audio-stable-audio-3
 crates/audio/candle-audio-whisper
+crates/audio/candle-audio-yue
+crates/audio/candle-audio-yue2
 crates/bundles/runtime-catalog
 crates/bundles/runtime-cpu
 crates/bundles/runtime-cuda

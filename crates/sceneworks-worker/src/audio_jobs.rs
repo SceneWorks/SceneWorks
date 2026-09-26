@@ -1570,6 +1570,75 @@ mod tests {
         base.as_object().cloned().unwrap()
     }
 
+    /// sc-22998: the builtin `yue2` catalog entry is the LINKED engine's `yue2` provider — same id,
+    /// family, advertised audio capabilities, and every component its descriptor requires is one
+    /// the entry provisions under the same `componentId`. Read from the registry the audio job loads
+    /// through, not from a copy of its constants. Mutation that reds this: rename the entry's `vae`
+    /// componentId, drop `supportsSymbolicSong`, or change `sampleRates`.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn yue2_catalog_entry_matches_the_linked_engine_descriptor() {
+        let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc is embedded");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(contents))
+                .expect("builtin manifest parses");
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "yue2")
+            .expect("yue2 is in the builtin catalog")
+            .clone();
+        let descriptor = crate::inference_runtime::audio_descriptor("yue2")
+            .expect("the linked audio lane registers the yue2 provider");
+        assert_eq!(descriptor.id, "yue2");
+        assert_eq!(entry["family"], descriptor.family);
+        let audio = &entry["audio"];
+        let caps = &descriptor.capabilities;
+        assert_eq!(audio["sampleRates"], json!(caps.audio_sample_rates));
+        for (key, advertised) in [
+            ("supportsGuidance", caps.supports_guidance),
+            ("supportsNegativePrompt", caps.supports_negative_prompt),
+            ("supportsMultiSpeaker", caps.supports_multi_speaker),
+            ("supportsSymbolicSong", caps.supports_symbolic_song),
+            ("supportsAudioArtifacts", caps.supports_audio_artifacts),
+        ] {
+            // Audio polarity: an absent key means false.
+            assert_eq!(
+                audio.get(key).and_then(Value::as_bool).unwrap_or(false),
+                advertised,
+                "audio.{key}"
+            );
+        }
+        let provisioned = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row.get("componentId").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        for required in descriptor.required_components {
+            assert!(
+                provisioned.contains(required),
+                "descriptor requires `{required}`, the catalog provisions {provisioned:?}"
+            );
+        }
+        // YuE1's six generators are separate providers; `yue2` is never one of their aliases. The
+        // pin links candle-audio-yue, so each must resolve (an absent one is a failure, not a skip).
+        for language in ["en", "zh", "jp_kr"] {
+            for mode in ["cot", "icl"] {
+                let yue1 = format!("yue_{language}_{mode}");
+                let v1 = crate::inference_runtime::audio_descriptor(&yue1)
+                    .unwrap_or_else(|| panic!("the linked audio lane registers YuE1 `{yue1}`"));
+                assert_eq!(v1.id, yue1);
+                assert_ne!(v1.id, descriptor.id, "{yue1}");
+                assert_ne!(v1.family, descriptor.family, "{yue1}");
+            }
+        }
+    }
+
     #[test]
     fn from_payload_reads_the_audio_knobs() {
         let request = AudioRequest::from_payload(&payload(json!({

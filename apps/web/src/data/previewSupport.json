@@ -253,6 +253,27 @@
     "stable_audio_3_small_sfx_base": {
       "candle": false
     },
+    "yue2": {
+      "candle": false
+    },
+    "yue_en_cot": {
+      "candle": false
+    },
+    "yue_en_icl": {
+      "candle": false
+    },
+    "yue_jp_kr_cot": {
+      "candle": false
+    },
+    "yue_jp_kr_icl": {
+      "candle": false
+    },
+    "yue_zh_cot": {
+      "candle": false
+    },
+    "yue_zh_icl": {
+      "candle": false
+    },
     "z_image": {
       "candle": true,
       "mlx": true

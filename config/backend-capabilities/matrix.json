@@ -2,27 +2,27 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 101,
+    "modelCount": 102,
     "importedFamilyCount": 4,
-    "cellCount": 971,
+    "cellCount": 976,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 51,
+    "candleOnlyCellCount": 55,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "59406571793b75ba7548ae18c2ac29402e7fad624b9c5808dab8f219560869a9",
-    "apiDto": "e7b3bef233d919abd20583128beeeda6fdd87fa992566e02563630224dc9f358",
+    "apiContractEntry": "d8101fa3bda85e1e87151d4dda8a749a5c594b063294a2673824f509b0721072",
+    "apiDto": "fea2623b2673a8f825e4d9101ac9b78735cdf13f9d30b9234a17de49987240ae",
     "apiGeneration": "6795856b217fc457236ea01e1e79c5f65f7766424a5d9a1b1abb2e125b5f7ad8",
     "apiValidation": "60a46aa0b42f00caf0cdb7a6f720f5627589f93e54ba31da4d2917ac8e44d9a7",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "6e06c01ee0c61252d23486803f14d7df1854a8a6a88e5618802f9b8bd3a5e62d",
+    "descriptorAudioFacts": "528e11a787cd0e6ac971ab43b092d7f02062164a95f7a5444e667be04d360dbd",
     "descriptorCandleFacts": "d082df06fbd839afc4e12bd31080b8e729a3e673b171cfa3ee51410df848a9ba",
     "descriptorCandleRuntime": "a4fab89e0512d45e5aad99bc2a4f63c3dec6c2de1dc76c50a24c46a79b646371",
-    "descriptorMlxFacts": "27a98d6fc96d7a4db146418d005c93904debd721cdeaef3e400ad7854b277ac3",
-    "descriptorMlxRuntime": "f011105529383bc100fbf35c086e1a7f735436b0a8d2dd97478f83f840d7bcc1",
-    "descriptorPreviewFacts": "ea1710782351567274a526a2601b85a7e8f8c05f7c4afdf1608a9ed5baaf227c",
+    "descriptorMlxFacts": "a6098221f0f11d5a0028adaa91321f84a3efde6b7e38ea33636b86f034cf9d02",
+    "descriptorMlxRuntime": "c7322d18017e7e232ad458cec79a3c7ff2c8c07778ceda059c54bd0b55d44943",
+    "descriptorPreviewFacts": "3b9091db16bbd59c67638676b63e12376aa6a235aba2d237ac364b0c07583331",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "36ab6d3069e915d68a79360aaf95324ac37446a05cdecce83fcdc7b67d586091",
+    "manifest": "be1e5e9504c0d045937ff9b08b26a485cd2daf0d0557ccc7d4a9c986bb7142d1",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
@@ -44,11 +44,11 @@
     "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
-    "workerAudioDispatch": "d7512ad2247fe146237d42094638761142a36b4349ff2a69df6b0c53614a0651",
+    "workerAudioDispatch": "f279d0366887add8053c3d76c05b08e5a31bd0e363c6347858ca2876e0fe3f24",
     "workerDispatch": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199",
     "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "411a431bdc8a7c711ed564080dcb85388b021629efd903d23cc46fd137b6b693",
+    "workerImageDispatch": "4c6abf0e436ec63c44040575b2ec2d41ece2fcae52fa0e6e260e95bec60935d8",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "2cd76993160bc421ac6c28a565b7447c3502f286912b3b29f1b5596217728b2a",
@@ -6639,6 +6639,49 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "yue2",
+      "family": "yue2",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
       }
     },
     {

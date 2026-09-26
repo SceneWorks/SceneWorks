@@ -759,3 +759,29 @@ describe("declared video capabilities are all offerable", () => {
     }
   });
 });
+
+// sc-22998: YuE2 plans a SYMBOLIC SONG (audio.supportsSymbolicSong). Its request — style, lyrics, a
+// score plan and a decoder choice — is none of the four Audio Studio modes, and on its sample rate
+// alone it would otherwise fall into the residual sfx bucket and be offered as a sound-effect model.
+// Read off the shipped catalog bytes, so the entry the picker would actually receive is judged.
+describe("a symbolic-song model serves no existing Audio Studio mode (sc-22998)", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const manifest = JSON5.parse(
+    readFileSync(resolve(HERE, "../../../config/manifests/builtin.models.jsonc"), "utf8"),
+  );
+  const yue2 = manifest.models.find((entry) => entry.id === "yue2");
+
+  it("the shipped yue2 entry advertises the symbolic-song capability", () => {
+    expect(yue2?.audio?.supportsSymbolicSong).toBe(true);
+    expect(yue2.audio.sampleRates).toEqual([48000]);
+  });
+
+  it.each(AUDIO_MODES)("yue2 does not serve %s", (mode) => {
+    expect(audioModelServesMode(yue2, mode)).toBe(false);
+  });
+
+  it("the same block without the flag is picked up as sfx, so the flag is what keeps it out", () => {
+    const { supportsSymbolicSong: _flag, ...withoutFlag } = yue2.audio;
+    expect(audioModelServesMode({ ...yue2, audio: withoutFlag }, "sfx")).toBe(true);
+  });
+});
