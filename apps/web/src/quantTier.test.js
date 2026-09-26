@@ -995,3 +995,30 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
     }
   });
 });
+
+// sc-22998: a locally DERIVED tier (YuE2 q8 / q4) has nothing to download until a derived snapshot
+// exists — the API reports it `derivationPending` and refuses its install — so it is never the tier
+// the UI offers as the lightest installable one.
+describe("a derivation-pending tier is not installable (sc-22998)", () => {
+  it("skips derivation-pending tiers and falls back to the original", () => {
+    const model = {
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "bf16", installState: "missing" },
+        { variant: "q8", installState: "derivationPending", derivationPending: true },
+        { variant: "q4", installState: "derivationPending", derivationPending: true },
+      ],
+    };
+    expect(lightestInstallableTier(model)).toBe("bf16");
+    // Once derived, the tier is an ordinary installable one again.
+    const derived = {
+      ...model,
+      variants: model.variants.map((variant) =>
+        variant.variant === "q4"
+          ? { variant: "q4", installState: "installed", derivationPending: false }
+          : variant,
+      ),
+    };
+    expect(lightestInstallableTier(derived)).toBe("q4");
+  });
+});

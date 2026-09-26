@@ -30,6 +30,31 @@ const CANDLE_DESCRIPTOR_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/capabilities.candle.json");
 const AUDIO_DESCRIPTOR_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/audio/capabilities.candle.json");
+/// Whether the checked-in audio dump (`config/engine-capabilities/audio/`) is `backend`'s and
+/// registers `model_id` (sc-22998). A dump that fails to parse registers nothing, so a malformed
+/// file can only remove a cell, never invent one.
+fn audio_dump_registers(backend: &str, model_id: &str) -> bool {
+    static DUMP: std::sync::OnceLock<(String, BTreeSet<String>)> = std::sync::OnceLock::new();
+    let (dump_backend, ids) = DUMP.get_or_init(|| {
+        let facts: Value = serde_json::from_str(AUDIO_DESCRIPTOR_FACTS).unwrap_or(Value::Null);
+        let backend = facts
+            .get("backend")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let ids = facts
+            .get("engines")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|engine| engine.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        (backend, ids)
+    });
+    dump_backend == backend && ids.contains(model_id)
+}
+
 const MLX_RUNTIME_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
 const CANDLE_RUNTIME_FACTS: &str =
@@ -2313,12 +2338,15 @@ fn precision_cell(
         //
         // AUDIO has no per-model route table: `audio_generate` routes by the lane's capability
         // advertisement alone (gaps.rs), so `backend_supports` holds for ANY audio model id and
-        // cannot be the route conjunct for an audio artifact row. An audio tier is therefore served
-        // only when the runtime descriptor declares it. The first tiered audio families (YuE,
-        // sc-19383; YuE2, sc-22998) are what exposed that an artifact row alone would otherwise
-        // claim the cell — on the MLX column for a Candle-only audio model.
+        // cannot be the route conjunct for an audio artifact row. For audio the artifact row
+        // therefore counts only on the lane whose AUDIO dump (`config/engine-capabilities/audio/`)
+        // registers the model: the audio registry is Candle-native on every platform, so an artifact
+        // row alone put a Candle-only audio model in the MLX column (YuE, sc-19383), while dropping
+        // the artifact term for audio altogether (sc-22998's first cut) lost the Candle lane's TRUE
+        // tier cells for a model whose descriptor advertises no quants (YuE2).
         descriptor
-            || (model.model_type != "audio" && manifest_artifact_tier_support(model, tier, backend))
+            || (manifest_artifact_tier_support(model, tier, backend)
+                && (model.model_type != "audio" || audio_dump_registers(backend, &model.id)))
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = support(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -3818,6 +3846,32 @@ mod tests {
                 "backend capability matrix drifted ({error}); run `{GENERATOR} -- config/backend-capabilities/matrix.json` only for an intentional capability recapture"
             )
         });
+    }
+
+    #[test]
+    fn a_tiered_audio_model_serves_its_tiers_only_on_the_lane_whose_audio_dump_registers_it() {
+        // sc-22998. YuE2's descriptor advertises no quants, so its tier cells rest on the artifact
+        // rows — which count for audio only on the lane whose audio dump registers the model.
+        // Mutations that red this: dropping the artifact term for audio (Candle loses its tiers),
+        // or dropping the `audio_dump_registers` conjunct (MLX gains them).
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        let yue2 = matrix
+            .models
+            .iter()
+            .find(|model| model.id == "yue2")
+            .expect("yue2 is in the matrix");
+        for tier in ["bf16", "q8", "q4"] {
+            let cell = yue2
+                .precision_tier
+                .iter()
+                .find(|cell| cell.capability == tier)
+                .unwrap_or_else(|| panic!("yue2 has a {tier} cell"));
+            assert_eq!(cell.candle, Some(true), "{tier} on candle");
+            assert_eq!(cell.mlx, Some(false), "{tier} on mlx");
+        }
+        assert!(audio_dump_registers("candle", "yue2"));
+        assert!(!audio_dump_registers("mlx", "yue2"));
+        assert!(!audio_dump_registers("candle", "not_a_registered_model"));
     }
 
     #[test]

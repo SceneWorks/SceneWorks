@@ -442,6 +442,9 @@ export function lightestInstallableTier(model) {
       (variant) =>
         tierQuantize(variant?.variant) !== null &&
         variant?.pendingArtifact !== true &&
+        // sc-22998: a locally derived tier has nothing to download.
+        variant?.derivationPending !== true &&
+        variant?.installState !== "derivationPending" &&
         variant?.installState !== "pending",
     )
     .map((variant) => variant.variant);

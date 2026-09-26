@@ -27680,7 +27680,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "9af8c1193c4b6c0f95cbcd79a52ff234fe0f2f480de5f56b0dd8fddfea46e172",
+              "sha256": "9bd589f420c7e340cd0ef4534a38ce7316217b65f8203eecbbd63ad6aa34e475",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27799,8 +27799,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 157333,
-                  "sha256": "42dbe3427718de672968324425e0406b0708c3061c791faef5dc442dc67950b6"
+                  "byteSize": 157874,
+                  "sha256": "b7599db3e222d6b789f41208b8386b2d4b17fb5c4875632933e2c187c529917d"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

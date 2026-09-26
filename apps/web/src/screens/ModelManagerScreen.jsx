@@ -402,6 +402,11 @@ function ModelTierDownloadPanel({
           // download with the reason, so offering the checkbox would be an invitation to an error.
           const pendingArtifact =
             variant.pendingArtifact === true || variant.installState === "pending";
+          // sc-22998: a tier DERIVED on this machine from another tier's original (YuE2 q8 / q4).
+          // There is nothing to download for it — the API refuses the install — so, like a pending
+          // artifact, it is shown but not selectable until a derived snapshot exists.
+          const derivationPending =
+            variant.derivationPending === true || variant.installState === "derivationPending";
           // Whether the PER-TIER delete can reclaim this tier on its own. The API refuses a tier with
           // no `files` scope ("delete the whole model instead"), because a whole-repo row IS the model
           // rather than a slice of it. Before sc-24112 every variant row carried a glob and this was
@@ -427,7 +432,13 @@ function ModelTierDownloadPanel({
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={installed || pendingArtifact || Boolean(activeJob) || licenseAckRequired}
+                  disabled={
+                    installed ||
+                    pendingArtifact ||
+                    derivationPending ||
+                    Boolean(activeJob) ||
+                    licenseAckRequired
+                  }
                   onChange={() => toggle(tier)}
                 />
                 <span className="model-tier-label">
@@ -467,6 +478,8 @@ function ModelTierDownloadPanel({
                     ? "installed"
                     : pendingArtifact
                       ? "not published yet"
+                      : derivationPending
+                        ? "derived locally (not available yet)"
                       : incomplete
                         ? "incomplete"
                         : "not installed"}

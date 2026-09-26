@@ -1625,9 +1625,15 @@ mod tests {
                 "descriptor requires `{required}`, the catalog provisions {provisioned:?}"
             );
         }
-        // YuE1's six generators are separate providers; `yue2` is never one of their aliases.
-        for yue1 in ["yue_en_cot", "yue_en_icl", "yue_zh_cot", "yue_zh_icl"] {
-            if let Some(v1) = crate::inference_runtime::audio_descriptor(yue1) {
+        // YuE1's six generators are separate providers; `yue2` is never one of their aliases. The
+        // pin links candle-audio-yue, so each must resolve (an absent one is a failure, not a skip).
+        for language in ["en", "zh", "jp_kr"] {
+            for mode in ["cot", "icl"] {
+                let yue1 = format!("yue_{language}_{mode}");
+                let v1 = crate::inference_runtime::audio_descriptor(&yue1)
+                    .unwrap_or_else(|| panic!("the linked audio lane registers YuE1 `{yue1}`"));
+                assert_eq!(v1.id, yue1);
+                assert_ne!(v1.id, descriptor.id, "{yue1}");
                 assert_ne!(v1.family, descriptor.family, "{yue1}");
             }
         }

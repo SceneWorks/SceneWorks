@@ -72,6 +72,155 @@ pub fn is_pending_artifact_download(download: &Value) -> bool {
     download.get("pendingArtifact").and_then(Value::as_bool) == Some(true)
 }
 
+/// A tier row's `localDerivation` block (sc-22998): the tier is derived on the user's machine from
+/// the `from_variant` original rather than downloaded, and the derivation must reproduce exactly
+/// `weights_file` of `weights_bytes` / `weights_sha256`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalDerivation {
+    pub from_variant: String,
+    pub conversion: String,
+    pub weights_file: String,
+    pub weights_bytes: u64,
+    pub weights_sha256: String,
+}
+
+/// The row's [`LocalDerivation`], if it declares one. A malformed block (a missing field) is `None`
+/// here and a schema/audit failure upstream; a caller that must not treat such a row as an ordinary
+/// download checks for the raw `localDerivation` key instead (see [`declares_local_derivation`]).
+pub fn local_derivation(download: &Value) -> Option<LocalDerivation> {
+    let block = download.get("localDerivation")?;
+    let text = |key: &str| {
+        block
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some(LocalDerivation {
+        from_variant: text("fromVariant")?,
+        conversion: text("conversion")?,
+        weights_file: text("weightsFile")?,
+        weights_bytes: block.get("weightsBytes").and_then(Value::as_u64)?,
+        weights_sha256: text("weightsSha256")?.to_ascii_lowercase(),
+    })
+}
+
+/// True when the row carries a `localDerivation` block at all, well-formed or not. Such a row is
+/// never an ordinary download: its `files` name the ORIGINAL, not the tier.
+pub fn declares_local_derivation(download: &Value) -> bool {
+    download.get("localDerivation").is_some()
+}
+
+fn safe_path_segment(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    .then_some(value)
+}
+
+/// Where a locally derived tier snapshot lives (sc-22998):
+/// `<data_dir>/models/derived/<model id>/<variant>/<conversion>/`. The conversion is part of the
+/// path because a different conversion writes different bytes — a snapshot from another conversion
+/// is a different artifact, never this tier. `None` when any segment is not a plain path segment.
+/// The deriver (the worker's audio-lane preparer, sc-22999) writes here; the catalog only reads.
+pub fn local_derivation_snapshot_dir(
+    data_dir: &Path,
+    model_id: &str,
+    variant: &str,
+    derivation: &LocalDerivation,
+) -> Option<PathBuf> {
+    Some(
+        data_dir
+            .join("models")
+            .join("derived")
+            .join(safe_path_segment(model_id)?)
+            .join(safe_path_segment(variant)?)
+            .join(safe_path_segment(&derivation.conversion)?),
+    )
+}
+
+/// What is at a derived tier's snapshot location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DerivedSnapshotState {
+    /// Nothing has been derived there.
+    Absent,
+    /// The weights file matches the pinned size and SHA-256.
+    Verified,
+    /// Something is there, but it is not the pinned derivation (why).
+    Invalid(String),
+}
+
+type DigestKey = (PathBuf, u64, Option<std::time::SystemTime>);
+
+/// SHA-256 of `path`, memoized per (path, size, mtime) for the life of the process, so a catalog
+/// read does not re-hash a multi-GB derived weights file that has not changed.
+fn memoized_file_sha256(path: &Path, len: u64) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<DigestKey, String>>> =
+        std::sync::OnceLock::new();
+    let modified = std::fs::metadata(path)?.modified().ok();
+    let key = (path.to_path_buf(), len, modified);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key, digest.clone());
+    }
+    Ok(digest)
+}
+
+/// Judge the derived snapshot at `dir` against `derivation`'s pinned weights identity. Only the
+/// weights file is checked here; the engine re-verifies the whole snapshot (every copied file and
+/// its conversion manifest) when it loads it.
+pub fn derived_snapshot_state(dir: &Path, derivation: &LocalDerivation) -> DerivedSnapshotState {
+    let Some(file_name) = safe_path_segment(&derivation.weights_file) else {
+        return DerivedSnapshotState::Invalid(format!(
+            "weights file name '{}' is not a plain file name",
+            derivation.weights_file
+        ));
+    };
+    if !dir.is_dir() {
+        return DerivedSnapshotState::Absent;
+    }
+    let weights = dir.join(file_name);
+    let Ok(metadata) = std::fs::metadata(&weights) else {
+        return DerivedSnapshotState::Invalid(format!("{file_name} is missing"));
+    };
+    if !metadata.is_file() || metadata.len() != derivation.weights_bytes {
+        return DerivedSnapshotState::Invalid(format!(
+            "{file_name} is {} bytes, the pinned derivation is {}",
+            metadata.len(),
+            derivation.weights_bytes
+        ));
+    }
+    match memoized_file_sha256(&weights, metadata.len()) {
+        Ok(digest) if digest == derivation.weights_sha256 => DerivedSnapshotState::Verified,
+        Ok(digest) => DerivedSnapshotState::Invalid(format!(
+            "{file_name} hashes to {digest}, the pinned derivation is {}",
+            derivation.weights_sha256
+        )),
+        Err(error) => DerivedSnapshotState::Invalid(format!("{file_name} is unreadable: {error}")),
+    }
+}
+
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the
 /// primary download rather than as a pick-one alternate.
 pub fn is_co_requisite_download(download: &Value) -> bool {
@@ -348,19 +497,39 @@ pub fn resolve_co_requisite_choices(
         .collect()
 }
 
+/// How much of a co-requisite row's snapshot is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoRequisitePresence {
+    /// Every declared file is cached.
+    Installed,
+    /// Some, but not all, declared files are cached: a started install of this option.
+    Incomplete,
+    /// Nothing of it is cached.
+    Absent,
+}
+
 /// The co-requisite rows whose state gates an install (sc-22998): every non-choice row, plus ONE row
-/// per choice group — the first installed option when any option is installed (the group is
-/// satisfied), else the group's default option (what a repair installs). A group with a malformed
-/// default keeps every option, so nothing is reported satisfied that is not. Order is preserved.
+/// per choice group. That row is, in order: the first INSTALLED option (the group is satisfied);
+/// else the first INCOMPLETE option — the one the user already started, so a repair completes it
+/// rather than fetching a different decoder; else the group's default option (what a fresh install
+/// fetches). A group with a malformed default and nothing on disk keeps every option, so nothing is
+/// reported satisfied that is not. Order is preserved.
 pub fn co_requisite_rows_gating_install(
     rows: Vec<Value>,
-    installed: impl Fn(&Value) -> bool,
+    presence: impl Fn(&Value) -> CoRequisitePresence,
 ) -> Vec<Value> {
-    let mut satisfied: BTreeMap<String, String> = BTreeMap::new();
+    let mut installed: BTreeMap<String, String> = BTreeMap::new();
+    let mut started: BTreeMap<String, String> = BTreeMap::new();
     for row in &rows {
         if let Some(choice) = co_requisite_choice(row) {
-            if !satisfied.contains_key(&choice.group) && installed(row) {
-                satisfied.insert(choice.group, choice.option);
+            match presence(row) {
+                CoRequisitePresence::Installed => {
+                    installed.entry(choice.group).or_insert(choice.option);
+                }
+                CoRequisitePresence::Incomplete => {
+                    started.entry(choice.group).or_insert(choice.option);
+                }
+                CoRequisitePresence::Absent => {}
             }
         }
     }
@@ -368,7 +537,10 @@ pub fn co_requisite_rows_gating_install(
     rows.into_iter()
         .filter(|row| match co_requisite_choice(row) {
             None => true,
-            Some(choice) => match satisfied.get(&choice.group) {
+            Some(choice) => match installed
+                .get(&choice.group)
+                .or_else(|| started.get(&choice.group))
+            {
                 Some(option) => *option == choice.option,
                 None => match defaults.get(&choice.group) {
                     Some(Some(option)) => *option == choice.option,
@@ -377,6 +549,30 @@ pub fn co_requisite_rows_gating_install(
             },
         })
         .collect()
+}
+
+/// The option of each choice group an install/REPAIR request that names no choice should fetch
+/// (sc-22998): the group's [`co_requisite_rows_gating_install`] row — an installed or partially
+/// installed option wins over the default, so repairing a half-downloaded legacy decoder completes
+/// it instead of fetching the standard one. Groups the request names keep the request's option.
+pub fn co_requisite_choices_for_repair(
+    model: &Value,
+    variant: Option<&str>,
+    requested: &BTreeMap<String, String>,
+    presence: impl Fn(&Value) -> CoRequisitePresence,
+) -> BTreeMap<String, String> {
+    let mut choices = requested.clone();
+    for row in co_requisite_rows_gating_install(
+        model_co_requisite_downloads_for_variant_all_options(model, variant),
+        presence,
+    ) {
+        if let Some(choice) = co_requisite_choice(&row) {
+            if !requested.keys().any(|group| group.trim() == choice.group) {
+                choices.entry(choice.group).or_insert(choice.option);
+            }
+        }
+    }
+    choices
 }
 
 /// The co-requisite downloads an install of `variant` with the resolved `choices` queues: every
@@ -1182,7 +1378,11 @@ mod tests {
         let rows = || model_co_requisite_downloads_for_variant_all_options(&yue2, Some("q4"));
         let gating = |installed_repo: Option<&str>| {
             co_requisite_rows_gating_install(rows(), |row| {
-                installed_repo.is_some_and(|repo| row["repo"] == repo)
+                if installed_repo.is_some_and(|repo| row["repo"] == repo) {
+                    CoRequisitePresence::Installed
+                } else {
+                    CoRequisitePresence::Absent
+                }
             })
         };
         assert_eq!(repos(&gating(None)), ["m-a-p/YuE2-Vae"]);
@@ -1191,6 +1391,107 @@ mod tests {
             ["m-a-p/YuE2-Vae-legacy"]
         );
         assert_eq!(repos(&gating(Some("m-a-p/YuE2-Vae"))), ["m-a-p/YuE2-Vae"]);
+    }
+
+    #[test]
+    fn a_derived_snapshot_is_verified_only_by_its_pinned_size_and_digest() {
+        // Mutations that red this: drop the size check or the SHA-256 comparison in
+        // `derived_snapshot_state`, or let `local_derivation_snapshot_dir` accept `..`.
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let weights = b"derived weights";
+        let yue2 = builtin_yue2();
+        let q4 = model_download_for_variant(&yue2, "q4").expect("q4 row");
+        let mut derivation = local_derivation(&q4).expect("q4 declares a derivation");
+        assert_eq!(derivation.from_variant, "bf16");
+        assert_eq!(
+            local_derivation(&model_download_for_variant(&yue2, "bf16").unwrap()),
+            None
+        );
+        derivation.weights_bytes = weights.len() as u64;
+        derivation.weights_sha256 = format!("{:x}", Sha256::digest(weights));
+
+        let dir = local_derivation_snapshot_dir(temp.path(), "yue2", "q4", &derivation).unwrap();
+        assert_eq!(
+            dir,
+            temp.path()
+                .join("models/derived/yue2/q4")
+                .join(&derivation.conversion)
+        );
+        assert_eq!(
+            local_derivation_snapshot_dir(temp.path(), "..", "q4", &derivation),
+            None
+        );
+        assert_eq!(
+            derived_snapshot_state(&dir, &derivation),
+            DerivedSnapshotState::Absent
+        );
+
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(
+            derived_snapshot_state(&dir, &derivation),
+            DerivedSnapshotState::Invalid(_)
+        ));
+        std::fs::write(dir.join("model.safetensors"), b"short").unwrap();
+        assert!(matches!(
+            derived_snapshot_state(&dir, &derivation),
+            DerivedSnapshotState::Invalid(why) if why.contains("bytes")
+        ));
+        std::fs::write(dir.join("model.safetensors"), vec![b'x'; weights.len()]).unwrap();
+        assert!(matches!(
+            derived_snapshot_state(&dir, &derivation),
+            DerivedSnapshotState::Invalid(why) if why.contains("hashes to")
+        ));
+        std::fs::write(dir.join("model.safetensors"), weights).unwrap();
+        assert_eq!(
+            derived_snapshot_state(&dir, &derivation),
+            DerivedSnapshotState::Verified
+        );
+    }
+
+    #[test]
+    fn a_partially_installed_legacy_decoder_is_what_the_repair_completes() {
+        // Legacy half-downloaded, standard absent: the gating row (what the catalog reports missing)
+        // and the repair's choice are LEGACY, not the default. Mutation that reds this: drop the
+        // `started` fallback in `co_requisite_rows_gating_install` (standard comes back).
+        let yue2 = builtin_yue2();
+        let presence = |row: &Value| {
+            if row["repo"] == "m-a-p/YuE2-Vae-legacy" {
+                CoRequisitePresence::Incomplete
+            } else {
+                CoRequisitePresence::Absent
+            }
+        };
+        let rows = model_co_requisite_downloads_for_variant_all_options(&yue2, Some("bf16"));
+        assert_eq!(
+            repos(&co_requisite_rows_gating_install(rows, presence)),
+            ["m-a-p/YuE2-Vae-legacy"]
+        );
+        let choices =
+            co_requisite_choices_for_repair(&yue2, Some("bf16"), &BTreeMap::new(), presence);
+        assert_eq!(
+            choices,
+            BTreeMap::from([("decoder".to_owned(), "legacy".to_owned())])
+        );
+        // An explicit request still wins over what is on disk.
+        let explicit = BTreeMap::from([("decoder".to_owned(), "standard".to_owned())]);
+        assert_eq!(
+            co_requisite_choices_for_repair(&yue2, Some("bf16"), &explicit, presence),
+            explicit
+        );
+        // An INSTALLED standard beats a started legacy: the group is already satisfied.
+        let both = |row: &Value| {
+            if row["repo"] == "m-a-p/YuE2-Vae" {
+                CoRequisitePresence::Installed
+            } else {
+                CoRequisitePresence::Incomplete
+            }
+        };
+        let rows = model_co_requisite_downloads_for_variant_all_options(&yue2, Some("bf16"));
+        assert_eq!(
+            repos(&co_requisite_rows_gating_install(rows, both)),
+            ["m-a-p/YuE2-Vae"]
+        );
     }
 
     #[test]

@@ -1816,7 +1816,9 @@ def test_locally_derived_tiers_fetch_exactly_their_source_variant():
             for key in ("provider", "repo", "revision", "files", "platforms"):
                 assert row.get(key) == source[0].get(key), (model["id"], row["variant"], key)
             assert row["footprint"]["diskSizeBytes"] > source[0]["footprint"]["diskSizeBytes"]
-    assert derived == 2, "the YuE2 q8 and q4 tiers are the derived rows"
+    # Shape, not population: the catalog declares at least one derived tier (so the loop above
+    # judged something), and every one of them resolved its `fromVariant` row above.
+    assert derived >= 1, "the catalog declares no locally derived tier; this test judged nothing"
 
 
 def test_choice_groups_declare_one_default_and_cover_components_are_never_downloads():

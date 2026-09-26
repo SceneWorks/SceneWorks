@@ -6,7 +6,7 @@
     "importedFamilyCount": 4,
     "cellCount": 976,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 52,
+    "candleOnlyCellCount": 55,
     "exceptionCount": 10
   },
   "sources": {
@@ -22,7 +22,7 @@
     "descriptorMlxRuntime": "c7322d18017e7e232ad458cec79a3c7ff2c8c07778ceda059c54bd0b55d44943",
     "descriptorPreviewFacts": "3b9091db16bbd59c67638676b63e12376aa6a235aba2d237ac364b0c07583331",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "c2b8cfb046bf50de471c1faba3f8d2473eb18da15840a4e71ab3d4b9ff88c50b",
+    "manifest": "be1e5e9504c0d045937ff9b08b26a485cd2daf0d0557ccc7d4a9c986bb7142d1",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
@@ -44,7 +44,7 @@
     "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
-    "workerAudioDispatch": "6d5f5b9064f2a61303dfb0c3253661ee3bacd1786514087d3d3575da6c722c89",
+    "workerAudioDispatch": "f279d0366887add8053c3d76c05b08e5a31bd0e363c6347858ca2876e0fe3f24",
     "workerDispatch": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199",
     "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
@@ -6661,17 +6661,20 @@
         {
           "capability": "bf16",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         },
         {
           "capability": "q4",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         },
         {
           "capability": "q8",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         }
       ],
       "guidanceMethod": [],
