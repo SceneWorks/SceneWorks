@@ -1015,6 +1015,88 @@
             "description": "Restrictions the user is notified of at the acknowledgment gate (sc-17227). Plain prose restating the upstream license's own operative terms — territory, acceptable use, revenue ceiling — not a summary invented here. Rendered inside the acknowledgment box."
           },
           "nonCommercial": { "type": "boolean" },
+          "experimental": {
+            "type": "boolean",
+            "description": "The model is offered for explicit, opt-in EXPERIMENTATION rather than as a supported production option (YuE2, epic sc-22988 E2). A surface that lists it must say so before download and selection; it is never a default, an upgrade target or a fallback for another model. Absent means false."
+          },
+          "commercialUse": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["eligible"],
+            "description": "Commercial-use eligibility of the model's WEIGHTS (sc-22998, epic sc-22988 E2). Read by `sceneworks_core::model_usage_policy::commercial_use_verdict`, the one resolver a commercial-use route asks: `eligible: false` refuses the model there and names the declared alternative family's own eligible entries instead. A model that omits this block is refused on such a route when it is `nonCommercial: true` and admitted otherwise. The verdict concerns the model weights only; it never clears rights in user-provided lyrics, recordings or generated output.",
+            "allOf": [
+              {
+                "if": { "properties": { "eligible": { "const": false } } },
+                "then": { "required": ["reason"] }
+              }
+            ],
+            "properties": {
+              "eligible": { "type": "boolean" },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Why a commercial-use route refuses the model: the licence's own operative restriction."
+              },
+              "alternativeFamily": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$",
+                "description": "The `family` whose own commercially eligible entries a refusal points to (YuE2 -> `yue`, the YuE1 lyrics-to-song family). Resolved against the live catalog; it is a pointer for the user, never a substitution: nothing reroutes a request to it."
+              },
+              "alternativeNote": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shown beside the pointer. Must not claim that the alternative clears rights beyond its model weights."
+              }
+            }
+          },
+          "conditionalComponents": {
+            "type": "array",
+            "description": "Pinned components a model needs ONLY for a specific purpose (sc-22998: YuE2's SheetSage2 + MERT-v2-FullSong source-recording transcription, needed for covers only, epic sc-22988 E7). They are deliberately NOT `downloads[]` rows, so no install, tier selection or co-requisite resolution fetches them for base generation. `sceneworks_core::model_usage_policy::conditional_component_downloads` is the only acquisition seam: it returns the pinned rows for a purpose, and REFUSES while any of them carries `blocked`, naming the reason and the unblock condition.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["componentId", "requiredFor", "provider", "repo", "revision", "files", "license"],
+              "properties": {
+                "componentId": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$",
+                  "description": "The engine's component key for these files (inference `ProviderComponents` / licence-row key)."
+                },
+                "requiredFor": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "enum": ["cover"] },
+                  "description": "The purposes that need the component. Base generation is never one of them."
+                },
+                "provider": { "enum": ["huggingface"] },
+                "repo": { "type": "string", "minLength": 1 },
+                "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                "files": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "estimatedSizeBytes": { "type": "integer", "minimum": 1 },
+                "license": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The component's declared licence (the engine's licence row)."
+                },
+                "blocked": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["reason", "unblock"],
+                  "description": "The component may not be offered or acquired yet. Shown to the user as the reason the dependent feature is unavailable.",
+                  "properties": {
+                    "reason": { "type": "string", "minLength": 1 },
+                    "unblock": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          },
           "supportsAlphaOutput": {
             "type": "boolean",
             "x-sceneworks-contract": "binding",
@@ -1917,6 +1999,14 @@
                 "type": "boolean",
                 "description": "Whether the model accepts a negative prompt (backend Capabilities.supports_negative_prompt). Read by Audio Studio's Music tab for its Negative prompt field. ABSENT MEANS FALSE — same audio polarity and the same sc-15299 history as `supportsGuidance`."
               },
+              "supportsSymbolicSong": {
+                "type": "boolean",
+                "description": "Whether the model plans a song as a symbolic score before rendering it and reads AudioParams.song (backend Capabilities.supports_symbolic_song, YuE2, epic sc-22988 / sc-22994): planning mode, a supplied ABC score, an exact saved plan, cached-latent decode and the decoder choice. A model that does not advertise it refuses the block as a typed Unsupported at the gen-core floor. It is its own surface, not a variant of an existing Audio Studio mode: modelEligibility.audioModelServesMode serves none of speech / music / voiceclone / sfx for it. ABSENT MEANS FALSE (audio polarity)."
+              },
+              "supportsAudioArtifacts": {
+                "type": "boolean",
+                "description": "Whether the model publishes a reproducibility record (plan, tokens, latents, effective settings and identities) into AudioParams.artifacts (backend Capabilities.supports_audio_artifacts, YuE2, sc-22994). ABSENT MEANS FALSE (audio polarity)."
+              },
               "conditioning": {
                 "type": "array",
                 "uniqueItems": true,
@@ -1955,6 +2045,19 @@
                     "properties": { "coRequisite": { "const": true } },
                     "required": ["coRequisite"]
                   }
+                },
+                {
+                  "$comment": "sc-22998: a locally derived tier is a selectable PRIMARY tier, so localDerivation is valid only on a non-coRequisite row that names its variant.",
+                  "if": { "required": ["localDerivation"] },
+                  "then": {
+                    "required": ["variant"],
+                    "not": { "required": ["coRequisite"], "properties": { "coRequisite": { "const": true } } }
+                  }
+                },
+                {
+                  "$comment": "sc-22998: a choice option is a co-requisite the install selects among, so it is valid only on coRequisite: true rows.",
+                  "if": { "required": ["choice"] },
+                  "then": { "properties": { "coRequisite": { "const": true } }, "required": ["coRequisite"] }
                 },
                 {
                   "$comment": "SC-18902: cleanupWithModel opts an exclusive dependency into cleanup-only tombstone deletion, so it is valid only on a coRequisite row.",
@@ -2019,6 +2122,39 @@
                 "pendingArtifact": {
                   "type": "boolean",
                   "description": "This variant is DECLARED but its artifact is not published yet (sc-24112). The row carries the null SHA 0000000000000000000000000000000000000000 as its revision — schema-valid 40-hex and unmistakably not a commit — and the pairing is rigid in both directions: a null SHA without this flag, or this flag with a real SHA, is a manifest-audit failure. A pending row is never queued for download, never counted as installable, and may never be `default: true`; the catalog still ENUMERATES it, so the tier axis and its picker are real before the artifact lands. Removing the flag and pinning the real revision is a single edit, which is the whole point: there is no separate switch to forget."
+                },
+                "localDerivation": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["fromVariant", "conversion", "weightsFile", "weightsBytes", "weightsSha256", "reason"],
+                  "description": "This tier is NOT downloaded as an artifact of its own: it is DERIVED ON THE USER'S MACHINE from the `fromVariant` original, which is what this row downloads. The row's `repo` / `revision` / `files` must equal that variant's row exactly (manifest audit), so selecting the tier fetches the verified original and never a re-host (sc-22998: YuE2's CC BY-NC 4.0 weights have no recorded redistribution basis). The worker runs the engine's audio-lane snapshot preparer over the original and the engine verifies the output against the pinned conversion identity below before loading it. `footprint.diskSizeBytes` counts the original PLUS the derived snapshot. Valid only on a non-coRequisite row with a `variant`.",
+                  "properties": {
+                    "fromVariant": { "$ref": "#/$defs/quantVariantKey" },
+                    "conversion": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The engine's conversion-code identity (candle-audio-yue2 `tier::CONVERSION_ID`). A different conversion writes different bytes and is a different artifact."
+                    },
+                    "weightsFile": { "type": "string", "minLength": 1 },
+                    "weightsBytes": { "type": "integer", "minimum": 1 },
+                    "weightsSha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "SHA-256 of the derived weights file the conversion must reproduce exactly (candle-audio-yue2 `tier::TIER_PINS`)."
+                    },
+                    "reason": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "choice": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["group", "option"],
+                  "description": "This co-requisite is ONE OPTION of a user choice (sc-22998: YuE2's decoder, `standard` or `legacy`). Install queues only the chosen option of each group (the one marked `default` when the request names none); an unknown group or option is refused, never replaced by another option. The model's install state is satisfied when ANY option of each group is fully cached, and every other option is an add-on the user may install later. Valid only on a `coRequisite: true` row; exactly one option per group is the default (manifest audit).",
+                  "properties": {
+                    "group": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                    "option": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                    "default": { "type": "boolean" }
+                  }
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],

@@ -1299,6 +1299,95 @@
       "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
     },
     {
+      "id": "yue2",
+      "models": [
+        "yue2"
+      ],
+      "name": "YuE2 (YuE2-3B, YuE2-Vae, YuE2-Vae-legacy)",
+      "publisher": "Multimodal Art Projection (the YuE2 authors)",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/YuE2-3B",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "EXPERIMENTAL song-generation model, NONCOMMERCIAL USE ONLY. SceneWorks downloads the weights on first use directly from the upstream repositories at pinned revisions (m-a-p/YuE2-3B@1a96eca688d6ae5d7f0feb88573fec89920fcd19, m-a-p/YuE2-Vae@95535e72a97bc0f09b8ada125d26b4009428c0e8, m-a-p/YuE2-Vae-legacy@b54118f0fc462f08999d1ec07e88817f4ee3f770); it does NOT re-host them, and a q8 / q4 tier is derived on the user's machine from the downloaded original. All three are licensed under CC BY-NC 4.0: NonCommercial purposes only, with attribution when shared. Attribution: YuE2-3B, YuE2-Vae and YuE2-Vae-legacy, YuE2 by the YuE2 authors (Multimodal Art Projection), weights licensed under CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/). The repositories' own third-party notices (Oobleck VAE and SnakeBeta code, MIT) are reproduced below. YuE2 is a separate model from YuE1; commercial use must use YuE1, which concerns the model weights only and clears no rights in user-provided lyrics, recordings or generated audio. The qwen.tiktoken tokenizer in the YuE2-3B repository has its own terms (Qwen tokenizer entry).",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0 (YuE2 weight licence)",
+          "key": "yue2-weights-cc-by-nc"
+        },
+        {
+          "label": "YuE2 third-party notices",
+          "key": "yue2-weights-third-party-notices"
+        },
+        {
+          "label": "MIT License (SnakeBeta, NVIDIA)",
+          "key": "yue2-weights-snakebeta-mit"
+        },
+        {
+          "label": "MIT License (stable-audio-tools)",
+          "key": "yue2-weights-stable-audio-tools-mit"
+        }
+      ]
+    },
+    {
+      "id": "yue2-qwen-tiktoken",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "Qwen tokenizer (qwen.tiktoken) used by YuE2",
+      "publisher": "Alibaba Cloud (Tongyi Qianwen)",
+      "license": "Tongyi Qianwen License Agreement",
+      "homepage": "https://huggingface.co/Qwen/Qwen-7B",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "YuE2's text / ABC tokenizer file qwen.tiktoken, downloaded with the YuE2-3B weights from m-a-p/YuE2-3B. It is byte-identical to Qwen/Qwen-7B's qwen.tiktoken, so it carries the Tongyi Qianwen License Agreement rather than the CC BY-NC 4.0 weight licence (YuE2's model licence states it does not replace separately applicable licences for text tokenization files). The upstream YuE2-3B copy ships neither the Agreement nor its Notice; both are reproduced here from Qwen/Qwen-7B@ef3c5c9c57b252f3149c1408daf4d649ec8b6c85. Tongyi Qianwen is licensed under the Tongyi Qianwen LICENSE AGREEMENT, Copyright (c) Alibaba Cloud. All Rights Reserved.",
+      "documents": [
+        {
+          "label": "Tongyi Qianwen License Agreement",
+          "key": "yue2-qwen-tiktoken-license"
+        },
+        {
+          "label": "Tongyi Qianwen Notice",
+          "key": "yue2-qwen-tiktoken-notice"
+        }
+      ]
+    },
+    {
+      "id": "yue2-source",
+      "models": [],
+      "name": "YuE2 inference source (multimodal-art-projection/YuE)",
+      "publisher": "the YuE2 authors (multimodal-art-projection)",
+      "license": "Apache-2.0 (with MIT-licensed Oobleck VAE and SnakeBeta portions)",
+      "homepage": "https://github.com/multimodal-art-projection/YuE/tree/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e",
+      "usage": "SceneWorks' native YuE2 engine (the Rust / Candle crate candle-audio-yue2 in the SceneWorks inference runtime) is a port of the first-party YuE2 source at commit 92a73cc7652fcc1f937855e4b765e0a0edd7ff2e: its MoT language model, request protocol and tokenizer handling, acoustic flow matching and VAE decoders. That source is Apache-2.0; its Oobleck VAE (stable-audio-tools) and SnakeBeta (NVIDIA BigVGAN) code carries the MIT notices reproduced below. This entry covers that SOURCE only: the YuE2 model weights are CC BY-NC 4.0 (YuE2 entry), and the ported score tools have their own entry.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "yue2-source-apache"
+        },
+        {
+          "label": "YuE third-party notices",
+          "key": "yue2-source-third-party-notices"
+        },
+        {
+          "label": "MIT License (SnakeBeta, NVIDIA)",
+          "key": "yue2-source-snakebeta-mit"
+        },
+        {
+          "label": "MIT License (stable-audio-tools)",
+          "key": "yue2-source-stable-audio-tools-mit"
+        }
+      ]
+    },
+    {
       "id": "yue2-score-tools-source",
       "models": [],
       "name": "YuE2 music skill score tools (abc_tools.py)",

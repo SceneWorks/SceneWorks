@@ -26485,6 +26485,268 @@
       }
     },
     {
+      // YuE2 (epic sc-22988, sc-22998) — the EXPERIMENTAL, NONCOMMERCIAL symbolic-plan song generator,
+      // offered BESIDE YuE1 (epic sc-19373, family `yue`, ids `yue_{en,zh,jp_kr}_{cot,icl}`), never in
+      // place of it. Everything that identifies it is disjoint from YuE1 (epic E1): catalog id + engine
+      // provider id `yue2` (candle-audio-yue2 `provider::PROVIDER_ID`, never an alias of YuE1's six
+      // `yue_*` generators), family `yue2`, and its download/cache namespace — the three UPSTREAM
+      // `m-a-p/YuE2*` repositories at their pinned revisions, never a `SceneWorks/yue-*` re-host. There is
+      // no upgrade, fallback or rename edge between the two families anywhere: `commercialUse` below only
+      // POINTS a commercial-use route at YuE1, it never reroutes a request (model_usage_policy.rs).
+      //
+      // LICENCE (epic E2 / E7). Weights: CC BY-NC 4.0 (YuE2-3B, YuE2-Vae, YuE2-Vae-legacy). The
+      // `qwen.tiktoken` tokenizer inside the YuE2-3B repo is byte-identical to Qwen/Qwen-7B's and is under
+      // the Tongyi Qianwen License Agreement, NOT the weight licence (candle-audio-yue2
+      // `license::LICENSE_QWEN_TIKTOKEN`). The first-party GitHub source SceneWorks' native engine is
+      // ported from is Apache-2.0. `requiresLicenseAcknowledgment` makes the API refuse the download until
+      // the user accepts `licenseNotice`; About -> Licenses carries `yue2`, `yue2-qwen-tiktoken` and
+      // `yue2-source`. No YuE2 file is re-hosted: the engine's licence gate refuses Redistribution until an
+      // owner records a basis, so every row here fetches the upstream original.
+      //
+      // CLOSURE (epic E7; candle-audio-yue2 `inventory::Closure::Generation`). Base generation needs
+      // exactly YuE2-3B (+ its `qwen.tiktoken`, same repo) and ONE decoder. The two decoders are one
+      // `choice` group: install queues only the chosen one (standard by default) and the other stays an
+      // add-on (LoadSpec components `vae` / `vae_legacy`). `files` name every pinned file of each
+      // component (weights, configs, model card, LICENSE and notices — the engine verifies all of them by
+      // size + SHA-256), and nothing else: the repos' remote Python, wheels and demo assets are excluded
+      // (`inventory::EXCLUDED`).
+      //
+      // TIERS (epic E8). bf16 is the released checkpoint. q8 / q4 are NOT artifacts of their own: each row
+      // downloads the SAME bf16 original and declares `localDerivation` — the worker derives the tier on
+      // the user's machine through the engine's audio-lane preparer (`candle_audio_yue2::prepare`, i.e.
+      // `tier::convert`) and the engine verifies it against `tier::TIER_PINS` before loading. bf16 is the
+      // default because it is the only tier that needs no local derivation; every tier downloads the same
+      // bytes.
+      //
+      // COVERS. SheetSage2 + MERT-v2-FullSong (`Closure::Cover`) are conditional cover dependencies, not
+      // generation downloads, so they live in `conditionalComponents`, never in `downloads`. They are
+      // BLOCKED: the native transcription port (inference `candle-audio-sheetsage2`) derives from upstream
+      // code that carries no licence grant, so it is gated out of every runtime bundle until the owner
+      // records a basis.
+      //
+      // Memory admission / floors are sc-23001; the API + worker jobs are sc-22999; the UI is sc-23000.
+      "id": "yue2",
+      "name": "YuE2 Song Generation (Experimental, Noncommercial)",
+      "family": "yue2",
+      "type": "audio",
+      "macOnly": false,
+      "experimental": true,
+      "nonCommercial": true,
+      "requiresLicenseAcknowledgment": true,
+      "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca688d6ae5d7f0feb88573fec89920fcd19/LICENSE",
+      "commercialUse": {
+        "eligible": false,
+        "reason": "YuE2's weights are licensed under CC BY-NC 4.0, which permits NonCommercial use only; no commercial licence from the rights holder (Multimodal Art Projection) is recorded.",
+        "alternativeFamily": "yue",
+        "alternativeNote": "YuE1 is the intended commercially licensed lyrics-to-song option. Choosing it concerns the model weights only; it does not clear rights in your lyrics, reference recordings or generated audio."
+      },
+      "audio": {
+        "sampleRates": [48000],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSymbolicSong": true,
+        "supportsAudioArtifacts": true
+      },
+      "downloads": [
+        {
+          // The released checkpoint (candle-audio-yue2 `inventory::LM` + `QWEN_TIKTOKEN`).
+          "provider": "huggingface",
+          "repo": "m-a-p/YuE2-3B",
+          "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+          "variant": "bf16",
+          "default": true,
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "yue2_generation_config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "licenses/stable-audio-tools-MIT.txt",
+            "qwen.tiktoken"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7264046963,
+          "footprint": { "diskSizeBytes": 7264046963 }
+        },
+        {
+          // Derived locally from the bf16 original (never re-hosted). Footprint = the original plus the
+          // derived snapshot (tier weights + the byte-copied config / tokenizer / licence files; its few-KiB
+          // `yue2-tier.json` conversion manifest is not counted).
+          "provider": "huggingface",
+          "repo": "m-a-p/YuE2-3B",
+          "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+          "variant": "q8",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "yue2_generation_config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "licenses/stable-audio-tools-MIT.txt",
+            "qwen.tiktoken"
+          ],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "yue2-ggml-tier-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4259728200,
+            "weightsSha256": "9b10c9fce645ae40708c665b88696cbb0f17c946570b5c35e2567d5ae1ffa83e",
+            "reason": "CC BY-NC 4.0 weights: the engine's licence gate refuses Redistribution until an owner records a distribution basis, so the tier is derived on this machine from the verified original instead of being re-hosted."
+          },
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7264046963,
+          "footprint": { "diskSizeBytes": 11526380486 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "m-a-p/YuE2-3B",
+          "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+          "variant": "q4",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "yue2_generation_config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "licenses/stable-audio-tools-MIT.txt",
+            "qwen.tiktoken"
+          ],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "yue2-ggml-tier-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 2658814800,
+            "weightsSha256": "df443371ec5b39b3b53525bf4cb8fc36e78c3597899e35d2aef585415fb4a9a6",
+            "reason": "CC BY-NC 4.0 weights: the engine's licence gate refuses Redistribution until an owner records a distribution basis, so the tier is derived on this machine from the verified original instead of being re-hosted."
+          },
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7264046963,
+          "footprint": { "diskSizeBytes": 9925467086 }
+        },
+        {
+          // The standard decoder (`inventory::VAE_STANDARD`) — LoadSpec component `vae`.
+          "provider": "huggingface",
+          "repo": "m-a-p/YuE2-Vae",
+          "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+          "coRequisite": true,
+          "componentId": "vae",
+          "choice": { "group": "decoder", "option": "standard", "default": true },
+          "files": [
+            "config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "licenses/stable-audio-tools-MIT.txt"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 530546498,
+          "footprint": { "diskSizeBytes": 530546498 }
+        },
+        {
+          // The legacy decoder (`inventory::VAE_LEGACY`) — LoadSpec component `vae_legacy`.
+          "provider": "huggingface",
+          "repo": "m-a-p/YuE2-Vae-legacy",
+          "revision": "b54118f0fc462f08999d1ec07e88817f4ee3f770",
+          "coRequisite": true,
+          "componentId": "vae_legacy",
+          "choice": { "group": "decoder", "option": "legacy" },
+          "files": [
+            "config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "licenses/stable-audio-tools-MIT.txt"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 530546133,
+          "footprint": { "diskSizeBytes": 530546133 }
+        }
+      ],
+      "conditionalComponents": [
+        {
+          // `inventory::SHEETSAGE2` (cover closure).
+          "componentId": "yue2_sheetsage2",
+          "requiredFor": ["cover"],
+          "provider": "huggingface",
+          "repo": "m-a-p/SheetSage2",
+          "revision": "eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+          "files": [
+            "config.json",
+            "processor_config.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          ],
+          "estimatedSizeBytes": 228772419,
+          "license": "cc-by-nc-4.0",
+          "blocked": {
+            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
+            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
+          }
+        },
+        {
+          // `inventory::MERT_V2_FULLSONG` (cover closure).
+          "componentId": "yue2_mert_v2_fullsong",
+          "requiredFor": ["cover"],
+          "provider": "huggingface",
+          "repo": "m-a-p/MERT-v2-FullSong",
+          "revision": "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
+          "files": [
+            "config.json",
+            "preprocessor_config.json",
+            "weights_manifest.json",
+            "model.safetensors",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          ],
+          "estimatedSizeBytes": 2529845146,
+          "license": "cc-by-nc-4.0",
+          "blocked": {
+            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
+            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
+          }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/m-a-p/YuE2-3B"
+      },
+      "ui": {
+        "label": "YuE2 (Experimental)",
+        "description": "EXPERIMENTAL · NONCOMMERCIAL (CC BY-NC 4.0). YuE2-3B plans a song as a two-voice ABC score, then generates its semantic and acoustic tokens and decodes 48 kHz stereo through the YuE2 VAE (standard, or the legacy decoder as an add-on). A separate model from YuE1, the commercial-use lyrics-to-song option — never a substitute for it. bf16 is the released checkpoint; q8 / q4 are derived on this machine from it, not re-hosted. Candle-native on every platform. Source Apache-2.0; weights CC BY-NC 4.0; qwen.tiktoken under the Tongyi Qianwen License Agreement.",
+        "promptGuide": {
+          "title": "YuE2 Song Generation Guide",
+          "path": "/prompt-guides/yue2.md",
+          "sources": [
+            { "label": "m-a-p/YuE2-3B (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE2-3B" },
+            { "label": "YuE2 generation guide (GitHub, pinned)", "url": "https://github.com/multimodal-art-projection/YuE/blob/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e/docs/generation.md" },
+            { "label": "YuE2 model licence (GitHub, pinned)", "url": "https://github.com/multimodal-art-projection/YuE/blob/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e/MODEL_LICENSE" }
+          ]
+        }
+      }
+    },
+    {
       // MOSS-TTS-Realtime (sc-13675, epic 13400 E2) — the audio lane's first STREAMING TTS model:
       // a Qwen3-1.7B autoregressive backbone + CSM-style local/depth transformer that emits 16 RVQ
       // speech-codebook frames one block at a time, decoded to 24 kHz PCM by the separate
@@ -27418,7 +27680,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "30999af241b10f56931eb60e1b5e78c40b2d9fe1c01839d3542e8cc29094d91c",
+              "sha256": "9af8c1193c4b6c0f95cbcd79a52ff234fe0f2f480de5f56b0dd8fddfea46e172",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27447,8 +27709,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 69413,
-                  "sha256": "e7b3bef233d919abd20583128beeeda6fdd87fa992566e02563630224dc9f358"
+                  "byteSize": 69873,
+                  "sha256": "fea2623b2673a8f825e4d9101ac9b78735cdf13f9d30b9234a17de49987240ae"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
@@ -27537,8 +27799,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 147353,
-                  "sha256": "321eb8f2fe37645316b97ad26c9765a50c6fa237b1ac9e60a8f7a70436658287"
+                  "byteSize": 157333,
+                  "sha256": "42dbe3427718de672968324425e0406b0708c3061c791faef5dc442dc67950b6"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

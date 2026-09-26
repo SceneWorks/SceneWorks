@@ -41,6 +41,7 @@ pub mod memory_calibration;
 pub mod minimax_h3_turbo;
 pub mod mlx_tier_completeness;
 pub mod model_artifacts;
+pub mod model_usage_policy;
 pub mod observability;
 pub mod payload_util;
 pub mod preview_support;

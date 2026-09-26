@@ -888,8 +888,22 @@ pub(crate) async fn create_model_download_job(
         .get("variant")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Choice groups (sc-22998): of a group's options — YuE2's standard / legacy decoder — only the
+    // one the request names (else the manifest default) is queued; the others stay add-ons. An
+    // unknown group or option is refused rather than answered with a different option.
+    let choices =
+        sceneworks_core::model_artifacts::artifact_selection::resolve_co_requisite_choices(
+            &model,
+            selected_variant.as_deref(),
+            &payload.choices,
+        )
+        .map_err(|error| ApiError::bad_request(format!("Model '{model_id}': {error}")))?;
     let co_requisites =
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+        sceneworks_core::model_artifacts::artifact_selection::model_co_requisite_downloads_for_selection(
+            &model,
+            selected_variant.as_deref(),
+            &choices,
+        );
 
     // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
     // in the PATH, so it fires only when the entry that id names declares
@@ -3693,8 +3707,35 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
             &state.settings.data_dir,
             &state.settings.external_model_roots,
         )?;
+        annotate_commercial_use_alternatives(model, &selection_catalog);
     }
     Ok(models)
+}
+
+/// Resolve a declared `commercialUse` pointer against this catalog (sc-22998): a model refused on
+/// commercial-use routes gets `commercialUse.alternatives`, the ids of its `alternativeFamily` that
+/// are themselves commercially eligible here — YuE2 lists the YuE1 entries. The declared block is
+/// otherwise passed through untouched, and nothing here reroutes anything: the list is a pointer
+/// for the user, resolved by the same `commercial_use_verdict` a commercial-use route applies.
+fn annotate_commercial_use_alternatives(model: &mut Value, catalog: &[Value]) {
+    if model.get("commercialUse").is_none() {
+        return;
+    }
+    let Some(id) = model.get("id").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    if let Ok(sceneworks_core::model_usage_policy::CommercialUseVerdict::Refused {
+        alternatives,
+        ..
+    }) = sceneworks_core::model_usage_policy::commercial_use_verdict(catalog, &id)
+    {
+        if let Some(block) = model
+            .get_mut("commercialUse")
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("alternatives".to_owned(), json!(alternatives));
+        }
+    }
 }
 
 /// Add runtime-only text-encoder choices to the public model catalog. The worker owns enumeration so
@@ -6980,10 +7021,17 @@ fn install_state_for(
                 );
             }
         }
-        for co_requisite in model_co_requisite_downloads(model)
-            .into_iter()
-            .filter(|download| co_requisite_variant(download).is_none())
-        {
+        // A choice group (sc-22998, YuE2's decoder) is satisfied by ANY installed option; when none
+        // is, its default option is what the install reports missing and a repair fetches.
+        for co_requisite in co_requisite_rows_gating_install(
+            model_co_requisite_downloads(model)
+                .into_iter()
+                .filter(|download| co_requisite_variant(download).is_none())
+                .collect(),
+            |download| {
+                co_requisite_cache_health(data_dir, download).is_some_and(|health| health.installed)
+            },
+        ) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
@@ -7371,9 +7419,16 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // An absent primary remains absent even if shared files from another tier exist.
             let mut dependencies_missing = false;
             if installed || cache_incomplete {
-                for download in model_co_requisite_downloads_for_variant(
-                    model,
-                    entry.get("variant").and_then(Value::as_str),
+                // Any installed option of a choice group satisfies it (sc-22998).
+                for download in co_requisite_rows_gating_install(
+                    model_co_requisite_downloads_for_variant_all_options(
+                        model,
+                        entry.get("variant").and_then(Value::as_str),
+                    ),
+                    |download| {
+                        co_requisite_cache_health(data_dir, download)
+                            .is_some_and(|health| health.installed)
+                    },
                 )
                 .into_iter()
                 .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
@@ -9649,8 +9704,9 @@ pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requi
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
 pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
-    co_requisite_variant, is_pending_artifact_download, model_co_requisite_downloads,
-    model_co_requisite_downloads_for_variant, model_download_for_variant,
+    co_requisite_rows_gating_install, co_requisite_variant, is_pending_artifact_download,
+    model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_co_requisite_downloads_for_variant_all_options, model_download_for_variant,
 };
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't

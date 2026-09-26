@@ -139,6 +139,22 @@ import joycaptionApache20 from "../../../desktop/licenses/joycaption-source/Apac
 // Upstream algorithm + vocabulary ported into sceneworks-core's YuE2 score tools (sc-22997): the
 // yue2-music skill's own LICENSE file, kept verbatim.
 import yue2ScoreToolsApache20 from "../../../desktop/licenses/yue2-score-tools-source/Apache-2.0.txt?url&no-inline";
+// YuE2 — EXPERIMENTAL, NON-COMMERCIAL (epic sc-22988, sc-22998). Three sets of terms, kept apart:
+// the CC BY-NC 4.0 weights (YuE2-3B + both VAEs, downloaded from the upstream m-a-p repos, never
+// re-hosted) with the notices those repos ship; the Qwen tokenizer's Tongyi Qianwen Agreement +
+// Notice (the YuE2-3B repo ships neither); and the Apache-2.0 source the native engine is ported
+// from, with its MIT Oobleck VAE / SnakeBeta notices. Every file is byte-identical to the copy the
+// inference crate candle-audio-yue2 vendors and pins by SHA-256 (`license::LICENSE_TEXTS`).
+import yue2WeightsCcByNc from "../../../desktop/licenses/yue2/LICENSE.txt?url&no-inline";
+import yue2WeightsNotices from "../../../desktop/licenses/yue2/THIRD_PARTY_NOTICES.txt?url&no-inline";
+import yue2WeightsSnakeBetaMit from "../../../desktop/licenses/yue2/SnakeBeta-NVIDIA-MIT.txt?url&no-inline";
+import yue2WeightsStableAudioToolsMit from "../../../desktop/licenses/yue2/stable-audio-tools-MIT.txt?url&no-inline";
+import yue2QwenTiktokenLicense from "../../../desktop/licenses/yue2-qwen-tiktoken/LICENSE.txt?url&no-inline";
+import yue2QwenTiktokenNotice from "../../../desktop/licenses/yue2-qwen-tiktoken/NOTICE.txt?url&no-inline";
+import yue2SourceApache20 from "../../../desktop/licenses/yue2-source/Apache-2.0.txt?url&no-inline";
+import yue2SourceNotices from "../../../desktop/licenses/yue2-source/THIRD_PARTY_NOTICES.txt?url&no-inline";
+import yue2SourceSnakeBetaMit from "../../../desktop/licenses/yue2-source/SnakeBeta-NVIDIA-MIT.txt?url&no-inline";
+import yue2SourceStableAudioToolsMit from "../../../desktop/licenses/yue2-source/stable-audio-tools-MIT.txt?url&no-inline";
 
 // Maps each manifest document key to its bundled text asset URL. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -223,6 +239,16 @@ const DOCUMENT_URL = {
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
   "joycaption-source-apache": joycaptionApache20,
   "yue2-score-tools-source-apache": yue2ScoreToolsApache20,
+  "yue2-weights-cc-by-nc": yue2WeightsCcByNc,
+  "yue2-weights-third-party-notices": yue2WeightsNotices,
+  "yue2-weights-snakebeta-mit": yue2WeightsSnakeBetaMit,
+  "yue2-weights-stable-audio-tools-mit": yue2WeightsStableAudioToolsMit,
+  "yue2-qwen-tiktoken-license": yue2QwenTiktokenLicense,
+  "yue2-qwen-tiktoken-notice": yue2QwenTiktokenNotice,
+  "yue2-source-apache": yue2SourceApache20,
+  "yue2-source-third-party-notices": yue2SourceNotices,
+  "yue2-source-snakebeta-mit": yue2SourceSnakeBetaMit,
+  "yue2-source-stable-audio-tools-mit": yue2SourceStableAudioToolsMit,
 };
 
 export const bundledLicenses = (manifest.components ?? []).map((component) => ({

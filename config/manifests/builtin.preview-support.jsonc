@@ -8,10 +8,10 @@
   "generatedFrom": {
     "candle": {
       "inferenceRevision": "d2b8cb3352e1b43983efd8ac833122e95db53ae7",
-      "audioInferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd"
+      "audioInferenceRevision": "f695a35990237152451dabdf888b2bbac434af4c"
     },
     "mlx": {
-      "inferenceRevision": "ffea1439fbf24eb3887861e300037f8b510878cd"
+      "inferenceRevision": "f695a35990237152451dabdf888b2bbac434af4c"
     }
   },
   "models": {
@@ -261,6 +261,27 @@
       "candle": false
     },
     "stable_audio_3_small_sfx_base": {
+      "candle": false
+    },
+    "yue2": {
+      "candle": false
+    },
+    "yue_en_cot": {
+      "candle": false
+    },
+    "yue_en_icl": {
+      "candle": false
+    },
+    "yue_jp_kr_cot": {
+      "candle": false
+    },
+    "yue_jp_kr_icl": {
+      "candle": false
+    },
+    "yue_zh_cot": {
+      "candle": false
+    },
+    "yue_zh_icl": {
       "candle": false
     },
     "z_image": {

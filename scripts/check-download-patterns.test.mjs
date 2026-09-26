@@ -180,17 +180,27 @@ test("the committed evidence grades the real catalog clean", async () => {
 // on one repo@revision key, bringing the current census to 107.
 // SC-21306 adds two exact historical rows for the audited artifact importer; they are not manifest
 // claims and are guarded separately against absence, identity drift, and file-census drift.
-test("all 107 current and two frozen legacy download keys use immutable commit SHAs", async () => {
+//
+// sc-22998 (YuE2, three upstream m-a-p keys) retired the pinned census count (107) in favour of the
+// shape it stood for, per FEATURE_DEVELOPMENT.md ("tests over measured corpora assert shape, never
+// exact populations"): every current claim key is recorded, and the evidence is exactly the current
+// claims plus the frozen importer authorities — so a re-record that adds or drops a key needs no edit
+// here, while an unrecorded claim, a stray recorded key or a moving revision still fails.
+test("every current and frozen legacy download key uses an immutable commit SHA", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 107, "update the 107/107 disclosure when the real key census changes");
+  assert.ok(keys.size > 0, "the real catalog declares download claims");
   assert.equal(
     evidence.repos.length,
-    109,
-    "the evidence census must be the 107 current claims plus two frozen importer authorities",
+    keys.size + FROZEN_LEGACY_EVIDENCE_AUTHORITIES.length,
+    "the evidence census must be the current claims plus the frozen importer authorities",
   );
+  const recorded = new Set(evidence.repos.map(({ key }) => key));
+  for (const key of keys) {
+    assert.ok(recorded.has(key), `${key} is a current claim with no recorded listing`);
+  }
   for (const claim of claims) {
     assert.match(
       claim.revision ?? "",

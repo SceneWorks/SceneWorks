@@ -161,6 +161,10 @@ export function videoModelUsable(model, caps) {
 //                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
 //                  ACE-Step's conditioning is "AudioEdit" (a music-edit signal), so it does NOT match.
 //   * sfx        — a general text-to-audio generator (audio.sampleRates[]) that is none of the above. → MOSS.
+// A model that plans a SYMBOLIC SONG (audio.supportsSymbolicSong → YuE2, sc-22998) serves none of
+// the four: its request is a style + lyrics + score plan with a decoder choice, which none of these
+// modes builds, and it would otherwise fall through to sfx on its sample rate alone. It is surfaced
+// by its own experimental surface (sc-23000), never through an existing mode.
 function audioBlock(model) {
   return model?.audio && typeof model.audio === "object" ? model.audio : null;
 }
@@ -196,9 +200,13 @@ function audioHasVoiceCloneConditioning(audio) {
   return conditioning.some((kind) => VOICE_CLONE_CONDITIONING.has(String(kind).toLowerCase()));
 }
 
+function audioPlansSymbolicSong(audio) {
+  return audio?.supportsSymbolicSong === true;
+}
+
 export function audioModelServesMode(model, mode) {
   const audio = audioBlock(model);
-  if (!audio) {
+  if (!audio || audioPlansSymbolicSong(audio)) {
     return false;
   }
   if (mode === "speech") {
