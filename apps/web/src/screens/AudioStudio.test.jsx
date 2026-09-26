@@ -2039,3 +2039,563 @@ describe("Audio nav registration (sc-13407)", () => {
     expect(audioItem.icon).toBeTruthy();
   });
 });
+
+// YuE lyrics-to-song fixtures (epic sc-19373, sc-19385) — mirror the seeded catalog entries: a
+// segmented-lyrics music model with no edit surface; the ICL variant adds ReferenceAudio
+// conditioning + a reference window. Tiers ride the /models variant matrix (bf16/q8/q4 downloads).
+const yueVariants = (installed) =>
+  ["q4", "q8", "bf16"].map((variant) => ({
+    variant,
+    installState: installed.includes(variant) ? "installed" : "missing",
+  }));
+const YUE_COT = {
+  id: "yue_en_cot",
+  name: "YuE English CoT (Lyrics-to-Song)",
+  type: "audio",
+  hasVariantMatrix: true,
+  variants: yueVariants(["q4", "q8"]),
+  audio: {
+    languages: ["en"],
+    sampleRates: [44100],
+    supportsMultiSpeaker: false,
+    supportsGuidance: true,
+    supportsNegativePrompt: false,
+    supportsSegmentedLyrics: true,
+    supportsRepetitionPenalty: true,
+    supportsReferenceRegion: false,
+    supportsOutputLimiter: true,
+  },
+  ui: {
+    label: "YuE English CoT",
+    promptGuide: { title: "YuE Lyrics-to-Song Guide", path: "/prompt-guides/yue.md" },
+  },
+};
+const YUE_ICL = {
+  ...YUE_COT,
+  id: "yue_en_icl",
+  name: "YuE English ICL (Lyrics-to-Song)",
+  audio: { ...YUE_COT.audio, conditioning: ["ReferenceAudio"], supportsReferenceRegion: true },
+  ui: { ...YUE_COT.ui, label: "YuE English ICL" },
+};
+
+describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <AudioStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const withYue = (overrides = {}) =>
+    baseContext({
+      audioModels: [...ALL_AUDIO, YUE_COT, YUE_ICL],
+      models: [...ALL_AUDIO, YUE_COT, YUE_ICL],
+      createAudioJob: vi.fn(async () => ({ id: "yue-job" })),
+      rememberLocalGenerationJob: vi.fn(),
+      ...overrides,
+    });
+  const setValue = async (el, value) => {
+    const proto =
+      el.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement
+        : el.tagName === "SELECT"
+          ? window.HTMLSelectElement
+          : window.HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(proto.prototype, "value").set.call(el, value);
+      el.dispatchEvent(
+        new window.Event(el.tagName === "SELECT" ? "change" : "input", { bubbles: true }),
+      );
+    });
+  };
+  const pressEnter = async (el) => {
+    await act(async () => {
+      el.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+  };
+  const selectModel = async (id) => setValue(modelSelect(container), id);
+  const submitForm = async () => {
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+  };
+  const caption = (label) => label.childNodes[0].textContent.trim();
+  const settingsCaptions = () => [...container.querySelectorAll(".settings-bar label")].map(caption);
+  const advancedCaptions = () => [...container.querySelectorAll(".advanced-panel label")].map(caption);
+  const advancedField = (text) =>
+    [...container.querySelectorAll(".advanced-panel label")].find((label) =>
+      label.textContent.trim().startsWith(text),
+    );
+  const generateButton = () => buttonWithText(container, "Generate");
+  const yueBand = () => container.querySelector('[data-testid="yue-reference-band"]');
+
+  // Fill the minimum a YuE render needs: one lyric section + one genre tag.
+  async function fillSong() {
+    await setValue(
+      container.querySelector('[aria-label="Section 1 lyrics"]'),
+      "Staring at the sunset\ncolors paint the sky",
+    );
+    const tagInput = container.querySelector('[aria-label="Add genre tags"]');
+    await setValue(tagInput, "uplifting, female");
+    await pressEnter(tagInput);
+  }
+
+  it("AC1: a YuE model swaps in the section-labelled lyrics editor, genre tags and song knobs (Advanced collapsed)", async () => {
+    await render(withYue());
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+
+    // Section-labelled lyrics editor replaces the prompt; starter song = [verse] + [chorus].
+    const editor = container.querySelector('[data-testid="yue-lyrics-editor"]');
+    expect(editor).toBeTruthy();
+    expect(container.querySelector('textarea[aria-label="Prompt"]')).toBeNull();
+    const labelSelects = [...editor.querySelectorAll("select")];
+    expect(labelSelects.map((select) => select.value)).toEqual(["verse", "chorus"]);
+    expect([...labelSelects[0].options].map((option) => option.textContent)).toEqual([
+      "[intro]",
+      "[verse]",
+      "[chorus]",
+      "[bridge]",
+      "[outro]",
+    ]);
+    await click(container.querySelector('[data-testid="yue-add-section"]'));
+    expect(editor.querySelectorAll(".script-segment").length).toBe(3);
+
+    // Genre tags: free text + upstream's top-200 list as suggestions, the browser collapsed.
+    const tags = container.querySelector('[data-testid="yue-genre-tags"]');
+    expect(tags).toBeTruthy();
+    const datalist = container.querySelector("#yue-genre-tag-suggestions");
+    const suggestions = [...datalist.querySelectorAll("option")].map((option) => option.value);
+    expect(suggestions).toContain("Pop");
+    expect(suggestions).toContain("airy vocal");
+    // Upstream's case-variant duplicates ("Pop" / "pop") are folded.
+    expect(suggestions).not.toContain("pop");
+    expect(tags.querySelector("details").open).toBe(false);
+
+    // Settings bar: ACE-Step's BPM / Key / Length / lyrics are gone; Sections + tier are in.
+    expect(settingsCaptions()).toEqual(["Model", "Language", "Sections", "Quant tier"]);
+    expect(container.querySelector(".settings-field-lyrics")).toBeNull();
+    expect(container.querySelector(".studio-source-band:not(.yue-reference-band)")).toBeNull();
+    const tierOptions = [...container.querySelector(".settings-field-tier select").options];
+    expect(tierOptions.map((option) => [option.value, option.disabled])).toEqual([
+      ["q4", false],
+      ["q8", false],
+      ["bf16", true],
+    ]);
+
+    // Advanced starts collapsed; opened it carries the R5 knobs (and no ACE-Step Steps).
+    expect(container.querySelector(".advanced-panel")).toBeNull();
+    await click(container.querySelector(".advanced-section-toggle"));
+    expect(advancedCaptions()).toEqual([
+      "Seed",
+      "",
+      "Guidance scale",
+      "Max tokens per section",
+      "Repetition penalty",
+      "Output limiter",
+      "Sample rate",
+    ]);
+    expect(advancedField("Guidance (CFG)").querySelector('input[type="checkbox"]').checked).toBe(true);
+    // The engine's stage-1 context is 16384 positions and keeps `16384 - budget - 1` for the prompt,
+    // so 16382 is the largest per-section budget it (and the API) accepts.
+    expect(advancedField("Max tokens per section").querySelector("input").getAttribute("max")).toBe(
+      "16382",
+    );
+  });
+
+  it("AC1: submits the lyrics, genre tags and every R5 knob in the sc-19384 payload shape", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "yue-job" }));
+    await render(withYue({ createAudioJob }));
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    expect(generateButton().disabled).toBe(true);
+
+    await setValue(container.querySelector('[aria-label="Section 1 lyrics"]'), "Staring at the sunset");
+    await setValue(container.querySelector('[aria-label="Section 2 label"]'), "bridge");
+    await setValue(container.querySelector('[aria-label="Section 2 lyrics"]'), "  Every road you take  ");
+    // Lyrics alone are not enough — the genre tags are the prompt.
+    expect(generateButton().disabled).toBe(true);
+    const tagInput = container.querySelector('[aria-label="Add genre tags"]');
+    await setValue(tagInput, "inspiring, bright vocal");
+    await pressEnter(tagInput);
+    // A suggestion chip adds a tag too.
+    await click(
+      buttonWithText(container.querySelector('[data-testid="yue-tag-suggestions"]'), "Pop"),
+    );
+    expect(generateButton().disabled).toBe(false);
+
+    await setValue(container.querySelector(".settings-field-segments input"), "3");
+    await setValue(container.querySelector(".settings-field-tier select"), "q8");
+    await click(container.querySelector(".advanced-section-toggle"));
+    await setValue(advancedField("Seed").querySelector("input"), "11");
+    await setValue(advancedField("Guidance scale").querySelector("input"), "1.75");
+    await setValue(advancedField("Max tokens per section").querySelector("input"), "1500");
+    await setValue(advancedField("Repetition penalty").querySelector("input"), "1.25");
+    await setValue(advancedField("Output limiter").querySelector("select"), "rescale");
+
+    await submitForm();
+    expect(createAudioJob).toHaveBeenCalledTimes(1);
+    expect(createAudioJob.mock.calls[0][0]).toEqual({
+      model: "yue_en_cot",
+      prompt: "inspiring bright vocal Pop",
+      lyrics: "[verse]\nStaring at the sunset\n\n[bridge]\nEvery road you take",
+      language: "en",
+      targetDurationSecs: undefined,
+      seed: 11,
+      segments: 3,
+      maxNewTokensPerSegment: 1500,
+      repetitionPenalty: 1.25,
+      guidanceEnabled: true,
+      guidance: 1.75,
+      quantTier: "q8",
+      outputLimiter: "rescale",
+    });
+  });
+
+  it("AC1: guidance off sends guidanceEnabled:false with no scale; cleared knobs are omitted", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "yue-job" }));
+    await render(withYue({ createAudioJob }));
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    await fillSong();
+    await click(container.querySelector(".advanced-section-toggle"));
+    await setValue(advancedField("Guidance scale").querySelector("input"), "2");
+    await click(advancedField("Guidance (CFG)").querySelector("input"));
+    expect(advancedField("Guidance scale").querySelector("input").disabled).toBe(true);
+    await submitForm();
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.prompt).toBe("uplifting female");
+    expect(payload.guidanceEnabled).toBe(false);
+    expect(payload.guidance).toBeUndefined();
+    expect(payload.segments).toBeUndefined();
+    expect(payload.maxNewTokensPerSegment).toBeUndefined();
+    expect(payload.repetitionPenalty).toBeUndefined();
+    expect(payload.outputLimiter).toBeUndefined();
+    // No ACE-Step knob ever reaches a YuE job (the API refuses them).
+    for (const key of ["bpm", "musicalKey", "steps", "editMode", "sourceAudioAssetId"]) {
+      expect(payload[key]).toBeUndefined();
+    }
+  });
+
+  it("AC1: the output limiter is gated on audio.supportsOutputLimiter", async () => {
+    const noLimiter = { ...YUE_COT, audio: { ...YUE_COT.audio, supportsOutputLimiter: undefined } };
+    await render(withYue({ audioModels: [ACESTEP, noLimiter], models: [ACESTEP, noLimiter] }));
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    await click(container.querySelector(".advanced-section-toggle"));
+    expect(advancedField("Repetition penalty")).toBeTruthy();
+    expect(advancedField("Output limiter")).toBeFalsy();
+  });
+
+  it("AC1: ACE-Step's Music controls are unchanged when YuE models are installed", async () => {
+    // Explicit field list, identical with and without YuE in the catalog.
+    const aceControls = async (context) => {
+      await render(context);
+      await click(modeTab(container, "Music"));
+      await selectModel("acestep_v15_turbo");
+      const bar = settingsCaptions();
+      const prompt = Boolean(container.querySelector('textarea[aria-label="Prompt"]'));
+      const band = container.querySelector(".studio-source-band")?.textContent.includes("Source track");
+      const yue = [
+        '[data-testid="yue-lyrics-editor"]',
+        '[data-testid="yue-genre-tags"]',
+        '[data-testid="yue-reference-band"]',
+        ".settings-field-segments",
+        ".settings-field-tier",
+      ].some((selector) => container.querySelector(selector));
+      await click(container.querySelector(".advanced-section-toggle"));
+      const advanced = advancedCaptions();
+      await act(async () => root.render(null));
+      window.localStorage.clear();
+      return { bar, prompt, band, yue, advanced };
+    };
+    const expected = {
+      bar: ["Model", "Language", "Length (s)", "BPM", "Key", "Lyrics"],
+      prompt: true,
+      band: true,
+      yue: false,
+      advanced: ["Seed", "Steps", "Sample rate"],
+    };
+    expect(await aceControls(baseContext({ createAudioJob: vi.fn() }))).toEqual(expected);
+    expect(await aceControls(withYue())).toEqual(expected);
+  });
+
+  it("AC1: an ACE-Step submit carries none of the YuE keys", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "ace-job" }));
+    await render(withYue({ createAudioJob }));
+    await click(modeTab(container, "Music"));
+    await selectModel("acestep_v15_turbo");
+    await setValue(container.querySelector('textarea[aria-label="Prompt"]'), "lofi piano");
+    await submitForm();
+    expect(Object.keys(createAudioJob.mock.calls[0][0]).sort()).toEqual(
+      [
+        "bpm",
+        "language",
+        "lyrics",
+        "model",
+        "musicalKey",
+        "prompt",
+        "seed",
+        "steps",
+        "targetDurationSecs",
+      ].sort(),
+    );
+  });
+
+  it("AC2: the ICL reference controls are disabled for a CoT model and never sent", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ iclReferenceAssetId: "ref-song", iclStartSecs: "5" }),
+    );
+    const createAudioJob = vi.fn(async () => ({ id: "yue-job" }));
+    await render(
+      withYue({ createAudioJob, assets: [{ id: "ref-song", type: "audio", displayName: "Ref" }] }),
+    );
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    const band = yueBand();
+    expect(band.disabled).toBe(true);
+    const controls = [...band.querySelectorAll("button, input")];
+    expect(controls.length).toBeGreaterThan(0);
+    // A disabled <fieldset> disables every descendant control (buttons + the window inputs).
+    expect(controls.every((control) => control.matches(":disabled"))).toBe(true);
+    expect(band.querySelector(".settings-field-icl-start input")).toBeTruthy();
+    await fillSong();
+    await submitForm();
+    const payload = createAudioJob.mock.calls[0][0];
+    for (const key of [
+      "iclMode",
+      "iclReferenceAssetId",
+      "iclVocalAssetId",
+      "iclInstrumentalAssetId",
+      "iclStartSecs",
+      "iclEndSecs",
+    ]) {
+      expect(payload[key]).toBeUndefined();
+    }
+  });
+
+  it("AC2: an ICL model enables the band, runs plain with no reference and sends single-track ICL", async () => {
+    const createAudioJob = vi.fn(async () => ({ id: "yue-job" }));
+    await render(withYue({ createAudioJob }));
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_icl");
+    expect(yueBand().disabled).toBe(false);
+    await fillSong();
+    // No reference song picked → an `_icl` checkpoint runs as a plain prompt run (sc-19384 R1):
+    // Generate is live and no ICL field is sent.
+    expect(generateButton().disabled).toBe(false);
+    await submitForm();
+    expect(createAudioJob.mock.calls[0][0].iclMode).toBeUndefined();
+    expect(createAudioJob.mock.calls[0][0].iclStartSecs).toBeUndefined();
+    createAudioJob.mockClear();
+    await act(async () => root.render(null));
+
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({
+        mode: "music",
+        model: "yue_en_icl",
+        iclReferenceAssetId: "ref-song",
+        iclStartSecs: "5",
+        iclEndSecs: "25",
+      }),
+    );
+    await render(
+      withYue({ createAudioJob, assets: [{ id: "ref-song", type: "audio", displayName: "Ref" }] }),
+    );
+    expect(modelSelect(container).value).toBe("yue_en_icl");
+    await fillSong();
+    expect(generateButton().disabled).toBe(false);
+    await submitForm();
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.iclMode).toBe("single");
+    expect(payload.iclReferenceAssetId).toBe("ref-song");
+    expect(payload.iclVocalAssetId).toBeUndefined();
+    expect(payload.iclStartSecs).toBe(5);
+    expect(payload.iclEndSecs).toBe(25);
+  });
+
+  it("AC2: dual-track ICL needs BOTH the vocal and instrumental tracks", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ mode: "music", model: "yue_en_icl", iclVocalAssetId: "vox" }),
+    );
+    const createAudioJob = vi.fn(async () => ({ id: "yue-job" }));
+    await render(withYue({ createAudioJob }));
+    await fillSong();
+    await click(buttonWithText(yueBand(), "Vocal + instrumental"));
+    expect(yueBand().textContent).toContain("Instrumental track");
+    expect(generateButton().disabled).toBe(true);
+    await act(async () => root.render(null));
+
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({
+        mode: "music",
+        model: "yue_en_icl",
+        iclMode: "dual",
+        iclVocalAssetId: "vox",
+        iclInstrumentalAssetId: "inst",
+      }),
+    );
+    await render(withYue({ createAudioJob }));
+    await fillSong();
+    expect(generateButton().disabled).toBe(false);
+    await submitForm();
+    const payload = createAudioJob.mock.calls[0][0];
+    expect(payload.iclMode).toBe("dual");
+    expect(payload.iclVocalAssetId).toBe("vox");
+    expect(payload.iclInstrumentalAssetId).toBe("inst");
+    expect(payload.iclReferenceAssetId).toBeUndefined();
+  });
+
+  it("AC1: a refined space-separated tag line splits into individual tag chips", async () => {
+    const fetchGuide = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      text: async () => "# YuE guide",
+    });
+    const refinePrompt = vi.fn(async () => "uplifting female airy vocal");
+    await render(
+      withYue({
+        refinePrompt,
+        models: [
+          ...ALL_AUDIO,
+          YUE_COT,
+          YUE_ICL,
+          { id: PROMPT_REFINE_MODEL_ID, name: "Prompt Refiner", installState: "installed" },
+        ],
+      }),
+    );
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    const tagInput = container.querySelector('[aria-label="Add genre tags"]');
+    await setValue(tagInput, "pop");
+    await pressEnter(tagInput);
+    await click(buttonWithText(container, "Refine my prompt"));
+    await settle();
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({ prompt: "pop" }));
+    await click(buttonWithText(container, "Apply"));
+    const chips = [
+      ...container.querySelectorAll('[data-testid="yue-genre-tags"] .yue-genre-tags__chosen .preset-chip > span'),
+    ].map((chip) => chip.textContent);
+    expect(chips).toEqual(["uplifting", "female", "airy vocal"]);
+    // Each is its own removable tag, and the suggestion browser shows it selected.
+    expect(container.querySelector('[aria-label="Remove tag female"]')).toBeTruthy();
+    await click(buttonWithText(container.querySelector('[aria-label="Tag category"]'), "Vocal timbre"));
+    expect(
+      buttonWithText(container.querySelector('[data-testid="yue-tag-suggestions"]'), "airy vocal").getAttribute(
+        "aria-pressed",
+      ),
+    ).toBe("true");
+    fetchGuide.mockRestore();
+  });
+
+  it("AC1: the tag-category picker is a pressed-button group, not a partial ARIA tab pattern", async () => {
+    await render(withYue());
+    await click(modeTab(container, "Music"));
+    await selectModel("yue_en_cot");
+    const tags = container.querySelector('[data-testid="yue-genre-tags"]');
+    expect(tags.querySelector('[role="tab"], [role="tablist"]')).toBeNull();
+    const group = tags.querySelector('[role="group"][aria-label="Tag category"]');
+    const buttons = [...group.querySelectorAll("button")];
+    expect(buttons.length).toBe(5);
+    expect(buttons.map((button) => button.getAttribute("aria-pressed"))).toEqual([
+      "true",
+      "false",
+      "false",
+      "false",
+      "false",
+    ]);
+  });
+
+  it("AC2: an ICL start at or past the effective end (empty end ⇒ 30 s) blocks Generate with a hint", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-project_1",
+      JSON.stringify({ mode: "music", model: "yue_en_icl", iclReferenceAssetId: "ref-song", iclStartSecs: "31" }),
+    );
+    await render(withYue({ assets: [{ id: "ref-song", type: "audio", displayName: "Ref" }] }));
+    await fillSong();
+    expect(generateButton().disabled).toBe(true);
+    expect(container.querySelector('[data-testid="yue-icl-window-error"]').textContent).toContain("30 s");
+    // An explicit end past the start clears it.
+    await setValue(container.querySelector(".settings-field-icl-end input"), "40");
+    expect(generateButton().disabled).toBe(false);
+    expect(container.querySelector('[data-testid="yue-icl-window-error"]')).toBeNull();
+  });
+
+  it("AC3: the result card plays the mix and offers a download for each stem", async () => {
+    const mix = {
+      id: "yue-mix",
+      projectId: "project_1",
+      type: "audio",
+      displayName: "Song",
+      file: { path: "assets/audios/genset_y/yue_mix.wav", mimeType: "audio/wav", duration: 60 },
+      extra: { audioStem: "mix", stemAssetIds: [{ stem: "vocals", assetId: "yue-vocals" }] },
+    };
+    const stem = (name) => ({
+      id: `yue-${name}`,
+      projectId: "project_1",
+      type: "audio",
+      displayName: `Song (${name})`,
+      file: { path: `assets/audios/genset_y/yue_${name}.wav`, mimeType: "audio/wav", duration: 60 },
+      extra: { audioStem: name, mixAssetId: "yue-mix" },
+    });
+    const job = {
+      id: "yue-done",
+      type: "audio_generate",
+      status: "completed",
+      createdAt: "2026-09-24T12:00:00Z",
+      payload: { model: "yue_en_cot", prompt: "uplifting pop", lyrics: "[verse]\nla" },
+      result: { assetIds: ["yue-mix", "yue-vocals", "yue-instrumental"] },
+    };
+    await render(
+      withYue({
+        assets: [mix, stem("vocals"), stem("instrumental")],
+        // The stems also arrive in the project's recent clips — they must not re-list as takes.
+        recentAudioAssets: [stem("instrumental"), stem("vocals"), mix],
+        audioLocalJobs: [job],
+      }),
+    );
+    const results = container.querySelector(".studio-results");
+    const cards = [...results.querySelectorAll('[data-testid="audio-take-card"]')];
+    expect(cards.length).toBe(1);
+    const card = cards[0];
+    const vocals = card.querySelector('[aria-label="Download vocals stem"]');
+    const instrumental = card.querySelector('[aria-label="Download instrumental stem"]');
+    expect(vocals.textContent).toContain("Vocals");
+    expect(instrumental.textContent).toContain("Instrumental");
+    // Each stem button downloads its OWN asset (the hidden anchor beside it).
+    expect(vocals.previousElementSibling.getAttribute("href")).toContain("yue_vocals.wav");
+    expect(instrumental.previousElementSibling.getAttribute("href")).toContain(
+      "yue_instrumental.wav",
+    );
+
+    // Play loads the MIX; the deck offers the stems too.
+    await click(card.querySelector('[aria-label="Play take 1"]'));
+    const deck = results.querySelector('[data-testid="audio-play-deck"]');
+    expect(deck.querySelector("audio").getAttribute("src")).toContain("yue_mix.wav");
+    expect(deck.querySelector('[aria-label="Download vocals stem"]')).toBeTruthy();
+    expect(deck.querySelector('[aria-label="Download instrumental stem"]')).toBeTruthy();
+  });
+});

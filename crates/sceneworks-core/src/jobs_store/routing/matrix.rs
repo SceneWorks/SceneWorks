@@ -2310,7 +2310,14 @@ fn precision_cell(
         // therefore `(descriptor || artifact) && production route`, and the per-family probe in
         // `rich_runtime_mutations_change_descriptor_and_dispatch_answers` proves it holds for
         // every family rather than for one spot-checked model (sc-20799).
-        descriptor || manifest_artifact_tier_support(model, tier, backend)
+        //
+        // AUDIO has no per-model route table: `audio_generate` routes by the lane's capability
+        // advertisement alone (gaps.rs), so `backend_supports` holds for ANY audio model id and
+        // cannot be the route conjunct for an audio artifact row. An audio tier is therefore served
+        // only when the runtime descriptor declares it — the first tiered audio family (YuE,
+        // sc-19383) is what exposed that an artifact row alone would otherwise claim the cell.
+        descriptor
+            || (model.model_type != "audio" && manifest_artifact_tier_support(model, tier, backend))
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = support(candle_facts) && backend_supports(&job, candle_facts)?;

@@ -46,7 +46,7 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **All 100 current keys and two frozen legacy-import keys are pinned to immutable lowercase
+//  1. **Every current key and the two frozen legacy-import keys are pinned to immutable lowercase
 //     40-hex revisions.** A git SHA's file
 //     listing is timeless — re-reading it in a year returns the same bytes. There is nothing to
 //     decay. sc-18924 closed the last 11-key moving-default-branch window, and the offline gate now

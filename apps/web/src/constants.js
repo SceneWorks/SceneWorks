@@ -1177,6 +1177,45 @@ const seededFallbackModels = [
       },
     },
   },
+  // YuE lyrics2song (epic sc-19373, sc-19383) — six stage-1 checkpoints, mirrored from
+  // builtin.models.jsonc. `supportsSegmentedLyrics` is the Music-mode signal for a model with no
+  // edit surface; the ICL variants' ReferenceAudio is a song prompt, not a voice-clone signal.
+  ...[
+    ["en", "English", ["en"]],
+    ["zh", "Chinese", ["zh"]],
+    ["jp_kr", "Japanese / Korean", ["ja", "ko"]],
+  ].flatMap(([lang, langLabel, languages]) =>
+    ["cot", "icl"].map((mode) => {
+      const icl = mode === "icl";
+      const modeLabel = icl ? "ICL" : "CoT";
+      return {
+        id: `yue_${lang}_${mode}`,
+        name: `YuE ${langLabel} ${modeLabel} (Lyrics-to-Song)`,
+        type: "audio",
+        macOnly: false,
+        audio: {
+          languages,
+          sampleRates: [44100],
+          ...(icl ? { conditioning: ["ReferenceAudio"] } : {}),
+          supportsMultiSpeaker: false,
+          supportsGuidance: true,
+          supportsNegativePrompt: false,
+          supportsSegmentedLyrics: true,
+          supportsRepetitionPenalty: true,
+          supportsReferenceRegion: icl,
+          supportsOutputLimiter: true,
+        },
+        ui: {
+          label: `YuE ${langLabel} ${modeLabel}`,
+          description: `YuE lyrics-to-song model for ${langLabel} lyrics — full songs with vocals from structured lyrics and genre tags, returned as a 44.1 kHz mix plus vocal and instrumental stems.${icl ? " Conditions on a reference clip (in-context learning)." : ""} Candle-native on every platform. Apache-2.0.`,
+          promptGuide: {
+            title: "YuE Lyrics-to-Song Guide",
+            path: "/prompt-guides/yue.md",
+          },
+        },
+      };
+    }),
+  ),
   {
     id: "openvoice_v2",
     name: "OpenVoice V2 (Voice Conversion)",

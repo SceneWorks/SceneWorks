@@ -177,19 +177,28 @@ test("the committed evidence grades the real catalog clean", async () => {
 // (`autoDownload: false`) changes when they are fetched, not whether their pattern claims must
 // resolve against an immutable tree. SC-24114 publishes the Qwen-Image 2.1 q8/q4 re-host
 // (`SceneWorks/qwen-image-2-1-mlx`); its two rows drop `pendingArtifact` and become ordinary claims
-// on one repo@revision key, bringing the current census to 107.
+// on one repo@revision key, bringing the current census to 107. SC-19383 (YuE, epic 19373) adds
+// eight SceneWorks re-host keys and retires the integer: the assertion is now the set shape.
 // SC-21306 adds two exact historical rows for the audited artifact importer; they are not manifest
 // claims and are guarded separately against absence, identity drift, and file-census drift.
-test("all 107 current and two frozen legacy download keys use immutable commit SHAs", async () => {
+test("every current and both frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 107, "update the 107/107 disclosure when the real key census changes");
+  // SHAPE, not census (sc-19383): the evidence is exactly the current claim keys plus the two frozen
+  // importer authorities, each recorded once. A pinned integer here was re-bumped by every catalog
+  // addition (95 -> 107 above) without saying anything the set equality below does not.
+  assert.ok(keys.size > 0, "the real catalog must contribute download keys");
+  assert.equal(
+    new Set(evidence.repos.map(({ key }) => key)).size,
+    evidence.repos.length,
+    "each repo@revision key is recorded once",
+  );
   assert.equal(
     evidence.repos.length,
-    109,
-    "the evidence census must be the 107 current claims plus two frozen importer authorities",
+    keys.size + FROZEN_LEGACY_EVIDENCE_AUTHORITIES.length,
+    "the evidence census must be the current claims plus the two frozen importer authorities",
   );
   for (const claim of claims) {
     assert.match(

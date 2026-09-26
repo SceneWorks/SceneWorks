@@ -1229,6 +1229,50 @@ pub(crate) struct AudioJobRequest {
     /// Bounded to a blanket sane 0..=1 range here; the converter re-checks it (finite, >= 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) match_strength: Option<f32>,
+    /// Segmented-song controls (YuE lyrics2song, sc-19384). `segments` = how many lyric segments to
+    /// render, `maxNewTokensPerSegment` = the stage-1 token budget per segment, `repetitionPenalty` =
+    /// the stage-1 sampler penalty. Ride the worker-side `AudioParams` fields of the same names;
+    /// accepted only for a model whose manifest advertises `audio.supportsSegmentedLyrics` /
+    /// `audio.supportsRepetitionPenalty`. `None` ⇒ the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) segments: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_new_tokens_per_segment: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repetition_penalty: Option<f32>,
+    /// Guidance on/off (sc-19384). `false` switches classifier-free guidance off (the worker sends a
+    /// `0.0` scale, which a segmented-song model reads as "no CFG") and may not be combined with a
+    /// `guidance` scale; `true`/absent sends `guidance` as given (absent ⇒ the model's schedule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) guidance_enabled: Option<bool>,
+    /// In-context-learning reference mode for a YuE `_icl` checkpoint (sc-19384): `"single"` (one
+    /// mixed clip, `iclReferenceAssetId`) or `"dual"` (`iclVocalAssetId` + `iclInstrumentalAssetId`).
+    /// Library `type: "audio"` asset ids, resolved project-scoped by the worker. Distinct from
+    /// `referenceAudioAssetId`, which routes a job onto the voice-clone chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_reference_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_vocal_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_instrumental_asset_id: Option<String>,
+    /// The window of the ICL reference the prompt uses, in seconds (sc-19384). `None` ⇒ the model's
+    /// default window (YuE: 0–30 s); an absent end ⇒ to the clip end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_start_secs: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) icl_end_secs: Option<f32>,
+    /// Weight tier (`bf16` / `q8` / `q4`) for a model that ships physical per-tier downloads (YuE,
+    /// sc-19384). Must name one of the model's `downloads[].variant` tiers. `None` ⇒ the default
+    /// tier when installed, else the first installed tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quant_tier: Option<String>,
+    /// Output limiter for a segmented-song model (YuE, upstream `--rescale`, sc-19384): `"clamp"`
+    /// (hard clip at ±0.99, the default) or `"rescale"` (scale the whole stem so its peak is 0.99).
+    /// `None` ⇒ the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output_limiter: Option<String>,
     #[serde(default)]
     pub(crate) seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]

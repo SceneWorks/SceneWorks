@@ -284,7 +284,7 @@ export function AudioClock({ current, total, className = "audio-clock" }) {
  * already carries the auth ticket in remote-auth mode, sc-8810) rather than a fetch, so the
  * browser owns the save dialog — same mechanism the Simple UI's DownloadButton uses.
  */
-export function AudioDownloadButton({ asset, className = "", label = null, iconSize = 14 }) {
+export function AudioDownloadButton({ asset, className = "", label = null, iconSize = 14, ariaLabel = "Download" }) {
   const anchorRef = useRef(null);
   return (
     <>
@@ -299,10 +299,10 @@ export function AudioDownloadButton({ asset, className = "", label = null, iconS
         download
       </a>
       <button
-        aria-label="Download"
+        aria-label={ariaLabel}
         className={className}
         onClick={() => anchorRef.current?.click()}
-        title="Download"
+        title={ariaLabel}
         type="button"
       >
         <Icon.Download size={iconSize} />

@@ -2195,6 +2195,33 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     );
 }
 
+/// The video reference command stays byte-identical PCM-16 now that YuE's ICL decode shares its builder.
+#[test]
+fn reference_audio_command_is_byte_identical_pcm16_normalization() {
+    use super::reference_audio::reference_audio_ffmpeg_args;
+    let args = reference_audio_ffmpeg_args(Path::new("/in/voice.wav"), Path::new("/out/ref.wav"));
+    assert_eq!(
+        args,
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-i",
+            "/in/voice.wav",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ar",
+            "32000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "/out/ref.wav",
+        ]
+    );
+}
+
 /// sc-24070: the normalization command pins the engine's CHANNEL layout as well as its rate.
 ///
 /// The ffmpeg-free half of the defect, so it runs on every lane including hosted macOS CI, which
