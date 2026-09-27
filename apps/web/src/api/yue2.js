@@ -1,4 +1,4 @@
-import { apiFetch } from "../api.js";
+import { API_BASE_URL, ApiError, apiFetch } from "../api.js";
 
 // YuE2 (epic 22988) client seam: the song-job route, the server-side licence acknowledgment and
 // the score-version / comparison records. Every call goes through `apiFetch`, so a refusal arrives
@@ -81,4 +81,58 @@ export function createYue2Comparison(projectId, body, token) {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// ---- cover from a recording (sc-23002) ------------------------------------------------------
+
+// POST /api/v1/models/:id/conditional-components/:purpose/download
+// { licenseAcknowledged, requestedGpu? } → { purpose, jobs, components: [{ componentId, repo,
+// revision, status: "queued" | "installed", jobId? }] }. Refusals: 403 `license_acknowledgment_required`,
+// 403 `component_blocked` (context.blocked[]), 404 `conditional_components_not_declared`.
+export function downloadYue2ConditionalComponents(modelId, purpose, body, token) {
+  return apiFetch(`/api/v1/models/${enc(modelId)}/conditional-components/${enc(purpose)}/download`, token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// GET → { items: [TranscriptionRecord], unreadable, renderNotice }.
+export function listYue2Transcriptions(projectId, token) {
+  return apiFetch(`${projectBase(projectId)}/transcriptions`, token);
+}
+
+// GET → { transcription: TranscriptionRecord, scores: { full: abc | null, melody: abc | null } }.
+export function getYue2Transcription(projectId, transcriptionId, token) {
+  return apiFetch(`${projectBase(projectId)}/transcriptions/${enc(transcriptionId)}`, token);
+}
+
+// One export of a transcription's review artifact (MIDI, LAB, ABC, JSON), by its manifest path.
+export function yue2TranscriptionFileUrl(projectId, transcriptionId, path) {
+  const file = String(path ?? "")
+    .split("/")
+    .map(enc)
+    .join("/");
+  return `${API_BASE_URL}${projectBase(projectId)}/transcriptions/${enc(transcriptionId)}/files/${file}`;
+}
+
+// The export's bytes, fetched with the session token (the files route is not a media-ticket route,
+// so a bare link would be refused in remote-auth mode). A refusal is an `ApiError` carrying the
+// server's typed code — never an empty file.
+export async function fetchYue2TranscriptionFile(projectId, transcriptionId, path, token) {
+  const headers = new Headers();
+  if (token) {
+    headers.set("X-SceneWorks-Token", token);
+  }
+  const response = await fetch(yue2TranscriptionFileUrl(projectId, transcriptionId, path), { headers });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload?.detail;
+    throw new ApiError(typeof detail === "string" ? detail : `Request failed with ${response.status}`, {
+      status: response.status,
+      detail,
+      code: payload?.code,
+      context: payload?.context,
+    });
+  }
+  return response.blob();
 }

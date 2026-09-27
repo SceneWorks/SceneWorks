@@ -19,10 +19,10 @@ import {
   SAMPLING_FIELDS,
   SAMPLING_TOKEN_DEFAULTS,
   YUE2_MODEL_ID,
-  blockedTranscription,
   buildYue2JobRequest,
   commercialAlternatives,
   installJobStatusLabel,
+  isCoverComponentDownload,
   composeKind,
   restoreYue2Settings,
   stripYue2ExportHeader,
@@ -54,6 +54,7 @@ import {
   Yue2RunCard,
   Yue2ScoreWorkbench,
 } from "./audioYue2Parts.jsx";
+import { Yue2RecordingCover } from "./audioYue2Recording.jsx";
 
 // YuE2 Song Lab (sc-23000, epic 22988) — the Audio Studio's EXPERIMENTAL surface for YuE2.
 //
@@ -98,6 +99,8 @@ const PRESET_EXCLUDED = new Set([
   "suppliedScore",
   "coverScore",
   "coverTranslatedFrom",
+  "transcribeAssetId",
+  "transcriptionId",
   "selectedVersionId",
   "compareA",
   "compareB",
@@ -283,6 +286,7 @@ export function Yue2SongLab({ header }) {
     jobs = [],
     assets = [],
     jobAction,
+    importAsset,
     createModelDownloadJob,
     requestedGpu,
     preferencesHydrated,
@@ -424,9 +428,19 @@ export function Yue2SongLab({ header }) {
   const [submitting, setSubmitting] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
 
+  // The version a cover follows: a transcribed one must be covered in its own mode (sc-23002).
+  const coverVersion = versions.find((version) => version.id === settings.coverVersionId) ?? null;
+  const problemContext = { hasProject: Boolean(projectId), coverVersion };
+
+  // The server says the acceptance lapsed (the terms changed, or it was withdrawn): re-gate.
+  function licenseLapsed() {
+    writeLicenseAck(model.id, false);
+    setAck({ status: "ready", acknowledged: false, error: null });
+  }
+
   async function submit(kind, target = {}) {
     if (submitting) return;
-    const problems = yue2RequestProblems(kind, settings, target, { hasProject: Boolean(projectId) });
+    const problems = yue2RequestProblems(kind, settings, target, problemContext);
     if (problems.length) {
       setSubmitError(problems.join(" "));
       return;
@@ -441,8 +455,7 @@ export function Yue2SongLab({ header }) {
     } catch (error) {
       setSubmitError(error);
       if (error?.code === "license_acknowledgment_required") {
-        writeLicenseAck(model.id, false);
-        setAck({ status: "ready", acknowledged: false, error: null });
+        licenseLapsed();
       }
     } finally {
       setSubmitting(false);
@@ -518,11 +531,16 @@ export function Yue2SongLab({ header }) {
   const installed = yue2ModelInstalled(model);
   const tierRows = yue2TierRows(model);
   const installedTiers = tierRows.filter((row) => row.installed).map((row) => row.tier);
+  // YuE2's own installs; the cover closure's downloads are shown by the recording flow.
   const downloads = (jobs ?? []).filter(
-    (job) => job.type === "model_download" && job.payload?.modelId === model.id && !terminalStatuses.has(job.status),
+    (job) =>
+      job.type === "model_download" &&
+      job.payload?.modelId === model.id &&
+      !terminalStatuses.has(job.status) &&
+      !isCoverComponentDownload(job, model),
   );
   const kind = composeKind(settings);
-  const hasProject = { hasProject: Boolean(projectId) };
+  const hasProject = problemContext;
   const composeProblems = yue2RequestProblems(kind, settings, {}, hasProject);
   const coverProblems = yue2RequestProblems("cover", settings, {}, hasProject);
   // The job kind the visible surface submits: its controls are the only ones that reach a request,
@@ -546,7 +564,6 @@ export function Yue2SongLab({ header }) {
         to keep it.
       </p>
     ) : null;
-  const blocked = blockedTranscription(model);
   const restorable = runs.map(yue2RunView).filter((view) => view.restorable);
   // A restored plan renders its own words: the Compose fields show them read-only and the request
   // carries them verbatim (the server refuses any other style or lyrics for a saved plan).
@@ -856,24 +873,24 @@ export function Yue2SongLab({ header }) {
 
             {settings.tab === "cover" ? (
               <div className="yue2-panel" data-testid="yue2-cover">
-                <div className="yue2-transcription" data-testid="yue2-transcription-blocked">
-                  <div className="yue2-inline">
-                    <strong>Transcribe a recording into a score</strong>
-                    <span className="status-badge danger">Blocked</span>
-                  </div>
-                  {blocked.length ? (
-                    <>
-                      <p>{blocked[0].reason}</p>
-                      <p className="yue2-muted">Unblocks when: {blocked[0].unblock}</p>
-                      <p className="yue2-muted">Blocked components: {blocked.map((row) => row.componentId).join(", ")}</p>
-                    </>
-                  ) : (
-                    <p>Recording transcription is not available in this build.</p>
-                  )}
-                  <p className="yue2-muted">
-                    Start a cover from a reviewed score instead — an existing score version or ABC you paste below.
-                  </p>
-                </div>
+                <Yue2RecordingCover
+                  assets={assets}
+                  importAsset={importAsset}
+                  jobs={jobs}
+                  model={model}
+                  onCancel={(target) => jobAction?.(target, "cancel")}
+                  onLicenseLapsed={licenseLapsed}
+                  onTranscribe={(target) => submit("transcribe", target)}
+                  projectId={projectId}
+                  refreshKey={finishedKey}
+                  requestedGpu={requestedGpu}
+                  runs={runs}
+                  settings={settings}
+                  submitting={submitting}
+                  token={token}
+                  update={update}
+                  versions={versions}
+                />
                 <div className="yue2-inline">
                   <span className="eyebrow">Cover score</span>
                   <Segmented
@@ -897,6 +914,8 @@ export function Yue2SongLab({ header }) {
                       {versions.map((version) => (
                         <option key={version.id} value={version.id}>
                           {version.id} · {version.editOperation ?? version.origin} · {version.cot}
+                          {version.transcription ? ` · from a recording (${version.transcription.mode})` : ""}
+                          {version.nonCommercial ? " · Noncommercial" : ""}
                         </option>
                       ))}
                     </select>
@@ -1142,6 +1161,7 @@ export function Yue2SongLab({ header }) {
                 onDecodeAgain={(sourceJobId, decoder) => submit("decode", { sourceJobId, decoder })}
                 onFetchVersionAbc={fetchVersionAbc}
                 onOpenVersion={(versionId) => update({ tab: "scores", selectedVersionId: versionId })}
+                onOpenTranscription={(transcriptionId) => update({ tab: "cover", transcriptionId })}
                 onRestorePlan={(jobId) => update({ tab: "compose", planSource: "restore", restorePlanJobId: jobId })}
               />
             ))}

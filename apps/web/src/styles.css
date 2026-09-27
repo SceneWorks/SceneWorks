@@ -19136,6 +19136,98 @@ button.audio-wave {
   border-color: color-mix(in oklch, var(--danger) 35%, var(--border));
 }
 
+/* Cover from a recording (sc-23002). */
+.yue2-recording,
+.yue2-transcribe,
+.yue2-transcription-review,
+.yue2-transcription-modes,
+.yue2-transcription-mode,
+.yue2-exports,
+.yue2-octave {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.yue2-recording,
+.yue2-cover-setup {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.yue2-cover-setup {
+  display: grid;
+  gap: 10px;
+  border-color: color-mix(in oklch, var(--warn) 40%, var(--border));
+}
+
+.yue2-cover-setup p,
+.yue2-octave p,
+.yue2-transcription-review p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.yue2-cover-setup .progress-track {
+  width: 140px;
+}
+
+.yue2-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.yue2-transcription-mode {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.yue2-transcription-warnings {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+}
+
+.yue2-transcription-warnings li {
+  overflow-wrap: anywhere;
+}
+
+.yue2-exports a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.yue2-octave .yue2-inspect {
+  overflow-x: auto;
+}
+
+.yue2-octave__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.yue2-octave__table th,
+.yue2-octave__table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.yue2-octave__table tr.is-flagged td {
+  background: var(--warn-soft);
+}
+
 .yue2-muted {
   color: var(--text-muted);
   font-size: 12.5px;

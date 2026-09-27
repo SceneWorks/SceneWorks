@@ -4,15 +4,18 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   YUE2_FIELD_KINDS,
-  blockedTranscription,
   buildEditOperation,
   buildYue2JobRequest,
   defaultEditDraft,
   defaultYue2Settings,
   installJobStatusLabel,
+  isCoverComponentDownload,
+  midiNoteLabel,
   seedValueProblem,
   stripYue2ExportHeader,
+  transcriptionSettingsProblems,
   yue2AbcExport,
+  yue2CoverSetup,
   yue2FieldDisabledReason,
   restoreYue2Settings,
   usagePolicyChips,
@@ -21,6 +24,7 @@ import {
   yue2RunExport,
   yue2RunView,
   yue2TierRows,
+  yue2TranscriptionView,
 } from "./yue2Lab.js";
 
 // sc-23000: the YuE2 Song Lab's pure half. The component tests assert the bodies the lab actually
@@ -68,6 +72,10 @@ const EVERY_CONTROL = {
   coverMode: "melody",
   coverKeep: "vocal",
   coverTranslatedFrom: "[verse]\nhola",
+  transcribeAssetId: "asset_take",
+  transcribeMaxSeconds: "90",
+  transcribeOverlapSeconds: "150",
+  transcribeLookaheadSeconds: "50",
 };
 
 // The request contract shared with the server (sc-22988 review item 7): a fixture of the field
@@ -93,6 +101,9 @@ function webJobRequests() {
     ["renderVersion", EVERY_CONTROL, { versionId: "ver_1" }],
     ["decode", EVERY_CONTROL, { sourceJobId: "job_src", decoder: "standard" }],
     ["create", { ...defaultYue2Settings(), lyrics: "la la" }, {}],
+    // sc-23002: a transcription with and without its window settings.
+    ["transcribe", EVERY_CONTROL, { sourceAudioAssetId: "asset_take" }],
+    ["transcribe", defaultYue2Settings(), { sourceAudioAssetId: "asset_take" }],
   ];
   return scenarios.map(([kind, settings, target]) => buildYue2JobRequest(kind, settings, target, "auto"));
 }
@@ -110,13 +121,17 @@ describe("YuE2 request builder (sc-23000)", () => {
     // Mutation that reds this: any change to what `buildYue2JobRequest` sends for these settings.
     expect(JSON.parse(readFileSync(WEB_REQUESTS_PATH, "utf8"))).toEqual(current);
     expect(new Set(current.bodies.map((body) => body.kind))).toEqual(
-      new Set(["create", "plan", "fromPlan", "cover", "renderVersion", "decode"]),
+      new Set(["create", "plan", "fromPlan", "cover", "renderVersion", "decode", "transcribe"]),
     );
   });
 
   it("never sends a field to a kind that does not read it", () => {
-    for (const kind of ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"]) {
-      const body = buildYue2JobRequest(kind, EVERY_CONTROL, { versionId: "ver_1", sourceJobId: "job_src" });
+    for (const kind of ["create", "plan", "fromPlan", "cover", "renderVersion", "decode", "transcribe"]) {
+      const body = buildYue2JobRequest(kind, EVERY_CONTROL, {
+        versionId: "ver_1",
+        sourceJobId: "job_src",
+        sourceAudioAssetId: "asset_take",
+      });
       for (const field of Object.keys(body)) {
         if (field === "kind" || field === "requestedGpu") continue;
         if (field === "memory") {
@@ -224,9 +239,27 @@ const YUE2_ENTRY = {
     {
       componentId: "yue2_sheetsage2",
       requiredFor: ["cover"],
-      blocked: { reason: "blocked: owner licensing decision", unblock: "the owner records a basis" },
+      repo: "m-a-p/SheetSage2",
+      revision: "eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+      estimatedSizeBytes: 228772419,
+      license: "cc-by-nc-4.0",
+      nonCommercial: true,
+      licenseBasis: "Owner decision: CC BY-NC 4.0, noncommercial, attribution per NOTICE.",
+      installState: "installed",
+    },
+    {
+      componentId: "yue2_mert_v2_fullsong",
+      requiredFor: ["cover"],
+      repo: "m-a-p/MERT-v2-FullSong",
+      revision: "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
+      estimatedSizeBytes: 2529845146,
+      license: "cc-by-nc-4.0",
+      nonCommercial: true,
+      licenseBasis: "Owner decision: CC BY-NC 4.0, noncommercial, attribution per NOTICE.",
+      installState: "incomplete",
     },
   ],
+  conditionalPurposes: { cover: { installState: "incomplete", blocked: false } },
   variants: [
     { variant: "bf16", installState: "installed" },
     { variant: "q8", installState: "derivationPending", derivationPending: true },
@@ -245,15 +278,26 @@ describe("YuE2 model identity (sc-23000)", () => {
     expect(usagePolicyChips(null, YUE2_ENTRY)).toEqual(["YuE2 (v2)", "Experimental", "Noncommercial", "CC BY-NC 4.0"]);
   });
 
-  it("reports the recorded transcription block", () => {
-    expect(blockedTranscription(YUE2_ENTRY)).toEqual([
-      {
-        componentId: "yue2_sheetsage2",
-        repo: undefined,
-        reason: "blocked: owner licensing decision",
-        unblock: "the owner records a basis",
-      },
+  // sc-23002: the cover closure is installable (no block), per component and as a purpose.
+  it("reads the cover closure's install state, sizes and licence from the catalog", () => {
+    const setup = yue2CoverSetup(YUE2_ENTRY);
+    // Mutation that reds this: reading `installed` from any single component instead of the purpose.
+    expect(setup).toMatchObject({ declared: true, installState: "incomplete", installed: false, blocked: false });
+    expect(setup.totalBytes).toBe(228772419 + 2529845146);
+    expect(setup.components.map((row) => [row.componentId, row.installState, row.license, row.nonCommercial])).toEqual([
+      ["yue2_sheetsage2", "installed", "CC BY-NC 4.0", true],
+      ["yue2_mert_v2_fullsong", "incomplete", "CC BY-NC 4.0", true],
     ]);
+    expect(yue2CoverSetup({ ...YUE2_ENTRY, conditionalPurposes: { cover: { installState: "installed" } } }).installed).toBe(true);
+    // A block declared again is still reported, with its reason.
+    const reblocked = {
+      ...YUE2_ENTRY,
+      conditionalComponents: [{ ...YUE2_ENTRY.conditionalComponents[0], blocked: { reason: "r", unblock: "u" } }],
+    };
+    expect(yue2CoverSetup(reblocked)).toMatchObject({ blocked: true, components: [{ blocked: { reason: "r", unblock: "u" } }] });
+    // A cover-closure download is told apart from YuE2's own tier installs by its repo.
+    expect(isCoverComponentDownload({ type: "model_download", payload: { modelId: "yue2", repo: "m-a-p/SheetSage2" } }, YUE2_ENTRY)).toBe(true);
+    expect(isCoverComponentDownload({ type: "model_download", payload: { modelId: "yue2", repo: "m-a-p/YuE2-3B" } }, YUE2_ENTRY)).toBe(false);
   });
 
   it("treats a derived tier as installable and an unpublished one as not", () => {
@@ -450,5 +494,112 @@ describe("YuE2 fix pass (sc-23000)", () => {
     );
     expect(stripYue2ExportHeader(exported)).toBe("X:1\nT:\n");
     expect(stripYue2ExportHeader("X:1\n% verse\n")).toBe("X:1\n% verse\n");
+  });
+});
+
+describe("YuE2 cover from a recording (sc-23002)", () => {
+  it("sends a transcription exactly its recording and window settings", () => {
+    // Mutation that reds this: dropping `transcription` from YUE2_FIELD_KINDS (the block never sends).
+    expect(buildYue2JobRequest("transcribe", EVERY_CONTROL, { sourceAudioAssetId: "asset_take" }, "auto")).toEqual({
+      kind: "transcribe",
+      sourceAudioAssetId: "asset_take",
+      transcription: { maxSeconds: 90, overlapSeconds: 150, lookaheadSeconds: 50 },
+      requestedGpu: "auto",
+    });
+    // Unset settings are omitted so the engine defaults apply.
+    expect(buildYue2JobRequest("transcribe", defaultYue2Settings(), { sourceAudioAssetId: "asset_take" })).toEqual({
+      kind: "transcribe",
+      sourceAudioAssetId: "asset_take",
+    });
+  });
+
+  it("never names a recording in a cover", () => {
+    const body = buildYue2JobRequest("cover", EVERY_CONTROL, { sourceAudioAssetId: "asset_take" });
+    // Mutation that reds this: adding sourceAudioAssetId to a cover (field table or cover block).
+    expect(body).not.toHaveProperty("sourceAudioAssetId");
+    expect(body.cover).not.toHaveProperty("sourceAudioAssetId");
+    expect(body.cover.versionId).toBe("ver_1");
+  });
+
+  it("checks the window rule over the resolved values", () => {
+    const at = (patch) => transcriptionSettingsProblems({ ...defaultYue2Settings(), ...patch });
+    expect(at({})).toEqual([]);
+    expect(at({ transcribeOverlapSeconds: "299.5", transcribeLookaheadSeconds: "299.5" })).toEqual([]);
+    // Mutation that reds this: `overlap > 300` instead of `>= 300`.
+    expect(at({ transcribeOverlapSeconds: "300" })).toEqual(["The window overlap must be at least 0 and under 300 seconds."]);
+    // An overlap below the DEFAULT look-ahead (100 s) is refused — the rule reads resolved values.
+    // Mutation that reds this: comparing only a typed look-ahead.
+    expect(at({ transcribeOverlapSeconds: "50" })).toEqual(["The look-ahead must be between 0 and the window overlap (50 s)."]);
+    expect(at({ transcribeLookaheadSeconds: "-1" })).toEqual(["The look-ahead must be between 0 and the window overlap (200 s)."]);
+    expect(at({ transcribeMaxSeconds: "0" })).toEqual(["The transcription length limit must be more than 0 seconds."]);
+    expect(yue2RequestProblems("transcribe", defaultYue2Settings(), {})).toEqual(["Choose the recording to transcribe."]);
+  });
+
+  it("covers a transcribed score only in its own mode", () => {
+    const settings = { ...defaultYue2Settings(), lyrics: "x", coverVersionId: "ver_t", coverMode: "full" };
+    const coverVersion = { id: "ver_t", cot: "melody", transcription: { transcriptionId: "t", mode: "melody" } };
+    // Mutation that reds this: dropping the transcribed-mode check from yue2RequestProblems.
+    expect(yue2RequestProblems("cover", settings, {}, { coverVersion })).toEqual([
+      "This transcribed score is a melody-only score — cover it in melody mode.",
+    ]);
+    expect(yue2RequestProblems("cover", { ...settings, coverMode: "melody" }, {}, { coverVersion })).toEqual([]);
+    // A version that did not come from a recording keeps the existing rules.
+    expect(yue2RequestProblems("cover", settings, {}, { coverVersion: { id: "ver_t", cot: "melody" } })).toEqual([]);
+  });
+
+  it("reads the review, warnings, octave evidence, readiness and exports off the record", () => {
+    const view = yue2TranscriptionView({
+      id: "yue2t_1",
+      device: "metal",
+      sourceAudioAssetId: "asset_take",
+      source: { name: "take.wav", duration_seconds: 31.5 },
+      review: {
+        voices: {
+          vocal: { notes: 0, min_pitch: null, max_pitch: null, median_pitch: null },
+          instrumental: { notes: 3, min_pitch: 48, max_pitch: 55, median_pitch: 50 },
+        },
+        distinct_chords: ["C:maj"],
+        distinct_chord_roots: 1,
+        keys: ["C:major"],
+        sections: ["verse"],
+        bars: 4,
+        diagnostics: ["inferred 4/4"],
+        warnings: [{ code: "ignored", message: "the record's warnings win" }],
+      },
+      warnings: [{ code: "empty_melody", message: "no melody notes" }],
+      octaveEvidence: {
+        method: "m",
+        transcribed_midi_range: [60, 72],
+        notes_checked: 4,
+        notes_with_more_energy_at_f0_half: 3,
+        fraction_f0_half_dominant: 0.75,
+        notes: [{ start: 0.5, midi: 64 }],
+      },
+      readiness: { melody: { ready: false, reason: "the transcription has no melody notes" }, full: { ready: true } },
+      versions: { melody: null, full: "ver_full" },
+      versionErrors: { full: "unsupported notation" },
+      exports: [
+        { path: "chord.lab", kind: "lab", sha256: "a" },
+        { path: "melody.mid", kind: "midi", sha256: "b" },
+        { path: "score.abc", kind: "abc", sha256: "c" },
+        { path: "vocal.mid", kind: "midi", sha256: "d" },
+      ],
+    });
+    expect(view.warnings).toEqual([{ code: "empty_melody", message: "no melody notes" }]);
+    expect(view.readiness.melody).toEqual({ ready: false, reason: "the transcription has no melody notes" });
+    expect(view.readiness.full).toEqual({ ready: true, reason: "" });
+    expect(view.versionErrors).toEqual([{ mode: "full", message: "unsupported notation" }]);
+    expect(view.octave).toMatchObject({ checked: 4, f0HalfDominant: 3, fraction: 0.75, range: [60, 72] });
+    // Mutation that reds this: grouping exports in manifest order instead of by kind.
+    expect(view.exportGroups.map((group) => [group.kind, group.files.map((file) => file.path)])).toEqual([
+      ["midi", ["melody.mid", "vocal.mid"]],
+      ["lab", ["chord.lab"]],
+      ["abc", ["score.abc"]],
+    ]);
+    expect(view.instrumental).toEqual({ notes: 3, minPitch: 48, maxPitch: 55, medianPitch: 50 });
+    expect(view.device).toBe("metal");
+    expect(midiNoteLabel(60)).toBe("C4 (60)");
+    expect(midiNoteLabel(69.5)).toBe("A#4 (69.5)");
+    expect(midiNoteLabel(null)).toBe("—");
   });
 });

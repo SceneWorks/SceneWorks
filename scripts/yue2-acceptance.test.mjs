@@ -2,15 +2,27 @@
 // stage timing, WAV evidence, memory parsing, record validation and summary rendering. The driver's
 // service half (API + worker + real renders) runs only on the terminal hosts.
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { detPow2, detSin, generateSilence, generateTestRecording, MELODY, RECORDING_GENERATOR_ID } from "./lib/yue2-test-recording.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 import {
   CASES,
+  COVER_CLOSURE_ROUTE,
   COVERED_ELSEWHERE,
+  EXPECTED_TRANSCRIPTION_DEVICE,
+  TRANSCRIPTION_ARTIFACT_SCHEMA,
+  TRANSCRIPTION_COMPONENT_IDS,
+  conditionalComponentAssertions,
+  coverFromTranscriptionAssertions,
+  emptyMelodyAssertions,
+  transcriptionAssertions,
+  transcriptionDeviceAssertions,
+  verifyTranscriptionArtifact,
   RECORD_SCHEMA,
   SONG_RUN_FILES,
   buildSummary,
@@ -63,7 +75,7 @@ test("the plan runs every case on a real run and skips only with a stated reason
   const dry = planCases({ platform: "metal", dryRun: true });
   assert.deepEqual(
     dry.filter((entry) => entry.action === "run").map((entry) => entry.id),
-    ["catalog-preflight", "isolation-v1-v2", "transcription-blocked", "licence-gate"],
+    ["catalog-preflight", "isolation-v1-v2", "licence-gate", "transcription-closure"],
   );
   for (const entry of dry.filter((item) => item.action === "skip")) assert.match(entry.reason, /dry run/);
   // The operator's --skip is recorded as such.
@@ -349,11 +361,15 @@ test("a record stands as evidence only when it is complete; a non-pass must say 
   assert.throws(broken({ assertions: [] }), /asserted nothing/);
   assert.throws(broken({ status: "skipped" }), /must say why/);
   assert.throws(broken({ status: "failed", reason: " " }), /must say why/);
-  assert.throws(broken({ status: "blocked", reason: "x" }), /only an expected refusal/);
+  // No case expects a blocker any more (AT2's transcription path runs for real), so even a
+  // well-formed blocked record is refused — it becomes a FAILED case in the driver, never a blocker.
+  // Mutation: drop the expectBlocked check in validateRecord → the first throw below does not fire.
   const blockers = [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }];
-  validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [], blockers }));
-  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [] })), /reason and unblock/);
-  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "x", jobs: [], blockers: [{ reason: "r" }] })), /reason and unblock/);
+  for (const item of CASES) {
+    assert.throws(() => validateRecord(passedRecord(item.id, { status: "blocked", reason: "x", jobs: [], blockers })), /only an expected refusal/, item.id);
+  }
+  assert.throws(broken({ status: "blocked", reason: "x" }), /reason and unblock/);
+  assert.throws(broken({ status: "blocked", reason: "x", jobs: [], blockers: [{ reason: "r" }] }), /reason and unblock/);
   assert.throws(broken({ jobs: [{ ...job, output: { ...job.output, runAudioSha256: undefined } }] }), /no output sha256/);
   assert.throws(broken({ jobs: [{ ...job, truncated: { abc: false } }] }), /no truncation flags/);
   assert.throws(broken({ jobs: [{ ...job, device: null }] }), /device\/dtype/);
@@ -366,9 +382,9 @@ test("a record stands as evidence only when it is complete; a non-pass must say 
 function summaryOf(statuses, meta = {}) {
   const records = CASES.map((item) => ({
     ...passedRecord(item.id, { jobs: [] }),
-    status: statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed"),
-    reason: statuses[item.id] && statuses[item.id] !== "passed" ? `why ${item.id}` : item.expectBlocked ? "blocked as designed" : null,
-    blockers: (statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed")) === "blocked"
+    status: statuses[item.id] ?? "passed",
+    reason: statuses[item.id] && statuses[item.id] !== "passed" ? `why ${item.id}` : null,
+    blockers: statuses[item.id] === "blocked"
       ? [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]
       : undefined,
   }));
@@ -376,14 +392,17 @@ function summaryOf(statuses, meta = {}) {
 }
 
 test("the verdict passes only a complete run: any failure fails it, any skip or dry run leaves it incomplete", () => {
-  // The designed transcription refusal is an open owner decision: never a plain pass, never exit 0.
-  const blocked = summaryOf({});
+  // Every case passing is a clean pass now that no case expects a blocker.
+  const clean = summaryOf({});
+  assert.equal(clean.verdict, "pass");
+  assert.equal(clean.counts.blocked, 0);
+  assert.deepEqual(clean.blockers, []);
+  // The machinery stays: a blocked path is an open owner decision, never a plain pass, never exit 0.
+  const blocked = summaryOf({ "transcribe-cover": "blocked" });
   assert.equal(blocked.verdict, "pass-with-blockers");
   assert.equal(blocked.counts.blocked, 1);
-  assert.deepEqual(blocked.blockers, [{ caseId: "transcription-blocked", acceptance: ["AT1"], componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]);
+  assert.deepEqual(blocked.blockers, [{ caseId: "transcribe-cover", acceptance: ["AT1"], componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]);
   assert.equal(exitCodeFor(blocked), 2);
-  const clean = summaryOf({ "transcription-blocked": "passed" });
-  assert.equal(clean.verdict, "pass");
   assert.equal(exitCodeFor(clean), 0);
   assert.equal(exitCodeFor(summaryOf({ "batch-serial": "failed" })), 1);
   assert.equal(exitCodeFor(summaryOf({ "batch-serial": "skipped" })), 1);
@@ -413,11 +432,19 @@ test("the markdown table has one row per case, carries hashes not audio, and esc
   assert.match(markdown, /CC BY-NC 4\.0/);
   assert.doesNotMatch(markdown, /\.wav/);
   // A blocker is listed with its reason and unblock condition, as an owner decision.
-  const withBlocker = renderMarkdown(summaryOf({}));
+  const withBlocker = renderMarkdown(summaryOf({ "transcribe-cover": "blocked" }));
   assert.match(withBlocker, /Verdict: \*\*pass-with-blockers\*\*/);
   assert.match(withBlocker, /## Blockers — owner decision required \(not a pass\)/);
-  assert.match(withBlocker, /\*\*transcription-blocked\*\* \(AT1\) — yue2_sheetsage2: owner licensing decision\. Unblock: record a licence basis/);
-  assert.doesNotMatch(renderMarkdown(summaryOf({ "transcription-blocked": "passed" })), /Blockers/);
+  assert.match(withBlocker, /\*\*transcribe-cover\*\* \(AT1\) — yue2_sheetsage2: owner licensing decision\. Unblock: record a licence basis/);
+  assert.doesNotMatch(renderMarkdown(summaryOf({})), /Blockers/);
+  // A transcription case lists its generated recording (digest, not audio) and its transcription.
+  const transcribed = passedRecord("transcribe-cover", {
+    recording: { assetId: "asset_rec", sha256: "e".repeat(64), durationSeconds: 21.5, rms: 0.125, generator: { id: "sceneworks-yue2-ode-to-joy-v1" } },
+    jobs: [{ jobId: "job_t", kind: "transcribe", status: "completed", device: "cpu", transcriptionId: "yue2tx_1", manifestSha256: "f".repeat(64), warnings: [{ code: "w" }] }],
+  });
+  const withRecording = renderMarkdown(buildSummary([transcribed], { platform: "metal" }));
+  assert.match(withRecording, /transcribe-cover: sceneworks-yue2-ode-to-joy-v1 sha256 e{64}, 21\.5 s, rms 0\.1250 → yue2tx_1 on cpu, manifest f{16}, 1 warning\(s\)/);
+  assert.doesNotMatch(withRecording, /\.wav/);
 });
 
 const SHELL = {
