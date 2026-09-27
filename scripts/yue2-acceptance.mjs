@@ -8,7 +8,8 @@
 //
 //   node scripts/yue2-acceptance.mjs --platform metal|cuda --out <dir>
 //        [--data-dir <dir>] [--hf-home <dir>] [--api-bin <path>] [--skip <case>]... [--dry-run]
-//        [--gpu-id N] [--port N] [--allow-metal-worker-kill] [--job-timeout-minutes N]
+//        [--gpu-id N] [--port N] [--ffmpeg-bin <path>] [--allow-metal-worker-kill]
+//        [--job-timeout-minutes N]
 //
 // Runbook (Metal under the watchdog, CUDA by dispatch): docs/epic-22988-yue2-terminal.md.
 //
@@ -220,6 +221,7 @@ export function parseArgs(argv) {
     else if (arg === "--data-dir") options.dataDir = value();
     else if (arg === "--hf-home") options.hfHome = value();
     else if (arg === "--api-bin") options.apiBin = value();
+    else if (arg === "--ffmpeg-bin") options.ffmpegBin = value();
     else if (arg === "--skip") options.skip.push(value());
     else if (arg === "--gpu-id") options.gpuId = value();
     else if (arg === "--port") options.port = Number(value());
@@ -750,6 +752,26 @@ export const RESOLVED_CACHE_DEFAULT_ENV = Object.freeze({
   SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS: "1209600",
 });
 
+/** Resolve one real decoder before launching services; the source shell's SCENEWORKS_FFMPEG is ignored. */
+export async function resolveFfmpeg(explicit, { base = process.env, platform = process.platform } = {}) {
+  const executable = platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const candidates = explicit
+    ? [path.resolve(explicit)]
+    : String(base.PATH ?? "").split(platform === "win32" ? ";" : ":")
+      .filter(Boolean).map((dir) => path.resolve(dir.replace(/^"|"$/g, ""), executable));
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const { stdout } = await execFile(candidate, ["-version"], { timeout: 10_000, maxBuffer: 64 * 1024 });
+      const version = stdout.split(/\r?\n/, 1)[0]?.trim();
+      if (version?.startsWith("ffmpeg version ")) return { path: candidate, version };
+    } catch { /* Try another PATH entry; an explicit invalid binary fails below. */ }
+  }
+  fail(explicit
+    ? `--ffmpeg-bin ${explicit} is not a working ffmpeg binary (-version failed)`
+    : "ffmpeg is required for recording transcription; put it on PATH or pass --ffmpeg-bin <path>");
+}
+
 /**
  * Where the services run differently from the shipped desktop, and why. Recorded in every summary.
  * Everything else in `serviceEnv` is the desktop's own spawn environment (apps/desktop/src/setup.rs
@@ -758,7 +780,7 @@ export const RESOLVED_CACHE_DEFAULT_ENV = Object.freeze({
  */
 export function serviceDeviations(platform) {
   const out = [
-    "SCENEWORKS_FFMPEG is not set: the desktop points it at its bundled ffmpeg; YuE2 jobs never shell out to ffmpeg.",
+    "SCENEWORKS_FFMPEG points to the probed host ffmpeg; the desktop points it at its bundled binary. Recording transcription uses this decoder.",
   ];
   if (platform === "metal") {
     out.push("The Metal worker gets no SCENEWORKS_PARENT_PID: its parent-death exit drops the render mid-command-buffer, the host-wedging kill this driver never performs; the API keeps it.");
@@ -773,8 +795,9 @@ export function serviceDeviations(platform) {
  * built from a base with EVERY inherited SCENEWORKS_* / HF_* / CUDA_VISIBLE_DEVICES / TRANSFORMERS_*
  * variable removed, so the shell a run is started from cannot change what is measured.
  */
-export function serviceEnv({ platform, role, base = process.env, url, port, dataDir, configDir, hfHome, workerId, gpuId, driverPid = process.pid, offline = false, extra = {} }) {
+export function serviceEnv({ platform, role, base = process.env, url, port, dataDir, configDir, hfHome, ffmpegBin, workerId, gpuId, driverPid = process.pid, offline = false, extra = {} }) {
   if (!["api", "worker"].includes(role)) fail(`unknown service role ${role}`);
+  if (!ffmpegBin || !path.isAbsolute(ffmpegBin)) fail("a probed absolute ffmpeg path is required for both services");
   const env = {};
   for (const [key, value] of Object.entries(base)) {
     if (/^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/i.test(key) || key.toUpperCase() === "CUDA_VISIBLE_DEVICES") continue;
@@ -785,6 +808,7 @@ export function serviceEnv({ platform, role, base = process.env, url, port, data
     SCENEWORKS_CONFIG_DIR: configDir,
     // The desktop sets HF_HOME only (macOS / Windows); the hub is <HF_HOME>/hub.
     HF_HOME: hfHome,
+    SCENEWORKS_FFMPEG: ffmpegBin,
     ...RESOLVED_CACHE_DEFAULT_ENV,
   });
   if (role === "api") {
@@ -932,6 +956,7 @@ class Service {
       dataDir: this.paths.dataDir,
       configDir: this.paths.configDir,
       hfHome: this.paths.hfHome,
+      ffmpegBin: this.options.ffmpegBin,
       workerId: this.workerId,
       gpuId: this.options.gpuId,
       offline: this.offline,
@@ -2258,9 +2283,12 @@ export async function main(argv = process.argv.slice(2)) {
   for (const dir of [paths.records, paths.logs, paths.dataDir, paths.configDir, paths.hfHub]) await mkdir(dir, { recursive: true });
   options.apiBin = path.resolve(options.apiBin ?? path.join(ROOT, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
   if (!existsSync(options.apiBin)) fail(`no API binary at ${options.apiBin}; build it first (cargo build --release --locked -p sceneworks-rust-api${options.platform === "cuda" ? " --features backend-candle" : ""})`);
+  const ffmpeg = await resolveFfmpeg(options.ffmpegBin);
+  options.ffmpegBin = ffmpeg.path;
 
   const startedAt = nowIso();
   const identity = await runIdentity(options.apiBin);
+  identity.ffmpeg = ffmpeg;
   identity.hfHome = { path: paths.hfHome, hub: paths.hfHub, mode: hubMode };
   const plan = planCases(options);
   const service = new Service(options, paths);

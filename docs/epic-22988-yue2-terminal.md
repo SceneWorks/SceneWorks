@@ -23,6 +23,8 @@ Each acceptance case writes one record to `<out>/evidence/records/<case>.json`, 
 - for transcription, the generated source recording's SHA-256 and RMS, a re-hash of the review
   manifest and every listed artifact, replay and unload evidence, warnings and readiness; covers
   also verify the reviewed score version, source recording, transcriber residency and output asset;
+- the absolute ffmpeg binary path and its probed version; the same path is given to the API and
+  worker through `SCENEWORKS_FFMPEG` for recording transcription;
 - the pass/fail reason.
 
 Audio is CC BY-NC 4.0: it stays in the app data dir on the host for the listening review and is
@@ -35,7 +37,10 @@ The driver starts the API and the worker with the desktop's own spawn environmen
 `CUDA_VISIBLE_DEVICES` variable inherited from the shell first, so the shell you start from cannot
 change what is measured. The summary records the effective environment (`serviceEnv`, never a
 secret) and every deliberate deviation (`deviations`):
-- The desktop's bundled `SCENEWORKS_FFMPEG` is not set; YuE2 jobs never use ffmpeg.
+- The source-built harness resolves and probes a host ffmpeg (or takes `--ffmpeg-bin`), then sets
+  `SCENEWORKS_FFMPEG` for both services. The packaged desktop uses its bundled ffmpeg. SheetSage2
+  transcription uses the shared decoder for WAV, WebM/Opus and MP4/AAC recordings; a missing or
+  broken ffmpeg fails before the acceptance cases run.
 - The Metal worker gets no `SCENEWORKS_PARENT_PID`: its parent-death exit would drop a render
   mid-command-buffer.
 - On CUDA the worker is the per-GPU child the desktop's `auto` supervisor would spawn, started
@@ -92,6 +97,8 @@ the derived tiers). The evidence goes to `/private/tmp`:
 RUN=$(date -u +%Y%m%dT%H%M%SZ)
 STATE=/Volumes/Models/sc-23002/$RUN; OUT=/private/tmp/sc-23002-yue2-metal-$RUN
 mkdir -p "$STATE" "$OUT"
+FFMPEG_BIN=${FFMPEG_BIN:-$(command -v ffmpeg)}
+"$FFMPEG_BIN" -version | head -1
 ```
 
 **Step 1: the acceptance matrix.** It runs under the footprint watchdog. The watchdog guards
@@ -109,7 +116,7 @@ python3 scripts/memory-calibration-watchdog.py \
   --event-file "$OUT/watchdog-acceptance.jsonl" -- \
   node scripts/yue2-acceptance.mjs --platform metal \
     --out "$OUT/acceptance" --data-dir "$STATE/app-data" --hf-home "$STATE/hf-home" \
-    --api-bin target/release/sceneworks-rust-api
+    --api-bin target/release/sceneworks-rust-api --ffmpeg-bin "$FFMPEG_BIN"
 ```
 
 **Metal safety.** The driver never sends a signal to a Metal worker that is (or may be) mid-render.
