@@ -7,6 +7,16 @@ use std::sync::{OnceLock, RwLock};
 
 const CANCEL_MESSAGE: &str = "YuE2 transcription canceled by user.";
 
+/// One guarded decode directory per attempt. Random allocation prevents a retry or another
+/// process from deleting or following a pre-existing path with the same job id.
+fn decode_scratch(job_id: &str) -> std::io::Result<tempfile::TempDir> {
+    let prefix = format!(
+        "sw-yue2-transcription-{}-",
+        super::safe_download_dir(job_id)
+    );
+    tempfile::Builder::new().prefix(&prefix).tempdir()
+}
+
 /// Serialize the CPU transcriber against YuE2 generator residency in this process. The generator
 /// holds a read guard through generation; a transcription holds a write guard through unload.
 pub(crate) fn residency_lock() -> &'static RwLock<()> {
@@ -400,27 +410,22 @@ pub(crate) async fn run<B: TranscriptionBackend>(
         .map(|_| ());
     }
     let snapshots = cover_snapshots(settings, entry)?;
-    let scratch = std::env::temp_dir().join(format!(
-        "sw-yue2-transcription-{}",
-        super::safe_download_dir(&job.id)
-    ));
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    tokio::fs::create_dir_all(&scratch).await?;
-    let decoded = crate::video_jobs::reference_audio::decode_audio_normalized(
-        api,
-        settings,
-        &job.id,
-        CANCEL_MESSAGE,
-        &source_path,
-        &scratch,
-        crate::video_jobs::reference_audio::AudioDecode {
-            float32: true,
-            ..Default::default()
-        },
-    )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    let audio = decoded?;
+    let audio = {
+        let scratch = decode_scratch(&job.id)?;
+        crate::video_jobs::reference_audio::decode_audio_normalized(
+            api,
+            settings,
+            &job.id,
+            CANCEL_MESSAGE,
+            &source_path,
+            scratch.path(),
+            crate::video_jobs::reference_audio::AudioDecode {
+                float32: true,
+                ..Default::default()
+            },
+        )
+        .await?
+    };
     let duration = audio.samples.len() as f64
         / f64::from(audio.sample_rate.max(1))
         / f64::from(audio.channels.max(1));
@@ -546,6 +551,25 @@ pub(crate) async fn run<B: TranscriptionBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_attempts_with_the_same_job_id_never_share_or_delete_scratch() {
+        let first = decode_scratch("job_1").unwrap();
+        let second = decode_scratch("job_1").unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        assert_ne!(first_path, second_path);
+        std::fs::write(first_path.join("reference.wav"), b"first").unwrap();
+        std::fs::write(second_path.join("reference.wav"), b"second").unwrap();
+        drop(first);
+        assert!(!first_path.exists());
+        assert_eq!(
+            std::fs::read(second_path.join("reference.wav")).unwrap(),
+            b"second"
+        );
+        drop(second);
+        assert!(!second_path.exists());
+    }
 
     /// Mutation evidence: changing `live == 0` to accept positive counts fails both assertions.
     #[test]
