@@ -178,7 +178,7 @@ export function AudioTakeCard({
         >
           <Icon.Star filled={favorite} size={14} />
         </button>
-        <AudioDownloadButton asset={asset} className="audio-icon-btn" />
+        <AudioDownloadButton asset={asset} className="audio-icon-btn" job={run.job} />
         <AudioStemDownloads className="audio-icon-btn audio-stem-btn" iconSize={14} stems={stems} />
         <button
           aria-label="Send to Video Editor"
@@ -278,7 +278,13 @@ export function AudioPlayDeck({ run, asset, takeIndex, player, onRunAgain, onSen
           {audioTakeTitle(run?.job, asset)}
         </strong>
         <div className="audio-deck__head-actions">
-          <AudioDownloadButton asset={asset} className="secondary-action" iconSize={15} label="Download" />
+          <AudioDownloadButton
+            asset={asset}
+            className="secondary-action"
+            iconSize={15}
+            job={run?.job ?? null}
+            label="Download"
+          />
           <AudioStemDownloads className="secondary-action" iconSize={15} stems={run?.stems?.[asset.id]} />
           {onSendToVideo ? (
             <button className="secondary-action" onClick={() => onSendToVideo(asset)} type="button">

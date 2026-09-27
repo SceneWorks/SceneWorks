@@ -10,7 +10,10 @@ const PREFIX = "sceneworks-studio";
 // (`{ [workspaceId]: { [studio]: {…} } }`) while the cache is one localStorage key per
 // (studio, workspace) — seeding has to know which keys to write, and there is no way to
 // enumerate them from the map alone without trusting its contents.
-const STUDIOS = ["image", "video", "audio", "character", "editor-video"];
+// `yue2lab` is the Audio Studio's experimental YuE2 Song Lab (sc-23000): its own snapshot, so the
+// lab's controls never share a key with (or displace) the standard audio modes' settings. Named so
+// that no studio id is a prefix of another (`audio-…` would be parsed back as `audio`).
+const STUDIOS = ["image", "video", "audio", "yue2lab", "character", "editor-video"];
 
 // Kept OUT of the durable copy (sc-15425). Both are unbounded free text — a batch sheet can
 // hold hundreds of prompts — and `ImageStudio` alone persists ~47 fields, so including them
@@ -19,6 +22,79 @@ const STUDIOS = ["image", "video", "audio", "character", "editor-video"];
 // localStorage cache, which is what actually serves within-session navigation; the contract is
 // "your setup comes back after a relaunch, an in-progress batch sheet doesn't".
 const NON_DURABLE_FIELDS = ["batchPromptsText", "batchVariableValues"];
+
+// Free-text fields that are durable only while they are small (sc-23000). The YuE2 lab's ABC
+// scores can reach 256 KiB and its lyrics 16 000 characters; one of them at full size would push
+// the whole workspace entry past the server's 128 KiB budget, where it is dropped WHOLE and every
+// studio in that workspace fails to restore. Under the cap they survive a relaunch; over it they
+// stay in the session cache only (a score is durable on the server as a score version).
+//
+// Both limits are UTF-8 BYTES (what the server budgets), never UTF-16 string length: 16 000 CJK
+// characters are ~48 KiB on the wire.
+const DURABLE_TEXT_CAPS = {
+  yue2lab: {
+    suppliedScore: 16 * 1024,
+    coverScore: 16 * 1024,
+    lyrics: 16 * 1024,
+    style: 4 * 1024,
+    coverTranslatedFrom: 16 * 1024,
+    compareNotes: 4 * 1024,
+  },
+};
+
+// A whole-snapshot budget for studios whose free text is unbounded (sc-23000). The server drops a
+// workspace entry WHOLE past 128 KiB — taking every other studio's settings in that workspace with
+// it — so the lab's snapshot is held to a fixed share of it: over budget, the largest field goes
+// first (a preset list loses its oldest presets first) until the snapshot fits.
+const DURABLE_SNAPSHOT_BUDGET_BYTES = {
+  yue2lab: 32 * 1024,
+};
+
+const utf8 = new TextEncoder();
+
+export function utf8ByteLength(value) {
+  return utf8.encode(typeof value === "string" ? value : JSON.stringify(value) ?? "").length;
+}
+
+// Whether `value` of `field` is kept in the durable (relaunch-surviving) copy of `studio`'s
+// snapshot on its own terms — false for a text over its per-field cap.
+export function durableTextFits(studio, field, value) {
+  const cap = DURABLE_TEXT_CAPS[studio]?.[field];
+  return !(cap && typeof value === "string" && utf8ByteLength(value) > cap);
+}
+
+// Apply the per-field caps and the whole-snapshot budget to a durable snapshot (mutates it).
+export function boundDurableSnapshot(studio, durable) {
+  for (const field of Object.keys(DURABLE_TEXT_CAPS[studio] ?? {})) {
+    if (!durableTextFits(studio, field, durable[field])) {
+      delete durable[field];
+    }
+  }
+  const budget = DURABLE_SNAPSHOT_BUDGET_BYTES[studio];
+  if (!budget) {
+    return durable;
+  }
+  while (utf8ByteLength(durable) > budget) {
+    let largest = null;
+    let largestBytes = 0;
+    for (const [key, value] of Object.entries(durable)) {
+      const bytes = utf8ByteLength(value);
+      if (bytes > largestBytes) {
+        largest = key;
+        largestBytes = bytes;
+      }
+    }
+    if (!largest) {
+      break;
+    }
+    if (Array.isArray(durable[largest]) && durable[largest].length > 0) {
+      durable[largest] = durable[largest].slice(0, -1);
+    } else {
+      delete durable[largest];
+    }
+  }
+  return durable;
+}
 
 const DEFAULT_WORKSPACE = "default";
 // Keep in sync with MAX_STUDIO_WORKSPACES in apps/rust-api/src/preferences.rs.
@@ -129,6 +205,7 @@ function persistToServer(touchedWorkspace) {
     for (const field of NON_DURABLE_FIELDS) {
       delete durable[field];
     }
+    boundDurableSnapshot(studio, durable);
     map[workspace] = { ...(map[workspace] ?? {}), [studio]: durable };
   }
   // Bound the map the same way the server does, keeping the workspace being written.

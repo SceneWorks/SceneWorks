@@ -392,8 +392,20 @@ fn transcription_refusal(entry: &Value) -> ApiError {
 // Submission.
 // ---------------------------------------------------------------------------------------------
 
+/// Largest server-chosen default seed. Seeds are shown, recorded and exported to a JavaScript
+/// client, where a Number is exact only up to 2^53 - 1; a larger seed would display (and replay)
+/// as a different one. The base leaves room for a batch's `seed + i` takes to stay in range. The
+/// engine accepts any seed in [0, 2^63), so the narrower range is always valid.
+pub(crate) const MAX_DEFAULT_SEED: u64 = (1u64 << 53) - 1;
+
 fn random_seed() -> u64 {
-    (Uuid::new_v4().as_u128() as u64) & ((1u64 << 63) - 1)
+    seed_in_js_range(Uuid::new_v4().as_u128() as u64)
+}
+
+/// Map raw randomness into [0, MAX_DEFAULT_SEED - MAX_BATCH], so every take of a batch
+/// (`seed + i`, i < MAX_BATCH) is still an exact JavaScript integer.
+fn seed_in_js_range(raw: u64) -> u64 {
+    raw % (MAX_DEFAULT_SEED - u64::from(yue2::MAX_BATCH) + 1)
 }
 
 /// A completed YuE2 job of this project and the run it published.
@@ -1250,6 +1262,34 @@ pub(crate) fn stamp_export_usage_policies(
         let extra = object.entry("extra").or_insert_with(|| json!({}));
         if let Some(extra) = extra.as_object_mut() {
             extra.insert("usagePolicies".to_owned(), json!(policies));
+        }
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn default_seeds_and_their_batch_takes_stay_exact_in_javascript() {
+        for raw in [
+            0,
+            1,
+            u64::MAX,
+            u64::MAX - 1,
+            1u64 << 63,
+            (1u64 << 53) + 5,
+            0x1234_5678_9abc_def0,
+        ] {
+            let base = seed_in_js_range(raw);
+            let last_take = base + u64::from(yue2::MAX_BATCH) - 1;
+            assert!(
+                last_take <= MAX_DEFAULT_SEED,
+                "raw {raw}: take {last_take} exceeds 2^53 - 1"
+            );
+        }
+        for _ in 0..1000 {
+            assert!(random_seed() + u64::from(yue2::MAX_BATCH) - 1 <= MAX_DEFAULT_SEED);
         }
     }
 }

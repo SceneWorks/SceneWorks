@@ -173,6 +173,68 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     expect(cached.batchPromptsText).toBe("kept");
   });
 
+  // sc-23000: the YuE2 Song Lab's own snapshot (`yue2lab`) rides the same durable map and is seeded
+  // back on launch, and a full-size ABC score stays out of the durable copy (it would push the whole
+  // workspace entry past the server's per-entry budget, dropping every studio in it).
+  it("mirrors and restores the YuE2 lab snapshot, keeping a full-size score session-only", async () => {
+    const bigScore = `X:1\n${"C4|".repeat(8000)}`;
+    await render(
+      <Harness
+        settings={{ optIn: true, lyrics: "[verse]\nhello", suppliedScore: bigScore, coverScore: "X:1\nC4|" }}
+        studio="yue2lab"
+      />,
+    );
+    const sent = lastSentMap()["ws-1"].yue2lab;
+    expect(sent).toMatchObject({ optIn: true, lyrics: "[verse]\nhello", coverScore: "X:1\nC4|" });
+    expect(sent).not.toHaveProperty("suppliedScore");
+    // The session cache keeps it, and no other studio key is confused with the lab's.
+    expect(loadStudioSettings("yue2lab", "ws-1").suppliedScore).toBe(bigScore);
+    expect(lastSentMap()["ws-1"]).not.toHaveProperty("audio");
+
+    window.localStorage.clear();
+    expect(seedStudioSettingsFromServer({ "ws-1": { yue2lab: sent } })).toBe(1);
+    expect(loadStudioSettings("yue2lab", "ws-1")).toMatchObject({ optIn: true, lyrics: "[verse]\nhello" });
+  });
+
+  // sc-23000 fix pass: the server budgets UTF-8 BYTES (128 KiB for the whole workspace entry) and
+  // drops an over-budget entry WHOLE — which would lose every other studio's settings too. Twelve
+  // legacy presets each carrying a 16 000-character CJK lyric sheet (~48 KiB apiece in UTF-8) must
+  // not take the workspace's standard Audio settings down with them.
+  it("bounds the YuE2 lab snapshot in UTF-8 bytes so the workspace entry survives", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-audio-ws-1",
+      JSON.stringify({ mode: "speech", model: "kokoro_82m", prompt: "keep me" }),
+    );
+    const cjk = "歌".repeat(16000);
+    const presets = Array.from({ length: 12 }, (_, index) => ({
+      id: `p${index}`,
+      name: `Preset ${index}`,
+      settings: { lyrics: cjk, tier: "q8" },
+    }));
+    await render(
+      <Harness settings={{ optIn: true, tier: "q8", lyrics: cjk, compareNotes: cjk, presets }} studio="yue2lab" />,
+    );
+    const entry = lastSentMap()["ws-1"];
+    const bytes = new TextEncoder().encode(JSON.stringify(entry)).length;
+    expect(bytes).toBeLessThanOrEqual(128 * 1024);
+    expect(entry.audio).toMatchObject({ prompt: "keep me" });
+    expect(entry.yue2lab).toMatchObject({ optIn: true, tier: "q8" });
+    expect(new TextEncoder().encode(JSON.stringify(entry.yue2lab)).length).toBeLessThanOrEqual(32 * 1024);
+    // 16 000 CJK characters are under a 16 KiB CHARACTER count but ~47 KiB in bytes: dropped.
+    expect(entry.yue2lab).not.toHaveProperty("lyrics");
+  });
+
+  // The per-field cap is UTF-8 bytes too: 8 000 CJK characters are well under 16 KiB of UTF-16
+  // units but ~23 KiB on the wire, and the snapshot as a whole is under its 32 KiB budget — so only
+  // a byte-measured field cap drops it.
+  it("caps a lyric sheet by its UTF-8 size, not its character count", async () => {
+    const lyrics = "歌".repeat(8000);
+    await render(<Harness settings={{ optIn: true, lyrics, style: "lofi" }} studio="yue2lab" />);
+    const sent = lastSentMap()["ws-1"].yue2lab;
+    expect(sent).not.toHaveProperty("lyrics");
+    expect(sent).toMatchObject({ optIn: true, style: "lofi" });
+  });
+
   it("ignores a malformed durable map rather than corrupting the cache", async () => {
     expect(seedStudioSettingsFromServer(null)).toBe(0);
     expect(seedStudioSettingsFromServer({ "ws-1": "not-an-object" })).toBe(0);

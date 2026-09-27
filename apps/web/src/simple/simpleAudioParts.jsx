@@ -75,11 +75,14 @@ export function SimpleAudioDeck({ run, asset, takeIndex, player, breakpoint, onR
     <>
       <AudioDownloadButton
         asset={asset}
+        job={run?.job ?? null}
         className={phone ? "su-deck__wide-action" : "su-deck__action"}
         iconSize={15}
         label="Download"
       />
-      {onRunAgain && run?.job ? (
+      {/* A run that cannot be replayed (a YuE2 song, a voice clone, a removed model) offers no
+          Run again — the generic route would refuse it. */}
+      {onRunAgain && run?.job && run?.replayable ? (
         <button
           className={phone ? "su-deck__wide-action" : "su-deck__action"}
           onClick={() => onRunAgain(run.job)}
