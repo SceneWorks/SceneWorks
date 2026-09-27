@@ -340,6 +340,18 @@ async fn either_decoder_completes_a_yue2_install_and_neither_leaves_it_repairabl
             }),
             "decoder {decoder:?}: {entry}"
         );
+        // The per-option install state a decoder picker gates on (sc-22988 round-2 item 2).
+        // Mutation that reds this: reporting every declared option as installed.
+        let installed_options = match decoder {
+            None => json!([]),
+            Some("m-a-p/YuE2-Vae-legacy") => json!(["legacy"]),
+            Some(_) => json!(["standard"]),
+        };
+        assert_eq!(
+            entry["installedChoices"],
+            json!({ "decoder": installed_options }),
+            "{entry}"
+        );
         if !expect_installed {
             assert_eq!(entry["repairAvailable"], true, "{entry}");
             let missing = entry["missingRequiredFiles"].to_string();

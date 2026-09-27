@@ -81,6 +81,8 @@ function yue2Entry(overrides = {}) {
       { componentId: "yue2_mert_v2_fullsong", requiredFor: ["cover"], blocked: { reason: BLOCK_REASON, unblock: BLOCK_UNBLOCK } },
     ],
     installState: "installed",
+    // The catalog's per-option install state (sc-22988): only the standard decoder is installed.
+    installedChoices: { decoder: ["standard"] },
     hasVariantMatrix: true,
     variants: [
       { variant: "bf16", installState: "installed" },
@@ -928,6 +930,32 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await settle();
     // Mutation that reds this: sending `s.decoder` (the lab-wide select) for a decode.
     expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "standard", requestedGpu: "auto" });
+  });
+
+  it("offers the legacy decoder for Decode again only once its add-on is installed", async () => {
+    await openEnabledLab(context({ jobs: [TRUNCATED], assets: [SONG_ASSET] }));
+    let card = container.querySelector('[data-testid="yue2-run-card"]');
+    const legacy = () => byLabel(card, "Decode again with").querySelector('option[value="legacy"]');
+    // Mutation that reds this: dropping `disabled={!legacyInstalled}` from the legacy option.
+    expect(legacy().disabled).toBe(true);
+    expect(legacy().textContent).toBe("Legacy decoder — not installed");
+    expect(card.querySelector('[data-testid="yue2-decode-legacy-missing"]').textContent).toContain("not installed");
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await openEnabledLab(
+      context({
+        jobs: [TRUNCATED],
+        assets: [SONG_ASSET],
+        models: [...STANDARD, YUE1, yue2Entry({ installedChoices: { decoder: ["standard", "legacy"] } })],
+      }),
+    );
+    card = container.querySelector('[data-testid="yue2-run-card"]');
+    expect(legacy().disabled).toBe(false);
+    expect(card.querySelector('[data-testid="yue2-decode-legacy-missing"]')).toBeNull();
+    await choose(byLabel(card, "Decode again with"), "legacy");
+    await click(buttonWithText(card, "Decode again"));
+    await settle();
+    expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "legacy", requestedGpu: "auto" });
   });
 
   it("offers no Decode again until YuE2 and the chosen tier are installed", async () => {

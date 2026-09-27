@@ -538,6 +538,14 @@ export function installJobStatusLabel(job) {
   return status;
 }
 
+// Whether the decoder `option` (`standard` / `legacy`) is installed on this host — the catalog's
+// per-option `installedChoices.decoder`. A catalog that does not report it proves nothing, so the
+// option reads as not installed (the render would fail after the load otherwise).
+export function yue2DecoderInstalled(model, option) {
+  const installed = model?.installedChoices?.decoder;
+  return Array.isArray(installed) && installed.includes(option);
+}
+
 export function yue2ModelInstalled(model) {
   return model?.installState === "installed";
 }

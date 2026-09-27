@@ -61,6 +61,9 @@ use sceneworks_core::yue2_score::store::{
 
 /// A commercial-use declaration refused for a noncommercial model.
 pub(crate) const COMMERCIAL_USE_REFUSED_CODE: &str = "commercial_use_refused";
+/// A commercial export refused because an asset's lineage cannot be read (a source asset is no
+/// longer in the library) — distinct from a noncommercial model's refusal.
+pub(crate) const COMMERCIAL_USE_LINEAGE_UNKNOWN_CODE: &str = "commercial_use_lineage_unknown";
 /// A plan / run / version a job needs is missing, incomplete or not this project's.
 pub(crate) const YUE2_SOURCE_UNAVAILABLE_CODE: &str = "yue2_source_unavailable";
 /// A `fromPlan` job's style / lyrics are not the restored plan's.
@@ -1329,23 +1332,53 @@ fn collect_asset_ids(value: &Value, out: &mut std::collections::BTreeSet<String>
 }
 
 /// Refuse a commercial export that places a noncommercial asset, naming the asset and the
-/// alternative its model's verdict points to.
+/// alternative its model's verdict points to — or, as a separate refusal the user can tell apart,
+/// one whose lineage is unknown because a source asset is no longer in the library. Both fail
+/// closed; a noncommercial asset wins the code when both are present, and the message names both.
 pub(crate) fn refuse_commercial_export(policies: &[Value]) -> Result<(), ApiError> {
-    // An unresolved lineage entry fails closed: what it was made from cannot be shown eligible.
-    let restricted: Vec<&Value> = policies
+    let noncommercial: Vec<&Value> = policies
         .iter()
         .filter(|entry| {
-            entry.get("unresolved").is_some()
-                || entry
-                    .pointer("/policy/commercialUse/verdict")
-                    .and_then(Value::as_str)
-                    == Some("refused")
+            entry
+                .pointer("/policy/commercialUse/verdict")
+                .and_then(Value::as_str)
+                == Some("refused")
         })
         .collect();
-    if restricted.is_empty() {
-        return Ok(());
+    let unknown: Vec<&Value> = policies
+        .iter()
+        .filter(|entry| entry.get("unresolved").is_some())
+        .collect();
+    let unknown_ids = || {
+        unknown
+            .iter()
+            .map(|entry| entry["assetId"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let unknown_sentence = || {
+        format!(
+            "Its lineage is unknown: source assets it was made from are no longer in the library \
+             ({}), so it cannot be shown to be commercially eligible.",
+            unknown_ids()
+        )
+    };
+    if noncommercial.is_empty() {
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        return Err(ApiError::typed(
+            StatusCode::FORBIDDEN,
+            format!(
+                "This export is declared commercial. {} No noncommercial model is known to be \
+                 involved; restore the source assets or replace the assets derived from them.",
+                unknown_sentence()
+            ),
+            COMMERCIAL_USE_LINEAGE_UNKNOWN_CODE,
+            json!({ "unresolved": unknown }),
+        ));
     }
-    let names: Vec<String> = restricted
+    let names: Vec<String> = noncommercial
         .iter()
         .map(|entry| {
             format!(
@@ -1354,20 +1387,25 @@ pub(crate) fn refuse_commercial_export(policies: &[Value]) -> Result<(), ApiErro
                 entry
                     .pointer("/policy/modelId")
                     .and_then(Value::as_str)
-                    .unwrap_or("lineage unresolved")
+                    .unwrap_or("?")
             )
         })
         .collect();
+    let also = if unknown.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", unknown_sentence())
+    };
     Err(ApiError::typed(
         StatusCode::FORBIDDEN,
         format!(
             "This export is declared commercial, but it places noncommercial assets: {}. Replace \
              them with assets from a commercially eligible model (see each policy's \
-             commercialUse.alternatives).",
+             commercialUse.alternatives).{also}",
             names.join(", ")
         ),
         COMMERCIAL_USE_REFUSED_CODE,
-        json!({ "assets": restricted }),
+        json!({ "assets": noncommercial, "unresolved": unknown }),
     ))
 }
 
