@@ -304,6 +304,7 @@ mod yue2_memory_profile;
 // provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
 // lane, which errors clearly on a build that links none.
 mod yue2_jobs;
+mod yue2_transcription;
 // Locally derived model tiers (sc-22999): the post-download deriver `localDerivation` rows name.
 mod local_derivation;
 // The Voice Clone "register a voice" embed path (sc-13517): the rust-api calls

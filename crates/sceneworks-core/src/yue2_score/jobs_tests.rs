@@ -65,6 +65,12 @@ fn with_field(mut spec: Yue2JobSpec, field: &str) -> Yue2JobSpec {
             })
         }
         "sourceAudioAssetId" => spec.source_audio_asset_id = Some("asset-2".into()),
+        "transcription" => {
+            spec.transcription = Some(TranscriptionSettings {
+                max_seconds: Some(30.0),
+                ..Default::default()
+            })
+        }
         "count" => spec.count = Some(3),
         other => panic!("unknown field {other}"),
     }
@@ -164,7 +170,7 @@ fn every_field_the_engine_reads_for_a_kind_is_accepted() {
             [&["versionId"][..], &synthesis, &render, &load].concat(),
         ),
         (Decode, [&["sourceJobId"][..], &render, &load].concat()),
-        (Transcribe, vec!["sourceAudioAssetId"]),
+        (Transcribe, vec!["sourceAudioAssetId", "transcription"]),
     ];
     for (kind, fields) in accepted {
         for field in fields {
@@ -415,16 +421,144 @@ fn execution_requires_the_server_resolved_inputs() {
     validate_for_execution(&spec).unwrap();
 }
 
+/// AT2 says "reviewed": a cover from a recording is a transcribe job, a reviewed score version and
+/// a cover of it. A cover naming the recording directly would skip the review, so it is refused
+/// with its own code — alone or beside a score. Mutation that reds this: dropping the
+/// `source_audio_asset_id` check in `validate_common` (the cover with a score then validates).
 #[test]
-fn transcription_is_recognised_on_either_door() {
-    assert!(requests_transcription(&base(Yue2JobKind::Transcribe)));
-    let mut cover = base(Yue2JobKind::Cover);
-    assert!(!requests_transcription(&cover));
-    let c = cover.cover.as_mut().unwrap();
-    c.score = None;
-    c.source_audio_asset_id = Some("asset-9".into());
-    validate_request(&cover).unwrap();
-    assert!(requests_transcription(&cover));
+fn a_cover_naming_a_recording_directly_requires_the_reviewed_transcription_step() {
+    for keep_score in [false, true] {
+        let mut cover = base(Yue2JobKind::Cover);
+        let c = cover.cover.as_mut().unwrap();
+        if !keep_score {
+            c.score = None;
+        }
+        c.source_audio_asset_id = Some("asset-9".into());
+        let err = validate_request(&cover).unwrap_err();
+        assert_eq!(
+            (err.code, err.field.as_str()),
+            (TRANSCRIPTION_REVIEW_REQUIRED, "cover.sourceAudioAssetId"),
+            "{err}"
+        );
+        assert!(err.message.contains("transcribe"), "{err}");
+        assert!(err.message.contains("cover.versionId"), "{err}");
+    }
+}
+
+/// The transcription settings follow the engine's window-plan rule over the RESOLVED values:
+/// `0 <= lookahead <= overlap < 300`, defaults 200 / 100, a finite positive crop. Mutations that
+/// red this: comparing the raw (unresolved) values (an overlap of 50 with the default look-ahead
+/// of 100 then passes), or allowing overlap == 300.
+#[test]
+fn transcription_settings_are_held_to_the_engines_window_plan() {
+    let with = |settings: TranscriptionSettings| {
+        let mut spec = base(Yue2JobKind::Transcribe);
+        spec.transcription = Some(settings);
+        validate_request(&spec)
+    };
+    for ok in [
+        TranscriptionSettings::default(),
+        TranscriptionSettings {
+            max_seconds: Some(12.5),
+            overlap_seconds: Some(150.0),
+            lookahead_seconds: Some(0.0),
+        },
+        TranscriptionSettings {
+            overlap_seconds: Some(299.0),
+            lookahead_seconds: Some(299.0),
+            ..Default::default()
+        },
+    ] {
+        with(ok).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
+    }
+    for (bad, field) in [
+        (
+            TranscriptionSettings {
+                max_seconds: Some(0.0),
+                ..Default::default()
+            },
+            "transcription.maxSeconds",
+        ),
+        (
+            TranscriptionSettings {
+                max_seconds: Some(f64::NAN),
+                ..Default::default()
+            },
+            "transcription.maxSeconds",
+        ),
+        (
+            TranscriptionSettings {
+                overlap_seconds: Some(TRANSCRIPTION_WINDOW_SECONDS),
+                ..Default::default()
+            },
+            "transcription.overlapSeconds",
+        ),
+        (
+            // The default look-ahead (100) exceeds this overlap.
+            TranscriptionSettings {
+                overlap_seconds: Some(50.0),
+                ..Default::default()
+            },
+            "transcription.lookaheadSeconds",
+        ),
+        (
+            TranscriptionSettings {
+                lookahead_seconds: Some(-1.0),
+                ..Default::default()
+            },
+            "transcription.lookaheadSeconds",
+        ),
+    ] {
+        let err = with(bad).unwrap_err();
+        assert_eq!(
+            (err.code, err.field.as_str()),
+            (INVALID_VALUE, field),
+            "{bad:?}: {err}"
+        );
+    }
+}
+
+/// A queued transcribe job must carry the server-resolved recording, and that recording must be
+/// the job's own asset with a SHA-256 the worker can check the file against. Mutation that reds
+/// this: dropping the `K_TRANSCRIBE => need(...)` arm (a transcribe job with no recording runs).
+#[test]
+fn a_transcribe_job_executes_only_with_its_resolved_recording() {
+    let mut spec = base(Yue2JobKind::Transcribe);
+    spec.run_id = Some("yue2run_t1".into());
+    let err = validate_for_execution(&spec).unwrap_err();
+    assert_eq!(
+        (err.code, err.field.as_str()),
+        (MISSING_FIELD, "sources.recording")
+    );
+    let recording = |asset: &str, sha: &str| Sources {
+        recording: Some(RecordingSource {
+            asset_id: asset.into(),
+            sha256: sha.into(),
+            name: Some("take.wav".into()),
+        }),
+        ..Default::default()
+    };
+    spec.sources = Some(recording("asset-other", &"a".repeat(64)));
+    assert_eq!(
+        validate_for_execution(&spec).unwrap_err().field,
+        "sources.recording"
+    );
+    spec.sources = Some(recording("asset-1", "not-a-digest"));
+    assert_eq!(
+        validate_for_execution(&spec).unwrap_err().field,
+        "sources.recording.sha256"
+    );
+    spec.sources = Some(recording("asset-1", &"a".repeat(64)));
+    validate_for_execution(&spec).unwrap();
+    assert_eq!(
+        transcription_id("yue2run_t1").as_deref(),
+        Some("yue2t_t1"),
+        "the record id is derived from the run id"
+    );
+    assert!(is_transcription_dir(&transcription_dir("yue2run_t1")));
+    assert!(!is_transcription_dir(
+        "yue2/transcriptions/../runs/yue2run_t1"
+    ));
 }
 
 /// Independent of [`FIELD_KINDS`] (the matrix test above reads its expectations from the table

@@ -121,6 +121,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         source_files: &[
             "crates/sceneworks-worker/src/audio_jobs.rs",
             "crates/sceneworks-worker/src/yue2_jobs.rs",
+            "crates/sceneworks-worker/src/yue2_transcription.rs",
         ],
         categories: &[Category::Audio, Category::Primary, Category::CoRequisite],
         resolution: Resolution::SharedContract {

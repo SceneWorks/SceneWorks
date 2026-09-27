@@ -10,6 +10,14 @@
 //!   the audio asset and both truncation flags.
 //! - `yue2/comparisons/<id>.json` — a persisted A/B listening comparison of two versions (and
 //!   optionally one render of each) with the symbolic differences between them.
+//! - `yue2/transcriptions/<id>.json` — a recording transcription (sc-23002, see
+//!   [`super::transcriptions`]): the replay-verified review artifact beside it, and the score
+//!   versions imported from it.
+//!
+//! A version imported from a transcription carries a [`TranscriptionLink`] to it (and so to the
+//! source recording), and every version made by a job carries the job's usage policy; an edit
+//! inherits both from its source, so neither the lineage nor the noncommercial restriction is lost
+//! by editing.
 //!
 //! Records are write-once: a create refuses an existing path, and reads verify the stored score
 //! hash so a hand-edited or corrupted file is reported instead of being trusted.
@@ -152,6 +160,30 @@ pub struct EditRecord {
     pub invariants: Value,
 }
 
+/// Which transcription (and so which source recording) a version's score came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptionLink {
+    pub transcription_id: String,
+    pub job_id: String,
+    pub source_audio_asset_id: String,
+    /// SHA-256 of the review artifact's `transcription.json`.
+    pub manifest_sha256: String,
+    /// The transcribed score the lineage started from: `full` (`score.abc`, with chord symbols) or
+    /// `melody` (`score_melody.abc`).
+    pub mode: super::Cot,
+    /// SHA-256 of that transcribed score as the artifact recorded it.
+    pub transcribed_score_sha256: String,
+}
+
+/// What a job-made version inherits beyond its score: the transcription it came from and the usage
+/// policy of the job that made it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VersionLineage {
+    pub transcription: Option<TranscriptionLink>,
+    pub usage_policy: Option<Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScoreVersionRecord {
@@ -170,6 +202,13 @@ pub struct ScoreVersionRecord {
     pub edit: Option<EditRecord>,
     pub provenance: Provenance,
     pub render_notice: String,
+    /// The transcription this version's lineage started from (sc-23002); inherited by edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<TranscriptionLink>,
+    /// The usage policy of the job that made this version's lineage (a plan or a transcription);
+    /// inherited by edits, carried into a cover's provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_policy: Option<Value>,
 }
 
 /// Both upstream truncation flags: the ABC plan and the semantic token stream.
@@ -361,6 +400,10 @@ pub struct VersionSummary {
     pub summary: Value,
     pub render_count: usize,
     pub provenance: Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<TranscriptionLink>,
+    /// Whether the lineage carries a usage policy that restricts it to noncommercial use.
+    pub non_commercial: bool,
 }
 
 /// A listing plus any record files that could not be read (reported, never silently dropped).
@@ -478,11 +521,20 @@ impl Yue2ScoreStore {
         }
     }
 
-    fn dir(&self, kind: &str) -> PathBuf {
+    pub(super) fn dir(&self, kind: &str) -> PathBuf {
         self.project_path.join("yue2").join(kind)
     }
 
-    fn create_record<T: Serialize>(&self, kind: &str, id: &str, record: &T) -> Result<()> {
+    pub(super) fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub(super) fn create_record<T: Serialize>(
+        &self,
+        kind: &str,
+        id: &str,
+        record: &T,
+    ) -> Result<()> {
         let _guard = lock_project_files(&self.project_path);
         let path = self.dir(kind).join(format!("{id}.json"));
         if path.exists() {
@@ -494,7 +546,11 @@ impl Yue2ScoreStore {
         Ok(())
     }
 
-    fn read_record<T: for<'de> Deserialize<'de>>(&self, kind: &str, id: &str) -> Result<T> {
+    pub(super) fn read_record<T: for<'de> Deserialize<'de>>(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> Result<T> {
         let path = self.dir(kind).join(format!("{id}.json"));
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -506,7 +562,7 @@ impl Yue2ScoreStore {
         Ok(serde_json::from_str(&text)?)
     }
 
-    fn record_ids(&self, kind: &str, prefix: &str) -> Result<Vec<String>> {
+    pub(super) fn record_ids(&self, kind: &str, prefix: &str) -> Result<Vec<String>> {
         let dir = self.dir(kind);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -574,6 +630,7 @@ impl Yue2ScoreStore {
         Ok((record, score))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_version(
         &self,
         score: &Score,
@@ -582,6 +639,7 @@ impl Yue2ScoreStore {
         parent: Option<&ScoreVersionRecord>,
         edit: Option<EditRecord>,
         provenance: Provenance,
+        lineage: VersionLineage,
     ) -> Result<ScoreVersionRecord> {
         let id = format!("{VERSION_PREFIX}{}", random_hex(12)?);
         Ok(ScoreVersionRecord {
@@ -605,11 +663,29 @@ impl Yue2ScoreStore {
             edit,
             provenance,
             render_notice: REGENERATION_NOTICE.to_owned(),
+            transcription: lineage.transcription,
+            usage_policy: lineage.usage_policy,
         })
     }
 
     /// Create a root version from an imported, planned or transcribed score.
     pub fn create_version(&self, input: CreateVersionInput) -> Result<ScoreVersionRecord> {
+        self.create_version_with_lineage(input, VersionLineage::default())
+    }
+
+    /// [`Self::create_version`] for a job-made root version, which records the transcription it came
+    /// from and the job's usage policy. Not reachable from the public version-create input: a
+    /// transcription link is only ever written by the transcription import.
+    pub fn create_version_with_lineage(
+        &self,
+        input: CreateVersionInput,
+        lineage: VersionLineage,
+    ) -> Result<ScoreVersionRecord> {
+        if lineage.transcription.is_some() && input.origin != VersionOrigin::Transcription {
+            return Err(bad(
+                "only a version of origin \"transcription\" can link a transcription",
+            ));
+        }
         if input.origin == VersionOrigin::Edit {
             return Err(bad(
                 "origin \"edit\" is reserved for versions made through an edit operation",
@@ -625,6 +701,7 @@ impl Yue2ScoreStore {
             None,
             None,
             input.provenance,
+            lineage,
         )?;
         self.create_record("versions", &record.id, &record)?;
         Ok(record)
@@ -655,6 +732,12 @@ impl Yue2ScoreStore {
             contract: outcome.contract,
             invariants: serde_json::to_value(&outcome.report)?,
         };
+        // An edit keeps its source's lineage: the transcription (and recording) it came from and
+        // the usage policy it was made under.
+        let lineage = VersionLineage {
+            transcription: source.transcription.clone(),
+            usage_policy: source.usage_policy.clone(),
+        };
         let record = self.new_version(
             &outcome.score,
             outcome.request,
@@ -662,6 +745,7 @@ impl Yue2ScoreStore {
             Some(&source),
             Some(edit),
             input.provenance,
+            lineage,
         )?;
         if !dry_run {
             self.create_record("versions", &record.id, &record)?;
@@ -698,6 +782,10 @@ impl Yue2ScoreStore {
                     cot: version.request.cot,
                     summary: version.score.summary,
                     provenance: version.provenance,
+                    non_commercial: version.usage_policy.as_ref().is_some_and(|policy| {
+                        policy.get("nonCommercial").and_then(Value::as_bool) == Some(true)
+                    }),
+                    transcription: version.transcription,
                 }),
                 Err(error) => unreadable.push(format!("versions/{id}.json: {error}")),
             }

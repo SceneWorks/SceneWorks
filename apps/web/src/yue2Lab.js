@@ -72,6 +72,7 @@ export const YUE2_FIELD_KINDS = Object.freeze({
   versionId: ["renderVersion"],
   cover: ["cover"],
   sourceAudioAssetId: ["transcribe"],
+  transcription: ["transcribe"],
   count: ["create", "plan", "cover"],
 });
 
@@ -125,6 +126,13 @@ export function defaultYue2Settings() {
     coverMode: "melody",
     coverKeep: "",
     coverTranslatedFrom: "",
+    // Cover from a recording (sc-23002): the recording to transcribe, the transcription under
+    // review, and the transcriber's window settings ("" = the engine default).
+    transcribeAssetId: "",
+    transcriptionId: "",
+    transcribeMaxSeconds: "",
+    transcribeOverlapSeconds: "",
+    transcribeLookaheadSeconds: "",
     seed: "",
     cfgScale: "",
     steps: "",
@@ -314,6 +322,10 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
     planJobId: trimmed(s.restorePlanJobId),
     sourceJobId: trimmed(target.sourceJobId),
     versionId: trimmed(target.versionId),
+    sourceAudioAssetId: trimmed(target.sourceAudioAssetId),
+    transcription: kind === "transcribe" ? transcriptionBody(s) : undefined,
+    // A cover never names a recording (`cover.sourceAudioAssetId` is refused with
+    // `yue2_transcription_review_required`): it follows a reviewed score version or a pasted score.
     cover: kind === "cover" ? coverBody(s) : undefined,
     count: count !== undefined && count !== 1 ? count : undefined,
   };
@@ -335,6 +347,45 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
     body.requestedGpu = requestedGpu;
   }
   return body;
+}
+
+// The transcriber's window settings (core `TranscriptionSettings`); omitted when all are defaults.
+function transcriptionBody(s) {
+  return compact({
+    maxSeconds: numberOrUndefined(s.transcribeMaxSeconds),
+    overlapSeconds: numberOrUndefined(s.transcribeOverlapSeconds),
+    lookaheadSeconds: numberOrUndefined(s.transcribeLookaheadSeconds),
+  });
+}
+
+// SheetSage2 transcribes 300 s windows; core `check_transcription`'s defaults and bounds.
+export const TRANSCRIPTION_WINDOW_SECONDS = 300;
+export const TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS = 200;
+export const TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS = 100;
+
+// Core `check_transcription` over the RESOLVED values (an unset field takes its default):
+// `0 <= lookahead <= overlap < 300` and a positive length limit. The server is the authority.
+export function transcriptionSettingsProblems(settings) {
+  const s = settings ?? defaultYue2Settings();
+  const read = (raw) => (raw === "" || raw === null || raw === undefined ? undefined : Number(raw));
+  const max = read(s.transcribeMaxSeconds);
+  const overlapRaw = read(s.transcribeOverlapSeconds);
+  const lookaheadRaw = read(s.transcribeLookaheadSeconds);
+  if ([max, overlapRaw, lookaheadRaw].some((value) => value !== undefined && !Number.isFinite(value))) {
+    return ["Transcription settings must be numbers."];
+  }
+  const problems = [];
+  if (max !== undefined && max <= 0) {
+    problems.push("The transcription length limit must be more than 0 seconds.");
+  }
+  const overlap = overlapRaw ?? TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS;
+  const lookahead = lookaheadRaw ?? TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS;
+  if (overlap < 0 || overlap >= TRANSCRIPTION_WINDOW_SECONDS) {
+    problems.push(`The window overlap must be at least 0 and under ${TRANSCRIPTION_WINDOW_SECONDS} seconds.`);
+  } else if (lookahead < 0 || lookahead > overlap) {
+    problems.push(`The look-ahead must be between 0 and the window overlap (${overlap} s).`);
+  }
+  return problems;
 }
 
 function coverBody(s) {
@@ -397,6 +448,21 @@ export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
     if (s.coverSource === "inline" && !trimmed(s.coverScore)) {
       problems.push("Paste the reviewed ABC score the cover follows.");
     }
+  }
+  if (kind === "cover" && s.coverSource === "version" && context.coverVersion?.transcription) {
+    // A transcribed score is covered in its own mode: melody-only → melody, full (chords) → full.
+    const cot = context.coverVersion.cot;
+    if ((cot === "melody" || cot === "full") && cot !== s.coverMode) {
+      problems.push(
+        `This transcribed score is a ${cot === "melody" ? "melody-only" : "full"} score — cover it in ${cot} mode.`,
+      );
+    }
+  }
+  if (kind === "transcribe") {
+    if (!trimmed(target.sourceAudioAssetId)) {
+      problems.push("Choose the recording to transcribe.");
+    }
+    problems.push(...transcriptionSettingsProblems(s));
   }
   if (kind === "renderVersion" && !trimmed(target.versionId)) {
     problems.push("Choose the score version to render.");
@@ -463,7 +529,7 @@ export function yue2FieldDisabledReason(field, kind) {
   } else if (kind === "cover") {
     reason = "a cover plans from its own reviewed score in its own mode";
   } else if (kind === "transcribe") {
-    reason = "transcription takes only the source recording";
+    reason = "transcription takes only the source recording and its transcription settings";
   } else if (field === "count") {
     reason = "a restored plan, a score version and a cached decode render the same take every time";
   } else {
@@ -484,18 +550,169 @@ export function commercialAlternatives(model, models = []) {
   });
 }
 
-// The recorded block of cover transcription: every conditional component the catalog marks
-// `blocked`, with its reason and unblock condition.
-export function blockedTranscription(model) {
-  const rows = Array.isArray(model?.conditionalComponents) ? model.conditionalComponents : [];
-  return rows
-    .filter((row) => row?.blocked && (row.requiredFor ?? []).includes("cover"))
-    .map((row) => ({
-      componentId: row.componentId,
-      repo: row.repo,
-      reason: row.blocked.reason ?? "",
-      unblock: row.blocked.unblock ?? "",
-    }));
+// ---- cover from a recording (sc-23002) ------------------------------------------------------
+
+// The cover closure: the conditional components a cover from a recording needs (SheetSage2 +
+// MERT-v2-FullSong), each with its install state, size and licence, and the purpose's summary
+// (`conditionalPurposes.cover`). A component the catalog marks `blocked` again is reported with its
+// reason and unblock condition — the install door would refuse it (`component_blocked`).
+export function yue2CoverSetup(model) {
+  const rows = (Array.isArray(model?.conditionalComponents) ? model.conditionalComponents : []).filter((row) =>
+    (row?.requiredFor ?? []).includes("cover"),
+  );
+  const purpose = model?.conditionalPurposes?.cover ?? null;
+  const components = rows.map((row) => ({
+    componentId: row.componentId,
+    repo: row.repo ?? "",
+    revision: row.revision ?? "",
+    estimatedSizeBytes: Number.isFinite(row.estimatedSizeBytes) ? row.estimatedSizeBytes : null,
+    installState: row.installState ?? "missing",
+    license: componentLicenseLabel(row.license),
+    nonCommercial: row.nonCommercial === true,
+    licenseBasis: row.licenseBasis ?? "",
+    blocked: row.blocked ? { reason: row.blocked.reason ?? "", unblock: row.blocked.unblock ?? "" } : null,
+  }));
+  return {
+    declared: components.length > 0,
+    // Installed only when the catalog says so; a catalog without the summary proves nothing.
+    installState: purpose?.installState ?? "missing",
+    installed: purpose?.installState === "installed",
+    blocked: Boolean(purpose?.blocked) || components.some((row) => row.blocked),
+    components,
+    totalBytes: components.reduce((sum, row) => sum + (row.estimatedSizeBytes ?? 0), 0),
+  };
+}
+
+// `cc-by-nc-4.0` → `CC BY-NC 4.0`: the catalog's licence id, as a licence is printed.
+export function componentLicenseLabel(id) {
+  const match = typeof id === "string" ? id.match(/^cc-([a-z-]+)-(\d\.\d)$/i) : null;
+  return match ? `CC ${match[1].toUpperCase()} ${match[2]}` : (id ?? "");
+}
+
+// A model_download job that installs the cover closure: one of the entry's downloads whose repo
+// is a cover component's (the install door queues one job per component repo).
+export function isCoverComponentDownload(job, model) {
+  if (job?.type !== "model_download" || job?.payload?.modelId !== model?.id) {
+    return false;
+  }
+  return yue2CoverSetup(model).components.some((row) => row.repo === job?.payload?.repo);
+}
+
+const PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+// MIDI 60 → "C4 (60)".
+export function midiNoteLabel(midi) {
+  const value = Number(midi);
+  if (midi === null || midi === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  const rounded = Math.round(value);
+  return `${PITCH_CLASSES[((rounded % 12) + 12) % 12]}${Math.floor(rounded / 12) - 1} (${value})`;
+}
+
+const EXPORT_KIND_ORDER = ["midi", "lab", "abc", "json", "text", "data"];
+export const EXPORT_KIND_LABELS = Object.freeze({
+  midi: "MIDI",
+  lab: "LAB (timed labels)",
+  abc: "ABC scores",
+  json: "JSON",
+  text: "Text",
+  data: "Data",
+});
+
+function list(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function warningRow(warning) {
+  return typeof warning === "string"
+    ? { code: "", message: warning }
+    : { code: warning?.code ?? "", message: warning?.message ?? "" };
+}
+
+function readinessRow(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  return { ready: row.ready === true, reason: typeof row.reason === "string" ? row.reason : "" };
+}
+
+/**
+ * Everything the transcription review shows, read off the server's `TranscriptionRecord` (whose
+ * review / source / closure / octave sub-objects are the engine's snake_case JSON verbatim). Nothing
+ * is invented: an absent field stays absent, and a refused mode keeps its reason.
+ */
+export function yue2TranscriptionView(record) {
+  const review = record?.review && typeof record.review === "object" ? record.review : {};
+  const voice = (raw) => ({
+    notes: Number.isFinite(raw?.notes) ? raw.notes : 0,
+    minPitch: raw?.min_pitch ?? null,
+    maxPitch: raw?.max_pitch ?? null,
+    medianPitch: raw?.median_pitch ?? null,
+  });
+  // The record's warnings are the review's; the review copy is the fallback for an older record.
+  const warnings = (list(record?.warnings).length ? list(record.warnings) : list(review.warnings)).map(warningRow);
+  const octave = record?.octaveEvidence && typeof record.octaveEvidence === "object" ? record.octaveEvidence : null;
+  const groups = new Map();
+  for (const file of list(record?.exports)) {
+    const kind = EXPORT_KIND_ORDER.includes(file?.kind) ? file.kind : "data";
+    groups.set(kind, [...(groups.get(kind) ?? []), file]);
+  }
+  const versionErrors = record?.versionErrors && typeof record.versionErrors === "object" ? record.versionErrors : {};
+  const source = record?.source && typeof record.source === "object" ? record.source : {};
+  const settings = record?.settings && typeof record.settings === "object" ? record.settings : {};
+  return {
+    id: record?.id ?? "",
+    createdAt: record?.createdAt ?? null,
+    jobId: record?.jobId ?? null,
+    sourceAudioAssetId: record?.sourceAudioAssetId ?? null,
+    sourceName: typeof source.name === "string" ? source.name : "",
+    durationSeconds: Number.isFinite(source.duration_seconds) ? source.duration_seconds : null,
+    device: record?.device ?? record?.closure?.device ?? "",
+    settings: {
+      overlapSeconds: settings.overlap_seconds ?? null,
+      lookaheadSeconds: settings.lookahead_seconds ?? null,
+      maxSeconds: settings.max_seconds ?? null,
+    },
+    vocal: voice(review.voices?.vocal),
+    instrumental: voice(review.voices?.instrumental),
+    chords: list(review.distinct_chords),
+    chordRoots: Number.isFinite(review.distinct_chord_roots) ? review.distinct_chord_roots : null,
+    keys: list(review.keys),
+    sections: list(review.sections),
+    bars: Number.isFinite(review.bars) ? review.bars : null,
+    diagnostics: list(review.diagnostics),
+    warnings,
+    decodeWarnings: list(record?.decodeWarnings).map(warningRow),
+    octave: octave
+      ? {
+          method: octave.method ?? "",
+          range: Array.isArray(octave.transcribed_midi_range) ? octave.transcribed_midi_range : null,
+          checked: octave.notes_checked ?? list(octave.notes).length,
+          f0HalfDominant: octave.notes_with_more_energy_at_f0_half ?? null,
+          fraction: Number.isFinite(octave.fraction_f0_half_dominant) ? octave.fraction_f0_half_dominant : null,
+          notes: list(octave.notes),
+        }
+      : null,
+    readiness: {
+      melody: readinessRow(record?.readiness?.melody ?? review.cover?.melody),
+      full: readinessRow(record?.readiness?.full ?? review.cover?.full),
+    },
+    versions: { melody: record?.versions?.melody ?? null, full: record?.versions?.full ?? null },
+    versionErrors: Object.entries(versionErrors)
+      .filter(([, message]) => message)
+      .map(([mode, message]) => ({ mode, message: String(message) })),
+    abcErrors: record?.abcErrors && typeof record.abcErrors === "object" ? record.abcErrors : {},
+    exportGroups: EXPORT_KIND_ORDER.filter((kind) => groups.has(kind)).map((kind) => ({
+      kind,
+      label: EXPORT_KIND_LABELS[kind],
+      files: groups.get(kind),
+    })),
+    usagePolicy: record?.usagePolicy ?? null,
+    replay: record?.replay ?? null,
+    unload: record?.unload ?? null,
+    closure: record?.closure ?? null,
+  };
 }
 
 // Tier rows for the lab's install panel. A locally derived tier (`derivationPending`) is installable:
@@ -622,6 +839,9 @@ export function yue2RunView(job) {
           ? `No score version was created (${block.scoreVersionSkipped}).`
           : null,
     renderRecordId: block.renderRecordId ?? null,
+    // A finished transcription's review record and the recording it read (sc-23002).
+    transcriptionId: block.transcriptionId ?? null,
+    sourceAudioAssetId: spec.sourceAudioAssetId ?? null,
     versionId: block.versionId ?? spec.versionId ?? null,
     batch: spec.batch ?? block.batch ?? null,
     style: spec.style ?? block.effectiveSettings?.style ?? "",

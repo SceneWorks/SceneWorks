@@ -27356,10 +27356,15 @@
       // bytes.
       //
       // COVERS. SheetSage2 + MERT-v2-FullSong (`Closure::Cover`) are conditional cover dependencies, not
-      // generation downloads, so they live in `conditionalComponents`, never in `downloads`. They are
-      // BLOCKED: the native transcription port (inference `candle-audio-sheetsage2`) derives from upstream
-      // code that carries no licence grant, so it is gated out of every runtime bundle until the owner
-      // records a basis.
+      // generation downloads, so they live in `conditionalComponents`, never in `downloads`: no install,
+      // tier or co-requisite path fetches them. They are acquired only for covers, through
+      // `POST /api/v1/models/yue2/conditional-components/cover/download`, under the SAME licence
+      // acknowledgment and noncommercial policy as YuE2 (the repo-keyed download doors allow them with
+      // the acknowledgment and refuse them without it). Owner decision, epic sc-22988, 2026-09-27: the
+      // native transcription port (inference `candle-audio-sheetsage2`) is distributed under CC BY-NC
+      // 4.0 — the upstream weight terms — noncommercial only, attribution per its NOTICE. The pinned
+      // identity is each row's revision, file list and weights SHA-256 (the engine verifies every file
+      // by size + SHA-256 against `inventory::SHEETSAGE2` / `MERT_V2_FULLSONG` before it loads).
       //
       // Memory admission / floors are sc-23001; the API + worker jobs are sc-22999; the UI is sc-23000.
       "id": "yue2",
@@ -27371,7 +27376,7 @@
       "nonCommercial": true,
       "requiresLicenseAcknowledgment": true,
       "license": "CC-BY-NC-4.0",
-      "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
+      "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. Covers from a recording also use SheetSage2 and MERT-v2-FullSong (by Multimodal Art Projection; weights CC BY-NC 4.0), downloaded only when you set up covers; SceneWorks' native transcription code ported from them is distributed under the same CC BY-NC 4.0 terms, noncommercial only. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
       "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca688d6ae5d7f0feb88573fec89920fcd19/LICENSE",
       "commercialUse": {
         "eligible": false,
@@ -27537,11 +27542,10 @@
             "THIRD_PARTY_NOTICES.md"
           ],
           "estimatedSizeBytes": 228772419,
+          "weightsSha256": "b235f68091a5f5b644000f2b5acb57d1e70432aca2b34ab1b9cf27236e1f4274",
           "license": "cc-by-nc-4.0",
-          "blocked": {
-            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
-            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
-          }
+          "nonCommercial": true,
+          "licenseBasis": "Owner decision recorded on epic sc-22988 (2026-09-27): the native SheetSage2 / MERT-v2-FullSong transcription port (inference candle-audio-sheetsage2) is distributed under CC BY-NC 4.0, the upstream weight terms, noncommercial use only, with attribution per its NOTICE. Acquired only for covers, never as a generation download."
         },
         {
           // `inventory::MERT_V2_FULLSONG` (cover closure).
@@ -27560,11 +27564,10 @@
             "THIRD_PARTY_NOTICES.md"
           ],
           "estimatedSizeBytes": 2529845146,
+          "weightsSha256": "e6dd2ab187d6dd62b6521cd7d8f932e237acf0c5757745a7232082e28391350d",
           "license": "cc-by-nc-4.0",
-          "blocked": {
-            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
-            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
-          }
+          "nonCommercial": true,
+          "licenseBasis": "Owner decision recorded on epic sc-22988 (2026-09-27): the native SheetSage2 / MERT-v2-FullSong transcription port (inference candle-audio-sheetsage2) is distributed under CC BY-NC 4.0, the upstream weight terms, noncommercial use only, with attribution per its NOTICE. Acquired only for covers, never as a generation download."
         }
       ],
       "paths": {
@@ -28531,7 +28534,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "2f44cad438b1549f112b8f706adb60fd6c01f470474c0f9779def1650bc03ea3",
+              "sha256": "2184b407f04791e1f89c852dc92e580043777170209219c2816f2b2cc01d2e82",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28550,18 +28553,18 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 252550,
-                  "sha256": "966d7d1256d0a6fbc5147f0990c9f2e4486bc55d74faa2e2055dbb8605860f24"
+                  "byteSize": 252907,
+                  "sha256": "9c33e17fa4d52c30cd3a10c499e28658b3addf6a677ef15e82f49fc13c993f41"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "b2a59946e866368a9750d7256bf26e9dd2cda94954ec1e44510c19a8a804ddc7"
+                  "sha256": "7cf03cdb7deecb40fdc172b5231ec6306226f477291f009874ac98c483219896"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 73363,
-                  "sha256": "6f575abb52cda2949552a870ac895dc7e6882dc38c0fbba8ed1bf74093dcc56a"
+                  "byteSize": 73853,
+                  "sha256": "cd962acf4bd8d019df949124f20692787b2fcd34839e15677e137d8545ca1400"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
@@ -28581,7 +28584,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 9161,
-                  "sha256": "58c2fb508dad2d90d996255733dab56fb5f029d7cdd9a16ce1d561514e02f402"
+                  "sha256": "689c6dcbb66fe79f85ac889e5e3a0fb6ecfb65353fdefc784448cfafc9e6db08"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -28605,13 +28608,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
-                  "byteSize": 39083,
-                  "sha256": "b8f060ebcd27431b74124fef0197c7fd8059b0ac91e8c543a18ca63d4c7371a3"
+                  "byteSize": 39195,
+                  "sha256": "ca48a435e9a90af4c8de8ae54c7de6862b9814a35ff168d231bea7065a4e8eb0"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 149599,
-                  "sha256": "cd80e397fd0f619e89953d9c0efbf2b0c8249e81d1d5feceb6411c3db83a5760"
+                  "byteSize": 149623,
+                  "sha256": "af2b746c459018ac6cc8c455e4fe71c94d13ab5b9dd30daf03160994709bb4a5"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -28650,8 +28653,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 160436,
-                  "sha256": "39cf875680250b26f0ce91996f039ee3e5ab013cd1c81115057a4070a15aee1a"
+                  "byteSize": 161539,
+                  "sha256": "c238b58b80d21616e6636ad77598a53f60231a5f2384809e216ec29f693f3ae2"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

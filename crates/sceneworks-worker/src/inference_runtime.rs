@@ -22,6 +22,9 @@ use runtime_cuda as platform_runtime;
 #[cfg(target_os = "macos")]
 use runtime_macos as platform_runtime;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) use platform_runtime::audio_providers;
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

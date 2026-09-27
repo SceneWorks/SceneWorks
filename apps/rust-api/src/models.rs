@@ -1176,6 +1176,216 @@ pub(crate) async fn create_model_download_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// A purpose the entry declares no conditional components for (sc-23002).
+pub(crate) const CONDITIONAL_COMPONENTS_NOT_DECLARED_CODE: &str =
+    "conditional_components_not_declared";
+
+/// `POST /api/v1/models/:model_id/conditional-components/:purpose/download` (sc-23002) — acquire the
+/// pinned components a model needs only for `purpose` (YuE2's SheetSage2 + MERT-v2-FullSong cover
+/// closure). They are never `downloads[]` rows, so no install reaches them; this is the one door, and
+/// it applies the entry's gates exactly as the model install does:
+///
+/// * a `blocked` component refuses the whole purpose (403 `component_blocked`, reason + unblock);
+/// * an entry that requires a licence acknowledgment refuses without one (403
+///   `license_acknowledgment_required`) and records it server-side when asserted, for the entry's
+///   CURRENT terms — the same acknowledgment YuE2 jobs re-check at execution;
+/// * the repo-keyed half of the gate runs over the repos it will queue, as on every other door.
+///
+/// Each component not already installed is queued as its own `model_download` job (the worker is
+/// one repo per job) at its pinned revision and file list, carrying the acknowledgment so a retry
+/// re-validates. Components already on disk are reported, not re-fetched.
+pub(crate) async fn create_conditional_components_download_jobs(
+    State(state): State<AppState>,
+    Path((model_id, purpose)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<ConditionalComponentsDownloadRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    use sceneworks_core::model_usage_policy::{
+        conditional_component_downloads, ConditionalComponentsError,
+    };
+    let model = model_catalog(&state)
+        .await?
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+            context: None,
+            code: None,
+        })?;
+    let rows = conditional_component_downloads(&model, &purpose).map_err(|error| match error {
+        ConditionalComponentsError::NotDeclared { .. } => ApiError::typed(
+            StatusCode::NOT_FOUND,
+            format!("Model '{model_id}': {error}."),
+            CONDITIONAL_COMPONENTS_NOT_DECLARED_CODE,
+            json!({ "purpose": purpose }),
+        ),
+        ConditionalComponentsError::Blocked { ref blocked, .. } => ApiError::typed(
+            StatusCode::FORBIDDEN,
+            format!("Model '{model_id}': {error}"),
+            COMPONENT_BLOCKED_CODE,
+            json!({
+                "purpose": purpose,
+                "blocked": blocked.iter().map(|(component_id, reason, unblock)| json!({
+                    "componentId": component_id, "reason": reason, "unblock": unblock,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+    })?;
+    if model_requires_license_acknowledgment(&model) {
+        if !payload.license_acknowledged {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: format!(
+                    "Model '{model_id}' requires accepting its license before its '{purpose}' \
+                     components download. Accept the license on the Models screen, or send \
+                     `licenseAcknowledged: true` to assert that the user has accepted it."
+                ),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+                context: None,
+            });
+        }
+        crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+    }
+    let repos: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let repo_refs: Vec<Option<&str>> = repos.iter().map(|repo| Some(repo.as_str())).collect();
+    ensure_license_acknowledged_for_source(&state, &repo_refs, None, payload.license_acknowledged)
+        .await?;
+    let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
+    let mut jobs = Vec::new();
+    let mut components = Vec::new();
+    for row in &rows {
+        let component_id = row.get("componentId").cloned().unwrap_or(Value::Null);
+        let presence = co_requisite_presence(&state.settings.data_dir, row);
+        if presence == CoRequisitePresence::Installed {
+            components.push(json!({
+                "componentId": component_id,
+                "repo": row.get("repo"),
+                "revision": row.get("revision"),
+                "status": "installed",
+            }));
+            continue;
+        }
+        let job_payload = build_model_download_job_payload(
+            &model,
+            &model_id,
+            row,
+            None,
+            false,
+            payload.license_acknowledged,
+            &state.settings.data_dir,
+        )?;
+        let job = create_generation_job(
+            state.clone(),
+            JobType::ModelDownload,
+            None,
+            None,
+            job_payload,
+            requested_gpu.clone(),
+        )
+        .await?;
+        components.push(json!({
+            "componentId": component_id,
+            "repo": row.get("repo"),
+            "revision": row.get("revision"),
+            "status": "queued",
+            "jobId": job.id,
+        }));
+        jobs.push(public_job_snapshot(job));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "purpose": purpose, "jobs": jobs, "components": components })),
+    ))
+}
+
+/// Stamp each conditional component row of a catalog entry with its install state (sc-23002) and
+/// summarize each purpose — `conditionalPurposes.<purpose>.installState` is `installed` only when
+/// every component the purpose needs is, `incomplete` when any is partly on disk, else `missing`,
+/// and `blocked` when any carries a block — so a client can tell whether a cover from a recording
+/// can run without guessing from file names.
+fn apply_conditional_component_state(object: &mut JsonObject, data_dir: &FsPath) {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let Some(rows) = object
+        .get_mut("conditionalComponents")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut purposes: std::collections::BTreeMap<String, (bool, bool, bool)> =
+        std::collections::BTreeMap::new();
+    for row in rows.iter_mut() {
+        let presence = co_requisite_presence(data_dir, row);
+        let blocked = row.get("blocked").is_some();
+        let state = match presence {
+            CoRequisitePresence::Installed => "installed",
+            CoRequisitePresence::Incomplete => "incomplete",
+            CoRequisitePresence::Absent => "missing",
+        };
+        for purpose in row
+            .get("requiredFor")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let entry = purposes
+                .entry(purpose.to_owned())
+                .or_insert((true, false, false));
+            entry.0 &= presence == CoRequisitePresence::Installed;
+            entry.1 |= presence == CoRequisitePresence::Incomplete;
+            entry.2 |= blocked;
+        }
+        if let Some(row) = row.as_object_mut() {
+            row.insert("installState".to_owned(), json!(state));
+        }
+    }
+    let summary: JsonObject = purposes
+        .into_iter()
+        .map(|(purpose, (installed, incomplete, blocked))| {
+            let state = if installed {
+                "installed"
+            } else if incomplete {
+                "incomplete"
+            } else {
+                "missing"
+            };
+            (
+                purpose,
+                json!({ "installState": state, "blocked": blocked }),
+            )
+        })
+        .collect();
+    object.insert("conditionalPurposes".to_owned(), Value::Object(summary));
+}
+
+/// The install state of `model`'s `purpose` components right now (sc-23002): `Ok(())` when every
+/// one is installed; otherwise the component ids that are not.
+pub(crate) fn conditional_components_missing(
+    data_dir: &FsPath,
+    model: &Value,
+    purpose: &str,
+) -> Result<Vec<Value>, sceneworks_core::model_usage_policy::ConditionalComponentsError> {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let rows =
+        sceneworks_core::model_usage_policy::conditional_component_downloads(model, purpose)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| co_requisite_presence(data_dir, row) != CoRequisitePresence::Installed)
+        .map(|row| {
+            json!({
+                "componentId": row.get("componentId"),
+                "repo": row.get("repo"),
+                "revision": row.get("revision"),
+            })
+        })
+        .collect())
+}
+
 fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
     ensure_model_not_cleanup_only(model)?;
     if model.get("downloadable").and_then(Value::as_bool) == Some(false) {
@@ -9064,6 +9274,7 @@ fn apply_model_catalog_entry(
     sceneworks_core::preview_support::apply_to_model_entry(object);
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
+    apply_conditional_component_state(object, data_dir);
     if platform_cleanup_only {
         // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
         // action projection even though the preserved manifest metadata is still needed by the

@@ -2011,6 +2011,187 @@ pub(crate) fn live_residency_bytes() -> (u64, u64) {
         .fold((0, 0), |(d, h), &(dd, hh, _)| (d + dd, h + hh))
 }
 
+/// CPU transcription occupies the host pool until the model has been unloaded.  The same live
+/// table is used by YuE2 admission, so a concurrent generator cannot borrow its memory on a
+/// unified host.  On CUDA the host's MemAvailable reading already includes this allocation.
+#[derive(Debug)]
+pub(crate) struct TranscriptionLease {
+    id: u64,
+}
+
+impl Drop for TranscriptionLease {
+    fn drop(&mut self) {
+        live_leases()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&self.id);
+    }
+}
+
+fn transcription_host_fit(needed: u64, budget: &Yue2Budget, other_live: u64) -> bool {
+    match budget {
+        Yue2Budget::Unified {
+            capacity_bytes,
+            resident_bytes,
+            ..
+        } => {
+            needed
+                <= capacity_bytes
+                    .saturating_sub(*resident_bytes)
+                    .saturating_sub(other_live)
+        }
+        Yue2Budget::Dedicated {
+            host_available_bytes,
+            ..
+        } => host_available_bytes
+            .is_some_and(|available| needed <= available.saturating_sub(other_live)),
+    }
+}
+
+/// The source pipeline retains the decoded WAV bytes while constructing the interleaved track,
+/// then the provider retains a mono conversion, resampler workspace/output and a prepared clone.
+/// Charge all of these alongside the model window, before reading the decoded WAV into RAM.
+pub(crate) fn transcription_source_bytes(frames: u64, rate: u32, channels: u16) -> u64 {
+    fn gcd(mut a: u32, mut b: u32) -> u32 {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a.max(1)
+    }
+    let interleaved = frames.saturating_mul(u64::from(channels)).saturating_mul(4);
+    let mono = frames.saturating_mul(4);
+    let resampled = frames
+        .saturating_mul(24_000)
+        .saturating_add(u64::from(rate).saturating_sub(1))
+        .checked_div(u64::from(rate.max(1)))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(4);
+    // The pinned sinc resampler allocates `new/gcd * taps` F32 kernel values. A high source rate
+    // with a small gcd can make this much larger than the recording itself.
+    let divisor = gcd(rate, 24_000);
+    let (orig, new) = (rate / divisor, 24_000 / divisor);
+    let width = (6.0 * f64::from(orig) / (f64::from(orig.min(new)) * 0.99)).ceil() as u64;
+    let kernel = u64::from(new)
+        .saturating_mul(width.saturating_mul(2).saturating_add(u64::from(orig)))
+        .saturating_mul(4);
+    interleaved
+        .saturating_mul(2)
+        .saturating_add(mono.saturating_mul(3))
+        .saturating_add(resampled.saturating_mul(4))
+        .saturating_add(kernel)
+        .saturating_add(1 << 20)
+}
+
+pub(crate) async fn check_transcription(
+    entry: &Value,
+    seconds: u64,
+    gpu_id: &str,
+    source_bytes: u64,
+) -> Result<TranscriptionLease, WorkerError> {
+    let weights = transcriber_bytes(entry).map_err(|why| {
+        WorkerError::InvalidPayload(format!(
+            "yue2: transcription memory admission cannot price the cover closure ({why})"
+        ))
+    })?;
+    let needed: u64 = transcription_terms(seconds, weights, Yue2Backend::Cpu)
+        .iter()
+        .map(|term| term.device_bytes + term.host_bytes)
+        .sum::<u64>()
+        .saturating_add(source_bytes);
+    let budget = live_budget(gpu_id).await.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "yue2: host memory budget is unavailable for transcription admission".into(),
+        )
+    })?;
+    let (other_device, other_host) = live_residency_bytes();
+    if !transcription_host_fit(needed, &budget, other_device + other_host) {
+        return Err(WorkerError::InvalidPayload(format!(
+                "yue2: transcription needs {:.2} GiB of host memory for SheetSage2 + MERT-v2, one window and source buffers; the host pool cannot admit it",
+                gb(needed)
+            )));
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 63);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    live_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(id, (0, needed, std::thread::current().id()));
+    Ok(TranscriptionLease { id })
+}
+
+/// A compressed source has no trustworthy frame count until ffmpeg decodes it. Reserve the model
+/// first, then cap the temporary output using the remaining measured host pool. The file itself
+/// must fit within half the remaining pool because the WAV reader briefly holds raw bytes and F32
+/// samples. The decoded format is re-priced before either allocation, including resampling.
+pub(crate) async fn transcription_unknown_decode_cap(gpu_id: &str) -> Result<u64, WorkerError> {
+    let budget = live_budget(gpu_id).await.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "yue2: host memory budget is unavailable for compressed recording admission".into(),
+        )
+    })?;
+    let (device, host) = live_residency_bytes();
+    let available = match budget {
+        Yue2Budget::Unified {
+            capacity_bytes,
+            resident_bytes,
+            ..
+        } => capacity_bytes
+            .saturating_sub(resident_bytes)
+            .saturating_sub(device)
+            .saturating_sub(host),
+        Yue2Budget::Dedicated {
+            host_available_bytes,
+            ..
+        } => host_available_bytes
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "yue2: host MemAvailable is unavailable for compressed recording admission"
+                        .into(),
+                )
+            })?
+            .saturating_sub(device)
+            .saturating_sub(host),
+    };
+    let cap = available / 2;
+    if cap < (2 << 20) {
+        return Err(WorkerError::InvalidPayload(
+            "yue2: host memory budget cannot admit decoded recording buffers".into(),
+        ));
+    }
+    Ok(cap)
+}
+
+/// `ReviewArtifact::open` replays persisted F32 model input. It reads raw bytes and constructs an
+/// F32 vector, so an existing artifact needs admission too, before replay allocates either copy.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) async fn check_transcription_replay(
+    artifact_file_bytes: u64,
+    gpu_id: &str,
+) -> Result<TranscriptionLease, WorkerError> {
+    let needed = artifact_file_bytes
+        .saturating_mul(3)
+        .saturating_add(16 << 20);
+    let budget = live_budget(gpu_id).await.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "yue2: host memory budget is unavailable for transcription replay".into(),
+        )
+    })?;
+    let (other_device, other_host) = live_residency_bytes();
+    if !transcription_host_fit(needed, &budget, other_device + other_host) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "yue2: transcription replay needs {:.2} GiB of host memory; the host pool cannot admit it",
+            gb(needed)
+        )));
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 62);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    live_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(id, (0, needed, std::thread::current().id()));
+    Ok(TranscriptionLease { id })
+}
+
 /// The admitted residency of one render, held from admission until the render's generator is
 /// dropped — on completion, error, cancellation or unwind alike (drop it AFTER the generator). While
 /// held, a later YuE2 admission on a unified pool counts it against the capacity, so a render whose

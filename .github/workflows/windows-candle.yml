@@ -1432,13 +1432,13 @@ jobs:
   # `yue2` provider on this card) and, once, the memory-profile campaign through the job path.
   # Dispatch only, at the frozen feature head:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_yue2_terminal_cuda=true -f inference_revision=<Cargo pin>
-  # The app state (a FRESH per-run Hugging Face home the cold install downloads into (~11 GB), the
-  # derived q8/q4 tiers, projects -- and the CC BY-NC 4.0 audio) lives on E: under a per-run directory
+  # The app state (a FRESH per-run Hugging Face home for the ~11 GB cold YuE2 install and the
+  # ~2.76 GB conditional SheetSage2/MERT cover closure, derived q8/q4 tiers, projects and CC BY-NC
+  # 4.0 audio) lives on E: under a per-run directory
   # and is NEVER uploaded; the artifact carries records, receipts, hashes and logs only. The shared
   # E:\huggingface\hub is never touched: a preseeded hub is not cold-install evidence. Remove
-  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. A `pass-with-blockers`
-  # acceptance verdict (the blocked AT2 transcription path) exits non-zero and fails this job: an
-  # open owner decision is never reported green.
+  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. Any blocked acceptance
+  # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
@@ -1511,6 +1511,16 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           echo .terminal/>>.git\info\exclude
           cargo build --release --locked -p sceneworks-rust-api --features backend-candle
+      - name: Locate and probe ffmpeg for YuE2 recording transcription
+        shell: powershell
+        run: |
+          $ffmpeg = (Get-Command ffmpeg.exe -CommandType Application -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathRooted($ffmpeg)) { throw "ffmpeg did not resolve to an absolute path: $ffmpeg" }
+          $versionLines = @(& $ffmpeg -version)
+          if ($LASTEXITCODE -ne 0 -or $versionLines.Count -eq 0 -or $versionLines[0] -notmatch '^ffmpeg version ') {
+            throw "YuE2 recording transcription requires a working ffmpeg: $ffmpeg"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "YUE2_FFMPEG_BIN=$ffmpeg"
       - name: Run the YuE2 terminal acceptance matrix (CUDA)
         id: yue2_acceptance
         continue-on-error: true
@@ -1518,7 +1528,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe
+          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)

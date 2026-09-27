@@ -17,6 +17,7 @@ use sceneworks_core::yue2_score::store::{
     ComparisonInput, ComparisonRecord, CreateVersionInput, EditInput, Listing, Provenance,
     RenderInput, RenderRecord, ScoreVersionRecord, VersionDetail, VersionSummary,
 };
+use sceneworks_core::yue2_score::transcriptions::{TranscriptionDetail, TranscriptionRecord};
 use sceneworks_core::yue2_score::{
     inspect, parse_bounded, ScoreEditOperation, ScoreInspection, Yue2ScoreError,
     REGENERATION_NOTICE,
@@ -261,4 +262,77 @@ pub(crate) async fn get_yue2_comparison(
         })
         .await?,
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Recording transcriptions (sc-23002): the review surface's reads. A transcription is created only
+// by a `transcribe` job's terminal side effect (`yue2_jobs::import_transcription`), never by a
+// client, so there is no create route.
+// ---------------------------------------------------------------------------------------------
+
+pub(crate) async fn list_yue2_transcriptions(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Listing<TranscriptionRecord>>, ApiError> {
+    Ok(Json(
+        yue2_call(state, move |store| {
+            store.yue2_score_store(&project_id)?.list_transcriptions()
+        })
+        .await?,
+    ))
+}
+
+/// A transcription with both transcribed scores (each re-read against its recorded digest).
+pub(crate) async fn get_yue2_transcription(
+    State(state): State<AppState>,
+    Path((project_id, transcription_id)): Path<(String, String)>,
+) -> Result<Json<TranscriptionDetail>, ApiError> {
+    Ok(Json(
+        yue2_call(state, move |store| {
+            store
+                .yue2_score_store(&project_id)?
+                .get_transcription_detail(&transcription_id)
+        })
+        .await?,
+    ))
+}
+
+/// One export of a transcription's review artifact (MIDI, LAB, ABC, JSON) — only a file the
+/// artifact's manifest names, re-hashed against its recorded digest on every read.
+pub(crate) async fn get_yue2_transcription_file(
+    State(state): State<AppState>,
+    Path((project_id, transcription_id, file)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let (export, bytes) = yue2_call(state, move |store| {
+        store
+            .yue2_score_store(&project_id)?
+            .transcription_file(&transcription_id, &file)
+    })
+    .await?;
+    let content_type = match export.kind.as_str() {
+        "midi" => "audio/midi",
+        "abc" => "text/vnd.abc; charset=utf-8",
+        "json" => "application/json",
+        "lab" | "text" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    let name: String = export
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or("export")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::ETAG, format!("\"{}\"", export.sha256))
+        .body(Body::from(bytes))
+        .map_err(|error| ApiError::internal(format!("transcription file response: {error}")))
 }

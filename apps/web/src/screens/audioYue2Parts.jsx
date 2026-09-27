@@ -51,6 +51,8 @@ export function ErrorNotice({ error, children = null, testId = "yue2-error" }) {
   const message = typeof error === "string" ? error : error.message || "The request failed.";
   const blocked = Array.isArray(error?.context?.blocked) ? error.context.blocked : [];
   const violations = Array.isArray(error?.context?.violations) ? error.context.violations : [];
+  // `yue2_cover_components_missing`: the cover components that are not installed yet.
+  const missing = Array.isArray(error?.context?.missing) ? error.context.missing : [];
   return (
     <div className="yue2-notice yue2-notice--error" data-testid={testId} role="alert">
       <Icon.Warning size={15} />
@@ -70,6 +72,16 @@ export function ErrorNotice({ error, children = null, testId = "yue2-error" }) {
           <ul className="yue2-notice__list">
             {violations.map((violation) => (
               <li key={violation}>{violation}</li>
+            ))}
+          </ul>
+        ) : null}
+        {missing.length ? (
+          <ul className="yue2-notice__list" data-testid="yue2-error-missing">
+            {missing.map((row) => (
+              <li key={row.componentId ?? row.repo}>
+                <strong>{row.componentId}</strong> not installed ({row.repo}
+                {row.revision ? `@${String(row.revision).slice(0, 8)}` : ""})
+              </li>
             ))}
           </ul>
         ) : null}
@@ -237,6 +249,7 @@ export function Yue2RunCard({
   model,
   onCancel,
   onOpenVersion,
+  onOpenTranscription,
   onRestorePlan,
   onDecodeAgain,
   onFetchVersionAbc,
@@ -373,6 +386,11 @@ export function Yue2RunCard({
           {view.scoreVersionId ? (
             <button className="secondary-action" onClick={() => onOpenVersion?.(view.scoreVersionId)} type="button">
               Open score version
+            </button>
+          ) : null}
+          {view.transcriptionId ? (
+            <button className="secondary-action" onClick={() => onOpenTranscription?.(view.transcriptionId)} type="button">
+              Review transcription
             </button>
           ) : null}
           {view.restorable ? (
@@ -851,6 +869,14 @@ export function Yue2ScoreWorkbench({
                 {version.rootVersionId !== version.id ? ` · root ${version.rootVersionId}` : ""}
               </span>
             </header>
+            {version.transcription ? (
+              // A transcribed score (sc-23002): name its recording and mode, and carry its policy.
+              <p className="yue2-muted" data-testid="yue2-version-transcription">
+                Transcribed from a recording ({version.transcription.mode} score, transcription{" "}
+                {version.transcription.transcriptionId}). Its style and lyrics are yours to supply when you cover it.{" "}
+                <PolicyChips policy={version.usagePolicy} />
+              </p>
+            ) : null}
             <ScorePreview inspection={inspection} />
             <dl className="yue2-facts">
               <div>

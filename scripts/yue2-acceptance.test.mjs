@@ -2,15 +2,27 @@
 // stage timing, WAV evidence, memory parsing, record validation and summary rendering. The driver's
 // service half (API + worker + real renders) runs only on the terminal hosts.
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { detPow2, detSin, generateSilence, generateTestRecording, MELODY, RECORDING_GENERATOR_ID } from "./lib/yue2-test-recording.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 import {
   CASES,
+  COVER_CLOSURE_ROUTE,
   COVERED_ELSEWHERE,
+  EXPECTED_TRANSCRIPTION_DEVICE,
+  TRANSCRIPTION_ARTIFACT_SCHEMA,
+  TRANSCRIPTION_COMPONENT_IDS,
+  conditionalComponentAssertions,
+  coverFromTranscriptionAssertions,
+  emptyMelodyAssertions,
+  transcriptionAssertions,
+  transcriptionDeviceAssertions,
+  verifyTranscriptionArtifact,
   RECORD_SCHEMA,
   SONG_RUN_FILES,
   buildSummary,
@@ -21,6 +33,7 @@ import {
   isLatentCorruptionRefusal,
   isMissingSourceRefusal,
   recordedServiceEnv,
+  resolveFfmpeg,
   serviceDeviations,
   stopWorkerSafely,
   tierAssertions,
@@ -33,6 +46,7 @@ import {
   parseArgs,
   parseWav,
   peakOf,
+  persistedAudioAsset,
   planCases,
   renderAssertions,
   renderMarkdown,
@@ -63,7 +77,7 @@ test("the plan runs every case on a real run and skips only with a stated reason
   const dry = planCases({ platform: "metal", dryRun: true });
   assert.deepEqual(
     dry.filter((entry) => entry.action === "run").map((entry) => entry.id),
-    ["catalog-preflight", "isolation-v1-v2", "transcription-blocked", "licence-gate"],
+    ["catalog-preflight", "isolation-v1-v2", "licence-gate", "transcription-closure"],
   );
   for (const entry of dry.filter((item) => item.action === "skip")) assert.match(entry.reason, /dry run/);
   // The operator's --skip is recorded as such.
@@ -267,6 +281,21 @@ test("tier evidence comes from the engine: tier, no FP8, and the pinned derived 
   assert.deepEqual(tierFailing(tierRun("bf16", PINS.q4)), ["loaded no derived tier's weights"]);
 });
 
+test("plan-only tier evidence uses engine provenance; a missing or wrong provenance fails", () => {
+  const plan = { ...tierRun("q8", PINS.q8), runResult: { kind: "plan" } };
+  assert.deepEqual(tierFailing({ ...plan, runProvenance: { weights: { weight_tier: "q8", quantization: "none", mot_native_weights_sha256: PINS.q8 } } }), []);
+  assert.deepEqual(tierFailing(plan), ["engine ran the q8 tier", "AR ran without FP8", "loaded the pinned derived q8 weights"]);
+  assert.deepEqual(tierFailing({ ...plan, runProvenance: { weights: { weight_tier: "bf16", quantization: "fp8", mot_native_weights_sha256: PINS.q4 } } }), ["engine ran the q8 tier", "AR ran without FP8", "loaded the pinned derived q8 weights"]);
+});
+
+test("library audio is resolved from the API's persisted asset id after assetWrites are consumed", () => {
+  const result = { assetIds: ["asset_1"], assets: [{ id: "asset_1", type: "audio", file: { path: "assets/audios/one.wav" } }] };
+  assert.deepEqual(persistedAudioAsset(result, result.assets[0]), { id: "asset_1", mediaPath: "assets/audios/one.wav" });
+  assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], id: "asset_2" }), /not persisted audio/);
+  assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], file: {} }), /not persisted audio/);
+  assert.throws(() => persistedAudioAsset({ assetWrites: [{ mediaPath: "assets/audios/one.wav" }] }, result.assets[0]), /no asset id/);
+});
+
 test("refusal matchers name the specific failure, not any error mentioning a record", () => {
   const corrupt = `yue2: the source run does not verify against its recorded identity: /p/yue2/runs/yue2run_1/latent.npy: SHA-256 ${"a".repeat(64)}, recorded ${"b".repeat(64)}`;
   assert.equal(isLatentCorruptionRefusal(corrupt), true);
@@ -349,11 +378,15 @@ test("a record stands as evidence only when it is complete; a non-pass must say 
   assert.throws(broken({ assertions: [] }), /asserted nothing/);
   assert.throws(broken({ status: "skipped" }), /must say why/);
   assert.throws(broken({ status: "failed", reason: " " }), /must say why/);
-  assert.throws(broken({ status: "blocked", reason: "x" }), /only an expected refusal/);
+  // No case expects a blocker any more (AT2's transcription path runs for real), so even a
+  // well-formed blocked record is refused — it becomes a FAILED case in the driver, never a blocker.
+  // Mutation: drop the expectBlocked check in validateRecord → the first throw below does not fire.
   const blockers = [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }];
-  validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [], blockers }));
-  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [] })), /reason and unblock/);
-  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "x", jobs: [], blockers: [{ reason: "r" }] })), /reason and unblock/);
+  for (const item of CASES) {
+    assert.throws(() => validateRecord(passedRecord(item.id, { status: "blocked", reason: "x", jobs: [], blockers })), /only an expected refusal/, item.id);
+  }
+  assert.throws(broken({ status: "blocked", reason: "x" }), /reason and unblock/);
+  assert.throws(broken({ status: "blocked", reason: "x", jobs: [], blockers: [{ reason: "r" }] }), /reason and unblock/);
   assert.throws(broken({ jobs: [{ ...job, output: { ...job.output, runAudioSha256: undefined } }] }), /no output sha256/);
   assert.throws(broken({ jobs: [{ ...job, truncated: { abc: false } }] }), /no truncation flags/);
   assert.throws(broken({ jobs: [{ ...job, device: null }] }), /device\/dtype/);
@@ -366,9 +399,9 @@ test("a record stands as evidence only when it is complete; a non-pass must say 
 function summaryOf(statuses, meta = {}) {
   const records = CASES.map((item) => ({
     ...passedRecord(item.id, { jobs: [] }),
-    status: statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed"),
-    reason: statuses[item.id] && statuses[item.id] !== "passed" ? `why ${item.id}` : item.expectBlocked ? "blocked as designed" : null,
-    blockers: (statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed")) === "blocked"
+    status: statuses[item.id] ?? "passed",
+    reason: statuses[item.id] && statuses[item.id] !== "passed" ? `why ${item.id}` : null,
+    blockers: statuses[item.id] === "blocked"
       ? [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]
       : undefined,
   }));
@@ -376,14 +409,17 @@ function summaryOf(statuses, meta = {}) {
 }
 
 test("the verdict passes only a complete run: any failure fails it, any skip or dry run leaves it incomplete", () => {
-  // The designed transcription refusal is an open owner decision: never a plain pass, never exit 0.
-  const blocked = summaryOf({});
+  // Every case passing is a clean pass now that no case expects a blocker.
+  const clean = summaryOf({});
+  assert.equal(clean.verdict, "pass");
+  assert.equal(clean.counts.blocked, 0);
+  assert.deepEqual(clean.blockers, []);
+  // The machinery stays: a blocked path is an open owner decision, never a plain pass, never exit 0.
+  const blocked = summaryOf({ "transcribe-cover": "blocked" });
   assert.equal(blocked.verdict, "pass-with-blockers");
   assert.equal(blocked.counts.blocked, 1);
-  assert.deepEqual(blocked.blockers, [{ caseId: "transcription-blocked", acceptance: ["AT1"], componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]);
+  assert.deepEqual(blocked.blockers, [{ caseId: "transcribe-cover", acceptance: ["AT1"], componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]);
   assert.equal(exitCodeFor(blocked), 2);
-  const clean = summaryOf({ "transcription-blocked": "passed" });
-  assert.equal(clean.verdict, "pass");
   assert.equal(exitCodeFor(clean), 0);
   assert.equal(exitCodeFor(summaryOf({ "batch-serial": "failed" })), 1);
   assert.equal(exitCodeFor(summaryOf({ "batch-serial": "skipped" })), 1);
@@ -413,25 +449,34 @@ test("the markdown table has one row per case, carries hashes not audio, and esc
   assert.match(markdown, /CC BY-NC 4\.0/);
   assert.doesNotMatch(markdown, /\.wav/);
   // A blocker is listed with its reason and unblock condition, as an owner decision.
-  const withBlocker = renderMarkdown(summaryOf({}));
+  const withBlocker = renderMarkdown(summaryOf({ "transcribe-cover": "blocked" }));
   assert.match(withBlocker, /Verdict: \*\*pass-with-blockers\*\*/);
   assert.match(withBlocker, /## Blockers — owner decision required \(not a pass\)/);
-  assert.match(withBlocker, /\*\*transcription-blocked\*\* \(AT1\) — yue2_sheetsage2: owner licensing decision\. Unblock: record a licence basis/);
-  assert.doesNotMatch(renderMarkdown(summaryOf({ "transcription-blocked": "passed" })), /Blockers/);
+  assert.match(withBlocker, /\*\*transcribe-cover\*\* \(AT1\) — yue2_sheetsage2: owner licensing decision\. Unblock: record a licence basis/);
+  assert.doesNotMatch(renderMarkdown(summaryOf({})), /Blockers/);
+  // A transcription case lists its generated recording (digest, not audio) and its transcription.
+  const transcribed = passedRecord("transcribe-cover", {
+    recording: { assetId: "asset_rec", sha256: "e".repeat(64), durationSeconds: 21.5, rms: 0.125, generator: { id: "sceneworks-yue2-ode-to-joy-v1" } },
+    jobs: [{ jobId: "job_t", kind: "transcribe", status: "completed", device: "cpu", transcriptionId: "yue2tx_1", manifestSha256: "f".repeat(64), warnings: [{ code: "w" }] }],
+  });
+  const withRecording = renderMarkdown(buildSummary([transcribed], { platform: "metal" }));
+  assert.match(withRecording, /transcribe-cover: sceneworks-yue2-ode-to-joy-v1 sha256 e{64}, 21\.5 s, rms 0\.1250 → yue2tx_1 on cpu, manifest f{16}, 1 warning\(s\)/);
+  assert.doesNotMatch(withRecording, /\.wav/);
 });
 
 const SHELL = {
   PATH: "/bin", HOME: "/home/u",
   HF_HOME: "/home/hf", HF_HUB_CACHE: "/shared/hub", HUGGINGFACE_HUB_CACHE: "/shared/hub", HF_HUB_OFFLINE: "1", HF_TOKEN: "hf_secret",
-  SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", SCENEWORKS_HEARTBEAT_SECONDS: "5", SCENEWORKS_JOBS_DB_PATH: "/elsewhere.db",
+  SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_FFMPEG: "/broken/ffmpeg", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", SCENEWORKS_HEARTBEAT_SECONDS: "5", SCENEWORKS_JOBS_DB_PATH: "/elsewhere.db",
   SCENEWORKS_RESOLVED_CACHE_ENABLED: "true", CUDA_VISIBLE_DEVICES: "3", TRANSFORMERS_CACHE: "/t",
 };
-const common = { base: SHELL, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHome: "H", workerId: "w", driverPid: 42 };
+const FFMPEG_TEST_BIN = path.resolve("/tools/ffmpeg");
+const common = { base: SHELL, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHome: "H", ffmpegBin: FFMPEG_TEST_BIN, workerId: "w", driverPid: 42 };
 const driverKeys = (env) => Object.keys(env).filter((key) => /^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/.test(key) || key === "CUDA_VISIBLE_DEVICES").sort();
 
 test("the services get the desktop's shipped environment and nothing inherited from the shell", () => {
   const resolved = { SCENEWORKS_RESOLVED_CACHE_ENABLED: "false", SCENEWORKS_RESOLVED_CACHE_MAX_BYTES: "68719476736", SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS: "1209600" };
-  const shared = { SCENEWORKS_DATA_DIR: "D", SCENEWORKS_CONFIG_DIR: "C", HF_HOME: "H", ...resolved };
+  const shared = { SCENEWORKS_DATA_DIR: "D", SCENEWORKS_CONFIG_DIR: "C", HF_HOME: "H", SCENEWORKS_FFMPEG: FFMPEG_TEST_BIN, ...resolved };
   // apps/desktop/src/setup.rs spawn_api, per platform.
   const apiCommon = { ...shared, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "5000", SCENEWORKS_TRUST_LOOPBACK: "true", SCENEWORKS_RUN_UTILITY_INPROCESS: "true", SCENEWORKS_PARENT_PID: "42" };
   const pick = (env) => Object.fromEntries(driverKeys(env).map((key) => [key, env[key]]));
@@ -450,7 +495,25 @@ test("the services get the desktop's shipped environment and nothing inherited f
   assert.equal(serviceEnv({ ...common, platform: "metal", role: "api" }).PATH, "/bin");
   assert.throws(() => serviceEnv({ ...common, platform: "metal", role: "both" }), /unknown service role/);
   assert.equal(serviceDeviations("metal").length, 2);
+  assert.match(serviceDeviations("metal")[0], /Recording transcription uses this decoder/);
   assert.match(serviceDeviations("cuda").join(" "), /per-GPU child/);
+});
+
+test("the ffmpeg preflight resolves and probes the exact binary recorded in both service environments", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-ffmpeg-"));
+  try {
+    const bin = path.join(dir, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+    if (process.platform === "win32") return; // Windows CI uses the real runner binary at dispatch.
+    await writeFile(bin, '#!/bin/sh\necho "ffmpeg version acceptance-test"\n');
+    await chmod(bin, 0o755);
+    const resolved = await resolveFfmpeg(undefined, { base: { PATH: dir, SCENEWORKS_FFMPEG: "/broken/ffmpeg" } });
+    assert.deepEqual(resolved, { path: bin, version: "ffmpeg version acceptance-test" });
+    assert.equal(serviceEnv({ ...common, role: "worker", platform: "metal", ffmpegBin: resolved.path }).SCENEWORKS_FFMPEG, bin);
+    await assert.rejects(resolveFfmpeg(path.join(dir, "missing")), /not a working ffmpeg/);
+    assert.throws(() => serviceEnv({ ...common, role: "api", platform: "metal", ffmpegBin: undefined }), /probed absolute ffmpeg path/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("offline takes the hub away for real; an admission cap is the only extra; secrets are never recorded", () => {
@@ -518,4 +581,121 @@ test("evidence and app state must live outside the repository", () => {
   assert.equal(insideRepository(path.join(root, "target", "evidence"), root), true);
   assert.equal(insideRepository(path.resolve("/tmp/yue2"), root), false);
   assert.equal(insideRepository(path.resolve("/repo/SceneWorks-evidence"), root), false);
+});
+
+const failures = (assertions) => assertions.filter((item) => !item.ok).map((item) => item.name);
+
+test("generated recording is deterministic, audible, and distinct from digital silence", () => {
+  const first = generateTestRecording();
+  const second = generateTestRecording();
+  const audio = parseWav(first.bytes);
+  assert.equal(first.generator.id, RECORDING_GENERATOR_ID);
+  assert.equal(first.sha256, "7ade3b3657bc683ebe604bf6c6c9665fb5efe6ef9f9e61fa320f697a2e4b1320");
+  assert.equal(sha(first.bytes), first.sha256);
+  assert.deepEqual(first.bytes, second.bytes);
+  assert.equal(audio.durationSeconds, 21.5);
+  assert.equal(audio.sampleRate, 44100);
+  assert.equal(audio.channels, 1);
+  assert.ok(audio.rms > 0.1);
+  assert.equal(MELODY.length, 30);
+  const silent = generateSilence(10);
+  assert.equal(parseWav(silent.bytes).rms, 0);
+  assert.notEqual(silent.sha256, first.sha256);
+});
+
+test("cover closure must be pinned, noncommercial, covers-only, and installed separately", () => {
+  const rows = TRANSCRIPTION_COMPONENT_IDS.map((componentId, index) => ({
+    componentId, repo: `SceneWorks/${componentId}`, revision: String(index + 1).repeat(40),
+    weightsSha256: String(index + 1).repeat(64), files: ["model.safetensors"], requiredFor: ["cover"],
+    license: "cc-by-nc-4.0", nonCommercial: true, licenseBasis: "model card",
+  }));
+  const manifestEntry = { conditionalComponents: rows, downloads: [{ repo: "SceneWorks/yue2", variant: "bf16" }] };
+  const apiEntry = { conditionalComponents: rows.map((row) => ({ ...row, installState: "missing" })), conditionalPurposes: { cover: { blocked: false, installState: "missing" } }, downloads: manifestEntry.downloads };
+  assert.deepEqual(failures(conditionalComponentAssertions({ manifestEntry, apiEntry })), []);
+  const wrong = structuredClone(apiEntry);
+  wrong.conditionalComponents[0].weightsSha256 = "f".repeat(64);
+  wrong.conditionalComponents[1].licenseBasis = "";
+  assert.ok(failures(conditionalComponentAssertions({ manifestEntry, apiEntry: wrong })).some((name) => name.includes("API serves the checked-in pins")));
+  assert.ok(failures(conditionalComponentAssertions({ manifestEntry, apiEntry: wrong })).some((name) => name.includes("licence basis stated")));
+});
+
+function transcriptionFixture(artifact) {
+  const recording = { assetId: "asset_recording", sha256: "a".repeat(64) };
+  const warnings = [{ code: "review_note", message: "Review the melody." }];
+  const readiness = { melody: { ready: true }, full: { ready: true } };
+  const replay = { artifactsMatched: 3, windows: 1 };
+  const t = { id: "yue2tx_1", dir: "yue2/transcriptions/yue2tx_1", manifestSha256: artifact.manifestSha256,
+    device: "cpu", replay, unload: { released: true, liveModelsAfter: 0 }, warnings };
+  const y2 = { status: "completed", kind: "transcribe", transcriptionId: t.id, transcription: t, readiness, usagePolicy: { nonCommercial: true } };
+  const record = { id: t.id, jobId: "job_tx", artifactDir: t.dir, manifestSha256: t.manifestSha256, sourceAudioAssetId: recording.assetId,
+    recordingSha256: recording.sha256, device: "cpu", replay, warnings, readiness, usagePolicy: { nonCommercial: true } };
+  return { platform: "cuda", jobId: "job_tx", recording, y2, record, artifact };
+}
+
+test("transcription artifact is independently re-hashed; missing, changed, and traversing files fail", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-transcription-test-"));
+  try {
+    const file = Buffer.from("reviewed-score\n");
+    const manifest = { schema: TRANSCRIPTION_ARTIFACT_SCHEMA,
+      source: { original_sha256: "a".repeat(64) }, closure: { device: "cpu" },
+      review: { warnings: [{ code: "review_note", message: "Review the melody." }], cover: { melody: { ready: true }, full: { ready: true } } },
+      artifacts: { "score.abc": sha(file) } };
+    await writeFile(path.join(dir, "score.abc"), file);
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    await writeFile(path.join(dir, "transcription.json"), manifestBytes);
+    const expected = sha(manifestBytes);
+    const artifact = await verifyTranscriptionArtifact(dir, expected);
+    assert.equal(artifact.ok, true);
+    assert.deepEqual(failures(transcriptionAssertions(transcriptionFixture(artifact))), []);
+    assert.deepEqual(failures(transcriptionDeviceAssertions({ platform: "metal", reported: "cpu", record: { device: "cpu" }, manifest })), []);
+    assert.deepEqual(failures(transcriptionDeviceAssertions({ platform: "cuda", reported: "cuda", record: { device: "cuda" }, manifest: { closure: { device: "cuda" } } })), ["transcription ran on the production transcription device"]);
+    await writeFile(path.join(dir, "score.abc"), "changed");
+    assert.match((await verifyTranscriptionArtifact(dir, expected)).detail, /score\.abc hashes to/);
+    await rm(path.join(dir, "score.abc"));
+    assert.match((await verifyTranscriptionArtifact(dir, expected)).detail, /score\.abc is missing/);
+    assert.match((await verifyTranscriptionArtifact(dir, "f".repeat(64))).detail, /transcription\.json hashes to/);
+    const unsafe = { ...manifest, artifacts: { "../outside": "a".repeat(64) } };
+    const unsafeBytes = Buffer.from(JSON.stringify(unsafe));
+    await writeFile(path.join(dir, "transcription.json"), unsafeBytes);
+    assert.match((await verifyTranscriptionArtifact(dir, sha(unsafeBytes))).detail, /not a plain relative path/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("transcription assertions reject wrong source, unverified replay, resident model and altered review", () => {
+  const artifact = { ok: true, detail: "verified", manifestSha256: "b".repeat(64), manifest: {
+    source: { original_sha256: "a".repeat(64) }, closure: { device: "cpu" },
+    review: { warnings: [{ code: "review_note", message: "Review the melody." }], cover: { melody: { ready: true }, full: { ready: true } } },
+  } };
+  const base = transcriptionFixture(artifact);
+  assert.deepEqual(failures(transcriptionAssertions(base)), []);
+  assert.ok(failures(transcriptionAssertions({ ...base, record: { ...base.record, sourceAudioAssetId: "other" } })).includes("the transcription read the uploaded recording"));
+  assert.ok(failures(transcriptionAssertions({ ...base, y2: { ...base.y2, transcription: { ...base.y2.transcription, replay: { artifactsMatched: 0, windows: 0 } } } })).includes("the worker replay-verified the artifact"));
+  assert.ok(failures(transcriptionAssertions({ ...base, y2: { ...base.y2, transcription: { ...base.y2.transcription, unload: { released: false, liveModelsAfter: 1 } } } })).includes("the transcriber unloaded (released, no live model after)"));
+  assert.ok(failures(transcriptionAssertions({ ...base, record: { ...base.record, warnings: [] } })).includes("the review's warnings are recorded verbatim (manifest, record, job)"));
+});
+
+test("silence refuses melody without importing any score version", () => {
+  const readiness = { melody: { ready: false, reason: "No melody notes found." }, full: { ready: false } };
+  const warnings = [{ code: "empty_melody" }];
+  const y2 = { readiness, transcription: { warnings }, scoreVersionIds: { melody: null, full: null } };
+  const record = { readiness, warnings, versions: { melody: null, full: null }, versionErrors: {} };
+  assert.deepEqual(failures(emptyMelodyAssertions({ y2, record })), []);
+  assert.deepEqual(failures(emptyMelodyAssertions({ y2: { ...y2, scoreVersionIds: { melody: "version_1", full: null } }, record })), ["no score version was imported"]);
+  assert.ok(failures(emptyMelodyAssertions({ y2, record: { ...record, readiness: { ...readiness, melody: { ready: true } } } })).includes("melody readiness refused, saying there are no melody notes"));
+});
+
+test("cover evidence binds both reviewed modes to the recording and unloaded transcriber", () => {
+  for (const mode of ["melody", "full"]) {
+    const transcription = { id: "yue2tx_1", jobId: "job_tx", manifestSha256: "b".repeat(64) };
+    const bound = { ...transcription, sourceAudioAssetId: "asset_recording", mode };
+    const sources = { transcription: bound, coverVersion: { id: `version_${mode}` } };
+    const transcriberResidency = { liveSheetsage2ModelsAtLoad: 0 };
+    const y2 = { sources, transcriberResidency, usagePolicy: { nonCommercial: true } };
+    const snapshot = { payload: { yue2: { sources: { transcription: bound } } }, result: { yue2: y2 } };
+    const asset = { extra: { yue2: y2, sourceRecordingAssetId: "asset_recording", usagePolicy: { modelId: "yue2", nonCommercial: true } } };
+    const input = { snapshot, asset, transcription, recordingAssetId: "asset_recording", versionId: `version_${mode}`, mode };
+    assert.deepEqual(failures(coverFromTranscriptionAssertions(input)), []);
+    assert.ok(failures(coverFromTranscriptionAssertions({ ...input, asset: { extra: { ...asset.extra, sourceRecordingAssetId: "other" } } })).includes("the output asset names the source recording"));
+    assert.ok(failures(coverFromTranscriptionAssertions({ ...input, snapshot: { ...snapshot, result: { yue2: { ...y2, transcriberResidency: { liveSheetsage2ModelsAtLoad: 1 } } } } })).includes("the transcriber was unloaded before YuE2 loaded"));
+  }
 });

@@ -279,8 +279,10 @@ function seedLab(yue2lab = ENABLED_SETTINGS, audio = { songLab: true }) {
 describe("YuE2 Song Lab (sc-23000)", () => {
   let container;
   let root;
+  let mediaDevicesDescriptor;
 
   beforeEach(() => {
+    mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
     apiFetchMock.mockReset();
@@ -292,6 +294,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   afterEach(async () => {
     await unmountRoot(root, container);
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    if (mediaDevicesDescriptor) Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
+    else delete navigator.mediaDevices;
   });
 
   async function render(ctx) {
@@ -572,18 +577,199 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     });
   });
 
-  // ---- AC2: cover from a reviewed score; transcription visibly blocked -------------------------
+  // ---- AC2: cover from a reviewed score; conditional transcription setup -------------------------
 
-  it("shows recording transcription as blocked with its reason and offers no working button", async () => {
+  it("shows a blocked cover closure with its reason and does not submit transcription", async () => {
     await openEnabledLab();
     await click(buttonWithText(lab(), "Cover"));
-    const blocked = lab().querySelector('[data-testid="yue2-transcription-blocked"]');
-    expect(blocked.textContent).toContain("Blocked");
-    expect(blocked.textContent).toContain(BLOCK_REASON);
-    expect(blocked.textContent).toContain(BLOCK_UNBLOCK);
-    expect(blocked.textContent).toContain("yue2_sheetsage2");
-    expect(blocked.querySelector("button")).toBeNull();
+    const setup = lab().querySelector('[data-testid="yue2-cover-setup"]');
+    expect(setup.textContent).toContain(BLOCK_REASON);
+    expect(setup.textContent).toContain(BLOCK_UNBLOCK);
+    expect(setup.textContent).toContain("yue2_sheetsage2");
+    expect(buttonWithText(setup, "Set up covers").disabled).toBe(true);
+    expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(true);
     expect(calls("/yue2/jobs").length).toBe(0);
+  });
+
+  it("transcribes a selected recording, reviews both modes, edits the full score and covers both modes", async () => {
+    const transcription = {
+      id: "yue2t_take", createdAt: "2026-09-27T12:00:00Z", sourceAudioAssetId: "asset_take",
+      source: { name: "take.wav", duration_seconds: 31 }, device: "cpu", usagePolicy: POLICY,
+      review: { voices: { vocal: { notes: 4, min_pitch: 60, max_pitch: 72, median_pitch: 65 } },
+        distinct_chords: ["C:maj"], keys: ["C:major"], bars: 8, sections: ["verse"] },
+      warnings: [{ code: "octave_check", message: "Review the vocal octave" }],
+      octaveEvidence: { notes_checked: 4, notes_with_more_energy_at_f0_half: 1,
+        fraction_f0_half_dominant: 0.25, transcribed_midi_range: [60, 72], notes: [] },
+      readiness: { melody: { ready: true }, full: { ready: true } },
+      versions: { melody: "ver_take", full: "ver_full" }, exports: [], versionErrors: {},
+    };
+    const version = { ...VERSION_SUMMARY, id: "ver_take", cot: "melody", origin: "transcription",
+      transcription: { transcriptionId: "yue2t_take", mode: "melody" } };
+    const fullVersion = { ...version, id: "ver_full", cot: "full", transcription: { transcriptionId: "yue2t_take", mode: "full" } };
+    const editedVersion = { ...fullVersion, id: "ver_edit", origin: "edit", editOperation: "set_tempo", parentVersionId: "ver_full" };
+    let editSaved = false;
+    const entry = yue2Entry({
+      conditionalComponents: [
+        { componentId: "yue2_sheetsage2", requiredFor: ["cover"], repo: "m-a-p/SheetSage2",
+          license: "cc-by-nc-4.0", nonCommercial: true, installState: "installed" },
+        { componentId: "yue2_mert_v2_fullsong", requiredFor: ["cover"], repo: "m-a-p/MERT-v2-FullSong",
+          license: "cc-by-nc-4.0", nonCommercial: true, installState: "installed" },
+      ],
+      conditionalPurposes: { cover: { installState: "installed" } },
+    });
+    apiFetchMock.mockImplementation(router({ ack: true, handle: async (path, method, options) => {
+      if (path.endsWith("/yue2/transcriptions")) return { items: [transcription], unreadable: [] };
+      if (path.endsWith("/yue2/transcriptions/yue2t_take")) return { transcription, scores: { melody: "X:1\nK:C\nC4|", full: "X:1\nK:C\n\"C\"C4|" } };
+      if (path.endsWith("/yue2/score-versions")) return { items: editSaved ? [version, fullVersion, editedVersion] : [version, fullVersion], unreadable: [] };
+      if (path.endsWith("/yue2/score-versions/ver_full/edits") && method === "POST") {
+        expect(JSON.parse(options.body)).toMatchObject({ operation: { op: "set_tempo", bpm: 72 }, provenance: { actor: "user", channel: "ui" }, dryRun: false });
+        editSaved = true;
+        return { dryRun: false, version: { id: "ver_edit", edit: { invariants: { match: true, checks: [], violations: [] } } } };
+      }
+      if (path.endsWith("/yue2/score-versions/ver_full") || path.endsWith("/yue2/score-versions/ver_edit")) {
+        return { version: { ...VERSION_RECORD, id: path.split("/").pop(), request: { ...VERSION_RECORD.request, cot: "full" }, transcription: fullVersion.transcription, usagePolicy: POLICY }, renders: [] };
+      }
+      return undefined;
+    } }));
+    seedLab({ optIn: true, tab: "cover", transcribeAssetId: "asset_take" });
+    await render(context({ models: [...STANDARD, YUE1, entry], assets: [{ id: "asset_take", type: "audio", displayName: "take.wav" }] }));
+    const review = lab().querySelector('[data-testid="yue2-transcription-review"]');
+    expect(review.textContent).toContain("Review the vocal octave");
+    expect(review.querySelector('[data-testid="yue2-octave-evidence"]').textContent).toContain("1 of 4");
+    expect(review.querySelector('[data-testid="yue2-readiness-full"]').textContent).toContain("Ready for a full cover");
+    await click(buttonStarting(lab(), "Transcribe the recording"));
+    expect(lastJobBody()).toMatchObject({ kind: "transcribe", sourceAudioAssetId: "asset_take" });
+    await click(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-melody"]'), "Use for the cover"));
+    expect(byLabel(lab(), "Cover score version").value).toBe("ver_take");
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nnew words");
+    await typeText(byLabel(lab(), "Style"), "acoustic");
+    expect(buttonWithText(lab(), "Generate cover").disabled).toBe(true);
+    expect(lab().querySelector('[data-testid="yue2-transcription-review-confirmation"]').textContent).toContain("warnings and octave evidence");
+    await click(lab().querySelector('[data-testid="yue2-transcription-review-confirmation"] input'));
+    await click(buttonWithText(lab(), "Generate cover"));
+    expect(lastJobBody()).toMatchObject({ kind: "cover", cover: { versionId: "ver_take", mode: "melody" } });
+    expect(lastJobBody()).not.toHaveProperty("sourceAudioAssetId");
+    await click(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-full"]'), "Review & edit in Scores"));
+    await settle();
+    expect(lab().querySelector('[data-testid="yue2-version-transcription"]').textContent).toContain("full score");
+    await choose(byLabel(lab(), "Edit operation"), "set_tempo");
+    await type(lab().querySelector('[data-testid="yue2-edit-panel"] input[type="number"]'), "72");
+    await type(byLabel(lab(), "Edit brief"), "slower cover");
+    await click(buttonWithText(lab(), "Save as new version"));
+    await settle();
+    expect(editSaved).toBe(true);
+    await click(buttonWithText(lab(), "Use as cover score"));
+    expect(byLabel(lab(), "Cover score version").value).toBe("ver_edit");
+    expect(byLabel(lab(), "Cover mode").value).toBe("full");
+    expect(buttonWithText(lab(), "Generate cover").disabled).toBe(true);
+    await click(lab().querySelector('[data-testid="yue2-transcription-review-confirmation"] input'));
+    await click(buttonWithText(lab(), "Generate cover"));
+    expect(lastJobBody()).toMatchObject({ kind: "cover", cover: { versionId: "ver_edit", mode: "full" } });
+    expect(lastJobBody()).not.toHaveProperty("sourceAudioAssetId");
+  });
+
+  it("imports a microphone take and releases its stream on stop, discard and unmount", async () => {
+    const tracks = [];
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: {
+      getUserMedia: vi.fn(async () => {
+        const track = { stop: vi.fn() };
+        tracks.push(track);
+        return { getTracks: () => [track] };
+      }),
+    } });
+    class Recorder {
+      constructor() { this.state = "inactive"; this.mimeType = "audio/webm"; }
+      start() { this.state = "recording"; }
+      stop() {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["audio"], { type: "audio/webm" }) });
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", Recorder);
+    const importAsset = vi.fn(async () => ({ id: "asset_mic", type: "audio" }));
+    await openEnabledLab(context({ importAsset }));
+    await click(buttonWithText(lab(), "Cover"));
+    await click(buttonWithText(lab(), "Record with microphone"));
+    expect(lab().querySelector('[data-testid="yue2-microphone"]').dataset.state).toBe("recording");
+    await click(buttonWithText(lab(), "Stop and use recording"));
+    await settle();
+    expect(tracks[0].stop).toHaveBeenCalled();
+    expect(importAsset).toHaveBeenCalledTimes(1);
+    expect(importAsset.mock.calls[0][0].type).toBe("audio/webm");
+    expect(lab().querySelector('[data-testid="yue2-microphone"]').textContent).toContain("saved to the project and is ready to transcribe");
+    await click(buttonWithText(lab(), "Record with microphone"));
+    await click(buttonWithText(lab(), "Discard recording"));
+    expect(tracks[1].stop).toHaveBeenCalled();
+    expect(importAsset).toHaveBeenCalledTimes(1);
+    await click(buttonWithText(lab(), "Record with microphone"));
+    await unmountRoot(root, container);
+    root = { unmount: () => {} };
+    expect(tracks[2].stop).toHaveBeenCalled();
+  });
+
+  it("shows microphone permission and import errors without selecting a failed take", async () => {
+    const track = { stop: vi.fn() };
+    const getUserMedia = vi.fn()
+      .mockRejectedValueOnce(new Error("Microphone permission denied"))
+      .mockResolvedValueOnce({ getTracks: () => [track] });
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia } });
+    class Recorder {
+      constructor() { this.state = "inactive"; this.mimeType = "audio/webm"; }
+      start() { this.state = "recording"; }
+      stop() {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["audio"], { type: "audio/webm" }) });
+        this.onstop?.();
+      }
+    }
+    vi.stubGlobal("MediaRecorder", Recorder);
+    const importAsset = vi.fn(async () => { throw new Error("Import failed"); });
+    await openEnabledLab(context({ importAsset }));
+    await click(buttonWithText(lab(), "Cover"));
+    await click(buttonWithText(lab(), "Record with microphone"));
+    expect(lab().querySelector('[data-testid="yue2-microphone-error"]').textContent).toContain("Microphone permission denied");
+    await click(buttonWithText(lab(), "Record with microphone"));
+    await click(buttonWithText(lab(), "Stop and use recording"));
+    await settle();
+    expect(track.stop).toHaveBeenCalled();
+    expect(lab().querySelector('[data-testid="yue2-microphone-error"]').textContent).toContain("Import failed");
+    expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(true);
+  });
+
+  it("retries a transcription read and refuses a mode whose score import failed", async () => {
+    let failRead = true;
+    const transcription = {
+      id: "yue2t_bad", sourceAudioAssetId: "asset_take", device: "cpu", review: {},
+      readiness: { melody: { ready: false, reason: "No vocal melody" }, full: { ready: true } },
+      versions: { melody: null, full: "ver_bad" },
+      versionErrors: { full: "score invariant failed" }, abcErrors: { melody: "No melody score" }, exports: [],
+    };
+    const entry = yue2Entry({
+      conditionalComponents: [{ componentId: "yue2_sheetsage2", requiredFor: ["cover"], repo: "m-a-p/SheetSage2", installState: "installed" }],
+      conditionalPurposes: { cover: { installState: "installed" } },
+    });
+    apiFetchMock.mockImplementation(router({ ack: true, handle: async (path) => {
+      if (path.endsWith("/yue2/transcriptions")) return { items: [transcription], unreadable: [] };
+      if (path.endsWith("/yue2/transcriptions/yue2t_bad")) {
+        if (failRead) throw new Error("transcription temporarily unavailable");
+        return { transcription, scores: { melody: null, full: "X:1\nK:C\nC4|" } };
+      }
+      if (path.endsWith("/yue2/score-versions")) return { items: [{ ...VERSION_SUMMARY, id: "ver_bad", cot: "full", transcription: { transcriptionId: "yue2t_bad", mode: "full" } }], unreadable: [] };
+      return undefined;
+    } }));
+    seedLab({ optIn: true, tab: "cover" });
+    await render(context({ models: [...STANDARD, YUE1, entry] }));
+    expect(lab().querySelector('[data-testid="yue2-transcription-error"]').textContent).toContain("temporarily unavailable");
+    failRead = false;
+    await click(buttonWithText(lab(), "Retry transcription"));
+    await settle();
+    const review = lab().querySelector('[data-testid="yue2-transcription-review"]');
+    expect(review.querySelector('[data-testid="yue2-readiness-reason-melody"]').textContent).toContain("No vocal melody");
+    expect(review.querySelector('[data-testid="yue2-abc-error-melody"]').textContent).toContain("No melody score");
+    expect(review.querySelector('[data-testid="yue2-version-error-full"]').textContent).toContain("score invariant failed");
+    expect(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-full"]'), "Use for the cover").disabled).toBe(true);
+    expect(calls("/yue2/jobs")).toHaveLength(0);
   });
 
   it("covers a reviewed score version with every cover control", async () => {

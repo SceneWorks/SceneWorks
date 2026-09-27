@@ -12,14 +12,14 @@ use sceneworks_core::jobs_store::CreateJob;
 
 const SCORE: &str =
     include_str!("../../../../crates/sceneworks-core/src/yue2_score/fixtures/score.abc");
-const WORKER: &str = "yue2-test-worker";
+pub(super) const WORKER: &str = "yue2-test-worker";
 /// The Song Lab's field table and the bodies its request builder produces
 /// (`apps/web/src/yue2Lab.test.js` writes and checks this file).
 const WEB_JOB_REQUESTS: &str = include_str!(
     "../../../../crates/sceneworks-core/src/yue2_score/fixtures/web-job-requests.json"
 );
 
-async fn project(app: &axum::Router) -> String {
+pub(super) async fn project(app: &axum::Router) -> String {
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -31,7 +31,11 @@ async fn project(app: &axum::Router) -> String {
     created["id"].as_str().unwrap().to_owned()
 }
 
-async fn submit(app: &axum::Router, project_id: &str, body: Value) -> (StatusCode, Value) {
+pub(super) async fn submit(
+    app: &axum::Router,
+    project_id: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     request(
         app.clone(),
         "POST",
@@ -41,13 +45,13 @@ async fn submit(app: &axum::Router, project_id: &str, body: Value) -> (StatusCod
     .await
 }
 
-async fn submit_ok(app: &axum::Router, project_id: &str, body: Value) -> Vec<Value> {
+pub(super) async fn submit_ok(app: &axum::Router, project_id: &str, body: Value) -> Vec<Value> {
     let (status, response) = submit(app, project_id, body).await;
     assert_eq!(status, StatusCode::CREATED, "{response}");
     response["jobs"].as_array().unwrap().clone()
 }
 
-async fn register(app: &axum::Router, worker: &str) {
+pub(super) async fn register(app: &axum::Router, worker: &str) {
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -61,7 +65,7 @@ async fn register(app: &axum::Router, worker: &str) {
     assert_eq!(status, StatusCode::OK);
 }
 
-async fn claim(app: &axum::Router, worker: &str) -> Value {
+pub(super) async fn claim(app: &axum::Router, worker: &str) -> Value {
     let (status, claimed) = request(
         app.clone(),
         "POST",
@@ -73,7 +77,7 @@ async fn claim(app: &axum::Router, worker: &str) -> Value {
     claimed["job"].clone()
 }
 
-async fn finish(
+pub(super) async fn finish(
     app: &axum::Router,
     job_id: &str,
     status: &str,
@@ -93,7 +97,7 @@ async fn finish(
     assert_eq!(code, StatusCode::OK, "{body}");
 }
 
-async fn job(app: &axum::Router, job_id: &str) -> Value {
+pub(super) async fn job(app: &axum::Router, job_id: &str) -> Value {
     let (status, job) = request(
         app.clone(),
         "GET",
@@ -219,7 +223,7 @@ async fn a_create_batch_queues_serial_takes_with_their_own_runs_and_seeds() {
 }
 
 #[tokio::test]
-async fn invalid_combinations_and_blocked_transcription_are_typed_refusals() {
+async fn invalid_combinations_and_unready_transcription_are_typed_refusals() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().unwrap();
     let app = app_with_yue1_and_yue2(&temp_dir);
@@ -250,40 +254,45 @@ async fn invalid_combinations_and_blocked_transcription_are_typed_refusals() {
             StatusCode::BAD_REQUEST,
             "yue2_invalid_combination",
         ),
+        // sc-23002: the cover closure is not installed in this fresh data dir.
         (
             json!({"kind": "transcribe", "sourceAudioAssetId": "asset_1", "licenseAcknowledged": true}),
-            StatusCode::FORBIDDEN,
-            "component_blocked",
+            StatusCode::CONFLICT,
+            "yue2_cover_components_missing",
         ),
+        // A cover from a recording goes through a reviewed transcription (AT2).
         (
             json!({"kind": "cover", "lyrics": "l", "cover": {"mode": "melody", "sourceAudioAssetId": "asset_1"}}),
-            StatusCode::FORBIDDEN,
-            "component_blocked",
+            StatusCode::BAD_REQUEST,
+            "yue2_transcription_review_required",
         ),
     ] {
         let (got, response) = submit(&app, &project_id, body.clone()).await;
         assert_eq!(got, status, "{body}: {response}");
         assert_eq!(response["code"], code, "{body}: {response}");
     }
-    // The transcription refusal carries the catalog's recorded reason AND unblock condition.
+    // The missing-closure refusal names every missing component and the one route that installs
+    // them.
     let (_, response) = submit(
         &app,
         &project_id,
         json!({"kind": "transcribe", "sourceAudioAssetId": "asset_1"}),
     )
     .await;
-    let blocked = response["context"]["blocked"].as_array().unwrap();
-    assert!(!blocked.is_empty());
-    for entry in blocked {
-        assert!(
-            entry["reason"]
-                .as_str()
-                .unwrap()
-                .contains("owner licensing decision"),
-            "{entry}"
-        );
-        assert!(!entry["unblock"].as_str().unwrap().is_empty(), "{entry}");
-    }
+    let missing = response["context"]["missing"].as_array().unwrap();
+    let repos: Vec<&str> = missing
+        .iter()
+        .map(|m| m["repo"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        repos,
+        ["m-a-p/SheetSage2", "m-a-p/MERT-v2-FullSong"],
+        "{response}"
+    );
+    assert_eq!(
+        response["context"]["install"],
+        "/api/v1/models/yue2/conditional-components/cover/download"
+    );
     // The generic audio route never queues YuE2 past its eligibility.
     let (status, response) = request(
         app.clone(),

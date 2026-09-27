@@ -1804,10 +1804,12 @@ def test_locally_derived_tiers_fetch_exactly_their_source_variant():
 def test_choice_groups_declare_one_default_and_cover_components_are_never_downloads():
     """AC3: YuE2 installs YuE2-3B + its tokenizer + ONE decoder. The two decoders are one choice
     group with exactly one default, and the cover closure (SheetSage2 + MERT-v2-FullSong) is a
-    blocked conditional component that no install, tier or co-requisite path can reach.
+    conditional cover component that no install, tier or co-requisite path can reach. Since the
+    owner's 2026-09-27 decision (sc-23002) it is acquirable for covers — no `blocked` record — and
+    declared noncommercial CC BY-NC 4.0 with the port-code basis and a pinned weights digest.
 
-    *Mutation that reds this:* marking both decoders `default`, or moving SheetSage2 into
-    `downloads`.
+    *Mutation that reds this:* marking both decoders `default`, moving SheetSage2 into
+    `downloads`, re-adding a `blocked` record, or dropping `nonCommercial` / `licenseBasis`.
     """
     yue2 = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "yue2")
     choices = [row["choice"] for row in yue2["downloads"] if "choice" in row]
@@ -1824,10 +1826,14 @@ def test_choice_groups_declare_one_default_and_cover_components_are_never_downlo
     for component in cover:
         assert component["requiredFor"] == ["cover"]
         assert component["repo"] not in download_repos
-        assert component["blocked"]["reason"].startswith(
-            "blocked: owner licensing decision for SheetSage2/MERT port code"
-        )
-        assert component["blocked"]["unblock"]
+        assert "blocked" not in component, component["componentId"]
+        assert component["license"] == "cc-by-nc-4.0"
+        assert component["nonCommercial"] is True
+        assert "CC BY-NC 4.0" in component["licenseBasis"]
+        assert "noncommercial" in component["licenseBasis"]
+        assert re.fullmatch(r"[0-9a-f]{64}", component["weightsSha256"])
+        assert re.fullmatch(r"[0-9a-f]{40}", component["revision"])
+        assert "model.safetensors" in component["files"]
 
 
 def test_yue_entries_advertise_their_backend_audio_capabilities():

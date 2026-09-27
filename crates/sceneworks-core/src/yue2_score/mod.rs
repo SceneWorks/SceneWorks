@@ -12,6 +12,8 @@
 //! - [`compare`] — change contracts and the musical-invariant check (parsed events, not text).
 //! - [`ops`] — the bounded edit-operation set; every result is re-parsed and invariant-checked.
 //! - [`store`] — immutable per-project version, render and comparison records.
+//! - [`transcriptions`] — recording transcriptions (sc-23002): the review artifact's record and
+//!   the import of its scores as versions linked to the source recording.
 //!
 //! An edit never overwrites anything: it creates a new version linked to its source. Rendering a
 //! version (sc-22999) regenerates the complete recording — see [`REGENERATION_NOTICE`].
@@ -21,6 +23,7 @@ pub mod compare;
 pub mod jobs;
 pub mod ops;
 pub mod store;
+pub mod transcriptions;
 
 #[cfg(test)]
 mod tests;
