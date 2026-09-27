@@ -2,7 +2,7 @@
 // stage timing, WAV evidence, memory parsing, record validation and summary rendering. The driver's
 // service half (API + worker + real renders) runs only on the terminal hosts.
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +33,7 @@ import {
   isLatentCorruptionRefusal,
   isMissingSourceRefusal,
   recordedServiceEnv,
+  resolveFfmpeg,
   serviceDeviations,
   stopWorkerSafely,
   tierAssertions,
@@ -466,15 +467,16 @@ test("the markdown table has one row per case, carries hashes not audio, and esc
 const SHELL = {
   PATH: "/bin", HOME: "/home/u",
   HF_HOME: "/home/hf", HF_HUB_CACHE: "/shared/hub", HUGGINGFACE_HUB_CACHE: "/shared/hub", HF_HUB_OFFLINE: "1", HF_TOKEN: "hf_secret",
-  SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", SCENEWORKS_HEARTBEAT_SECONDS: "5", SCENEWORKS_JOBS_DB_PATH: "/elsewhere.db",
+  SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_FFMPEG: "/broken/ffmpeg", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", SCENEWORKS_HEARTBEAT_SECONDS: "5", SCENEWORKS_JOBS_DB_PATH: "/elsewhere.db",
   SCENEWORKS_RESOLVED_CACHE_ENABLED: "true", CUDA_VISIBLE_DEVICES: "3", TRANSFORMERS_CACHE: "/t",
 };
-const common = { base: SHELL, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHome: "H", workerId: "w", driverPid: 42 };
+const FFMPEG_TEST_BIN = path.resolve("/tools/ffmpeg");
+const common = { base: SHELL, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHome: "H", ffmpegBin: FFMPEG_TEST_BIN, workerId: "w", driverPid: 42 };
 const driverKeys = (env) => Object.keys(env).filter((key) => /^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/.test(key) || key === "CUDA_VISIBLE_DEVICES").sort();
 
 test("the services get the desktop's shipped environment and nothing inherited from the shell", () => {
   const resolved = { SCENEWORKS_RESOLVED_CACHE_ENABLED: "false", SCENEWORKS_RESOLVED_CACHE_MAX_BYTES: "68719476736", SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS: "1209600" };
-  const shared = { SCENEWORKS_DATA_DIR: "D", SCENEWORKS_CONFIG_DIR: "C", HF_HOME: "H", ...resolved };
+  const shared = { SCENEWORKS_DATA_DIR: "D", SCENEWORKS_CONFIG_DIR: "C", HF_HOME: "H", SCENEWORKS_FFMPEG: FFMPEG_TEST_BIN, ...resolved };
   // apps/desktop/src/setup.rs spawn_api, per platform.
   const apiCommon = { ...shared, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "5000", SCENEWORKS_TRUST_LOOPBACK: "true", SCENEWORKS_RUN_UTILITY_INPROCESS: "true", SCENEWORKS_PARENT_PID: "42" };
   const pick = (env) => Object.fromEntries(driverKeys(env).map((key) => [key, env[key]]));
@@ -493,7 +495,25 @@ test("the services get the desktop's shipped environment and nothing inherited f
   assert.equal(serviceEnv({ ...common, platform: "metal", role: "api" }).PATH, "/bin");
   assert.throws(() => serviceEnv({ ...common, platform: "metal", role: "both" }), /unknown service role/);
   assert.equal(serviceDeviations("metal").length, 2);
+  assert.match(serviceDeviations("metal")[0], /Recording transcription uses this decoder/);
   assert.match(serviceDeviations("cuda").join(" "), /per-GPU child/);
+});
+
+test("the ffmpeg preflight resolves and probes the exact binary recorded in both service environments", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-ffmpeg-"));
+  try {
+    const bin = path.join(dir, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+    if (process.platform === "win32") return; // Windows CI uses the real runner binary at dispatch.
+    await writeFile(bin, '#!/bin/sh\necho "ffmpeg version acceptance-test"\n');
+    await chmod(bin, 0o755);
+    const resolved = await resolveFfmpeg(undefined, { base: { PATH: dir, SCENEWORKS_FFMPEG: "/broken/ffmpeg" } });
+    assert.deepEqual(resolved, { path: bin, version: "ffmpeg version acceptance-test" });
+    assert.equal(serviceEnv({ ...common, role: "worker", platform: "metal", ffmpegBin: resolved.path }).SCENEWORKS_FFMPEG, bin);
+    await assert.rejects(resolveFfmpeg(path.join(dir, "missing")), /not a working ffmpeg/);
+    assert.throws(() => serviceEnv({ ...common, role: "api", platform: "metal", ffmpegBin: undefined }), /probed absolute ffmpeg path/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("offline takes the hub away for real; an admission cap is the only extra; secrets are never recorded", () => {

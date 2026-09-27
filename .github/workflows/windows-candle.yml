@@ -1511,6 +1511,16 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           echo .terminal/>>.git\info\exclude
           cargo build --release --locked -p sceneworks-rust-api --features backend-candle
+      - name: Locate and probe ffmpeg for YuE2 recording transcription
+        shell: powershell
+        run: |
+          $ffmpeg = (Get-Command ffmpeg.exe -CommandType Application -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathRooted($ffmpeg)) { throw "ffmpeg did not resolve to an absolute path: $ffmpeg" }
+          $versionLines = @(& $ffmpeg -version)
+          if ($LASTEXITCODE -ne 0 -or $versionLines.Count -eq 0 -or $versionLines[0] -notmatch '^ffmpeg version ') {
+            throw "YuE2 recording transcription requires a working ffmpeg: $ffmpeg"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "YUE2_FFMPEG_BIN=$ffmpeg"
       - name: Run the YuE2 terminal acceptance matrix (CUDA)
         id: yue2_acceptance
         continue-on-error: true
@@ -1518,7 +1528,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe
+          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)
