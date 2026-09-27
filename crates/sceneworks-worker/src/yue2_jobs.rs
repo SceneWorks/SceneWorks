@@ -20,7 +20,7 @@
 //!    resume: true }` under an exclusive OS claim on `<run dir>.claim` ([`RunClaim`]): the stable
 //!    run id makes a retried job resume its own checkpoints (a duplicate gets a fresh run id), and
 //!    the engine checks every recorded identity before it reuses anything. The shared keepalive watcher
-//!    ([`run_blocking_with_heartbeat`]) keeps the worker heartbeat alive through long AR phases and
+//!    ([`run_blocking_with_heartbeat_keeping_ok`]) keeps the worker heartbeat alive through long AR phases and
 //!    trips the request's cancel flag — the engine's own cancel hook — on a user cancel. Engine
 //!    progress (per-token plan / semantic steps, acoustic ODE steps, decoding) is coalesced onto the
 //!    job progress channel.
@@ -1135,7 +1135,7 @@ async fn generate(
             posts
         })
     };
-    let result = run_blocking_with_heartbeat(
+    let result = run_blocking_with_heartbeat_keeping_ok(
         api,
         settings,
         &job.id,

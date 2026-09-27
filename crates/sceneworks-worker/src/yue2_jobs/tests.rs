@@ -416,6 +416,17 @@ impl Generator for StubYue2 {
             Behavior::CompleteThenCancel(cancel) => {
                 let report = Self::publish(req, (false, false));
                 cancel.store(true, Ordering::SeqCst);
+                // Return only once the job's watcher has observed that cancel and tripped the
+                // engine flag: the engine had passed its last cancel checkpoint (the run is
+                // published) and returns `Ok` anyway — the worst interleaving, on every run.
+                let start = Instant::now();
+                while !req.cancel.is_cancelled() {
+                    if start.elapsed() > Duration::from_secs(30) {
+                        return Err(gen_core::Error::Msg("req.cancel never tripped".into()));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.seen.lock().unwrap().observed_cancel = req.cancel.is_cancelled();
                 report
             }
             Behavior::Fail => {
@@ -1297,17 +1308,21 @@ async fn a_cancel_after_the_run_published_still_publishes_it() {
         "late-cancel",
         json!({"kind": "create", "style": "late", "lyrics": "[verse]\nla"}),
     );
+    let seen = Arc::new(Mutex::new(Seen::default()));
     h.run(
         &job,
         loader(
             Behavior::CompleteThenCancel(h.state.cancel_requested.clone()),
-            Default::default(),
+            seen.clone(),
             Default::default(),
         ),
     )
     .await
     .unwrap();
-    // Mutation that reds this: restoring the post-generate `check_cancel`.
+    // The watcher saw the cancel and tripped the engine flag while the engine was still running.
+    assert!(seen.lock().unwrap().observed_cancel);
+    // Mutations that red this: restoring the post-generate `check_cancel`; calling
+    // `run_blocking_with_heartbeat` (the discarding default) from `generate` (sc-22999).
     let terminal = h.terminal();
     assert_eq!(terminal["status"], "completed", "{terminal}");
     assert!(h
