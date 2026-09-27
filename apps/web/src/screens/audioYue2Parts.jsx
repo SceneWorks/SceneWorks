@@ -293,6 +293,12 @@ export function Yue2RunCard({
           ))}
         </ul>
       ) : null}
+      {view.scoreVersionSkipped ? (
+        <p className="yue2-notice yue2-notice--warn" data-testid="yue2-run-version-skipped">
+          <Icon.Warning size={15} />
+          <span>{view.scoreVersionSkipped}</span>
+        </p>
+      ) : null}
       {view.sideEffectErrors.length ? (
         <ErrorNotice
           error={`The run finished, but recording it failed: ${view.sideEffectErrors.join("; ")}`}

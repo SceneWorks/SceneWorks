@@ -33,8 +33,8 @@ const EVERY_CONTROL = {
   precision: "fp32",
   offloadPolicy: "sequential",
   stageResidency: "on",
-  chunkAttention: "off",
-  attentionChunkSize: "512",
+  chunkAttention: "on",
+  attentionChunkSize: "393216",
   tileVaeDecode: "on",
   decodeTileEdge: "256",
   scoreSampling: {
@@ -126,6 +126,16 @@ describe("YuE2 request builder (sc-23000)", () => {
     expect(buildYue2JobRequest("create", settings)).toEqual({ kind: "create", lyrics: "la la", planning: "full" });
   });
 
+  // Core `validate_common`: a chunk size is read only with chunked attention ON, a tile edge only
+  // with tiled decode ON, and only a melody cover chooses what it keeps.
+  it("sends a memory size and a cover keep only with the switch that makes them meaningful", () => {
+    const off = { ...EVERY_CONTROL, chunkAttention: "off", tileVaeDecode: "off", coverMode: "full" };
+    const body = buildYue2JobRequest("cover", off);
+    expect(body.memory).toEqual({ stageResidency: true, chunkAttention: false, tileVaeDecode: false });
+    expect(body.cover).toEqual({ versionId: "ver_1", mode: "full", translatedFrom: "[verse]\nhola" });
+    expect(buildYue2JobRequest("cover", defaultYue2Settings()).cover).toEqual({ mode: "melody" });
+  });
+
   it("sends a supplied score instead of the planning sampler", () => {
     const body = buildYue2JobRequest("create", { ...EVERY_CONTROL, planSource: "supplied", suppliedScore: "X:1\n" });
     expect(body.score).toBe("X:1");
@@ -145,6 +155,18 @@ describe("YuE2 request builder (sc-23000)", () => {
       "A supplied score needs full or melody planning.",
     ]);
     expect(yue2RequestProblems("fromPlan", settings)).toEqual(["Choose the saved plan to restore."]);
+    expect(yue2RequestProblems("plan", { ...settings, lyrics: "x", planning: "off" })).toEqual([
+      "Plan only needs full or melody planning — planning off makes no score.",
+    ]);
+    expect(yue2RequestProblems("cover", { ...settings, lyrics: "x", coverVersionId: "v", coverMode: "" })).toEqual([
+      "Choose the cover mode (melody or full).",
+    ]);
+    expect(
+      yue2RequestProblems("create", { ...settings, lyrics: "x", chunkAttention: "on", attentionChunkSize: "512" }),
+    ).toEqual(["The attention chunk size must be at least 393216 score elements."]);
+    expect(
+      yue2RequestProblems("decode", { ...settings, tileVaeDecode: "on", decodeTileEdge: "2048" }, { sourceJobId: "j" }),
+    ).toEqual(["The decode tile must be between 1 and 1024 latent frames."]);
   });
 });
 
@@ -251,6 +273,16 @@ describe("YuE2 run view (sc-23000)", () => {
     expect(view.warnings).toEqual([{ code: "semantic_truncated", message: "hit max tokens" }]);
     expect(view.sideEffectErrors).toEqual(["score version: boom"]);
     expect(view.usagePolicy).toBe(POLICY);
+  });
+
+  it("says when a truncated plan was not saved as a score version", () => {
+    const view = yue2RunView({
+      status: "completed",
+      payload: { yue2: { kind: "plan" } },
+      result: { yue2: { truncated: { abc: true }, scoreVersionSkipped: "abc_truncated", score: { abc: "X:1" } } },
+    });
+    expect(view.scoreVersionSkipped).toContain("not saved as a score version");
+    expect(view.truncations.map((item) => item.key)).toEqual(["abc"]);
   });
 
   it("surfaces the worker's error for a failed job, never an empty state", () => {

@@ -431,8 +431,8 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     for (const [label, value] of Object.entries(score)) await type(byLabel(lab(), `Score planning sampling ${label}`), value);
     for (const [label, value] of Object.entries(semantic)) await type(byLabel(lab(), `Semantic sampling ${label}`), value);
     await choose(byLabel(lab(), "Stage residency"), "on");
-    await choose(byLabel(lab(), "Chunked attention"), "off");
-    await type(byLabel(lab(), "Attention chunk size"), "512");
+    await choose(byLabel(lab(), "Chunked attention"), "on");
+    await type(byLabel(lab(), "Attention chunk size"), "393216");
     await choose(byLabel(lab(), "Tiled decode"), "on");
     await type(byLabel(lab(), "Decode tile"), "256");
     await choose(byLabel(lab(), "Tier"), "q8");
@@ -440,7 +440,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   }
   const SCORE_SAMPLING = { temperature: 0.9, topP: 0.95, topK: 40, repetitionPenalty: 1.1, penaltyWindow: 32, minTokens: 64, maxTokens: 2048 };
   const SEMANTIC_SAMPLING = { temperature: 1, topP: 0.9, topK: 50, repetitionPenalty: 1.2, penaltyWindow: 16, minTokens: 300, maxTokens: 8000 };
-  const MEMORY = { stageResidency: true, chunkAttention: false, attentionChunkSize: 512, tileVaeDecode: true, decodeTileEdge: 256 };
+  const MEMORY = { stageResidency: true, chunkAttention: true, attentionChunkSize: 393216, tileVaeDecode: true, decodeTileEdge: 256 };
 
   it("sends every compose and advanced control in the create request", async () => {
     await openEnabledLab();
@@ -596,7 +596,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await typeText(byLabel(lab(), "Cover ABC score"), "X:1\nK:C\nC4|");
     await click(buttonWithText(lab(), "Generate cover"));
     await settle();
-    expect(lastJobBody()).toEqual({ kind: "cover", lyrics: "[verse]\nhello", cover: { score: "X:1\nK:C\nC4|" }, requestedGpu: "auto" });
+    expect(lastJobBody()).toEqual({ kind: "cover", lyrics: "[verse]\nhello", cover: { score: "X:1\nK:C\nC4|", mode: "melody" }, requestedGpu: "auto" });
   });
 
   // ---- AC2: score preview, bounded edits, renders, comparisons --------------------------------
@@ -813,6 +813,20 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(done.querySelector('[data-testid="yue2-effective-settings"]').textContent).toContain('"tier": "q8"');
     expect(failed.querySelector('[data-testid="yue2-run-error"]').textContent).toContain("context budget exceeds 24576 tokens");
     expect(failed.querySelector('[data-testid="yue2-run-progress"]')).toBeNull();
+  });
+
+  it("says a truncated plan was not saved as a score version", async () => {
+    const truncatedPlan = {
+      ...TRUNCATED,
+      id: "job_plan_trunc",
+      payload: { yue2: { kind: "plan" }, usagePolicy: POLICY },
+      result: { yue2: { truncated: { abc: true, semantic: false }, scoreVersionSkipped: "abc_truncated", score: { abc: "X:1" }, usagePolicy: POLICY } },
+    };
+    await openEnabledLab(context({ jobs: [truncatedPlan] }));
+    const card = container.querySelector('[data-testid="yue2-run-card"]');
+    expect(card.querySelector('[data-testid="yue2-run-version-skipped"]').textContent).toContain("not saved as a score version");
+    expect(card.querySelector('[data-testid="yue2-run-truncated"]').textContent).toContain("incomplete plan");
+    expect(buttonWithText(card, "Open score version")).toBeUndefined();
   });
 
   it("exports the run record and score with the usage policy carried into them", async () => {

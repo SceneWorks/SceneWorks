@@ -8,7 +8,9 @@ import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioS
 import { writeLicenseAck } from "../licenseAcknowledgment.js";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  MAX_DECODE_TILE_FRAMES,
   MAX_TAKES,
+  MIN_ATTENTION_CHUNK_ELEMENTS,
   SAMPLING_FIELDS,
   SAMPLING_TOKEN_DEFAULTS,
   YUE2_MODEL_ID,
@@ -679,7 +681,7 @@ export function Yue2SongLab({ header }) {
                   <div className="yue2-inline">
                     <span className="eyebrow">Planning</span>
                     <Segmented
-                      disabledValues={settings.planSource === "supplied" ? ["off"] : []}
+                      disabledValues={settings.planSource === "supplied" || settings.planOnly ? ["off"] : []}
                       label="Planning"
                       onChange={(value) => update({ planning: value })}
                       options={[
@@ -851,14 +853,13 @@ export function Yue2SongLab({ header }) {
                   <label>
                     Cover mode
                     <select aria-label="Cover mode" onChange={(event) => update({ coverMode: event.target.value })} value={settings.coverMode}>
-                      <option value="">Model default</option>
                       <option value="melody">Melody</option>
                       <option value="full">Full</option>
                     </select>
                   </label>
-                  <label>
+                  <label title={settings.coverMode === "melody" ? undefined : "Only a melody cover chooses which melodies it keeps."}>
                     Keep
-                    <select aria-label="Cover keep" onChange={(event) => update({ coverKeep: event.target.value })} value={settings.coverKeep}>
+                    <select aria-label="Cover keep" disabled={settings.coverMode !== "melody"} onChange={(event) => update({ coverKeep: event.target.value })} value={settings.coverKeep}>
                       <option value="">Model default</option>
                       <option value="both">Vocal and instrumental</option>
                       <option value="vocal">Vocal only</option>
@@ -980,12 +981,12 @@ export function Yue2SongLab({ header }) {
                   <TriStateSelect label="Chunked attention" onChange={(value) => update({ chunkAttention: value })} value={settings.chunkAttention} />
                   <label>
                     Attention chunk size
-                    <input aria-label="Attention chunk size" min="1" onChange={(event) => update({ attentionChunkSize: event.target.value })} placeholder="Admission decides" type="number" value={settings.attentionChunkSize} />
+                    <input aria-label="Attention chunk size" disabled={settings.chunkAttention !== "on"} min={MIN_ATTENTION_CHUNK_ELEMENTS} onChange={(event) => update({ attentionChunkSize: event.target.value })} placeholder={`≥ ${MIN_ATTENTION_CHUNK_ELEMENTS} (with chunked attention on)`} type="number" value={settings.attentionChunkSize} />
                   </label>
                   <TriStateSelect label="Tiled decode" onChange={(value) => update({ tileVaeDecode: value })} value={settings.tileVaeDecode} />
                   <label>
                     Decode tile (frames)
-                    <input aria-label="Decode tile" max="1024" min="1" onChange={(event) => update({ decodeTileEdge: event.target.value })} placeholder="Admission decides" type="number" value={settings.decodeTileEdge} />
+                    <input aria-label="Decode tile" disabled={settings.tileVaeDecode !== "on"} max={MAX_DECODE_TILE_FRAMES} min="1" onChange={(event) => update({ decodeTileEdge: event.target.value })} placeholder="1–1024 (with tiled decode on)" type="number" value={settings.decodeTileEdge} />
                   </label>
                 </div>
               </fieldset>

@@ -61,6 +61,12 @@ export const YUE2_FIELD_KINDS = Object.freeze({
 
 export const MAX_TAKES = 8;
 
+// Smallest NAR attention chunk the engine accepts (core `MIN_ATTENTION_CHUNK_ELEMENTS`: one query
+// row at the full 24 576-token context across 16 heads), and the decode tile's upper bound (core
+// `MAX_DECODE_TILE_FRAMES`).
+export const MIN_ATTENTION_CHUNK_ELEMENTS = 16 * 24576;
+export const MAX_DECODE_TILE_FRAMES = 1024;
+
 // One autoregressive phase's sampling overrides (core `TokenSampling`), in display order.
 export const SAMPLING_FIELDS = Object.freeze([
   { key: "temperature", label: "Temperature", kind: "float", min: 0, max: 5, step: 0.05 },
@@ -99,7 +105,8 @@ export function defaultYue2Settings() {
     coverSource: "version",
     coverVersionId: "",
     coverScore: "",
-    coverMode: "",
+    // The core contract requires a cover mode (melody or full); melody is the upstream default.
+    coverMode: "melody",
     coverKeep: "",
     coverTranslatedFrom: "",
     seed: "",
@@ -222,9 +229,12 @@ function memoryBody(settings, kind) {
   return compact({
     stageResidency: acoustic ? triState(settings.stageResidency) : undefined,
     chunkAttention: acoustic ? triState(settings.chunkAttention) : undefined,
-    attentionChunkSize: acoustic ? intOrUndefined(settings.attentionChunkSize) : undefined,
+    // A chunk size is read only with chunked attention on, a tile edge only with tiled decode on
+    // (core `validate_common`), so neither is sent without its switch.
+    attentionChunkSize:
+      acoustic && settings.chunkAttention === "on" ? intOrUndefined(settings.attentionChunkSize) : undefined,
     tileVaeDecode: decode ? triState(settings.tileVaeDecode) : undefined,
-    decodeTileEdge: decode ? intOrUndefined(settings.decodeTileEdge) : undefined,
+    decodeTileEdge: decode && settings.tileVaeDecode === "on" ? intOrUndefined(settings.decodeTileEdge) : undefined,
   });
 }
 
@@ -304,7 +314,8 @@ function coverBody(s) {
     if (score) cover.score = score;
   }
   if (s.coverMode) cover.mode = s.coverMode;
-  if (s.coverKeep) cover.keep = s.coverKeep;
+  // Only a melody cover chooses which melodies it keeps.
+  if (s.coverKeep && s.coverMode === "melody") cover.keep = s.coverKeep;
   const translated = trimmed(s.coverTranslatedFrom);
   if (translated) cover.translatedFrom = translated;
   return cover;
@@ -330,10 +341,16 @@ export function yue2RequestProblems(kind, settings, target = {}) {
       problems.push("A supplied score needs full or melody planning.");
     }
   }
+  if (kind === "plan" && s.planning === "off") {
+    problems.push("Plan only needs full or melody planning — planning off makes no score.");
+  }
   if (kind === "fromPlan" && !trimmed(s.restorePlanJobId)) {
     problems.push("Choose the saved plan to restore.");
   }
   if (kind === "cover") {
+    if (s.coverMode !== "melody" && s.coverMode !== "full") {
+      problems.push("Choose the cover mode (melody or full).");
+    }
     if (s.coverSource === "version" && !trimmed(s.coverVersionId)) {
       problems.push("Choose the reviewed score version the cover follows.");
     }
@@ -346,6 +363,24 @@ export function yue2RequestProblems(kind, settings, target = {}) {
   }
   if (kind === "decode" && !trimmed(target.sourceJobId)) {
     problems.push("Choose the finished run whose latents to decode.");
+  }
+  const chunk = intOrUndefined(s.attentionChunkSize);
+  if (
+    YUE2_FIELD_KINDS["memory.acoustic"].includes(kind) &&
+    s.chunkAttention === "on" &&
+    chunk !== undefined &&
+    chunk < MIN_ATTENTION_CHUNK_ELEMENTS
+  ) {
+    problems.push(`The attention chunk size must be at least ${MIN_ATTENTION_CHUNK_ELEMENTS} score elements.`);
+  }
+  const tile = intOrUndefined(s.decodeTileEdge);
+  if (
+    YUE2_FIELD_KINDS["memory.decode"].includes(kind) &&
+    s.tileVaeDecode === "on" &&
+    tile !== undefined &&
+    (tile < 1 || tile > MAX_DECODE_TILE_FRAMES)
+  ) {
+    problems.push(`The decode tile must be between 1 and ${MAX_DECODE_TILE_FRAMES} latent frames.`);
   }
   const count = intOrUndefined(s.count);
   if (YUE2_FIELD_KINDS.count.includes(kind) && count !== undefined && (count < 1 || count > MAX_TAKES)) {
@@ -515,6 +550,13 @@ export function yue2RunView(job) {
     request: block.request ?? null,
     score: block.score ?? null,
     scoreVersionId: block.scoreVersionId ?? null,
+    // A plan cut off by its token budget is kept on the run but never becomes a score version.
+    scoreVersionSkipped:
+      block.scoreVersionSkipped === "abc_truncated"
+        ? "This plan was truncated, so it was not saved as a score version. Its partial score is still on the run."
+        : block.scoreVersionSkipped
+          ? `No score version was created (${block.scoreVersionSkipped}).`
+          : null,
     renderRecordId: block.renderRecordId ?? null,
     versionId: block.versionId ?? spec.versionId ?? null,
     batch: spec.batch ?? block.batch ?? null,
