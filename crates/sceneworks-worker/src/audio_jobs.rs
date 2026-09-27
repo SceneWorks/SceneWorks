@@ -406,6 +406,29 @@ fn audio_model_repo(entry: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A symbolic-plan song model (YuE2) only runs as a YuE2 job — its contract, eligibility check and
+/// run directory come with the `yue2` block. A generic audio job naming one (a replayed payload, a
+/// hand-built job) is refused before anything loads. Judged on both the linked provider's
+/// descriptor and the manifest entry the job carries.
+fn refuse_symbolic_song_without_block(request: &AudioRequest) -> WorkerResult<()> {
+    let declared = request
+        .model_manifest_entry
+        .get("audio")
+        .and_then(|audio| audio.get("supportsSymbolicSong"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let linked = crate::inference_runtime::audio_descriptor(&request.model)
+        .is_some_and(|descriptor| descriptor.capabilities.supports_symbolic_song);
+    if declared || linked {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} is a symbolic-plan song model; it runs only as a YuE2 job (POST \
+             /api/v1/projects/:project_id/yue2/jobs), not as a generic audio job.",
+            request.model
+        )));
+    }
+    Ok(())
+}
+
 fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
     if request.project_id.is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -432,7 +455,12 @@ pub(crate) async fn run_audio_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // YuE2 (sc-22999): its own contract, eligibility, run directory and provenance.
+    if crate::yue2_jobs::is_yue2_job(&job.payload) {
+        return crate::yue2_jobs::run_yue2_job(api, settings, job).await;
+    }
     let request = AudioRequest::from_payload(&job.payload);
+    refuse_symbolic_song_without_block(&request)?;
     audio_preflight(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
@@ -1625,6 +1653,35 @@ mod tests {
                 "descriptor requires `{required}`, the catalog provisions {provisioned:?}"
             );
         }
+        // sc-22999 (deferred from sc-22998 until the descriptor advertised its tiers): every tier
+        // the catalog offers is one the linked provider accepts — the unquantized `bf16` original
+        // (`quantize: None`) or an advertised `supported_quants` entry. Mutation that reds this: add
+        // a `q6` / `nvfp4` row to the manifest, or drop `Q8` from the provider's SUPPORTED_QUANTS.
+        let accepted: Vec<String> = std::iter::once("bf16".to_owned())
+            .chain(
+                caps.supported_quants
+                    .iter()
+                    .map(|quant| format!("{quant:?}").to_ascii_lowercase()),
+            )
+            .collect();
+        let variants: Vec<&str> = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .filter_map(|row| row.get("variant").and_then(Value::as_str))
+            .collect();
+        assert!(!variants.is_empty(), "the catalog offers at least one tier");
+        for variant in &variants {
+            assert!(
+                accepted.iter().any(|a| a == variant),
+                "catalog tier `{variant}` is not one the provider accepts ({accepted:?})"
+            );
+        }
+        assert!(
+            ["q8", "q4"].iter().all(|q| accepted.iter().any(|a| a == q)),
+            "the provider advertises the derived tiers the catalog declares: {accepted:?}"
+        );
         // YuE1's six generators are separate providers; `yue2` is never one of their aliases. The
         // pin links candle-audio-yue, so each must resolve (an absent one is a failure, not a skip).
         for language in ["en", "zh", "jp_kr"] {

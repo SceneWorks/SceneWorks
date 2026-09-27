@@ -663,9 +663,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
     // mint it. Carries the specific adapters permitted, not a blanket flag — see
     // [`persisted_character_inline_loras`] and [`validate_merged_job_loras`].
     let permitted_inline_loras = persisted_character_inline_loras(&merged);
+    let persisted = merged.clone();
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
+        // A YuE2 retry/duplicate is held to the contract the worker enforces (sc-22999): the block
+        // cannot be injected, removed or pointed at another model, and a block-less replay cannot
+        // name a symbolic-song model the generic audio route refuses.
+        if matches!(job_type, JobType::AudioGenerate) {
+            crate::yue2_jobs::canonicalize_replayed_audio_payload(state, &persisted, &mut merged)
+                .await?;
+        }
     } else {
         validate_raw_job_payload(state, &job_type, &merged).await?;
     }
@@ -1462,6 +1470,9 @@ async fn apply_progress_side_effects(
     // re-inject the built sidecars into the result so the UI keeps streaming them
     // (story 1656 — Rust is the single project-store writer).
     persist_reported_assets(state, &job_id, &mut result).await?;
+    // YuE2 (sc-22999): a finished plan becomes a score version; a score-version render — completed
+    // or failed — is recorded against its version. Idempotent per job for the recovery sweep.
+    crate::yue2_jobs::apply_yue2_side_effects(state, &job, &mut result).await?;
 
     if result == accepted_result && !clear_terminal_side_effects {
         return Ok(job);
@@ -1632,11 +1643,14 @@ pub(crate) async fn persist_reported_assets(
     })
     .await?;
     stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
+    crate::yue2_jobs::stamp_export_usage_policies(&job.job_type, &job.payload, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
     let job_id_owned = job_id.to_owned();
     let built = project_call(state.clone(), move |store| {
+        // An asset derived from a policy-bearing input inherits its usage policy (sc-22999).
+        crate::yue2_jobs::inherit_usage_policies(&store, &project_id, &mut asset_writes)?;
         if let Some(generation_set) = generation_set.as_ref() {
             store.write_generation_set(
                 &project_id,

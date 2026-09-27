@@ -6,8 +6,9 @@
 //! YuE1 entries are fixtures in the shape the YuE1 epic (sc-19373) ships, which is not on this branch
 //! (epic sc-22988 acceptance test 5).
 use super::support::*;
+use crate::AppState;
 
-fn builtin_yue2() -> Value {
+pub(super) fn builtin_yue2() -> Value {
     let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
         .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -41,11 +42,24 @@ fn yue1_fixture(id: &str) -> Value {
     })
 }
 
-fn app_with_yue1_and_yue2(temp_dir: &tempfile::TempDir) -> axum::Router {
+pub(super) fn app_with_yue1_and_yue2(temp_dir: &tempfile::TempDir) -> axum::Router {
     app_with_yue1_and(temp_dir, builtin_yue2())
 }
 
-fn app_with_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) -> axum::Router {
+pub(super) fn app_with_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) -> axum::Router {
+    write_yue1_and(temp_dir, yue2);
+    create_app(test_settings(temp_dir)).expect("app creates")
+}
+
+/// [`app_with_yue1_and_yue2`] with the app state, for tests that seed a stored job directly.
+pub(super) fn app_with_yue1_and_yue2_state(
+    temp_dir: &tempfile::TempDir,
+) -> (axum::Router, AppState) {
+    write_yue1_and(temp_dir, builtin_yue2());
+    create_app_with_state(test_settings(temp_dir)).expect("app and state create")
+}
+
+fn write_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -59,7 +73,6 @@ fn app_with_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) -> axum::Router 
     )
     .expect("builtin models writes");
     write_empty_sibling_manifests(&config_dir);
-    create_app(test_settings(temp_dir)).expect("app creates")
 }
 
 async fn queued_downloads(app: axum::Router) -> Vec<Value> {
@@ -261,7 +274,7 @@ async fn catalog_points_commercial_use_from_yue2_to_the_yue1_entries() {
 }
 
 /// Seed a pinned snapshot under the test's own hub cache holding `files` (placeholder bytes).
-fn seed_snapshot(temp_dir: &tempfile::TempDir, download: &Value) {
+pub(super) fn seed_snapshot(temp_dir: &tempfile::TempDir, download: &Value) {
     let repo = download["repo"].as_str().unwrap().replace('/', "--");
     let snapshot = temp_dir
         .path()
@@ -335,7 +348,7 @@ async fn either_decoder_completes_a_yue2_install_and_neither_leaves_it_repairabl
     }
 }
 
-fn yue2_row(yue2: &Value, repo: &str, co_requisite: bool) -> Value {
+pub(super) fn yue2_row(yue2: &Value, repo: &str, co_requisite: bool) -> Value {
     yue2["downloads"]
         .as_array()
         .unwrap()
@@ -430,13 +443,14 @@ async fn blocked_cover_components_are_refused_on_every_repo_keyed_door() {
     assert!(queued_downloads(app).await.is_empty());
 }
 
-/// sc-22998 item 2: a locally derived tier (q8 / q4) is not installed because the ORIGINAL is.
-/// With bf16 + the standard VAE on disk, bf16 reads installed and q8 / q4 read `derivationPending`
-/// (not installed, not deletable), and the install route refuses them with the reason.
-/// Mutation that reds this: drop the `declares_local_derivation` branch in `model_variant_states`
-/// (q8/q4 read installed off bf16's files), or the refusal in `create_model_download_job`.
+/// sc-22998 / sc-22999: the bf16 original does not install the derived tiers — each reads
+/// `derivationPending` until its own snapshot verifies — and installing one queues a download of
+/// the ORIGINAL (receipted as the original's variant, never the tier's) that carries the
+/// derivation for the worker's audio-lane preparer. Mutations that red this: drop the
+/// `localDerivation` stamp (the worker derives nothing), or queue the derived row under its own
+/// variant (the original's receipt is labelled q8).
 #[tokio::test]
-async fn derived_tiers_are_not_installed_by_the_original_and_cannot_be_downloaded() {
+async fn derived_tiers_are_not_installed_by_the_original_and_install_through_the_deriver() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let yue2 = builtin_yue2();
@@ -464,16 +478,31 @@ async fn derived_tiers_are_not_installed_by_the_original_and_cannot_be_downloade
             json!({ "licenseAcknowledged": true, "variant": tier }),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{tier}: {body}");
-        assert!(
-            body["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("derived on this machine"),
-            "{body}"
+        assert_eq!(status, StatusCode::CREATED, "{tier}: {body}");
+        let payload = &body["payload"];
+        assert_eq!(payload["repo"], "m-a-p/YuE2-3B", "{tier}: {payload}");
+        assert_eq!(
+            payload["variant"], "bf16",
+            "the fetch is the original's: {payload}"
+        );
+        let tier_row = yue2["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == tier)
+            .unwrap();
+        let pins = &tier_row["localDerivation"];
+        assert_eq!(payload["localDerivation"]["variant"], tier);
+        assert_eq!(payload["localDerivation"]["conversion"], pins["conversion"]);
+        assert_eq!(
+            payload["localDerivation"]["weightsBytes"],
+            pins["weightsBytes"]
+        );
+        assert_eq!(
+            payload["localDerivation"]["weightsSha256"],
+            pins["weightsSha256"]
         );
     }
-    assert!(queued_downloads(app).await.is_empty());
 }
 
 /// sc-22998 item 2: a derived snapshot that verifies against the row's pinned weights is what

@@ -32,6 +32,7 @@ pub mod ideogram_caption;
 pub mod image_request;
 pub mod jobs_store;
 pub mod jsonc;
+pub mod license_acknowledgments;
 pub mod lora_family;
 pub mod lora_url;
 pub mod managed_checkpoint_variants;

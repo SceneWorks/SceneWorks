@@ -63,7 +63,7 @@ fn yue2_error(error: Yue2ScoreError) -> ApiError {
     }
 }
 
-async fn yue2_call<T, F>(state: AppState, operation: F) -> Result<T, ApiError>
+pub(crate) async fn yue2_call<T, F>(state: AppState, operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(Arc<ProjectStore>) -> Result<T, Yue2ScoreError> + Send + 'static,

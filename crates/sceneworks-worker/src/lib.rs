@@ -289,6 +289,12 @@ pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
 use audio_jobs::*;
+// YuE2 song jobs (sc-22999): `audio_generate` jobs carrying a `yue2` block, run through the `yue2`
+// provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
+// lane, which errors clearly on a build that links none.
+mod yue2_jobs;
+// Locally derived model tiers (sc-22999): the post-download deriver `localDerivation` rows name.
+mod local_derivation;
 // The Voice Clone "register a voice" embed path (sc-13517): the rust-api calls
 // `voice_register::embed_reference_clip` to compute a reference clip's Chatterbox-VE speaker vector
 // for the saved-voice registry. Public because it is invoked from another crate (rust-api), not the
