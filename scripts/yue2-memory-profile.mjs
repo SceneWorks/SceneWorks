@@ -282,7 +282,40 @@ export function validateRecord(record) {
       if (!STAGES.includes(stage)) fail(`${record.caseId}: unknown measured stage ${stage}`);
     }
     if (!record.measured.stages.load) fail(`${record.caseId}: a completed record measured no load`);
+    validateRunOutcome(record);
   }
+  return record;
+}
+
+/**
+ * The run fields a completed capture's `outcome.json` states since sc-23002 (`outcome_json` in
+ * yue2_memory_profile.rs): truncation flags, per-stage wall times, engine timings and the run / plan /
+ * decoder / latent identities. A record captured before them carries none and stays valid; a record
+ * carrying any of them must carry all of them, well-formed — a partial set is a broken capture.
+ */
+export const RUN_OUTCOME_FIELDS = Object.freeze([
+  "truncated", "stageSeconds", "engineTiming", "runIdentity", "planIdentity", "decoder", "latent",
+]);
+
+export function validateRunOutcome(record) {
+  const outcome = record.outcome;
+  const present = RUN_OUTCOME_FIELDS.filter((field) => outcome[field] !== undefined);
+  if (!present.length) return record;
+  const missing = RUN_OUTCOME_FIELDS.filter((field) => outcome[field] === undefined || outcome[field] === null);
+  if (missing.length) fail(`${record.caseId}: the outcome states ${present.join(", ")} but not ${missing.join(", ")}`);
+  for (const phase of ["abc", "semantic"]) {
+    if (typeof outcome.truncated?.[phase] !== "boolean") fail(`${record.caseId}: outcome.truncated.${phase} is not a boolean`);
+  }
+  if (typeof outcome.stageSeconds !== "object" || Array.isArray(outcome.stageSeconds)) fail(`${record.caseId}: outcome.stageSeconds is not an object`);
+  for (const [stage, seconds] of Object.entries(outcome.stageSeconds)) {
+    if (!STAGES.includes(stage)) fail(`${record.caseId}: outcome.stageSeconds names unknown stage ${stage}`);
+    if (!Number.isFinite(seconds) || seconds < 0) fail(`${record.caseId}: outcome.stageSeconds.${stage} is not a duration`);
+  }
+  for (const field of ["runIdentity", "planIdentity"]) {
+    if (typeof outcome[field] !== "string" || !outcome[field]) fail(`${record.caseId}: outcome.${field} is not an identity`);
+  }
+  if (typeof outcome.decoder !== "object" || typeof outcome.engineTiming !== "object") fail(`${record.caseId}: outcome.decoder / engineTiming must be objects`);
+  if (!/^[0-9a-f]{64}$/.test(outcome.latent?.sha256 ?? "")) fail(`${record.caseId}: outcome.latent has no sha256`);
   return record;
 }
 
@@ -683,6 +716,13 @@ export async function main(argv = process.argv.slice(2), root = ROOT) {
           console.log(
             `  ${row.stage.padEnd(9)} measured ${formatBytes(row.measuredBytes)}  estimated ${formatBytes(row.estimatedBytes)}  ` +
               `${row.covered ? "covered" : "UNDER-PRICED"}${row.ratio ? ` (${row.ratio.toFixed(2)}×)` : ""}`,
+          );
+        }
+        const run = record.outcome;
+        if (run.latent) {
+          console.log(
+            `  run ${run.runIdentity.slice(0, 12)}  latent ${run.latent.sha256.slice(0, 12)}  truncated abc=${run.truncated.abc} ` +
+              `semantic=${run.truncated.semantic}  stages ${Object.entries(run.stageSeconds).map(([stage, s]) => `${stage} ${s.toFixed(1)}s`).join(", ")}`,
           );
         }
       }

@@ -271,3 +271,30 @@ test("capture planning: CUDA builds the candle feature, Metal runs under the foo
   });
   assert.throws(() => parseArgs(["run", "--backend", "rocm"]), /unknown backend/);
 });
+
+test("a record states the run's truncation, stage times and identities, or none of them (sc-23002)", () => {
+  const item = expandCases(sources.plan).find((candidate) => candidate.backend === "metal");
+  const run = {
+    truncated: { abc: false, semantic: true },
+    stageSeconds: { load: 2.5, plan: 7.5, semantic: 10, acoustic: 4, decode: 1.5 },
+    engineTiming: { nar_seconds: 3.5, vae_seconds: 1.25 },
+    runIdentity: "run-identity",
+    planIdentity: "plan-identity",
+    decoder: { release: "standard" },
+    latent: { sha256: "c".repeat(64) },
+  };
+  const withRun = (outcome) => record(item, { outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...outcome } });
+  // A record captured before these fields existed stays valid and ingestible.
+  validateRecord(record(item));
+  admitToCorpus(record(item), sources);
+  // A record carrying them is valid and ingestible with them intact.
+  const current = withRun(run);
+  validateRecord(current);
+  assert.deepEqual(admitToCorpus(current, sources).outcome.latent, run.latent);
+  // A partial set is a broken capture, never a weaker record.
+  assert.throws(() => validateRecord(withRun({ ...run, latent: undefined })), /but not latent/);
+  assert.throws(() => validateRecord(withRun({ ...run, truncated: { abc: false, semantic: "yes" } })), /truncated\.semantic/);
+  assert.throws(() => validateRecord(withRun({ ...run, stageSeconds: { ...run.stageSeconds, warmup: 1 } })), /unknown stage warmup/);
+  assert.throws(() => validateRecord(withRun({ ...run, latent: { sha256: "short" } })), /latent has no sha256/);
+  assert.throws(() => admitToCorpus(withRun({ ...run, runIdentity: null }), sources), /runIdentity/);
+});

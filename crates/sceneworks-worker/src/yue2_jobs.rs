@@ -281,17 +281,7 @@ async fn execute(
     let tier = crate::yue2_admission::Yue2Tier::from_key(load.tier.as_str()).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("yue2: {} is not a YuE2 tier", load.tier.as_str()))
     })?;
-    let controls = spec.memory.unwrap_or_default();
-    let pins = crate::yue2_admission::Yue2Pins::from_controls(
-        controls.stage_residency,
-        spec.offload_policy
-            .map(|policy| policy == OffloadPolicy::Sequential),
-        controls.chunk_attention,
-        controls.attention_chunk_size,
-        controls.tile_vae_decode,
-        controls.decode_tile_edge,
-    )
-    .map_err(|why| WorkerError::InvalidPayload(format!("yue2: {why}")))?;
+    let pins = admission_pins(&spec)?;
     let admitted = crate::yue2_admission::check(
         contract::MODEL_ID,
         &entry,
@@ -396,6 +386,23 @@ async fn execute(
     Ok(())
 }
 
+/// The admission pins a job's own controls set (sc-23001): every control the job set is honoured as
+/// sent, every control it left unset is the gate's choice. Shared with the memory-profile capture
+/// (`yue2_memory_profile`), so the terminal campaign admits a case exactly as a job is admitted.
+pub(crate) fn admission_pins(spec: &Yue2JobSpec) -> WorkerResult<crate::yue2_admission::Yue2Pins> {
+    let controls = spec.memory.unwrap_or_default();
+    crate::yue2_admission::Yue2Pins::from_controls(
+        controls.stage_residency,
+        spec.offload_policy
+            .map(|policy| policy == OffloadPolicy::Sequential),
+        controls.chunk_attention,
+        controls.attention_chunk_size,
+        controls.tile_vae_decode,
+        controls.decode_tile_edge,
+    )
+    .map_err(|why| WorkerError::InvalidPayload(format!("yue2: {why}")))
+}
+
 /// The completion message: a truncated run says so, naming the phase that hit its budget.
 fn completion_message(done: &str, published: &Published) -> String {
     let truncated = published.truncated();
@@ -475,9 +482,9 @@ fn transcription_blocked(entry: &Value) -> WorkerError {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct LoadPlan {
-    spec: LoadSpec,
-    tier: Tier,
+pub(crate) struct LoadPlan {
+    pub(crate) spec: LoadSpec,
+    pub(crate) tier: Tier,
     decoder: Option<Decoder>,
     staged_decoders: Vec<Decoder>,
     model_identity: Value,
@@ -513,7 +520,11 @@ fn tier_of(name: &str) -> Option<Tier> {
     }
 }
 
-fn resolve_load(settings: &Settings, entry: &Value, spec: &Yue2JobSpec) -> WorkerResult<LoadPlan> {
+pub(crate) fn resolve_load(
+    settings: &Settings,
+    entry: &Value,
+    spec: &Yue2JobSpec,
+) -> WorkerResult<LoadPlan> {
     let rows = primary_rows(entry);
     let tier = match spec.tier {
         Some(tier) => tier,
@@ -663,7 +674,7 @@ fn dir_has_files(dir: &Path) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
-struct Inputs {
+pub(crate) struct Inputs {
     /// A saved plan to restore: its directory and recorded plan identity.
     plan: Option<(PathBuf, String)>,
     /// A completed run whose latents are decoded.
@@ -826,7 +837,7 @@ fn memory(spec: &Yue2JobSpec) -> Option<GenerationMemory> {
     })
 }
 
-fn build_request(
+pub(crate) fn build_request(
     spec: &Yue2JobSpec,
     inputs: &Inputs,
     run_dir: &Path,

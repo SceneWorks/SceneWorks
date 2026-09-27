@@ -28530,7 +28530,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "75972d2382ba9bb415e9c3e2d260f5093c17669337f299eeb67729e476e3408c",
+              "sha256": "c3ae98716e78445b60bd969021a7f6fdea7f738147b29a25b0b301dcfca792d2",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28644,8 +28644,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7594,
-                  "sha256": "f9eebffbcb459949e1b953d9697cc2f1ac357ce27a2f2e8e7551fb3932e4ac89"
+                  "byteSize": 7627,
+                  "sha256": "78e0a38a0b554395629e30bee61248f511418b1cf4fa004e777c3a943cc6a8a5"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
