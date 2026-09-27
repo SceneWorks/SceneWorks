@@ -2166,7 +2166,10 @@ async fn host_available_bytes() -> Option<u64> {
 }
 
 /// `MemAvailable` (kB) of a `/proc/meminfo` body, in bytes.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "backend-candle")),
+    allow(dead_code)
+)]
 fn parse_meminfo_available(meminfo: &str) -> Option<u64> {
     meminfo.lines().find_map(|line| {
         let rest = line.strip_prefix("MemAvailable:")?;
