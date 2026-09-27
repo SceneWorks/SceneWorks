@@ -443,6 +443,24 @@ async fn transcription_retry_cannot_retarget_same_bytes_to_another_asset() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["code"], "yue2_invalid_combination");
 
+    // A valid cover block must not replace a failed transcription while retaining its run ID.
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/retry"),
+        json!({"payloadChanges":{"yue2":{
+            "kind":"cover", "runId":original_block["runId"],
+            "lyrics":"[verse]\nla la", "cover":{"mode":"melody", "score":SCORE}
+        }}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["code"], "yue2_invalid_combination");
+    assert!(
+        response.to_string().contains("transcription retry"),
+        "{response}"
+    );
+
     let (status, retry) = request(
         app.clone(),
         "POST",

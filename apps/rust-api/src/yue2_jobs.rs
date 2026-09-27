@@ -904,7 +904,7 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
                 )
             })?;
             yue2::validate_for_execution(&spec).map_err(spec_error)?;
-            if retry && spec.kind == Yue2JobKind::Transcribe {
+            if retry {
                 let original: Yue2JobSpec = serde_json::from_value(
                     persisted
                         .get(yue2::PAYLOAD_KEY)
@@ -914,7 +914,7 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
                 .map_err(|error| {
                     ApiError::internal(format!("stored YuE2 job is malformed: {error}"))
                 })?;
-                if !same_transcription_retry(&original, &spec) {
+                if !valid_transcription_retry(&original, &spec) {
                     return Err(refused(
                         "yue2",
                         "a recording transcription retry must keep its original recording, settings and run identity; duplicate the job for a new transcription".into(),
@@ -955,6 +955,14 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
 
 fn same_transcription_retry(original: &Yue2JobSpec, retry: &Yue2JobSpec) -> bool {
     original.kind == Yue2JobKind::Transcribe && retry == original
+}
+
+fn valid_transcription_retry(original: &Yue2JobSpec, retry: &Yue2JobSpec) -> bool {
+    if original.kind == Yue2JobKind::Transcribe || retry.kind == Yue2JobKind::Transcribe {
+        same_transcription_retry(original, retry)
+    } else {
+        true
+    }
 }
 
 /// The generic audio route refuses a symbolic-song model: its submission, eligibility and source
@@ -1688,6 +1696,7 @@ mod seed_tests {
         }))
         .unwrap();
         assert!(same_transcription_retry(&original, &original));
+        assert!(valid_transcription_retry(&original, &original));
         for (pointer, value) in [
             ("/sourceAudioAssetId", json!("asset_two")),
             ("/sources/recording/assetId", json!("asset_two")),
@@ -1698,7 +1707,21 @@ mod seed_tests {
             *changed.pointer_mut(pointer).unwrap() = value;
             let changed: Yue2JobSpec = serde_json::from_value(changed).unwrap();
             assert!(!same_transcription_retry(&original, &changed), "{pointer}");
+            assert!(!valid_transcription_retry(&original, &changed), "{pointer}");
         }
+        let mut cover = original.clone();
+        cover.kind = Yue2JobKind::Cover;
+        assert!(!valid_transcription_retry(&original, &cover));
+        assert!(!valid_transcription_retry(&cover, &original));
+        let create: Yue2JobSpec = serde_json::from_value(json!({
+            "kind":"create", "runId":"yue2run_create", "lyrics":"[verse]\nla la"
+        }))
+        .unwrap();
+        yue2::validate_for_execution(&create).unwrap();
+        let mut changed_create = create.clone();
+        changed_create.style = Some("another style".into());
+        yue2::validate_for_execution(&changed_create).unwrap();
+        assert!(valid_transcription_retry(&create, &changed_create));
     }
 
     #[test]
