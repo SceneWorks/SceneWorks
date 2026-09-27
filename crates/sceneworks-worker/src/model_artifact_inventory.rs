@@ -494,6 +494,8 @@ mod tests {
         "crates/sceneworks-worker/src/wan_i2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_t2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_ti2v_5b_tier_build.rs",
+        // sc-23001: the YuE2 memory-profile capture entrypoint (an #[ignore]d test module).
+        "crates/sceneworks-worker/src/yue2_memory_profile.rs",
     ];
 
     fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {

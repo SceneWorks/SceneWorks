@@ -159,6 +159,8 @@ const MERT_HIDDEN: u64 = 1024;
 const MERT_HEADS: u64 = 16;
 /// `mert::ATTENTION_QUERY_CHUNK`.
 const MERT_QUERY_CHUNK: u64 = 512;
+/// MERT-v2's feed-forward inner width (`ffn{1,2}.w_1`: [4096, 1024]).
+const MERT_FFN: u64 = 4096;
 /// SheetSage2 transcribes one fixed 300 s context window at a time.
 const TRANSCRIPTION_WINDOW_SECS: u64 = 300;
 
@@ -919,8 +921,11 @@ fn latent_bytes(song_frames: u64, rows: u64, dense: u64) -> u64 {
     song_frames * LATENT_DIM * 4 + 4 * rows * LATENT_DIM * dense
 }
 
-fn decode_tile_bytes(core: u64) -> u64 {
-    DECODE_TILE_RESERVE_BYTES + DECODE_TILE_BYTES_PER_FRAME * (core + 2 * DECODE_HALO_FRAMES)
+/// `DecodeOptions::estimated_peak_bytes`: one tile of `core + 2 × halo` latent frames, or the whole
+/// song when it is shorter than a tile.
+fn decode_tile_bytes(core: u64, song_frames: u64) -> u64 {
+    let tile = (core + 2 * DECODE_HALO_FRAMES).min(song_frames.max(1));
+    DECODE_TILE_RESERVE_BYTES + DECODE_TILE_BYTES_PER_FRAME * tile
 }
 
 fn waveform_bytes(frames: u64) -> u64 {
@@ -933,7 +938,7 @@ fn waveform_bytes(frames: u64) -> u64 {
 fn transcription_terms(secs: u64, transcriber_bytes: u64) -> Vec<Yue2Term> {
     let frames = secs.min(TRANSCRIPTION_WINDOW_SECS) * MERT_FRAMES_PER_SEC;
     let encoder = SCORE_TILES_LIVE * MERT_HEADS * MERT_QUERY_CHUNK.min(frames) * frames * 4
-        + (4 * MERT_HIDDEN + 4 * 4 * MERT_HIDDEN) * frames * 4;
+        + (4 * MERT_HIDDEN + 4 * MERT_FFN) * frames * 4;
     vec![
         Yue2Term {
             what: "SheetSage2 + MERT-v2 weights (F32)",
@@ -1101,7 +1106,7 @@ pub(crate) fn estimate(
                 term("FP32 VAE decoder", shape.decoder_bytes, 0),
                 term(
                     "VAE decode tile",
-                    decode_tile_bytes(controls.decode_core_frames),
+                    decode_tile_bytes(controls.decode_core_frames, song_frames),
                     0,
                 ),
                 term("song waveform", waveform_bytes(song_frames), 0),
@@ -1289,12 +1294,20 @@ fn choose(
                 decode_core_frames: production_core,
             };
             let estimate = price(controls);
-            match fit(&estimate, budget, other_live) {
-                verdict @ (Fit::Fits | Fit::FitsAfterEvict) => return Ok((estimate, verdict)),
+            let verdict = fit(&estimate, budget, other_live);
+            match verdict {
+                Fit::Fits | Fit::FitsAfterEvict => return Ok((estimate, verdict)),
                 Fit::Short {
                     stage: Yue2Stage::AcousticSolve,
                     ..
-                } => tightest = Some((estimate, fit_of(&controls, shape, budget, other_live))),
+                } => {
+                    // Report the shortfall of the first offload choice (resident AR weights where
+                    // offload is free to choose): a later pass that also fails, e.g. on the host
+                    // pool the offload fills, would otherwise hide the device shortfall.
+                    if tightest.is_none() || offload_ar == offloads[0] {
+                        tightest = Some((estimate, verdict));
+                    }
+                }
                 Fit::Short {
                     stage: Yue2Stage::Decode,
                     ..
@@ -1325,18 +1338,11 @@ fn choose(
                         (estimate, verdict)
                     }));
                 }
-                verdict => return Err((estimate, verdict)),
+                Fit::Short { .. } => return Err((estimate, verdict)),
             }
         }
     }
     Err(tightest.expect("the acoustic solve was short at every candidate"))
-}
-
-/// The verdict for `controls` (re-priced), for the shortfall a refusal reports.
-fn fit_of(controls: &Yue2Controls, shape: &Yue2Shape, budget: &Yue2Budget, other_live: u64) -> Fit {
-    let estimate = estimate(shape, budget.backend(), *controls, budget.compute_cap())
-        .expect("the combination was validated before choosing");
-    fit(&estimate, budget, other_live)
 }
 
 /// The admission decision.
@@ -1469,21 +1475,27 @@ fn refusal(
         (Pool::Host, _) => format!("only ~{:.1} GB of host RAM is available", gb(*available)),
         _ => format!("only ~{:.1} GB is available", gb(*available)),
     };
-    let controls = if matches!(stage, Yue2Stage::Decode | Yue2Stage::AcousticSolve) {
-        let c = estimate.controls;
-        format!(
-            " Memory controls tried down to: decode tile core {} frames, NAR attention chunk {} \
-             score elements{}.",
-            c.decode_core_frames,
+    let c = estimate.controls;
+    let controls = match stage {
+        Yue2Stage::Decode => format!(
+            " The VAE decode tile was tried down to a {}-frame core.",
+            c.decode_core_frames
+        ),
+        Yue2Stage::AcousticSolve => format!(
+            " The NAR attention chunk was tried down to {} score elements{}.",
             c.attention_elements,
-            if c.offload_ar {
-                ", AR weights offloaded"
-            } else {
-                ""
+            match (
+                c.offload_ar,
+                shape.pins.offload_ar,
+                budget.backend().unified()
+            ) {
+                (true, _, _) => ", with the AR weights offloaded to host memory",
+                (false, Some(false), _) => " (AR offload is disabled by the request)",
+                (false, _, true) => " (AR offload frees nothing in unified memory)",
+                (false, _, false) => "",
             }
-        )
-    } else {
-        String::new()
+        ),
+        _ => String::new(),
     };
     let mut alternatives = alternatives(shape, budget, other_live, *stage);
     if shape.pins.any() {
@@ -1841,10 +1853,14 @@ pub(crate) struct Yue2Lease {
     /// Index into `order` (the load stage before any progress).
     at: Option<usize>,
     last_step: Option<(u32, u32)>,
+    /// The step totals the AR stages report (their `max_tokens`): a resumed run reuses finished
+    /// stages without reporting them, so a restarted count is matched to its stage by its total.
+    plan_total: Option<u64>,
+    semantic_total: Option<u64>,
 }
 
 impl Yue2Lease {
-    fn open(estimate: Yue2Estimate) -> Self {
+    fn open(estimate: Yue2Estimate, work: Yue2Work) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let order = estimate
@@ -1861,12 +1877,31 @@ impl Yue2Lease {
                 )
             })
             .collect();
+        let (plan_total, semantic_total) = match work {
+            Yue2Work::Generate {
+                planning,
+                semantic_max_tokens,
+                ..
+            } => (
+                match planning {
+                    Yue2Planning::Sample { max_tokens } => Some(max_tokens),
+                    _ => None,
+                },
+                Some(semantic_max_tokens),
+            ),
+            Yue2Work::PlanOnly {
+                planning: Yue2Planning::Sample { max_tokens },
+            } => (Some(max_tokens), None),
+            _ => (None, None),
+        };
         let lease = Self {
             id,
             estimate,
             order,
             at: None,
             last_step: None,
+            plan_total,
+            semantic_total,
         };
         lease.publish();
         #[cfg(test)]
@@ -1933,7 +1968,22 @@ impl Yue2Lease {
                 self.last_step = Some((current, total));
                 if restarted {
                     let next = self.at.map_or(0, |i| i + 1);
-                    if let Some(&stage) = self.order.get(next) {
+                    let total = u64::from(total);
+                    // The first remaining stage this total identifies (an AR stage reports its own
+                    // `max_tokens`; the acoustic stage's midpoint-step count matches neither), else
+                    // simply the next stage.
+                    let identified = self.order[next.min(self.order.len())..]
+                        .iter()
+                        .copied()
+                        .find(|&stage| match stage {
+                            Yue2Stage::Plan => self.plan_total == Some(total),
+                            Yue2Stage::Semantic => self.semantic_total == Some(total),
+                            Yue2Stage::AcousticSolve => {
+                                self.plan_total != Some(total) && self.semantic_total != Some(total)
+                            }
+                            _ => false,
+                        });
+                    if let Some(stage) = identified.or_else(|| self.order.get(next).copied()) {
                         self.enter(stage);
                     }
                 }
@@ -2189,7 +2239,7 @@ pub(crate) async fn check(
             .memory
             .is_none()
             .then(|| estimate.controls.generation_memory()),
-        lease: Yue2Lease::open(estimate),
+        lease: Yue2Lease::open(estimate, shape.work),
     })
 }
 

@@ -234,8 +234,14 @@ fn fp8_is_refused_outside_cuda_sm89_bf16() {
     };
     use Yue2Backend::*;
     use Yue2Tier::*;
-    assert!(fp8(Bf16, Metal, Yue2Precision::Default, None).is_err());
-    assert!(fp8(Bf16, Cpu, Yue2Precision::Default, None).is_err());
+    // Refused for the backend itself, not merely for an unread compute capability.
+    for backend in [Metal, Cpu] {
+        for cap in [None, Some(12.0)] {
+            let error = fp8(Bf16, backend, Yue2Precision::Default, cap).unwrap_err();
+            assert!(error.contains("runs only on CUDA"), "{backend:?}: {error}");
+        }
+    }
+
     assert!(fp8(Q8, Cuda, Yue2Precision::Default, Some(9.0)).is_err());
     assert!(fp8(Bf16, Cuda, Yue2Precision::Fp32, Some(9.0)).is_err());
     assert!(fp8(Bf16, Cuda, Yue2Precision::Default, Some(8.6)).is_err());
@@ -247,7 +253,7 @@ fn fp8_is_refused_outside_cuda_sm89_bf16() {
         ..shape(Bf16, &default_request())
     };
     let message = refused(decide("yue2", &fp8_shape, Some(&metal(u64::MAX)), 0));
-    assert!(message.contains("CUDA"), "{message}");
+    assert!(message.contains("runs only on CUDA"), "{message}");
 }
 
 /// An unknown tier key never prices as zero: it is `None`, which the callers refuse.
@@ -541,6 +547,25 @@ fn partial_work_prices_only_the_stages_it_runs() {
     assert_eq!(
         shape(Yue2Tier::Q4, &cached).work,
         Yue2Work::DecodeCached { frames: 250 }
+    );
+    // A song shorter than one tile decodes in one tile of its own length
+    // (`DecodeOptions::estimated_peak_bytes`). Mutation: price the full tile regardless.
+    let cached_estimate = priced(
+        &shape(Yue2Tier::Q4, &cached),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    let tile = cached_estimate
+        .stage(Yue2Stage::Decode)
+        .unwrap()
+        .terms
+        .iter()
+        .find(|t| t.what == "VAE decode tile")
+        .unwrap()
+        .device_bytes;
+    assert_eq!(
+        tile,
+        DECODE_TILE_RESERVE_BYTES + 250 * DECODE_TILE_BYTES_PER_FRAME
     );
 
     let entry = builtin_yue2_entry();
@@ -1050,7 +1075,8 @@ fn a_lease_follows_the_stages_and_releases_on_drop() {
         let s = est.stage(stage).unwrap();
         (s.device_bytes(), s.host_bytes())
     };
-    let mut lease = Yue2Lease::open(est.clone());
+    let work = shape(Yue2Tier::Q8, &default_request()).work;
+    let mut lease = Yue2Lease::open(est.clone(), work);
     let id = lease.id();
     assert!(lease_is_live(id));
     assert_eq!(lease.stage(), Yue2Stage::Load);
@@ -1089,14 +1115,15 @@ fn an_offloaded_lease_holds_the_ar_weights_host_side_during_the_acoustic_stage()
         },
     );
     let ar_only = est.weights.ar_only_bytes;
-    let mut lease = Yue2Lease::open(est);
+    let work = shape(Yue2Tier::Bf16, &default_request()).work;
+    let mut lease = Yue2Lease::open(est, work);
     lease.observe(&Progress::Step {
         current: 1,
-        total: 10,
+        total: ABC_MAX_TOKENS_DEFAULT as u32,
     });
     lease.observe(&Progress::Step {
         current: 1,
-        total: 20,
+        total: SEMANTIC_MAX_TOKENS_DEFAULT as u32,
     });
     lease.observe(&Progress::Step {
         current: 1,
@@ -1116,9 +1143,39 @@ fn a_decode_only_lease_has_only_the_decode_stage() {
         work: Yue2Work::DecodeCached { frames: 500 },
         ..shape(Yue2Tier::Q4, &default_request())
     };
-    let mut lease = Yue2Lease::open(priced(&s, Yue2Backend::Metal, Yue2Controls::production()));
+    let mut lease = Yue2Lease::open(
+        priced(&s, Yue2Backend::Metal, Yue2Controls::production()),
+        s.work,
+    );
     lease.observe(&Progress::Decoding);
     assert_eq!(lease.stage(), Yue2Stage::Decode);
+}
+
+/// A resumed run reuses its finished stages without reporting them, so a restarted count is matched
+/// to its stage by its total: a run resuming at the semantic stage is held at the semantic stage's
+/// residency, not the plan's. Mutation: advance strictly by order (the lease then reads "plan").
+#[test]
+fn a_resumed_run_is_placed_by_its_step_totals() {
+    let _serial = lease_test_serial();
+    let s = shape(Yue2Tier::Q8, &default_request());
+    let mut lease = Yue2Lease::open(
+        priced(&s, Yue2Backend::Metal, Yue2Controls::production()),
+        s.work,
+    );
+    lease.observe(&Progress::Step {
+        current: 1,
+        total: SEMANTIC_MAX_TOKENS_DEFAULT as u32,
+    });
+    assert_eq!(lease.stage(), Yue2Stage::Semantic);
+    let mut resumed_at_acoustic = Yue2Lease::open(
+        priced(&s, Yue2Backend::Metal, Yue2Controls::production()),
+        s.work,
+    );
+    resumed_at_acoustic.observe(&Progress::Step {
+        current: 1,
+        total: 32,
+    });
+    assert_eq!(resumed_at_acoustic.stage(), Yue2Stage::AcousticSolve);
 }
 
 // ---- The hook ---------------------------------------------------------------------------------------
