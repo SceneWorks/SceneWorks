@@ -395,6 +395,66 @@ async fn a_recording_transcribes_into_linked_versions_that_a_cover_reviews() {
     assert_eq!(sources["transcription"]["mode"], "melody");
 }
 
+#[tokio::test]
+async fn transcription_retry_cannot_retarget_same_bytes_to_another_asset() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp_dir);
+    for row in cover_rows() {
+        seed_snapshot(&temp_dir, &row);
+    }
+    let project_id = project(&app).await;
+    register(&app, WORKER).await;
+    let recording = wav(24_000);
+    let first = upload_recording(&app, &project_id, &recording).await;
+    let second = upload_recording(&app, &project_id, &recording).await;
+    assert_ne!(first, second);
+    let jobs = submit_ok(
+        &app,
+        &project_id,
+        json!({
+            "kind":"transcribe", "sourceAudioAssetId":first,
+            "licenseAcknowledged":true, "transcription":{"maxSeconds":10.0}
+        }),
+    )
+    .await;
+    let id = jobs[0]["id"].as_str().unwrap();
+    let original_block = jobs[0]["payload"]["yue2"].clone();
+    claim(&app, WORKER).await;
+    finish(
+        &app,
+        id,
+        "failed",
+        json!({"yue2":{"status":"failed"}}),
+        Some("interrupted"),
+    )
+    .await;
+
+    let mut changed = original_block.clone();
+    changed["sourceAudioAssetId"] = json!(second);
+    changed["sources"]["recording"]["assetId"] = json!(second);
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/retry"),
+        json!({"payloadChanges":{"yue2":changed}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["code"], "yue2_invalid_combination");
+
+    let (status, retry) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{retry}");
+    assert_ne!(retry["id"], id);
+    assert_eq!(retry["payload"]["yue2"], original_block);
+}
+
 /// A deliberate silent recording: the transcription completes, NOTHING is imported for a refused
 /// mode, and the refusal reason is on the job result and the record. Mutation that reds this:
 /// importing regardless of the review's readiness.

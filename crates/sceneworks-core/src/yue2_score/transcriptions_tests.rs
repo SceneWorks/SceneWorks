@@ -91,6 +91,38 @@ fn import(manifest_sha256: String) -> TranscriptionImport {
     }
 }
 
+#[test]
+fn existing_transcription_is_idempotent_only_for_the_same_recording_and_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Yue2ScoreStore::new(temp.path(), "project-1");
+    let digest = write_artifact(temp.path(), true, SCORE);
+    let original = store.import_transcription(import(digest.clone())).unwrap();
+    let mut retry = import(digest.clone());
+    retry.job_id = "job-retry".into();
+    assert_eq!(store.import_transcription(retry.clone()).unwrap(), original);
+
+    retry.source_audio_asset_id = "asset_same_bytes_other_id".into();
+    assert!(store
+        .import_transcription(retry.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("another recording"));
+    retry.source_audio_asset_id = "asset_take".into();
+    retry.manifest_sha256 = "a".repeat(64);
+    assert!(store
+        .import_transcription(retry.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("another recording"));
+    retry.manifest_sha256 = digest;
+    retry.artifact_dir = "yue2/transcriptions/yue2run_other".into();
+    assert!(store
+        .import_transcription(retry)
+        .unwrap_err()
+        .to_string()
+        .contains("another recording"));
+}
+
 /// AT2: both transcribed scores become versions linked to the transcription AND the recording,
 /// carrying the job's usage policy; an edit keeps that lineage. Mutations that red this: dropping
 /// the `VersionLineage` from `import_score` (no link), or not inheriting it in `apply_edit`.

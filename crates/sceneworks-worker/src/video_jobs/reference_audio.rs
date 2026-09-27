@@ -238,6 +238,132 @@ pub(crate) async fn decode_audio_normalized(
     }
 }
 
+/// Bounded on-disk float decode for transcription. The caller prices the returned frame layout
+/// before calling `read_wav_f32`, whose general-purpose reader retains the whole WAV in memory.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DecodedWavInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
+    pub file_bytes: u64,
+}
+
+pub(crate) struct AudioDecodeBounds {
+    pub max_seconds: Option<f64>,
+    pub max_output_bytes: u64,
+}
+
+pub(crate) async fn write_audio_normalized_bounded(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel_message: &str,
+    source: &Path,
+    work_dir: &Path,
+    bounds: AudioDecodeBounds,
+) -> WorkerResult<(std::path::PathBuf, DecodedWavInfo)> {
+    let wav = work_dir.join("reference.wav");
+    let args = bounded_audio_ffmpeg_args(source, &wav, &bounds);
+    let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
+    run_ffmpeg(args, Some(ctx)).await?;
+    let info = inspect_float_wav(&wav)?;
+    if info.file_bytes >= bounds.max_output_bytes.saturating_sub(1 << 20) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "yue2: decoded recording reached the {:.2} GiB host-memory output budget",
+            bounds.max_output_bytes as f64 / 1_073_741_824.0
+        )));
+    }
+    Ok((wav, info))
+}
+
+fn bounded_audio_ffmpeg_args(source: &Path, wav: &Path, bounds: &AudioDecodeBounds) -> Vec<String> {
+    let mut args = audio_normalize_ffmpeg_args(
+        source,
+        wav,
+        AudioDecode {
+            float32: true,
+            ..Default::default()
+        },
+    );
+    args.pop();
+    if let Some(seconds) = bounds.max_seconds {
+        args.extend(["-t".to_owned(), seconds.to_string()]);
+    }
+    args.extend([
+        "-fs".to_owned(),
+        bounds.max_output_bytes.to_string(),
+        wav.display().to_string(),
+    ]);
+    args
+}
+
+/// Read only WAV chunk headers; even a multi-hour recording costs constant RAM here.
+pub(crate) fn inspect_float_wav(path: &Path) -> WorkerResult<DecodedWavInfo> {
+    inspect_wav_layout(path, true)?.ok_or_else(|| {
+        WorkerError::InvalidPayload("yue2: decoded audio is not float RIFF/WAVE".into())
+    })
+}
+
+pub(crate) fn probe_source_wav(path: &Path) -> WorkerResult<Option<DecodedWavInfo>> {
+    inspect_wav_layout(path, false)
+}
+
+fn inspect_wav_layout(path: &Path, float_only: bool) -> WorkerResult<Option<DecodedWavInfo>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header)?;
+    if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
+        return Ok(None);
+    }
+    let mut pos = 12u64;
+    let mut format = None;
+    let mut data = None;
+    while pos.saturating_add(8) <= file_bytes {
+        file.seek(SeekFrom::Start(pos))?;
+        let mut chunk = [0u8; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u64::from(u32::from_le_bytes(chunk[4..8].try_into().unwrap()));
+        let start = pos + 8;
+        if &chunk[..4] == b"fmt " && size >= 16 && start + 16 <= file_bytes {
+            let mut body = [0u8; 16];
+            file.read_exact(&mut body)?;
+            let channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
+            let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            let codec = u16::from_le_bytes(body[0..2].try_into().unwrap());
+            let bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            if (codec == 1 && bits == 16 && !float_only)
+                || ((codec == 3 || codec == 0xfffe) && bits == 32)
+            {
+                format = Some((channels, rate, bits));
+            } else {
+                return Ok(None);
+            }
+        } else if &chunk[..4] == b"data" {
+            data = Some((start, size.min(file_bytes.saturating_sub(start))));
+        }
+        if let (Some((channels, rate, bits)), Some((_, bytes))) = (format, data) {
+            let stride = u64::from(channels).saturating_mul(u64::from(bits / 8));
+            if rate == 0 || stride == 0 || bytes % stride != 0 {
+                return Err(WorkerError::InvalidPayload(
+                    "yue2: decoded WAV has invalid frames".into(),
+                ));
+            }
+            return Ok(Some(DecodedWavInfo {
+                sample_rate: rate,
+                channels,
+                frames: bytes / stride,
+                file_bytes,
+            }));
+        }
+        pos = start.saturating_add(size).saturating_add(size & 1);
+    }
+    Err(WorkerError::InvalidPayload(
+        "yue2: WAV has no readable audio frames".into(),
+    ))
+}
+
 /// The normalization command, built apart from running it so the two engine constants it carries
 /// are assertable without an ffmpeg on the host — the hosted macOS CI lane has none.
 ///
@@ -296,4 +422,25 @@ fn mean_downmix_filter(n: u16) -> String {
     let gain = 1.0 / f64::from(n);
     let terms: Vec<String> = (0..n).map(|c| format!("{gain}*c{c}")).collect();
     format!("aformat=sample_fmts=flt,pan=mono|c0={}", terms.join("+"))
+}
+
+#[cfg(test)]
+mod bounded_decode_tests {
+    use super::*;
+
+    #[test]
+    fn compressed_transcription_decode_crops_and_caps_output_before_file_open() {
+        let args = bounded_audio_ffmpeg_args(
+            Path::new("take.webm"),
+            Path::new("reference.wav"),
+            &AudioDecodeBounds {
+                max_seconds: Some(11.0),
+                max_output_bytes: 8 << 20,
+            },
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-t", "11"]));
+        assert!(args.windows(2).any(|pair| pair == ["-fs", "8388608"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "pcm_f32le"]));
+        assert_eq!(args.last().map(String::as_str), Some("reference.wav"));
+    }
 }

@@ -323,6 +323,19 @@ impl Yue2ScoreStore {
     pub fn import_transcription(&self, input: TranscriptionImport) -> Result<TranscriptionRecord> {
         validate_transcription_id(&input.transcription_id)?;
         if let Ok(existing) = self.get_transcription(&input.transcription_id) {
+            // A retry gets a new job id but retains the same run and recording. Never let an
+            // existing record silently satisfy a different asset (even when its bytes match),
+            // nor a different artifact under the same transcription id.
+            if existing.source_audio_asset_id != input.source_audio_asset_id
+                || existing.recording_sha256 != input.recording_sha256
+                || existing.artifact_dir != input.artifact_dir
+                || existing.manifest_sha256 != input.manifest_sha256
+            {
+                return Err(conflict(format!(
+                    "transcription {} already belongs to another recording or artifact",
+                    input.transcription_id
+                )));
+            }
             return Ok(existing);
         }
         let artifact = Artifact::open(

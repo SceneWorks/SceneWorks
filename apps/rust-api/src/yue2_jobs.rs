@@ -852,6 +852,7 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
     state: &AppState,
     persisted: &JsonObject,
     merged: &mut JsonObject,
+    retry: bool,
 ) -> Result<(), ApiError> {
     let block_of = |payload: &JsonObject| {
         payload
@@ -903,6 +904,23 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
                 )
             })?;
             yue2::validate_for_execution(&spec).map_err(spec_error)?;
+            if retry && spec.kind == Yue2JobKind::Transcribe {
+                let original: Yue2JobSpec = serde_json::from_value(
+                    persisted
+                        .get(yue2::PAYLOAD_KEY)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+                .map_err(|error| {
+                    ApiError::internal(format!("stored YuE2 job is malformed: {error}"))
+                })?;
+                if !same_transcription_retry(&original, &spec) {
+                    return Err(refused(
+                        "yue2",
+                        "a recording transcription retry must keep its original recording, settings and run identity; duplicate the job for a new transcription".into(),
+                    ));
+                }
+            }
             let entry = resolve_model_manifest_entry(state, yue2::MODEL_ID).await?;
             merged.insert("modelManifestEntry".to_owned(), entry);
             match persisted.get("usagePolicy") {
@@ -933,6 +951,10 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
             Ok(())
         }
     }
+}
+
+fn same_transcription_retry(original: &Yue2JobSpec, retry: &Yue2JobSpec) -> bool {
+    original.kind == Yue2JobKind::Transcribe && retry == original
 }
 
 /// The generic audio route refuses a symbolic-song model: its submission, eligibility and source
@@ -1656,6 +1678,28 @@ pub(crate) fn stamp_export_usage_policies(
 #[cfg(test)]
 mod seed_tests {
     use super::*;
+
+    #[test]
+    fn transcription_retry_freezes_recording_settings_and_run() {
+        let original: Yue2JobSpec = serde_json::from_value(json!({
+            "kind":"transcribe", "runId":"yue2run_take", "sourceAudioAssetId":"asset_one",
+            "sources":{"recording":{"assetId":"asset_one","sha256":"a".repeat(64)}},
+            "transcription":{"maxSeconds":10.0}
+        }))
+        .unwrap();
+        assert!(same_transcription_retry(&original, &original));
+        for (pointer, value) in [
+            ("/sourceAudioAssetId", json!("asset_two")),
+            ("/sources/recording/assetId", json!("asset_two")),
+            ("/transcription/maxSeconds", json!(20.0)),
+            ("/runId", json!("yue2run_other")),
+        ] {
+            let mut changed = serde_json::to_value(&original).unwrap();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let changed: Yue2JobSpec = serde_json::from_value(changed).unwrap();
+            assert!(!same_transcription_retry(&original, &changed), "{pointer}");
+        }
+    }
 
     #[test]
     fn default_seeds_and_their_batch_takes_stay_exact_in_javascript() {

@@ -421,6 +421,7 @@ pub(crate) async fn retry_job(
         &state,
         &job_id,
         &payload.payload_changes,
+        true,
     )
     .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
@@ -470,6 +471,7 @@ pub(crate) async fn duplicate_job(
         &state,
         &job_id,
         &payload.payload_changes,
+        false,
     )
     .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
@@ -652,6 +654,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     state: &AppState,
     job_id: &str,
     payload_changes: &JsonObject,
+    retry: bool,
 ) -> Result<JsonObject, ApiError> {
     let job_id = job_id.to_owned();
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
@@ -671,8 +674,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // cannot be injected, removed or pointed at another model, and a block-less replay cannot
         // name a symbolic-song model the generic audio route refuses.
         if matches!(job_type, JobType::AudioGenerate) {
-            crate::yue2_jobs::canonicalize_replayed_audio_payload(state, &persisted, &mut merged)
-                .await?;
+            crate::yue2_jobs::canonicalize_replayed_audio_payload(
+                state,
+                &persisted,
+                &mut merged,
+                retry,
+            )
+            .await?;
         }
     } else {
         validate_raw_job_payload(state, &job_type, &merged).await?;

@@ -3,9 +3,54 @@
 
 use super::*;
 use sceneworks_core::yue2_score::jobs::{self as contract, Yue2JobSpec};
+use sha2::{Digest, Sha256};
 use std::sync::{OnceLock, RwLock};
 
 const CANCEL_MESSAGE: &str = "YuE2 transcription canceled by user.";
+const OWNER_FILE: &str = "sceneworks-owner.json";
+
+fn artifact_owner(
+    job_id: &str,
+    run_id: &str,
+    asset_id: &str,
+    sha256: &str,
+    manifest: &str,
+) -> Value {
+    json!({"schema":"sceneworks-yue2-transcription-owner-v1", "originJobId":job_id,
+        "runId":run_id, "sourceAudioAssetId":asset_id, "recordingSha256":sha256,
+        "manifestSha256":manifest})
+}
+
+fn owner_matches(dir: &Path, run_id: &str, asset_id: &str, sha256: &str) -> WorkerResult<String> {
+    let path = dir.join(OWNER_FILE);
+    let file = std::fs::File::open(&path)?;
+    if file.metadata()?.len() > 4096 {
+        return Err(WorkerError::InvalidPayload(
+            "yue2: transcription owner record is oversized".into(),
+        ));
+    }
+    let owner: Value = serde_json::from_reader(file).map_err(|e| {
+        WorkerError::InvalidPayload(format!("yue2: transcription owner record: {e}"))
+    })?;
+    if owner["schema"] != "sceneworks-yue2-transcription-owner-v1"
+        || owner["runId"] != run_id
+        || owner["sourceAudioAssetId"] != asset_id
+        || owner["recordingSha256"] != sha256
+    {
+        return Err(WorkerError::InvalidPayload(
+            "yue2: existing transcription belongs to a different recording asset or run".into(),
+        ));
+    }
+    owner["manifestSha256"]
+        .as_str()
+        .filter(|digest| digest.len() == 64)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "yue2: transcription owner record has no manifest digest".into(),
+            )
+        })
+}
 
 /// One guarded decode directory per attempt. Random allocation prevents a retry or another
 /// process from deleting or following a pre-existing path with the same job id.
@@ -15,6 +60,34 @@ fn decode_scratch(job_id: &str) -> std::io::Result<tempfile::TempDir> {
         super::safe_download_dir(job_id)
     );
     tempfile::Builder::new().prefix(&prefix).tempdir()
+}
+
+async fn verified_source_sha256(path: &Path, expected: &str) -> WorkerResult<()> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+    }
+    if format!("{:x}", digest.finalize()) != expected {
+        return Err(WorkerError::InvalidPayload(
+            "yue2: source recording no longer matches its queued SHA-256".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn planned_frames(
+    info: crate::video_jobs::reference_audio::DecodedWavInfo,
+    max: Option<f64>,
+) -> u64 {
+    max.map(|seconds| ((seconds + 1.0) * f64::from(info.sample_rate)).ceil() as u64)
+        .map_or(info.frames, |crop| info.frames.min(crop))
 }
 
 /// Serialize the CPU transcriber against YuE2 generator residency in this process. The generator
@@ -222,20 +295,40 @@ pub(crate) fn live_models() -> usize {
 /// A completed artifact may outlive a failed terminal progress POST. A retried job replays that
 /// same immutable artifact instead of loading a second transcriber or overwriting its files.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-fn published_details(
+async fn published_details(
     dir: &Path,
     source_sha256: &str,
+    source_asset_id: &str,
     spec: &Yue2JobSpec,
+    gpu_id: &str,
 ) -> WorkerResult<Option<Value>> {
     use crate::inference_runtime::audio_providers::candle_audio_sheetsage2 as ss2;
     if !dir.exists() {
         return Ok(None);
     }
+    let owner_manifest = owner_matches(
+        dir,
+        spec.run_id.as_deref().unwrap_or_default(),
+        source_asset_id,
+        source_sha256,
+    )?;
+    let persisted_bytes = std::fs::read_dir(dir)?.try_fold(0u64, |bytes, entry| {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        Ok::<u64, std::io::Error>(bytes.saturating_add(metadata.len()))
+    })?;
+    let _replay_lease =
+        crate::yue2_admission::check_transcription_replay(persisted_bytes, gpu_id).await?;
     let artifact = ss2::review::ReviewArtifact::open(dir).map_err(|e| {
         WorkerError::InvalidPayload(format!(
             "yue2: existing transcription artifact does not verify: {e}"
         ))
     })?;
+    if artifact.manifest_sha256() != owner_manifest {
+        return Err(WorkerError::InvalidPayload(
+            "yue2: existing transcription owner digest changed".into(),
+        ));
+    }
     let source = artifact.source().map_err(|e| {
         WorkerError::InvalidPayload(format!("yue2: existing transcription source: {e}"))
     })?;
@@ -266,7 +359,13 @@ fn published_details(
 }
 
 #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
-fn published_details(dir: &Path, _: &str, _: &Yue2JobSpec) -> WorkerResult<Option<Value>> {
+async fn published_details(
+    dir: &Path,
+    _: &str,
+    _: &str,
+    _: &Yue2JobSpec,
+    _: &str,
+) -> WorkerResult<Option<Value>> {
     if dir.exists() {
         Err(WorkerError::InvalidPayload(
             "yue2: this worker cannot replay a native transcription artifact".into(),
@@ -383,17 +482,14 @@ pub(crate) async fn run<B: TranscriptionBackend>(
         source_id,
         project_path,
     )?;
-    let encoded = tokio::fs::read(&source_path).await?;
-    if super::yue2_jobs::sha256_hex(&encoded) != source.sha256 {
-        return Err(WorkerError::InvalidPayload(
-            "yue2: source recording no longer matches its queued SHA-256".into(),
-        ));
-    }
+    verified_source_sha256(&source_path, &source.sha256).await?;
     let run_id = spec.run_id.as_deref().unwrap_or_default();
     let rel = contract::transcription_dir(run_id);
     let dir = project_path.join(&rel);
     let _claim = super::yue2_jobs::RunClaim::acquire(&dir)?;
-    if let Some(details) = published_details(&dir, &source.sha256, spec)? {
+    if let Some(details) =
+        published_details(&dir, &source.sha256, source_id, spec, &settings.gpu_id).await?
+    {
         return super::update_job(
             api,
             &job.id,
@@ -410,32 +506,91 @@ pub(crate) async fn run<B: TranscriptionBackend>(
         .map(|_| ());
     }
     let snapshots = cover_snapshots(settings, entry)?;
+    let max_seconds = spec.transcription.and_then(|s| s.max_seconds);
+    let source_layout = crate::video_jobs::reference_audio::probe_source_wav(&source_path)?;
+    let planned = source_layout.map(|info| planned_frames(info, max_seconds));
+    let preflight_seconds = source_layout.map_or(300, |info| {
+        planned
+            .unwrap_or(0)
+            .div_ceil(u64::from(info.sample_rate.max(1)))
+    });
+    let source_cost = source_layout.map_or(0, |info| {
+        crate::yue2_admission::transcription_source_bytes(
+            planned.unwrap_or(0),
+            info.sample_rate,
+            info.channels,
+        )
+    });
+    // Reserve the model and, for WAV, all source buffers before ffmpeg writes or RAM is allocated.
+    // Compressed inputs use a budget-derived disk cap; the decoded layout is re-priced below.
+    let preflight = crate::yue2_admission::check_transcription(
+        entry,
+        preflight_seconds,
+        &settings.gpu_id,
+        source_cost,
+    )
+    .await?;
+    let output_cap = if let Some(info) = source_layout {
+        planned
+            .unwrap_or(0)
+            .saturating_mul(u64::from(info.channels))
+            .saturating_mul(4)
+            .saturating_add(2 << 20)
+    } else {
+        crate::yue2_admission::transcription_unknown_decode_cap(&settings.gpu_id).await?
+    };
     let audio = {
         let scratch = decode_scratch(&job.id)?;
-        crate::video_jobs::reference_audio::decode_audio_normalized(
+        let disk_cap = fs2::available_space(scratch.path())?.saturating_sub(64 << 20);
+        if disk_cap < (2 << 20) || (source_layout.is_some() && output_cap > disk_cap) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "yue2: transcription scratch disk cannot admit {:.2} GiB of decoded recording",
+                output_cap as f64 / 1_073_741_824.0
+            )));
+        }
+        let (wav, decoded) = crate::video_jobs::reference_audio::write_audio_normalized_bounded(
             api,
             settings,
             &job.id,
             CANCEL_MESSAGE,
             &source_path,
             scratch.path(),
-            crate::video_jobs::reference_audio::AudioDecode {
-                float32: true,
-                ..Default::default()
+            crate::video_jobs::reference_audio::AudioDecodeBounds {
+                max_seconds: max_seconds.map(|s| s + 1.0),
+                max_output_bytes: output_cap.min(disk_cap),
             },
         )
-        .await?
+        .await?;
+        if let Some(expected) = planned {
+            if decoded.frames.saturating_add(2) < expected {
+                return Err(WorkerError::InvalidPayload(
+                    "yue2: decoded recording ended before its admitted source duration".into(),
+                ));
+            }
+        }
+        // The asset can be replaced between the first digest check and ffmpeg's open. Refuse any
+        // changed bytes before assigning their decoded samples the queued recording identity.
+        verified_source_sha256(&source_path, &source.sha256).await?;
+        drop(preflight);
+        let seconds = decoded
+            .frames
+            .div_ceil(u64::from(decoded.sample_rate.max(1)));
+        let source_bytes = crate::yue2_admission::transcription_source_bytes(
+            decoded.frames,
+            decoded.sample_rate,
+            decoded.channels,
+        );
+        let lease = crate::yue2_admission::check_transcription(
+            entry,
+            seconds,
+            &settings.gpu_id,
+            source_bytes,
+        )
+        .await?;
+        let audio = crate::audio_jobs::read_wav_f32(&wav)?;
+        (audio, lease)
     };
-    let duration = audio.samples.len() as f64
-        / f64::from(audio.sample_rate.max(1))
-        / f64::from(audio.channels.max(1));
-    let seconds = spec
-        .transcription
-        .and_then(|s| s.max_seconds)
-        .map_or(duration, |max| duration.min(max))
-        .ceil() as u64;
-    let lease =
-        crate::yue2_admission::check_transcription(entry, seconds, &settings.gpu_id).await?;
+    let (audio, lease) = audio;
     if backend.live_models() != 0 {
         return Err(WorkerError::InvalidPayload(
             "yue2: a SheetSage2 transcriber is already resident".into(),
@@ -526,11 +681,34 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     }
     // Publish only a fully replay-verified artifact. Rename is atomic within the project volume.
     if dir.exists() {
+        let _ = std::fs::remove_dir_all(super::yue2_jobs::partial_dir(&dir));
         return Err(WorkerError::InvalidPayload(
             "yue2: this transcription artifact already exists".into(),
         ));
     }
-    std::fs::rename(super::yue2_jobs::partial_dir(&dir), &dir)?;
+    let publish = (|| -> WorkerResult<()> {
+        let manifest_sha = details["manifestSha256"]
+            .as_str()
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "yue2: transcription backend returned no valid manifest digest".into(),
+                )
+            })?;
+        let owner = artifact_owner(&job.id, run_id, source_id, &source.sha256, manifest_sha);
+        std::fs::write(
+            super::yue2_jobs::partial_dir(&dir).join(OWNER_FILE),
+            serde_json::to_vec(&owner)?,
+        )?;
+        std::fs::rename(super::yue2_jobs::partial_dir(&dir), &dir)?;
+        Ok(())
+    })();
+    if publish.is_err() {
+        let _ = std::fs::remove_dir_all(super::yue2_jobs::partial_dir(&dir));
+    }
+    publish?;
     let result = completion_result(spec, &rel, details, usage_policy);
     super::update_job(
         api,
@@ -551,6 +729,62 @@ pub(crate) async fn run<B: TranscriptionBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_owner_binds_same_bytes_to_the_original_asset_and_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "a".repeat(64);
+        let manifest = "b".repeat(64);
+        let owner = artifact_owner("job-original", "yue2run_one", "asset_one", &sha, &manifest);
+        std::fs::write(
+            dir.path().join(OWNER_FILE),
+            serde_json::to_vec(&owner).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            owner_matches(dir.path(), "yue2run_one", "asset_one", &sha).unwrap(),
+            manifest
+        );
+        assert!(owner_matches(dir.path(), "yue2run_one", "asset_other_same_bytes", &sha).is_err());
+        assert!(owner_matches(dir.path(), "yue2run_other", "asset_one", &sha).is_err());
+    }
+
+    #[test]
+    fn long_wav_and_compressed_source_are_probed_without_reading_payload() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("long.wav");
+        let frames = 600u64 * 48_000;
+        let bytes = frames * 2 * 2;
+        let mut file = std::fs::File::create(&wav).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36u32 + bytes as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&48_000u32.to_le_bytes()).unwrap();
+        file.write_all(&192_000u32.to_le_bytes()).unwrap();
+        file.write_all(&4u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&(bytes as u32).to_le_bytes()).unwrap();
+        file.set_len(44 + bytes).unwrap();
+        let info = crate::video_jobs::reference_audio::probe_source_wav(&wav)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.frames, frames);
+        assert_eq!(planned_frames(info, None), frames);
+        assert_eq!(planned_frames(info, Some(10.0)), 11 * 48_000);
+        let compressed = dir.path().join("take.webm");
+        std::fs::write(&compressed, b"\x1a\x45\xdf\xa3webm header").unwrap();
+        assert!(
+            crate::video_jobs::reference_audio::probe_source_wav(&compressed)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn decode_attempts_with_the_same_job_id_never_share_or_delete_scratch() {

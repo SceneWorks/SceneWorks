@@ -609,6 +609,19 @@ impl crate::yue2_transcription::TranscriptionBackend for StubTranscriber {
         progress: &mut dyn FnMut(f64, String),
     ) -> WorkerResult<Value> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if input
+            .spec
+            .transcription
+            .and_then(|s| s.max_seconds)
+            .is_some()
+        {
+            let frames = input.audio.samples.len() / usize::from(input.audio.channels);
+            let rate = input.audio.sample_rate as usize;
+            assert!(
+                frames >= rate && frames <= 2 * rate + 1024,
+                "cropped decode has {frames} frames at {rate} Hz"
+            );
+        }
         std::fs::write(input.artifact_dir.join("partial-marker"), b"work")?;
         progress(0.5, "Transcribing window 1 of 1.".into());
         if self.fail {
@@ -628,7 +641,7 @@ fn recording_job(h: &Harness, id: &str) -> JobSnapshot {
     let wav = h.data.path().join(format!("{id}.wav"));
     crate::video_jobs::write_wav_pcm16(
         &AudioTrack {
-            samples: vec![0.1; 24_000],
+            samples: vec![0.1; if id.ends_with("ok") { 72_000 } else { 24_000 }],
             sample_rate: 24_000,
             channels: 1,
         },
@@ -683,6 +696,7 @@ fn recording_job(h: &Harness, id: &str) -> JobSnapshot {
         json!({
             "kind": "transcribe", "sourceAudioAssetId": asset_id,
             "sources": {"recording": {"assetId": asset_id, "sha256": sha}},
+            "transcription": if id.ends_with("ok") { json!({"maxSeconds": 1.0}) } else { Value::Null },
         }),
     )
 }
@@ -705,6 +719,47 @@ async fn transcription_job_publishes_result_and_cleans_failed_partial() {
         "m-a-p/MERT-v2-FullSong",
         "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
     );
+    let refused = recording_job(&h, "transcribe-refuse");
+    let refused_calls = Arc::new(AtomicUsize::new(0));
+    let refused_loads = Arc::new(AtomicUsize::new(0));
+    let small =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: 1 << 20,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }));
+    run_yue2_job_using_backends(
+        &h.api,
+        &h.settings,
+        &refused,
+        loader(complete(vec![]), Default::default(), refused_loads.clone()),
+        StubTranscriber {
+            calls: refused_calls.clone(),
+            fail: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(h.terminal()["status"], "failed");
+    assert!(h.terminal()["error"]
+        .as_str()
+        .unwrap()
+        .contains("host pool"));
+    assert_eq!(
+        refused_calls.load(Ordering::SeqCst),
+        0,
+        "refuse before decode/load"
+    );
+    assert_eq!(refused_loads.load(Ordering::SeqCst), 0);
+    drop(small);
+    let _budget =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: 64 << 30,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }));
     for fail in [false, true] {
         let id = if fail {
             "transcribe-fail"
