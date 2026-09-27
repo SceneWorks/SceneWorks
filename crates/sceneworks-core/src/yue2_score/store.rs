@@ -214,6 +214,14 @@ pub enum RenderStatus {
     Failed,
 }
 
+/// A present-but-nullable truncation record: the key is required (no default), `null` is allowed.
+fn nullable_truncation<'de, D>(deserializer: D) -> std::result::Result<Option<Truncation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Truncation>::deserialize(deserializer)
+}
+
 /// What the render job reports when it finishes (sc-22999 fills this in).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -224,8 +232,11 @@ pub struct RenderInput {
     /// [`super::request_sha256`] of the request the job actually rendered; must equal the
     /// version's `requestSha256`.
     pub request_sha256: String,
-    /// Required — there is no default truncation state.
-    pub truncated: Truncation,
+    /// Required as a key — there is no default truncation state. `null` means the truncation
+    /// was never observed (a render that failed before its run published), which only a failed
+    /// render may report; a completed render must state both flags.
+    #[serde(deserialize_with = "nullable_truncation")]
+    pub truncated: Option<Truncation>,
     pub model: ComponentIdentity,
     #[serde(default)]
     pub decoder: Option<ComponentIdentity>,
@@ -258,7 +269,8 @@ pub struct RenderRecord {
     pub score_abc: String,
     pub score_sha256: String,
     pub edit_brief: Option<String>,
-    pub truncated: Truncation,
+    /// `None` only on a failed render whose truncation was never observed.
+    pub truncated: Option<Truncation>,
     pub model: ComponentIdentity,
     pub decoder: Option<ComponentIdentity>,
     pub job_id: Option<String>,
@@ -756,6 +768,11 @@ impl Yue2ScoreStore {
         }
         match input.status {
             RenderStatus::Completed => {
+                if input.truncated.is_none() {
+                    return Err(bad(
+                        "a completed render must state its truncation (abc and semantic)",
+                    ));
+                }
                 if input.audio_asset_id.is_none() {
                     return Err(bad("a completed render must name its audio asset"));
                 }
@@ -899,17 +916,22 @@ impl Yue2ScoreStore {
                 "render {render_id} did not complete; it has no recording to compare"
             )));
         };
-        if render.truncated.any() {
+        let Some(truncated) = render.truncated else {
+            return Err(bad(format!(
+                "render {render_id} recorded no truncation state; it cannot be compared"
+            )));
+        };
+        if truncated.any() {
             warnings.push(format!(
                 "side {side} render {render_id} is TRUNCATED (abc: {}, semantic: {}); compare \
                  complete recordings before judging the edit",
-                render.truncated.abc, render.truncated.semantic
+                truncated.abc, truncated.semantic
             ));
         }
         Ok(Some(ListeningEntry {
             render_id: render.id,
             audio_asset_id,
-            truncated: render.truncated,
+            truncated,
             model: render.model,
             decoder: render.decoder,
             job_id: render.job_id,

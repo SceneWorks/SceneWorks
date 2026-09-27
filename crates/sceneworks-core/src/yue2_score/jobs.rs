@@ -43,6 +43,10 @@ pub const MAX_BATCH: u32 = 8;
 pub const MAX_STEPS: u32 = 10_000;
 /// The model's context (`candle_audio_yue2::protocol::CONTEXT`): no phase may budget more.
 pub const CONTEXT_TOKENS: u32 = 24_576;
+/// Smallest NAR attention chunk the engine accepts, in score elements: one query row at the full
+/// context, `heads × positions` (`candle_audio_yue2::engine::Yue2Engine::attention_bounds`, 16 × the
+/// context). A smaller chunk is refused by the engine, so it is refused at submission (sc-23001).
+pub const MIN_ATTENTION_CHUNK_ELEMENTS: u32 = 16 * CONTEXT_TOKENS;
 /// Largest decode tile core, in latent frames (`candle_audio_yue2::decode::DecodeOptions::tiled`).
 pub const MAX_DECODE_TILE_FRAMES: u32 = 1024;
 /// The engine's truncation warning codes.
@@ -907,11 +911,17 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                 "is read only with memory.chunkAttention",
             ));
         }
-        if memory.attention_chunk_size == Some(0) {
+        if memory
+            .attention_chunk_size
+            .is_some_and(|elements| elements < MIN_ATTENTION_CHUNK_ELEMENTS)
+        {
             return Err(error(
                 INVALID_VALUE,
                 "memory.attentionChunkSize",
-                "must be >= 1",
+                format!(
+                    "must be >= {MIN_ATTENTION_CHUNK_ELEMENTS} score elements (one query row at \
+                     the full context: 16 heads × {CONTEXT_TOKENS} keys)"
+                ),
             ));
         }
         if memory.decode_tile_edge.is_some() && memory.tile_vae_decode != Some(true) {
@@ -956,6 +966,38 @@ fn check_score(field: &str, abc: &str) -> Result<(), Yue2JobError> {
     super::parse_score(abc)
         .map(|_| ())
         .map_err(|e| error("yue2_unsupported_notation", field, e.to_string()))
+}
+
+/// A duplicate is a NEW take, never a resume: give a `yue2` payload block a fresh run id and drop
+/// its batch membership, so two jobs never share a run directory. (A retry keeps its run id — it
+/// resumes the same run's verified checkpoints.) A payload without a block is left untouched.
+pub fn refresh_block_for_duplicate(payload: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(block) = payload
+        .get_mut(PAYLOAD_KEY)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    block.insert(
+        "runId".to_owned(),
+        serde_json::Value::String(format!("{RUN_ID_PREFIX}{}", fresh_hex_id())),
+    );
+    block.remove("batch");
+}
+
+fn fresh_hex_id() -> String {
+    let mut bytes = [0u8; 16];
+    // A failed OS RNG must not hand two duplicates the same run: fall back to a time-and-address
+    // mix, which is unique per call in one process.
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let marker = &bytes as *const _ as usize as u128;
+        bytes = (nanos ^ marker.rotate_left(64)).to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Whether a request (or its cover) asks for recording transcription, which is blocked.
