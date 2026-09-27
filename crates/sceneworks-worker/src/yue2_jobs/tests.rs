@@ -734,6 +734,17 @@ async fn a_create_job_maps_every_setting_and_publishes_a_library_asset() {
     assert!(fact["extra"]["yue2"].get("score").is_none());
     let media = h.project_path.join(fact["mediaPath"].as_str().unwrap());
     assert!(media.is_file(), "the WAV is written into the project");
+    // E2: the licence travels inside the file as a RIFF LIST/INFO chunk after `data`, and the
+    // audio still decodes. Mutation that reds this: publishing through plain `write_wav_pcm16`.
+    let bytes = std::fs::read(&media).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("LIST") && text.contains("INFO") && text.contains("ICOP"));
+    assert!(
+        text.contains("NONCOMMERCIAL USE ONLY"),
+        "the WAV names its noncommercial licence"
+    );
+    let decoded = crate::audio_jobs::read_wav_pcm16(&media).expect("the tagged WAV still decodes");
+    assert_eq!(decoded.sample_rate, 48_000);
 
     // Progress: coalesced, monotone, ending on a stage message.
     let fractions: Vec<f64> = h
@@ -2272,4 +2283,30 @@ mod real_weights {
         );
         eprintln!("decode: {:?}", started.elapsed());
     }
+}
+
+/// The INFO tags are read from the granted policy: a noncommercial policy says so; a policy that
+/// does not declare it does not. Mutation that reds this: dropping the `nonCommercial` check.
+#[test]
+fn wav_licence_info_follows_the_usage_policy() {
+    let noncommercial = json!({
+        "nonCommercial": true,
+        "experimental": true,
+        "license": {"license": null, "notice": "licensed under (CC BY-NC 4.0): terms", "url": "https://x/LICENSE"}
+    });
+    let tags = super::wav_licence_info(&noncommercial);
+    assert_eq!(&tags[0].0, b"ICOP");
+    assert_eq!(
+        tags[0].1,
+        "Generated with YuE2 (weights: CC BY-NC 4.0). NONCOMMERCIAL USE ONLY"
+    );
+    assert_eq!(
+        tags[1].1,
+        "SceneWorks YuE2 (experimental model); licence: https://x/LICENSE"
+    );
+    let open = json!({"nonCommercial": false, "license": {"license": "Apache-2.0"}});
+    assert_eq!(
+        super::wav_licence_info(&open)[0].1,
+        "Generated with YuE2 (weights: Apache-2.0)"
+    );
 }
