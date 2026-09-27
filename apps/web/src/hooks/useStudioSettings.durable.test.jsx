@@ -173,6 +173,29 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     expect(cached.batchPromptsText).toBe("kept");
   });
 
+  // sc-23000: the YuE2 Song Lab's own snapshot (`yue2lab`) rides the same durable map and is seeded
+  // back on launch, and a full-size ABC score stays out of the durable copy (it would push the whole
+  // workspace entry past the server's per-entry budget, dropping every studio in it).
+  it("mirrors and restores the YuE2 lab snapshot, keeping a full-size score session-only", async () => {
+    const bigScore = `X:1\n${"C4|".repeat(8000)}`;
+    await render(
+      <Harness
+        settings={{ optIn: true, lyrics: "[verse]\nhello", suppliedScore: bigScore, coverScore: "X:1\nC4|" }}
+        studio="yue2lab"
+      />,
+    );
+    const sent = lastSentMap()["ws-1"].yue2lab;
+    expect(sent).toMatchObject({ optIn: true, lyrics: "[verse]\nhello", coverScore: "X:1\nC4|" });
+    expect(sent).not.toHaveProperty("suppliedScore");
+    // The session cache keeps it, and no other studio key is confused with the lab's.
+    expect(loadStudioSettings("yue2lab", "ws-1").suppliedScore).toBe(bigScore);
+    expect(lastSentMap()["ws-1"]).not.toHaveProperty("audio");
+
+    window.localStorage.clear();
+    expect(seedStudioSettingsFromServer({ "ws-1": { yue2lab: sent } })).toBe(1);
+    expect(loadStudioSettings("yue2lab", "ws-1")).toMatchObject({ optIn: true, lyrics: "[verse]\nhello" });
+  });
+
   it("ignores a malformed durable map rather than corrupting the cache", async () => {
     expect(seedStudioSettingsFromServer(null)).toBe(0);
     expect(seedStudioSettingsFromServer({ "ws-1": "not-an-object" })).toBe(0);
