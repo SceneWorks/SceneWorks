@@ -45,6 +45,7 @@ import {
   parseArgs,
   parseWav,
   peakOf,
+  persistedAudioAsset,
   planCases,
   renderAssertions,
   renderMarkdown,
@@ -277,6 +278,21 @@ test("tier evidence comes from the engine: tier, no FP8, and the pinned derived 
   assert.deepEqual(tierFailing(tierRun("q4", PINS.q8)), ["loaded the pinned derived q4 weights"]);
   assert.deepEqual(tierFailing(tierRun("q8", "b".repeat(64))), ["loaded the pinned derived q8 weights"]);
   assert.deepEqual(tierFailing(tierRun("bf16", PINS.q4)), ["loaded no derived tier's weights"]);
+});
+
+test("plan-only tier evidence uses engine provenance; a missing or wrong provenance fails", () => {
+  const plan = { ...tierRun("q8", PINS.q8), runResult: { kind: "plan" } };
+  assert.deepEqual(tierFailing({ ...plan, runProvenance: { weights: { weight_tier: "q8", quantization: "none", mot_native_weights_sha256: PINS.q8 } } }), []);
+  assert.deepEqual(tierFailing(plan), ["engine ran the q8 tier", "AR ran without FP8", "loaded the pinned derived q8 weights"]);
+  assert.deepEqual(tierFailing({ ...plan, runProvenance: { weights: { weight_tier: "bf16", quantization: "fp8", mot_native_weights_sha256: PINS.q4 } } }), ["engine ran the q8 tier", "AR ran without FP8", "loaded the pinned derived q8 weights"]);
+});
+
+test("library audio is resolved from the API's persisted asset id after assetWrites are consumed", () => {
+  const result = { assetIds: ["asset_1"], assets: [{ id: "asset_1", type: "audio", file: { path: "assets/audios/one.wav" } }] };
+  assert.deepEqual(persistedAudioAsset(result, result.assets[0]), { id: "asset_1", mediaPath: "assets/audios/one.wav" });
+  assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], id: "asset_2" }), /not persisted audio/);
+  assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], file: {} }), /not persisted audio/);
+  assert.throws(() => persistedAudioAsset({ assetWrites: [{ mediaPath: "assets/audios/one.wav" }] }, result.assets[0]), /no asset id/);
 });
 
 test("refusal matchers name the specific failure, not any error mentioning a record", () => {
@@ -545,4 +561,121 @@ test("evidence and app state must live outside the repository", () => {
   assert.equal(insideRepository(path.join(root, "target", "evidence"), root), true);
   assert.equal(insideRepository(path.resolve("/tmp/yue2"), root), false);
   assert.equal(insideRepository(path.resolve("/repo/SceneWorks-evidence"), root), false);
+});
+
+const failures = (assertions) => assertions.filter((item) => !item.ok).map((item) => item.name);
+
+test("generated recording is deterministic, audible, and distinct from digital silence", () => {
+  const first = generateTestRecording();
+  const second = generateTestRecording();
+  const audio = parseWav(first.bytes);
+  assert.equal(first.generator.id, RECORDING_GENERATOR_ID);
+  assert.equal(first.sha256, "7ade3b3657bc683ebe604bf6c6c9665fb5efe6ef9f9e61fa320f697a2e4b1320");
+  assert.equal(sha(first.bytes), first.sha256);
+  assert.deepEqual(first.bytes, second.bytes);
+  assert.equal(audio.durationSeconds, 21.5);
+  assert.equal(audio.sampleRate, 44100);
+  assert.equal(audio.channels, 1);
+  assert.ok(audio.rms > 0.1);
+  assert.equal(MELODY.length, 30);
+  const silent = generateSilence(10);
+  assert.equal(parseWav(silent.bytes).rms, 0);
+  assert.notEqual(silent.sha256, first.sha256);
+});
+
+test("cover closure must be pinned, noncommercial, covers-only, and installed separately", () => {
+  const rows = TRANSCRIPTION_COMPONENT_IDS.map((componentId, index) => ({
+    componentId, repo: `SceneWorks/${componentId}`, revision: String(index + 1).repeat(40),
+    weightsSha256: String(index + 1).repeat(64), files: ["model.safetensors"], requiredFor: ["cover"],
+    license: "cc-by-nc-4.0", nonCommercial: true, licenseBasis: "model card",
+  }));
+  const manifestEntry = { conditionalComponents: rows, downloads: [{ repo: "SceneWorks/yue2", variant: "bf16" }] };
+  const apiEntry = { conditionalComponents: rows.map((row) => ({ ...row, installState: "missing" })), conditionalPurposes: { cover: { blocked: false, installState: "missing" } }, downloads: manifestEntry.downloads };
+  assert.deepEqual(failures(conditionalComponentAssertions({ manifestEntry, apiEntry })), []);
+  const wrong = structuredClone(apiEntry);
+  wrong.conditionalComponents[0].weightsSha256 = "f".repeat(64);
+  wrong.conditionalComponents[1].licenseBasis = "";
+  assert.ok(failures(conditionalComponentAssertions({ manifestEntry, apiEntry: wrong })).some((name) => name.includes("API serves the checked-in pins")));
+  assert.ok(failures(conditionalComponentAssertions({ manifestEntry, apiEntry: wrong })).some((name) => name.includes("licence basis stated")));
+});
+
+function transcriptionFixture(artifact) {
+  const recording = { assetId: "asset_recording", sha256: "a".repeat(64) };
+  const warnings = [{ code: "review_note", message: "Review the melody." }];
+  const readiness = { melody: { ready: true }, full: { ready: true } };
+  const replay = { artifactsMatched: 3, windows: 1 };
+  const t = { id: "yue2tx_1", dir: "yue2/transcriptions/yue2tx_1", manifestSha256: artifact.manifestSha256,
+    device: "cpu", replay, unload: { released: true, liveModelsAfter: 0 }, warnings };
+  const y2 = { status: "completed", kind: "transcribe", transcriptionId: t.id, transcription: t, readiness, usagePolicy: { nonCommercial: true } };
+  const record = { id: t.id, jobId: "job_tx", artifactDir: t.dir, manifestSha256: t.manifestSha256, sourceAudioAssetId: recording.assetId,
+    recordingSha256: recording.sha256, device: "cpu", replay, warnings, readiness, usagePolicy: { nonCommercial: true } };
+  return { platform: "cuda", jobId: "job_tx", recording, y2, record, artifact };
+}
+
+test("transcription artifact is independently re-hashed; missing, changed, and traversing files fail", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-transcription-test-"));
+  try {
+    const file = Buffer.from("reviewed-score\n");
+    const manifest = { schema: TRANSCRIPTION_ARTIFACT_SCHEMA,
+      source: { original_sha256: "a".repeat(64) }, closure: { device: "cpu" },
+      review: { warnings: [{ code: "review_note", message: "Review the melody." }], cover: { melody: { ready: true }, full: { ready: true } } },
+      artifacts: { "score.abc": sha(file) } };
+    await writeFile(path.join(dir, "score.abc"), file);
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    await writeFile(path.join(dir, "transcription.json"), manifestBytes);
+    const expected = sha(manifestBytes);
+    const artifact = await verifyTranscriptionArtifact(dir, expected);
+    assert.equal(artifact.ok, true);
+    assert.deepEqual(failures(transcriptionAssertions(transcriptionFixture(artifact))), []);
+    assert.deepEqual(failures(transcriptionDeviceAssertions({ platform: "metal", reported: "cpu", record: { device: "cpu" }, manifest })), []);
+    assert.deepEqual(failures(transcriptionDeviceAssertions({ platform: "cuda", reported: "cuda", record: { device: "cuda" }, manifest: { closure: { device: "cuda" } } })), ["transcription ran on the production transcription device"]);
+    await writeFile(path.join(dir, "score.abc"), "changed");
+    assert.match((await verifyTranscriptionArtifact(dir, expected)).detail, /score\.abc hashes to/);
+    await rm(path.join(dir, "score.abc"));
+    assert.match((await verifyTranscriptionArtifact(dir, expected)).detail, /score\.abc is missing/);
+    assert.match((await verifyTranscriptionArtifact(dir, "f".repeat(64))).detail, /transcription\.json hashes to/);
+    const unsafe = { ...manifest, artifacts: { "../outside": "a".repeat(64) } };
+    const unsafeBytes = Buffer.from(JSON.stringify(unsafe));
+    await writeFile(path.join(dir, "transcription.json"), unsafeBytes);
+    assert.match((await verifyTranscriptionArtifact(dir, sha(unsafeBytes))).detail, /not a plain relative path/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("transcription assertions reject wrong source, unverified replay, resident model and altered review", () => {
+  const artifact = { ok: true, detail: "verified", manifestSha256: "b".repeat(64), manifest: {
+    source: { original_sha256: "a".repeat(64) }, closure: { device: "cpu" },
+    review: { warnings: [{ code: "review_note", message: "Review the melody." }], cover: { melody: { ready: true }, full: { ready: true } } },
+  } };
+  const base = transcriptionFixture(artifact);
+  assert.deepEqual(failures(transcriptionAssertions(base)), []);
+  assert.ok(failures(transcriptionAssertions({ ...base, record: { ...base.record, sourceAudioAssetId: "other" } })).includes("the transcription read the uploaded recording"));
+  assert.ok(failures(transcriptionAssertions({ ...base, y2: { ...base.y2, transcription: { ...base.y2.transcription, replay: { artifactsMatched: 0, windows: 0 } } } })).includes("the worker replay-verified the artifact"));
+  assert.ok(failures(transcriptionAssertions({ ...base, y2: { ...base.y2, transcription: { ...base.y2.transcription, unload: { released: false, liveModelsAfter: 1 } } } })).includes("the transcriber unloaded (released, no live model after)"));
+  assert.ok(failures(transcriptionAssertions({ ...base, record: { ...base.record, warnings: [] } })).includes("the review's warnings are recorded verbatim (manifest, record, job)"));
+});
+
+test("silence refuses melody without importing any score version", () => {
+  const readiness = { melody: { ready: false, reason: "No melody notes found." }, full: { ready: false } };
+  const warnings = [{ code: "empty_melody" }];
+  const y2 = { readiness, transcription: { warnings }, scoreVersionIds: { melody: null, full: null } };
+  const record = { readiness, warnings, versions: { melody: null, full: null }, versionErrors: {} };
+  assert.deepEqual(failures(emptyMelodyAssertions({ y2, record })), []);
+  assert.deepEqual(failures(emptyMelodyAssertions({ y2: { ...y2, scoreVersionIds: { melody: "version_1", full: null } }, record })), ["no score version was imported"]);
+  assert.ok(failures(emptyMelodyAssertions({ y2, record: { ...record, readiness: { ...readiness, melody: { ready: true } } } })).includes("melody readiness refused, saying there are no melody notes"));
+});
+
+test("cover evidence binds both reviewed modes to the recording and unloaded transcriber", () => {
+  for (const mode of ["melody", "full"]) {
+    const transcription = { id: "yue2tx_1", jobId: "job_tx", manifestSha256: "b".repeat(64) };
+    const bound = { ...transcription, sourceAudioAssetId: "asset_recording", mode };
+    const sources = { transcription: bound, coverVersion: { id: `version_${mode}` } };
+    const transcriberResidency = { liveSheetsage2ModelsAtLoad: 0 };
+    const y2 = { sources, transcriberResidency, usagePolicy: { nonCommercial: true } };
+    const snapshot = { payload: { yue2: { sources: { transcription: bound } } }, result: { yue2: y2 } };
+    const asset = { extra: { yue2: y2, sourceRecordingAssetId: "asset_recording", usagePolicy: { modelId: "yue2", nonCommercial: true } } };
+    const input = { snapshot, asset, transcription, recordingAssetId: "asset_recording", versionId: `version_${mode}`, mode };
+    assert.deepEqual(failures(coverFromTranscriptionAssertions(input)), []);
+    assert.ok(failures(coverFromTranscriptionAssertions({ ...input, asset: { extra: { ...asset.extra, sourceRecordingAssetId: "other" } } })).includes("the output asset names the source recording"));
+    assert.ok(failures(coverFromTranscriptionAssertions({ ...input, snapshot: { ...snapshot, result: { yue2: { ...y2, transcriberResidency: { liveSheetsage2ModelsAtLoad: 1 } } } } })).includes("the transcriber was unloaded before YuE2 loaded"));
+  }
 });
