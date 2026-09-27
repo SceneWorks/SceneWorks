@@ -1129,6 +1129,161 @@ async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() 
     );
 }
 
+/// A keepalive stub whose FIRST worker heartbeat releases the blocking task and returns only once
+/// that task has resolved, while every job GET reports `cancel_requested: true`. The watcher's
+/// first tick therefore always observes the cancel AFTER the task finished — the race sc-22999 hit
+/// (the task resolves while the tick arm awaits its heartbeat POST and cancel peek), forced on
+/// every run instead of left to the scheduler.
+#[derive(Clone)]
+struct FinishingHeartbeatStub {
+    #[allow(clippy::type_complexity)]
+    release: std::sync::Arc<
+        std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, tokio::task::AbortHandle)>>,
+    >,
+    progress: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+async fn spawn_finishing_heartbeat_stub(state: FinishingHeartbeatStub) -> String {
+    async fn heartbeat_route(State(state): State<FinishingHeartbeatStub>) -> Response {
+        let pending = state.release.lock().unwrap().take();
+        if let Some((release, task)) = pending {
+            let _ = release.send(());
+            let start = std::time::Instant::now();
+            while !task.is_finished() && start.elapsed() < Duration::from_secs(30) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        Json(json!({})).into_response()
+    }
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<FinishingHeartbeatStub>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(payload): Json<Value>,
+    ) -> Response {
+        state.progress.lock().unwrap().push(payload);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+/// sc-22999 — a cancel the watcher observes only AFTER the blocking task already resolved must not
+/// discard the finished result: the task's value is returned, no terminal `Canceled` is posted and
+/// the (moot) engine flag is never tripped. Before the fix the tick arm tripped the flag and set
+/// `canceled`, and the next iteration turned the `Ok` into `Canceled` — a YuE2 job then ended
+/// canceled with its run already published and owned by no job. Deterministic: the stub releases
+/// the task from inside the first heartbeat and waits for it to resolve before the cancel peek.
+/// Mutation that reds this: drop the `is_finished()` check in the tick arm.
+#[tokio::test]
+async fn keepalive_returns_a_task_that_resolved_before_the_cancel_was_observed() {
+    let state = FinishingHeartbeatStub {
+        release: Default::default(),
+        progress: Default::default(),
+    };
+    let base = spawn_finishing_heartbeat_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        released
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| WorkerError::Engine("the first heartbeat never released".to_owned()))?;
+        Ok(7)
+    });
+    *state.release.lock().unwrap() = Some((release, task.abort_handle()));
+    let flag = gen_core::CancelFlag::new();
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-22999",
+        Some(flag.clone()),
+        "canceled",
+        "finished-before-cancel stand-in",
+        crate::no_cancel_ack(),
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(7)),
+        "the finished task's value wins over a cancel that raced it, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        !posts.iter().any(|p| p["status"] == "canceled"),
+        "no terminal Canceled is posted for a task that had already finished, got {posts:?}"
+    );
+    assert!(!flag.is_cancelled(), "a finished task's flag is never tripped");
+}
+
+/// sc-22999 — the committed-`Ok` policy (YuE2: the engine publishes its run before returning).
+/// Same interleaving as `keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag`
+/// (the cancel is observed and the flag tripped while the task runs, then the task returns `Ok`),
+/// but `run_blocking_with_heartbeat_keeping_ok` returns the value and posts no terminal `Canceled`.
+/// Mutation that reds this: pass `false` for `keep_ok_after_cancel` from the keeping wrapper (and
+/// passing `true` from the default wrapper reds the sibling test above, which pins the default).
+#[tokio::test]
+async fn keepalive_keeping_ok_returns_a_task_that_finished_after_the_cancel() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let wait_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        let start = std::time::Instant::now();
+        while !wait_flag.is_cancelled() {
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err(WorkerError::Engine("cancel flag never tripped".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(7)
+    });
+    let result = super::run_blocking_with_heartbeat_keeping_ok(
+        &api,
+        &settings,
+        "job-22999-keep",
+        Some(flag),
+        "canceled",
+        "published-run stand-in",
+        crate::no_cancel_ack(),
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(7)),
+        "a committed Ok is returned, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        !posts.iter().any(|p| p["status"] == "canceled"),
+        "no terminal Canceled is posted over a committed Ok, got {posts:?}"
+    );
+}
+
 /// sc-11184 (F-014) — the Windows stdin-close latch must survive a zero-receiver window.
 ///
 /// `wait_for_parent_stdin_close` (the `#[cfg(not(unix))]` graceful-shutdown signal) fans a single
