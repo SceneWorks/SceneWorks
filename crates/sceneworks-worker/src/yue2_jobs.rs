@@ -52,7 +52,7 @@ use sceneworks_core::yue2_score::jobs::{
 };
 use sceneworks_core::yue2_score::store::ScoreVersionRecord;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::video_jobs::{write_wav_pcm16_with_info, AudioTrack};
@@ -96,6 +96,7 @@ struct JobRecord {
     /// Set by the blocking task the moment it hands the request to the engine — the only point
     /// after which the run's working directory can be this job's.
     engine_started: Arc<AtomicBool>,
+    transcriber_at_load: Arc<AtomicUsize>,
     /// This job's exclusive claim on its run directory, held until the job has cleaned up.
     claim: Option<RunClaim>,
 }
@@ -145,8 +146,36 @@ pub(crate) async fn run_yue2_job_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    run_yue2_job_using_backends(
+        api,
+        settings,
+        job,
+        load_generator,
+        crate::yue2_transcription::NativeTranscription,
+    )
+    .await
+}
+
+async fn run_yue2_job_using_backends<B: crate::yue2_transcription::TranscriptionBackend>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    transcription_backend: B,
+) -> WorkerResult<()> {
     let mut record = JobRecord::default();
-    match execute(api, settings, job, load_generator, &mut record).await {
+    match execute(
+        api,
+        settings,
+        job,
+        load_generator,
+        transcription_backend,
+        &mut record,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(WorkerError::Canceled(message)) => {
             // A canceled job cleans its temporary work: the run's unpublished working directory —
@@ -179,7 +208,7 @@ pub(crate) async fn run_yue2_job_using(
     }
 }
 
-fn yue2_progress(
+pub(crate) fn yue2_progress(
     status: JobStatus,
     stage: ProgressStage,
     fraction: f64,
@@ -204,13 +233,14 @@ fn parse_spec(payload: &JsonObject) -> WorkerResult<Yue2JobSpec> {
     Ok(spec)
 }
 
-async fn execute(
+async fn execute<B: crate::yue2_transcription::TranscriptionBackend>(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
+    transcription_backend: B,
     record: &mut JobRecord,
 ) -> WorkerResult<()> {
     let spec = parse_spec(&job.payload)?;
@@ -226,7 +256,11 @@ async fn execute(
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&project_id)?;
     let project_path = PathBuf::from(project.path);
-    let run_rel = contract::run_dir(&run_id);
+    let run_rel = if spec.kind == Yue2JobKind::Transcribe {
+        contract::transcription_dir(&run_id)
+    } else {
+        contract::run_dir(&run_id)
+    };
     let run_dir = project_path.join(&run_rel);
     record.run_rel = Some(run_rel.clone());
     record.run_dir = Some(run_dir.clone());
@@ -258,7 +292,18 @@ async fn execute(
         .cloned()
         .unwrap_or_else(|| json!({}));
     if spec.kind == Yue2JobKind::Transcribe {
-        return Err(transcription_blocked(&entry));
+        return crate::yue2_transcription::run(
+            api,
+            settings,
+            job,
+            &spec,
+            &project_id,
+            &project_path,
+            &entry,
+            &usage_policy,
+            transcription_backend,
+        )
+        .await;
     }
     let load = resolve_load(settings, &entry, &spec)?;
     record.identities = Some((
@@ -319,6 +364,7 @@ async fn execute(
         cancel,
         admitted.lease,
         record.engine_started.clone(),
+        record.transcriber_at_load.clone(),
         load_generator,
     )
     .await?;
@@ -350,6 +396,14 @@ async fn execute(
         effective,
         &usage_policy,
     );
+    if spec.kind == Yue2JobKind::Cover {
+        block.insert(
+            "transcriberResidency".to_owned(),
+            json!({
+                "liveSheetsage2ModelsAtLoad": record.transcriber_at_load.load(Ordering::SeqCst),
+            }),
+        );
+    }
     let (result, message) = if spec.kind.renders_audio() {
         let track = match report.output {
             Some(GenerationOutput::Audio(track)) => track,
@@ -458,26 +512,6 @@ async fn check_eligibility(api: &ApiClient, job_id: &str) -> WorkerResult<Value>
         ));
     }
     Ok(answer.get("usagePolicy").cloned().unwrap_or(Value::Null))
-}
-
-fn transcription_blocked(entry: &Value) -> WorkerError {
-    let detail = match sceneworks_core::model_usage_policy::conditional_component_downloads(
-        entry, "cover",
-    ) {
-        Err(sceneworks_core::model_usage_policy::ConditionalComponentsError::Blocked {
-            blocked,
-            ..
-        }) => blocked
-            .iter()
-            .map(|(id, reason, unblock)| format!("{id}: {reason} (unblock: {unblock})"))
-            .collect::<Vec<_>>()
-            .join("; "),
-        Err(error) => error.to_string(),
-        Ok(_) => "no linked runtime bundle carries the transcription crate".into(),
-    };
-    WorkerError::InvalidPayload(format!(
-        "[component_blocked] YuE2 recording transcription is blocked: {detail}"
-    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -688,7 +722,7 @@ pub(crate) struct Inputs {
     cover_score: Option<String>,
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -1073,6 +1107,7 @@ async fn generate(
     cancel: CancelFlag,
     lease: crate::yue2_admission::Yue2Lease,
     engine_started: Arc<AtomicBool>,
+    transcriber_at_load: Arc<AtomicUsize>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -1082,6 +1117,9 @@ async fn generate(
     let handle = {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<GenerationReport> {
+            let _residency = crate::yue2_transcription::residency_lock()
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner());
             // The engine's cancel hook is `request.cancel`; it is checked at the load boundary
             // too, so a cancel during a cold load never starts generation.
             // Declared before the generator so it drops AFTER it (sc-23001): the admitted
@@ -1090,6 +1128,9 @@ async fn generate(
             if cancel.is_cancelled() {
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
+            let live_at_load = crate::yue2_transcription::live_models();
+            transcriber_at_load.store(live_at_load, Ordering::SeqCst);
+            crate::yue2_transcription::require_unloaded(live_at_load)?;
             let generator = load_generator(contract::MODEL_ID, &load)
                 .map_err(|error| classify("YuE2 model load failed", error))?;
             if cancel.is_cancelled() {
@@ -1558,6 +1599,9 @@ async fn publish_audio(
         "extra": {
             "yue2": Value::Object(provenance),
             "usagePolicy": usage_policy,
+            "sourceRecordingAssetId": spec.sources.as_ref()
+                .and_then(|sources| sources.transcription.as_ref())
+                .map(|source| source.source_audio_asset_id.as_str()),
         },
     });
     let mut result = json!({

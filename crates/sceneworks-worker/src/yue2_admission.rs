@@ -2011,6 +2011,78 @@ pub(crate) fn live_residency_bytes() -> (u64, u64) {
         .fold((0, 0), |(d, h), &(dd, hh, _)| (d + dd, h + hh))
 }
 
+/// CPU transcription occupies the host pool until the model has been unloaded.  The same live
+/// table is used by YuE2 admission, so a concurrent generator cannot borrow its memory on a
+/// unified host.  On CUDA the host's MemAvailable reading already includes this allocation.
+#[derive(Debug)]
+pub(crate) struct TranscriptionLease {
+    id: u64,
+}
+
+impl Drop for TranscriptionLease {
+    fn drop(&mut self) {
+        live_leases()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&self.id);
+    }
+}
+
+fn transcription_host_fit(needed: u64, budget: &Yue2Budget, other_live: u64) -> bool {
+    match budget {
+        Yue2Budget::Unified {
+            capacity_bytes,
+            resident_bytes,
+            ..
+        } => {
+            needed
+                <= capacity_bytes
+                    .saturating_sub(*resident_bytes)
+                    .saturating_sub(other_live)
+        }
+        Yue2Budget::Dedicated {
+            host_available_bytes,
+            ..
+        } => host_available_bytes
+            .is_none_or(|available| needed <= available.saturating_sub(other_live)),
+    }
+}
+
+/// Price the cover closure's F32 weights and one encoder window against the host pool before a
+/// native model is loaded. The lease remains live through unload and artifact publication.
+pub(crate) async fn check_transcription(
+    entry: &Value,
+    seconds: u64,
+    gpu_id: &str,
+) -> Result<TranscriptionLease, WorkerError> {
+    let weights = transcriber_bytes(entry).map_err(|why| {
+        WorkerError::InvalidPayload(format!(
+            "yue2: transcription memory admission cannot price the cover closure ({why})"
+        ))
+    })?;
+    let needed: u64 = transcription_terms(seconds, weights, Yue2Backend::Cpu)
+        .iter()
+        .map(|term| term.device_bytes + term.host_bytes)
+        .sum();
+    let budget = live_budget(gpu_id).await;
+    let (other_device, other_host) = live_residency_bytes();
+    if let Some(budget) = &budget {
+        if !transcription_host_fit(needed, budget, other_device + other_host) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "yue2: transcription needs {:.2} GiB of host memory for SheetSage2 + MERT-v2 and one window; the host pool cannot admit it",
+                gb(needed)
+            )));
+        }
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 63);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    live_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(id, (0, needed, std::thread::current().id()));
+    Ok(TranscriptionLease { id })
+}
+
 /// The admitted residency of one render, held from admission until the render's generator is
 /// dropped — on completion, error, cancellation or unwind alike (drop it AFTER the generator). While
 /// held, a later YuE2 admission on a unified pool counts it against the capacity, so a render whose

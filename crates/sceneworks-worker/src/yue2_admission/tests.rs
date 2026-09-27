@@ -1302,6 +1302,36 @@ fn meminfo_available_is_parsed_in_bytes() {
     assert_eq!(parse_meminfo_available("MemTotal: 1 kB\n"), None);
 }
 
+/// A CPU transcription is charged to the host pool until its lease drops. Mutation evidence:
+/// omitting the live-lease subtraction admits the second identical closure on the same budget;
+/// pricing just the weights admits the one-byte-short budget below.
+#[tokio::test]
+async fn transcription_admission_charges_host_and_releases_its_lease() {
+    let entry = builtin_yue2_entry();
+    let bytes = transcriber_bytes(&entry).unwrap();
+    let needed: u64 = transcription_terms(300, bytes, Yue2Backend::Cpu)
+        .iter()
+        .map(|term| term.device_bytes + term.host_bytes)
+        .sum();
+    let budget = |capacity_bytes| Yue2Budget::Unified {
+        backend: Yue2Backend::Metal,
+        capacity_bytes,
+        resident_bytes: 0,
+        reclaimable_bytes: 0,
+    };
+    let too_small = override_budget(Some(budget(needed - 1)));
+    assert!(check_transcription(&entry, 300, "0").await.is_err());
+    drop(too_small);
+    let exact = override_budget(Some(budget(needed)));
+    let lease = check_transcription(&entry, 300, "0").await.unwrap();
+    assert_eq!(live_residency_bytes(), (0, needed));
+    assert!(check_transcription(&entry, 300, "0").await.is_err());
+    drop(lease);
+    assert_eq!(live_residency_bytes(), (0, 0));
+    assert!(check_transcription(&entry, 300, "0").await.is_ok());
+    drop(exact);
+}
+
 /// The catalog's advisory `candle.minMemoryGbByTier` floors are THIS estimator's derivation: the
 /// smallest machine admission can admit the default song on — the default request at the smallest
 /// controls admission can choose (1-frame decode core, one-row score chunks, AR offload on CUDA),

@@ -592,6 +592,170 @@ fn complete(steps: Vec<Progress>) -> Behavior {
     }
 }
 
+#[derive(Clone)]
+struct StubTranscriber {
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+impl crate::yue2_transcription::TranscriptionBackend for StubTranscriber {
+    fn live_models(&self) -> usize {
+        0
+    }
+
+    fn transcribe(
+        &self,
+        _: &[(String, PathBuf)],
+        _: gen_core::AudioTrack,
+        _: &str,
+        _: &Yue2JobSpec,
+        dir: &Path,
+        _: &gen_core::CancelFlag,
+        progress: &mut dyn FnMut(f64, String),
+    ) -> WorkerResult<Value> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::fs::write(dir.join("partial-marker"), b"work")?;
+        progress(0.5, "Transcribing window 1 of 1.".into());
+        if self.fail {
+            return Err(WorkerError::Engine("stub transcription failed".into()));
+        }
+        Ok(json!({
+            "manifestSha256": "a".repeat(64), "device": "cpu",
+            "replay": {"artifactsMatched": 5, "windows": 1},
+            "unload": {"released": true, "parameterBytes": 42, "liveModelsAfter": 0},
+            "warnings": [],
+            "readiness": {"melody": {"ready": true}, "full": {"ready": true}},
+        }))
+    }
+}
+
+fn recording_job(h: &Harness, id: &str) -> JobSnapshot {
+    let wav = h.data.path().join(format!("{id}.wav"));
+    crate::video_jobs::write_wav_pcm16(
+        &AudioTrack {
+            samples: vec![0.1; 24_000],
+            sample_rate: 24_000,
+            channels: 1,
+        },
+        &wav,
+    )
+    .unwrap();
+    // The successful case exercises MediaRecorder's WebM/Opus recording format.
+    let (source, filename, content_type) = if id.ends_with("ok") {
+        let webm = h.data.path().join(format!("{id}.webm"));
+        let program = std::env::var("SCENEWORKS_FFMPEG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "ffmpeg".into());
+        let status = std::process::Command::new(program)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&wav)
+            .args(["-c:a", "libopus", "-b:a", "64k"])
+            .arg(&webm)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "ffmpeg must encode the browser recording fixture"
+        );
+        (webm, format!("{id}.webm"), "audio/webm")
+    } else {
+        (wav, format!("{id}.wav"), "audio/wav")
+    };
+    let asset = ProjectStore::new(h.settings.data_dir.clone(), "worker")
+        .import_asset(
+            &h.project_id,
+            sceneworks_core::project_store::UploadAsset {
+                filename,
+                content_type: Some(content_type.into()),
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let asset_id = asset["id"].as_str().unwrap();
+    let media_rel = asset["file"]["path"].as_str().unwrap();
+    if id.ends_with("ok") {
+        assert!(
+            media_rel.ends_with(".wav"),
+            "WebM upload should be normalized: {media_rel}"
+        );
+    }
+    let sha = sha256_hex(&std::fs::read(h.project_path.join(media_rel)).unwrap());
+    h.job(
+        id,
+        json!({
+            "kind": "transcribe", "sourceAudioAssetId": asset_id,
+            "sources": {"recording": {"assetId": asset_id, "sha256": sha}},
+        }),
+    )
+}
+
+/// The stored transcribe block runs through asset resolution, source digest verification, memory
+/// admission and the injected backend, and yields the exact API pointer. A failed backend removes
+/// only this attempt's unpublished artifact. Mutation: skip the backend call or omit either
+/// `transcription.dir`/`manifestSha256` in completion_result; the success assertions fail.
+#[tokio::test]
+#[ignore = "requires ffmpeg with WebM/Opus support (SCENEWORKS_FFMPEG or PATH)"]
+async fn transcription_job_publishes_result_and_cleans_failed_partial() {
+    let h = Harness::new().await;
+    stage_snapshot(
+        h.data.path(),
+        "m-a-p/SheetSage2",
+        "eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+    );
+    stage_snapshot(
+        h.data.path(),
+        "m-a-p/MERT-v2-FullSong",
+        "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
+    );
+    for fail in [false, true] {
+        let id = if fail {
+            "transcribe-fail"
+        } else {
+            "transcribe-ok"
+        };
+        let job = recording_job(&h, id);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+        run_yue2_job_using_backends(
+            &h.api,
+            &h.settings,
+            &job,
+            loader(complete(vec![]), Default::default(), loads.clone()),
+            StubTranscriber {
+                calls: calls.clone(),
+                fail,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "{}", h.terminal());
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        let dir = h.project_path.join(contract::transcription_dir(
+            job.payload["yue2"]["runId"].as_str().unwrap(),
+        ));
+        let terminal = h.terminal();
+        if fail {
+            assert_eq!(terminal["status"], "failed", "{terminal}");
+            assert!(!partial_dir(&dir).exists());
+            assert!(!dir.exists());
+        } else {
+            assert_eq!(terminal["status"], "completed", "{terminal}");
+            let y2 = &terminal["result"]["yue2"];
+            assert_eq!(y2["kind"], "transcribe");
+            assert_eq!(
+                y2["transcription"]["dir"],
+                contract::transcription_dir("yue2run_transcribe-ok")
+            );
+            assert_eq!(y2["transcription"]["manifestSha256"], "a".repeat(64));
+            assert_eq!(y2["readiness"]["full"]["ready"], true);
+            assert!(dir.join("partial-marker").is_file());
+        }
+    }
+}
+
 #[cfg_attr(
     not(any(target_os = "macos", feature = "backend-candle")),
     allow(dead_code)
@@ -1592,10 +1756,9 @@ async fn failed_and_truncated_runs_persist_with_their_provenance() {
     assert_eq!(fact["extra"]["yue2"]["truncated"]["semantic"], true);
 }
 
-/// Tier and decoder availability are checked before load: an underived q8 tier, a legacy decoder
-/// that is not installed, and a blocked transcription are refused with the reason.
+/// Tier and decoder availability are checked before load.
 #[tokio::test]
-async fn missing_tiers_decoders_and_blocked_transcription_refuse_before_load() {
+async fn missing_tiers_and_decoders_refuse_before_load() {
     let h = Harness::with_decoders(true, false).await;
     for (id, spec, needle) in [
         (
@@ -1607,11 +1770,6 @@ async fn missing_tiers_decoders_and_blocked_transcription_refuse_before_load() {
             "legacy",
             json!({"kind": "create", "lyrics": "[verse]\nla", "decoder": "legacy"}),
             "legacy decoder is not installed",
-        ),
-        (
-            "transcribe",
-            json!({"kind": "transcribe", "sourceAudioAssetId": "asset-1"}),
-            "component_blocked",
         ),
     ] {
         let loads = Arc::new(AtomicUsize::new(0));
