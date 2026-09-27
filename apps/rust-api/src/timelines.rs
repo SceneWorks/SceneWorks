@@ -89,6 +89,19 @@ pub(crate) async fn create_timeline_export(
     );
     job_payload.insert("resolution".to_owned(), json!(payload.resolution));
     job_payload.insert("fps".to_owned(), json!(payload.fps));
+    // sc-22999 (E2): the usage policies of the placed assets travel with the export — a
+    // commercial export of a noncommercial asset is refused, and the exported file's provenance
+    // carries every policy it inherits.
+    let usage_policies =
+        crate::yue2_jobs::timeline_usage_policies(&state, &project_id, &timeline_result.document)
+            .await?;
+    if payload.commercial_use {
+        crate::yue2_jobs::refuse_commercial_export(&usage_policies)?;
+    }
+    job_payload.insert("commercialUse".to_owned(), json!(payload.commercial_use));
+    if !usage_policies.is_empty() {
+        job_payload.insert("usagePolicies".to_owned(), json!(usage_policies));
+    }
     let job = create_generation_job(
         state,
         JobType::TimelineExport,

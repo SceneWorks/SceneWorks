@@ -416,6 +416,11 @@ pub(crate) struct TimelineExportRequest {
     pub(crate) fps: u32,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// The export is for a commercial use (sc-22999, epic 22988 E2). An export that places an
+    /// asset whose usage policy refuses commercial use (YuE2 audio) is refused with the pointer
+    /// to the commercially eligible alternative. Absent ⇒ not declared commercial.
+    #[serde(default)]
+    pub(crate) commercial_use: bool,
 }
 
 #[derive(Debug, Deserialize)]

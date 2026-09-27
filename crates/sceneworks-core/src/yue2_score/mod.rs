@@ -18,6 +18,7 @@
 
 pub mod abc;
 pub mod compare;
+pub mod jobs;
 pub mod ops;
 pub mod store;
 

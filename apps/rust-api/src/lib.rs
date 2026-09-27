@@ -102,6 +102,11 @@ use yue2_scores::{
     list_yue2_comparisons, list_yue2_score_renders, list_yue2_score_versions,
     record_yue2_score_render,
 };
+mod yue2_jobs;
+use yue2_jobs::{
+    create_yue2_jobs, delete_license_acknowledgment, get_job_yue2_eligibility,
+    get_license_acknowledgment, put_license_acknowledgment,
+};
 mod characters;
 use characters::{
     add_character_reference, archive_character, attach_character_lora, create_character,
@@ -1738,6 +1743,21 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/yue2/comparisons",
             get(list_yue2_comparisons).post(create_yue2_comparison),
+        )
+        // YuE2 song jobs (sc-22999): create / plan / fromPlan / cover / renderVersion / decode.
+        .route(
+            "/api/v1/projects/:project_id/yue2/jobs",
+            post(create_yue2_jobs),
+        )
+        .route(
+            "/api/v1/jobs/:job_id/yue2-eligibility",
+            get(get_job_yue2_eligibility),
+        )
+        .route(
+            "/api/v1/models/:model_id/license-acknowledgment",
+            get(get_license_acknowledgment)
+                .put(put_license_acknowledgment)
+                .delete(delete_license_acknowledgment),
         )
         .route(
             "/api/v1/projects/:project_id/yue2/comparisons/:comparison_id",
