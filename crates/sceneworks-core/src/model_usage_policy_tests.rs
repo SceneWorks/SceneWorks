@@ -150,29 +150,18 @@ fn non_commercial_flag_refuses_even_without_or_against_a_commercial_use_block() 
 }
 
 #[test]
-fn cover_components_are_refused_while_blocked_with_reason_and_unblock() {
-    // The live entry: SheetSage2 + MERT-v2-FullSong are declared for covers and BLOCKED on the owner's
-    // licensing decision. Mutation that reds this: delete either `blocked` record (the purpose then
-    // returns rows), or drop `cover` from a component's `requiredFor`.
+fn the_live_cover_closure_is_acquirable_and_only_for_covers() {
+    // The live entry since the owner's 2026-09-27 decision (sc-23002): SheetSage2 +
+    // MERT-v2-FullSong are declared for covers, carry no block, and are the purpose's rows in
+    // declaration order. Mutation that reds this: re-adding a `blocked` record to either component,
+    // or dropping `cover` from a component's `requiredFor`.
     let yue2 = builtin_yue2();
-    let Err(ConditionalComponentsError::Blocked { purpose, blocked }) =
-        conditional_component_downloads(&yue2, "cover")
-    else {
-        panic!("the cover closure must be refused while blocked");
-    };
-    assert_eq!(purpose, "cover");
-    let ids = blocked
+    let rows = conditional_component_downloads(&yue2, "cover").expect("acquirable for covers");
+    let repos = rows
         .iter()
-        .map(|(id, _, _)| id.as_str())
+        .map(|row| row["repo"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(ids, ["yue2_sheetsage2", "yue2_mert_v2_fullsong"]);
-    for (_, reason, unblock) in &blocked {
-        assert!(
-            reason.starts_with("blocked: owner licensing decision for SheetSage2/MERT port code"),
-            "{reason}"
-        );
-        assert!(!unblock.is_empty());
-    }
+    assert_eq!(repos, ["m-a-p/SheetSage2", "m-a-p/MERT-v2-FullSong"]);
     // Base generation declares no conditional components at all.
     assert_eq!(
         conditional_component_downloads(&yue2, "generation"),
@@ -183,14 +172,36 @@ fn cover_components_are_refused_while_blocked_with_reason_and_unblock() {
 }
 
 #[test]
-fn an_unblocked_cover_closure_yields_exact_pinned_co_requisite_rows() {
-    // The seam itself, with the owner's gate lifted on a copy: every pinned identity is carried
-    // through verbatim and the rows can never be taken for a primary download.
+fn a_blocked_component_still_refuses_its_purpose_with_reason_and_unblock() {
+    // The block machinery stays in force for any entry that declares one (a synthetic block on a
+    // copy of the live entry): the whole purpose is refused, naming every blocked component's reason
+    // and unblock condition. Mutation that reds this: returning rows while any row is blocked.
     let mut yue2 = builtin_yue2();
     for component in yue2["conditionalComponents"].as_array_mut().unwrap() {
-        component.as_object_mut().unwrap().remove("blocked");
+        component["blocked"] = json!({"reason": "blocked: r", "unblock": "u"});
     }
-    let rows = conditional_component_downloads(&yue2, "cover").expect("unblocked");
+    let Err(ConditionalComponentsError::Blocked { purpose, blocked }) =
+        conditional_component_downloads(&yue2, "cover")
+    else {
+        panic!("a blocked closure must be refused");
+    };
+    assert_eq!(purpose, "cover");
+    let ids = blocked
+        .iter()
+        .map(|(id, _, _)| id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["yue2_sheetsage2", "yue2_mert_v2_fullsong"]);
+    assert!(blocked
+        .iter()
+        .all(|(_, reason, unblock)| reason == "blocked: r" && unblock == "u"));
+}
+
+#[test]
+fn the_cover_closure_yields_exact_pinned_co_requisite_rows() {
+    // The seam itself: every pinned identity is carried through verbatim and the rows can never be
+    // taken for a primary download.
+    let yue2 = builtin_yue2();
+    let rows = conditional_component_downloads(&yue2, "cover").expect("acquirable");
     assert_eq!(rows.len(), 2);
     for (row, component) in rows
         .iter()

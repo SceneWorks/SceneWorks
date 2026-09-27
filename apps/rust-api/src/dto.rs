@@ -1287,6 +1287,17 @@ pub(crate) struct AudioJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConditionalComponentsDownloadRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// The caller asserts the user accepted the declaring entry's licence (sc-23002); required when
+    /// the entry carries `requiresLicenseAcknowledgment`, exactly as on the model install.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDownloadRequest {
     #[serde(default = "default_requested_gpu")]

@@ -8,16 +8,21 @@
 //!
 //! 1. validates it with `yue2_score::jobs::validate_request` (typed 400 `yue2_invalid_combination`
 //!    / `yue2_invalid_value` / `yue2_missing_field`, 422 `yue2_unsupported_notation`);
-//! 2. refuses recording transcription with the catalog's recorded block (403 `component_blocked`,
-//!    reason + unblock condition) — the SheetSage2 / MERT port is gated on an owner licensing
-//!    decision and linked into no bundle;
+//! 2. for a `transcribe` job (sc-23002), requires the cover closure — SheetSage2 +
+//!    MERT-v2-FullSong, the entry's `requiredFor: ["cover"]` conditional components — installed
+//!    (409 `yue2_cover_components_missing`, naming each missing component and the download route;
+//!    403 `component_blocked` if the catalog ever blocks one again). A cover naming a recording
+//!    directly is refused by the contract (400 `yue2_transcription_review_required`): a cover from
+//!    a recording is a transcription, a reviewed score version, then a cover of that version;
 //! 3. checks eligibility ([`yue2_eligibility`]): a declared commercial use is refused with the
 //!    verdict's pointer to YuE1 (403 `commercial_use_refused`), and the licence must be
 //!    acknowledged — asserted now (and recorded) or recorded earlier for the current terms (403
 //!    `license_acknowledgment_required`);
 //! 4. resolves the kind's inputs from the project (a plan or song job's published run, a score
-//!    version and its digests) and refuses what is missing, incomplete or foreign (404 / 409
-//!    `yue2_source_unavailable`);
+//!    version and its digests, the recording a transcription reads — an audio asset of the project,
+//!    pinned by its media file's SHA-256 — and, for a cover of a transcription-derived version, the
+//!    transcription and recording behind it) and refuses what is missing, incomplete or foreign
+//!    (404 / 409 `yue2_source_unavailable`);
 //! 5. queues one `audio_generate` job per take (`count`), each with its own run id and seed
 //!    `seed + i`. The server claims at most one active job per GPU, so a batch renders serially on
 //!    the admitted GPU.
@@ -34,30 +39,33 @@
 //! # Terminal side effects ([`apply_yue2_side_effects`])
 //!
 //! After the worker's audio asset is persisted: a plan (or a planned song) becomes a sc-22997 score
-//! version (origin `plan`, source = the job); a score-version render — completed or failed — is
-//! recorded with `record_yue2_render` (score / request digests, truncation, model, decoder, job,
-//! audio asset, effective settings, provenance). Both are idempotent per job, so the recovery sweep
-//! can re-run them.
+//! version (origin `plan`, source = the job, carrying the job's usage policy); a score-version
+//! render — completed or failed — is recorded with `record_yue2_render` (score / request digests,
+//! truncation, model, decoder, job, audio asset, effective settings, provenance); a completed
+//! transcription is recorded and its cover-ready scores imported as versions linked to the recording
+//! (`Yue2ScoreStore::import_transcription`). All are idempotent per job, so the recovery sweep can
+//! re-run them.
 
 use super::*;
 
 use crate::models::{
-    model_catalog_snapshot, COMPONENT_BLOCKED_CODE, LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE,
+    conditional_components_missing, model_catalog_snapshot, COMPONENT_BLOCKED_CODE,
+    LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE,
 };
 
 use sceneworks_core::license_acknowledgments::{self as acks, LicenseAcknowledgment};
 use sceneworks_core::model_usage_policy::{
-    commercial_use_verdict, conditional_component_downloads, CommercialUseError,
-    CommercialUseVerdict, ConditionalComponentsError,
+    commercial_use_verdict, CommercialUseError, CommercialUseVerdict, ConditionalComponentsError,
 };
 use sceneworks_core::yue2_score::jobs::{
-    self as yue2, BatchMember, RunSource, Sources, VersionSource, Yue2JobError, Yue2JobKind,
-    Yue2JobSpec,
+    self as yue2, BatchMember, CoverMode, RecordingSource, RunSource, Sources, TranscriptionSource,
+    VersionSource, Yue2JobError, Yue2JobKind, Yue2JobSpec,
 };
 use sceneworks_core::yue2_score::store::{
     Actor, Channel, ComponentIdentity, CreateVersionInput, Provenance, RenderInput, RenderStatus,
-    SourceKind, SourceReference, Truncation, VersionOrigin,
+    SourceKind, SourceReference, Truncation, VersionLineage, VersionOrigin,
 };
+use sceneworks_core::yue2_score::transcriptions::TranscriptionImport;
 
 /// A commercial-use declaration refused for a noncommercial model.
 pub(crate) const COMMERCIAL_USE_REFUSED_CODE: &str = "commercial_use_refused";
@@ -68,8 +76,12 @@ pub(crate) const COMMERCIAL_USE_LINEAGE_UNKNOWN_CODE: &str = "commercial_use_lin
 pub(crate) const YUE2_SOURCE_UNAVAILABLE_CODE: &str = "yue2_source_unavailable";
 /// A `fromPlan` job's style / lyrics are not the restored plan's.
 pub(crate) const YUE2_PLAN_REQUEST_MISMATCH_CODE: &str = "yue2_plan_request_mismatch";
-/// Transcription is not blocked by the catalog but no linked bundle can run it.
-pub(crate) const YUE2_TRANSCRIPTION_UNAVAILABLE_CODE: &str = "yue2_transcription_unavailable";
+/// A transcription was requested before the cover closure (SheetSage2 + MERT-v2-FullSong) is
+/// installed.
+pub(crate) const YUE2_COVER_COMPONENTS_MISSING_CODE: &str = "yue2_cover_components_missing";
+/// The one door that installs the cover closure (relative to the model).
+pub(crate) const YUE2_COVER_COMPONENTS_ROUTE: &str =
+    "/api/v1/models/yue2/conditional-components/cover/download";
 /// A symbolic-song model sent to the generic audio route.
 pub(crate) const YUE2_SONG_ROUTE_REQUIRED_CODE: &str = "yue2_song_route_required";
 /// The route a symbolic-song model is submitted through.
@@ -352,45 +364,109 @@ pub(crate) async fn get_job_yue2_eligibility(
     Ok(Json(json!({ "eligible": true, "usagePolicy": policy })))
 }
 
-/// The refusal for recording transcription: the catalog's recorded block when there is one.
-fn transcription_refusal(entry: &Value) -> ApiError {
-    match conditional_component_downloads(entry, "cover") {
-        Err(ConditionalComponentsError::Blocked { blocked, .. }) => {
-            let reasons: Vec<Value> = blocked
-                .iter()
-                .map(|(component_id, reason, unblock)| {
+/// A transcription needs the cover closure on disk before it queues: the catalog's recorded block
+/// if one is ever declared again (403 `component_blocked`), otherwise every component that is not
+/// installed, with the one route that installs them (409 `yue2_cover_components_missing`). The
+/// worker re-verifies the closure — every pinned file by size and SHA-256 — before it loads.
+fn ensure_cover_closure_installed(state: &AppState, entry: &Value) -> Result<(), ApiError> {
+    match conditional_components_missing(&state.settings.data_dir, entry, "cover") {
+        Ok(missing) if missing.is_empty() => Ok(()),
+        Ok(missing) => Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            format!(
+                "YuE2 recording transcription needs its cover components (SheetSage2 + \
+                 MERT-v2-FullSong) installed first: {}. Install them with POST \
+                 {YUE2_COVER_COMPONENTS_ROUTE} (they are downloaded only for covers, under YuE2's \
+                 licence acknowledgment).",
+                missing
+                    .iter()
+                    .filter_map(|row| row.get("repo").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            YUE2_COVER_COMPONENTS_MISSING_CODE,
+            json!({ "purpose": "cover", "missing": missing, "install": YUE2_COVER_COMPONENTS_ROUTE }),
+        )),
+        Err(ConditionalComponentsError::Blocked { blocked, .. }) => Err(ApiError::typed(
+            StatusCode::FORBIDDEN,
+            format!(
+                "YuE2 recording transcription is blocked: {}",
+                blocked
+                    .iter()
+                    .map(|(_, reason, _)| reason.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            COMPONENT_BLOCKED_CODE,
+            json!({
+                "purpose": "cover",
+                "blocked": blocked.iter().map(|(component_id, reason, unblock)| {
                     json!({"componentId": component_id, "reason": reason, "unblock": unblock})
-                })
-                .collect();
-            ApiError::typed(
-                StatusCode::FORBIDDEN,
-                format!(
-                    "YuE2 recording transcription is blocked: {}. Start a cover from a reviewed \
-                     score (cover.score or cover.versionId) instead.",
-                    blocked
-                        .iter()
-                        .map(|(_, reason, _)| reason.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ),
-                COMPONENT_BLOCKED_CODE,
-                json!({ "purpose": "cover", "blocked": reasons }),
-            )
-        }
-        Err(error) => ApiError::typed(
-            StatusCode::NOT_IMPLEMENTED,
+                }).collect::<Vec<_>>(),
+            }),
+        )),
+        Err(error @ ConditionalComponentsError::NotDeclared { .. }) => Err(ApiError::typed(
+            StatusCode::CONFLICT,
             format!("YuE2 recording transcription is unavailable: {error}"),
-            YUE2_TRANSCRIPTION_UNAVAILABLE_CODE,
-            json!({ "purpose": "cover" }),
-        ),
-        Ok(_) => ApiError::typed(
-            StatusCode::NOT_IMPLEMENTED,
-            "YuE2 recording transcription is not linked into this build's runtime; start a cover \
-             from a reviewed score instead.",
-            YUE2_TRANSCRIPTION_UNAVAILABLE_CODE,
-            json!({ "purpose": "cover" }),
-        ),
+            YUE2_COVER_COMPONENTS_MISSING_CODE,
+            json!({ "purpose": "cover", "missing": [] }),
+        )),
     }
+}
+
+/// The recording a `transcribe` job reads: an audio asset of this project, pinned by its media
+/// file's SHA-256 (hashed now, re-checked by the worker before it decodes).
+async fn recording_source(
+    state: &AppState,
+    project_id: &str,
+    asset_id: &str,
+) -> Result<RecordingSource, ApiError> {
+    let (project, asset) = (project_id.to_owned(), asset_id.to_owned());
+    let resolved = project_call(state.clone(), move |store| {
+        let record = store.get_asset(&project, &asset)?;
+        let path = store.resolve_asset_media_path(&project, &asset)?;
+        Ok((record, path))
+    })
+    .await;
+    let (record, path) = resolved.map_err(|error| {
+        if error.status == StatusCode::NOT_FOUND {
+            ApiError {
+                status: StatusCode::NOT_FOUND,
+                detail: format!("sourceAudioAssetId: asset {asset_id} is not in this project."),
+                context: None,
+                code: Some(YUE2_SOURCE_UNAVAILABLE_CODE),
+            }
+        } else {
+            error
+        }
+    })?;
+    if record.get("type").and_then(Value::as_str) != Some("audio") {
+        return Err(source_unavailable(format!(
+            "sourceAudioAssetId: asset {asset_id} is not an audio asset."
+        )));
+    }
+    let sha256 = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+        use sha2::Digest;
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = sha2::Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(|error| {
+        source_unavailable(format!(
+            "sourceAudioAssetId: asset {asset_id}'s media file cannot be read ({error})."
+        ))
+    })?;
+    Ok(RecordingSource {
+        asset_id: asset_id.to_owned(),
+        sha256,
+        name: record
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -608,16 +684,60 @@ async fn resolve_sources(
         }
         Yue2JobKind::Cover => {
             if let Some(version_id) = spec.cover.as_ref().and_then(|c| c.version_id.clone()) {
-                let (source, abc) = version_source(state, project_id, &version_id).await?;
+                let (source, abc, transcription) =
+                    version_source_with_transcription(state, project_id, &version_id).await?;
                 if let Some(cover) = spec.cover.as_mut() {
                     cover.score = Some(abc);
                 }
                 sources.cover_version = Some(source);
+                sources.transcription = transcription;
             }
+        }
+        Yue2JobKind::Transcribe => {
+            let asset_id = spec.source_audio_asset_id.clone().unwrap_or_default();
+            sources.recording = Some(recording_source(state, project_id, &asset_id).await?);
         }
         _ => {}
     }
     Ok(sources)
+}
+
+/// [`version_source`], plus the transcription (and recording) a transcription-derived version's
+/// lineage started from, so a cover of it names its source recording.
+async fn version_source_with_transcription(
+    state: &AppState,
+    project_id: &str,
+    version_id: &str,
+) -> Result<(VersionSource, String, Option<TranscriptionSource>), ApiError> {
+    let (project, version) = (project_id.to_owned(), version_id.to_owned());
+    let record = crate::yue2_scores::yue2_call(state.clone(), move |store| {
+        store
+            .yue2_score_store(&project)?
+            .get_version_record(&version)
+    })
+    .await?;
+    let transcription = record
+        .transcription
+        .as_ref()
+        .map(|link| TranscriptionSource {
+            id: link.transcription_id.clone(),
+            job_id: link.job_id.clone(),
+            source_audio_asset_id: link.source_audio_asset_id.clone(),
+            manifest_sha256: link.manifest_sha256.clone(),
+            mode: match link.mode {
+                sceneworks_core::yue2_score::Cot::Melody => CoverMode::Melody,
+                sceneworks_core::yue2_score::Cot::Full => CoverMode::Full,
+            },
+        });
+    Ok((
+        VersionSource {
+            id: record.id,
+            score_sha256: record.score.sha256,
+            request_sha256: record.request_sha256,
+        },
+        record.score.abc,
+        transcription,
+    ))
 }
 
 /// `POST /api/v1/projects/:project_id/yue2/jobs` — see the [module docs](self).
@@ -641,8 +761,8 @@ pub(crate) async fn create_yue2_jobs(
             code: None,
         });
     }
-    if yue2::requests_transcription(&spec) {
-        return Err(transcription_refusal(&entry));
+    if spec.kind == Yue2JobKind::Transcribe {
+        ensure_cover_closure_installed(&state, &entry)?;
     }
     let commercial_use = spec.commercial_use;
     let usage_policy = yue2_eligibility(
@@ -936,6 +1056,22 @@ pub(crate) async fn apply_yue2_side_effects(
         .unwrap_or_default();
     let mut errors: Vec<String> = Vec::new();
     match job.status {
+        JobStatus::Completed if spec.kind == Yue2JobKind::Transcribe => {
+            if block.get("transcriptionId").is_none() {
+                match import_transcription(state, job, &spec, &project_id, &block).await {
+                    Ok(record) => {
+                        block.insert("transcriptionId".to_owned(), json!(record.id));
+                        block.insert(
+                            "scoreVersionIds".to_owned(),
+                            json!({"melody": record.versions.melody, "full": record.versions.full}),
+                        );
+                        block.insert("readiness".to_owned(), json!(record.readiness));
+                        block.insert("versionErrors".to_owned(), json!(record.version_errors));
+                    }
+                    Err(error) => errors.push(format!("transcription: {}", error.detail)),
+                }
+            }
+        }
         JobStatus::Completed => {
             if spec.kind == Yue2JobKind::RenderVersion {
                 if block.get("renderRecordId").is_none() {
@@ -991,6 +1127,78 @@ pub(crate) async fn apply_yue2_side_effects(
     Ok(())
 }
 
+/// Record a completed transcription and import its cover-ready scores (see
+/// `sceneworks_core::yue2_score::transcriptions`). What the worker reported is only a pointer: the
+/// store re-reads the artifact against the manifest digest the worker recorded, and the recording
+/// digest the job was QUEUED with (never one the worker reports) must be the artifact's source.
+async fn import_transcription(
+    state: &AppState,
+    job: &JobSnapshot,
+    spec: &Yue2JobSpec,
+    project_id: &str,
+    block: &JsonObject,
+) -> Result<sceneworks_core::yue2_score::transcriptions::TranscriptionRecord, ApiError> {
+    let recording = spec
+        .sources
+        .as_ref()
+        .and_then(|sources| sources.recording.clone())
+        .ok_or_else(|| ApiError::bad_request("the transcribe job carries no recording"))?;
+    let run_id = spec.run_id.clone().unwrap_or_default();
+    let transcription_id = yue2::transcription_id(&run_id)
+        .ok_or_else(|| ApiError::bad_request("the transcribe job carries no run id"))?;
+    let reported = block
+        .get("transcription")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::internal("the worker reported no transcription"))?;
+    let text = |key: &str| -> Result<String, ApiError> {
+        reported
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ApiError::internal(format!("the worker reported no transcription {key}"))
+            })
+    };
+    let artifact_dir = text("dir")?;
+    if artifact_dir != yue2::transcription_dir(&run_id) {
+        return Err(ApiError::internal(format!(
+            "the worker reported transcription directory {artifact_dir}, not this job's {}",
+            yue2::transcription_dir(&run_id)
+        )));
+    }
+    let input = TranscriptionImport {
+        transcription_id,
+        job_id: job.id.clone(),
+        source_audio_asset_id: recording.asset_id,
+        recording_sha256: recording.sha256,
+        artifact_dir,
+        manifest_sha256: text("manifestSha256")?,
+        replay: reported.get("replay").cloned().unwrap_or(Value::Null),
+        unload: reported.get("unload").cloned().unwrap_or(Value::Null),
+        usage_policy: job
+            .payload
+            .get("usagePolicy")
+            .cloned()
+            .unwrap_or(Value::Null),
+        provenance: Provenance {
+            actor: Actor::User,
+            agent_name: None,
+            channel: Channel::Worker,
+            source: Some(SourceReference {
+                kind: SourceKind::Job,
+                id: Some(job.id.clone()),
+            }),
+        },
+    };
+    let project = project_id.to_owned();
+    crate::yue2_scores::yue2_call(state.clone(), move |store| {
+        store
+            .yue2_score_store(&project)?
+            .import_transcription(input)
+    })
+    .await
+}
+
 async fn create_plan_version(
     state: &AppState,
     job: &JobSnapshot,
@@ -1008,6 +1216,8 @@ async fn create_plan_version(
         return Ok(None);
     };
     let (project, job_id) = (project_id.to_owned(), job.id.clone());
+    // The version inherits the policy the plan ran under (edits of it inherit it in turn).
+    let usage_policy = job.payload.get("usagePolicy").cloned();
     crate::yue2_scores::yue2_call(state.clone(), move |store| {
         let scores = store.yue2_score_store(&project)?;
         // Idempotent per job: the recovery sweep may re-run this.
@@ -1018,12 +1228,18 @@ async fn create_plan_version(
         }) {
             return Ok(Some(existing.id));
         }
-        let record = scores.create_version(CreateVersionInput {
-            abc,
-            request,
-            origin: VersionOrigin::Plan,
-            provenance: job_provenance(&job_id),
-        })?;
+        let record = scores.create_version_with_lineage(
+            CreateVersionInput {
+                abc,
+                request,
+                origin: VersionOrigin::Plan,
+                provenance: job_provenance(&job_id),
+            },
+            VersionLineage {
+                transcription: None,
+                usage_policy,
+            },
+        )?;
         Ok(Some(record.id))
     })
     .await

@@ -27356,10 +27356,15 @@
       // bytes.
       //
       // COVERS. SheetSage2 + MERT-v2-FullSong (`Closure::Cover`) are conditional cover dependencies, not
-      // generation downloads, so they live in `conditionalComponents`, never in `downloads`. They are
-      // BLOCKED: the native transcription port (inference `candle-audio-sheetsage2`) derives from upstream
-      // code that carries no licence grant, so it is gated out of every runtime bundle until the owner
-      // records a basis.
+      // generation downloads, so they live in `conditionalComponents`, never in `downloads`: no install,
+      // tier or co-requisite path fetches them. They are acquired only for covers, through
+      // `POST /api/v1/models/yue2/conditional-components/cover/download`, under the SAME licence
+      // acknowledgment and noncommercial policy as YuE2 (the repo-keyed download doors allow them with
+      // the acknowledgment and refuse them without it). Owner decision, epic sc-22988, 2026-09-27: the
+      // native transcription port (inference `candle-audio-sheetsage2`) is distributed under CC BY-NC
+      // 4.0 — the upstream weight terms — noncommercial only, attribution per its NOTICE. The pinned
+      // identity is each row's revision, file list and weights SHA-256 (the engine verifies every file
+      // by size + SHA-256 against `inventory::SHEETSAGE2` / `MERT_V2_FULLSONG` before it loads).
       //
       // Memory admission / floors are sc-23001; the API + worker jobs are sc-22999; the UI is sc-23000.
       "id": "yue2",
@@ -27371,7 +27376,7 @@
       "nonCommercial": true,
       "requiresLicenseAcknowledgment": true,
       "license": "CC-BY-NC-4.0",
-      "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
+      "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. Covers from a recording also use SheetSage2 and MERT-v2-FullSong (by Multimodal Art Projection; weights CC BY-NC 4.0), downloaded only when you set up covers; SceneWorks' native transcription code ported from them is distributed under the same CC BY-NC 4.0 terms, noncommercial only. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
       "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca688d6ae5d7f0feb88573fec89920fcd19/LICENSE",
       "commercialUse": {
         "eligible": false,
@@ -27537,11 +27542,10 @@
             "THIRD_PARTY_NOTICES.md"
           ],
           "estimatedSizeBytes": 228772419,
+          "weightsSha256": "b235f68091a5f5b644000f2b5acb57d1e70432aca2b34ab1b9cf27236e1f4274",
           "license": "cc-by-nc-4.0",
-          "blocked": {
-            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
-            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
-          }
+          "nonCommercial": true,
+          "licenseBasis": "Owner decision recorded on epic sc-22988 (2026-09-27): the native SheetSage2 / MERT-v2-FullSong transcription port (inference candle-audio-sheetsage2) is distributed under CC BY-NC 4.0, the upstream weight terms, noncommercial use only, with attribution per its NOTICE. Acquired only for covers, never as a generation download."
         },
         {
           // `inventory::MERT_V2_FULLSONG` (cover closure).
@@ -27560,11 +27564,10 @@
             "THIRD_PARTY_NOTICES.md"
           ],
           "estimatedSizeBytes": 2529845146,
+          "weightsSha256": "e6dd2ab187d6dd62b6521cd7d8f932e237acf0c5757745a7232082e28391350d",
           "license": "cc-by-nc-4.0",
-          "blocked": {
-            "reason": "blocked: owner licensing decision for SheetSage2/MERT port code. The native transcription port derives from the remote Python published inside m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, which carries no licence grant of its own (the repositories license their weights only), so it is gated out of every SceneWorks runtime bundle.",
-            "unblock": "The owner records a basis for the port code — an explicit code licence from the rights holder (Multimodal Art Projection) or an owner decision — in candle-audio-yue2 license::CODE_TERMS, the inference candle-audio-sheetsage2 crate joins the audio catalog, and this `blocked` record is removed."
-          }
+          "nonCommercial": true,
+          "licenseBasis": "Owner decision recorded on epic sc-22988 (2026-09-27): the native SheetSage2 / MERT-v2-FullSong transcription port (inference candle-audio-sheetsage2) is distributed under CC BY-NC 4.0, the upstream weight terms, noncommercial use only, with attribution per its NOTICE. Acquired only for covers, never as a generation download."
         }
       ],
       "paths": {

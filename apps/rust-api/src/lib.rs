@@ -98,9 +98,10 @@ use saved_voices::{create_saved_voice, delete_saved_voice, list_saved_voices};
 mod yue2_scores;
 use yue2_scores::{
     create_yue2_comparison, create_yue2_score_version, edit_yue2_score_version,
-    get_yue2_comparison, get_yue2_score_version, inspect_yue2_score, inspect_yue2_score_version,
+    get_yue2_comparison, get_yue2_score_version, get_yue2_transcription,
+    get_yue2_transcription_file, inspect_yue2_score, inspect_yue2_score_version,
     list_yue2_comparisons, list_yue2_score_renders, list_yue2_score_versions,
-    record_yue2_score_render,
+    list_yue2_transcriptions, record_yue2_score_render,
 };
 mod yue2_jobs;
 use yue2_jobs::{
@@ -195,19 +196,20 @@ use dto::{
     AccessResponse, AssetPurgeQuery, AssetsQuery, AudioJobRequest, CatalogDeleteQuery,
     CharacterCreateRequest, CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
-    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
-    DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
-    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
-    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
-    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
-    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
-    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
-    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
-    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery,
+    ConditionalComponentsDownloadRequest, CreateEventTicketRequest, DatasetAnalysisJobRequest,
+    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
+    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
+    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
+    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
+    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
+    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
+    ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VectorMode, VectorPromptWorkflowRequest, VectorRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -232,10 +234,10 @@ use model_cache::{
 };
 mod models;
 use models::{
-    create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
-    delete_model_variant, list_models, model_catalog, model_is_installed,
-    resolve_model_manifest_entry, resolve_selected_image_text_encoder, ModelCatalogCache,
-    ModelSizeCache,
+    create_conditional_components_download_jobs, create_model_convert_job,
+    create_model_download_job, create_model_import_job, delete_model, delete_model_variant,
+    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry,
+    resolve_selected_image_text_encoder, ModelCatalogCache, ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -1744,7 +1746,21 @@ fn create_app_with_state_mode(
             "/api/v1/projects/:project_id/yue2/comparisons",
             get(list_yue2_comparisons).post(create_yue2_comparison),
         )
-        // YuE2 song jobs (sc-22999): create / plan / fromPlan / cover / renderVersion / decode.
+        // Recording transcriptions (sc-23002): the review artifact's record, scores and exports.
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions",
+            get(list_yue2_transcriptions),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id",
+            get(get_yue2_transcription),
+        )
+        .route(
+            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id/files/*file",
+            get(get_yue2_transcription_file),
+        )
+        // YuE2 song jobs (sc-22999 / sc-23002): create / plan / fromPlan / cover / renderVersion /
+        // decode / transcribe.
         .route(
             "/api/v1/projects/:project_id/yue2/jobs",
             post(create_yue2_jobs),
@@ -2060,6 +2076,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/models/:model_id/download",
             post(create_model_download_job),
+        )
+        .route(
+            "/api/v1/models/:model_id/conditional-components/:purpose/download",
+            post(create_conditional_components_download_jobs),
         )
         .route(
             "/api/v1/models/:model_id/convert",

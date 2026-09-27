@@ -18,16 +18,21 @@
 //! | `cover` | a zero-shot cover of a reviewed score (`audio.song.cover`) | `lyrics`, `cover.score` or `cover.versionId` |
 //! | `renderVersion` | renders a sc-22997 score version's request with its ABC | `versionId` |
 //! | `decode` | decodes a completed run's cached latents (`audio.song.cached_latents`) | `sourceJobId` |
-//! | `transcribe` | recording → score transcription — **blocked** (see below) | `sourceAudioAssetId` |
+//! | `transcribe` | recording → reviewable score transcription (SheetSage2 + MERT-v2-FullSong) | `sourceAudioAssetId` |
 //!
 //! Every other field is accepted only by the kinds it means something for ([`FIELD_KINDS`]); a
 //! field sent to a kind that would ignore it is a typed `yue2_invalid_combination`, never dropped.
 //!
-//! Transcription (SheetSage2 + MERT-v2-FullSong) is gated on an owner licensing decision: the
-//! crate is in no runtime bundle and the catalog declares its components `blocked`. A `transcribe`
-//! job (or a cover naming a source recording) is accepted by this parser only so the route can
-//! refuse it with the recorded reason and unblock condition (`model_usage_policy::
-//! conditional_component_downloads`).
+//! # A cover from a recording is two jobs
+//!
+//! Transcription (SheetSage2 + MERT-v2-FullSong — the cover closure, conditional cover
+//! dependencies acquired only for covers, under YuE2's licence acknowledgment and noncommercial
+//! policy) runs as its own `transcribe` job: the worker persists the replay-verified review
+//! artifact under the project ([`TRANSCRIPTIONS_DIR`]) and unloads the transcriber, and the API
+//! imports its full and melody-only scores as score versions linked to the source recording. The
+//! cover is then a SEPARATE `cover` job over a reviewed (optionally edited) score version
+//! (`cover.versionId`). A cover that named a recording directly would skip that review, so
+//! `cover.sourceAudioAssetId` is refused with [`TRANSCRIPTION_REVIEW_REQUIRED`].
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +60,17 @@ pub const TRUNCATION_CODES: [&str; 2] = ["abc_truncated", "semantic_truncated"];
 pub const RUNS_DIR: &str = "yue2/runs";
 /// Prefix of a server-assigned run id.
 pub const RUN_ID_PREFIX: &str = "yue2run_";
+/// Where a transcription's review artifact lives inside its project (`<dir>/<runId>`).
+pub const TRANSCRIPTIONS_DIR: &str = "yue2/transcriptions";
+/// Prefix of a transcription record id (`yue2t_` + the transcribe job's run-id suffix).
+pub const TRANSCRIPTION_ID_PREFIX: &str = "yue2t_";
+/// SheetSage2's fixed context window, seconds (`Tokenizer::audio_length_seconds` of the pinned
+/// checkpoint): the window overlap must be shorter than it.
+pub const TRANSCRIPTION_WINDOW_SECONDS: f64 = 300.0;
+/// `candle_audio_sheetsage2::pipeline::DEFAULT_OVERLAP_SECONDS` (upstream's default preset).
+pub const TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS: f64 = 200.0;
+/// `candle_audio_sheetsage2::pipeline::DEFAULT_LOOKAHEAD_SECONDS` (upstream's default preset).
+pub const TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS: f64 = 100.0;
 
 /// The (min_tokens, max_tokens) defaults of the planning (ABC) and semantic phases
 /// (`candle_audio_yue2::protocol::Sampling::{abc_default, semantic_default}`), so a request that
@@ -98,7 +114,7 @@ impl Yue2JobKind {
         }
     }
 
-    /// Whether the job renders audio (every kind but `plan` and the blocked `transcribe`).
+    /// Whether the job renders audio (every kind but `plan` and `transcribe`).
     pub fn renders_audio(self) -> bool {
         !matches!(self, Self::Plan | Self::Transcribe)
     }
@@ -252,9 +268,43 @@ pub struct CoverSpec {
     /// Source lyrics, when `lyrics` is their section-aligned translation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated_from: Option<String>,
-    /// A source recording to transcribe into the score — blocked (see the module docs).
+    /// A recording to cover directly. Always refused with [`TRANSCRIPTION_REVIEW_REQUIRED`]: a
+    /// cover from a recording is a `transcribe` job, a reviewed score version, then a cover of that
+    /// version (see the module docs). Kept as a field so the refusal says so, instead of a generic
+    /// unknown-field error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_audio_asset_id: Option<String>,
+}
+
+/// How a `transcribe` job transcribes (`candle_audio_sheetsage2::review::TranscriptionSettings`).
+/// The task prompts are always upstream's full default set, which the review and both cover modes
+/// need. An unset field takes the engine's default-preset value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptionSettings {
+    /// Crop the recording to this many seconds before transcribing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seconds: Option<f64>,
+    /// Overlap between consecutive 300 s windows, seconds (default 200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap_seconds: Option<f64>,
+    /// Right-hand look-ahead of each non-final window, seconds (default 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookahead_seconds: Option<f64>,
+}
+
+impl TranscriptionSettings {
+    /// The overlap the engine will use.
+    pub fn resolved_overlap_seconds(&self) -> f64 {
+        self.overlap_seconds
+            .unwrap_or(TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS)
+    }
+
+    /// The look-ahead the engine will use.
+    pub fn resolved_lookahead_seconds(&self) -> f64 {
+        self.lookahead_seconds
+            .unwrap_or(TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS)
+    }
 }
 
 /// A completed run another job reads (a plan to restore, latents to decode). Server-resolved from
@@ -293,6 +343,37 @@ pub struct Sources {
     pub version: Option<VersionSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_version: Option<VersionSource>,
+    /// The recording a `transcribe` job transcribes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingSource>,
+    /// The transcription a covered score version was imported (or edited) from, so the cover
+    /// names its source recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<TranscriptionSource>,
+}
+
+/// A project audio asset a `transcribe` job reads, with the SHA-256 of its media file at
+/// submission; the worker refuses a file that no longer has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordingSource {
+    pub asset_id: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The transcription behind a covered score version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptionSource {
+    pub id: String,
+    pub job_id: String,
+    pub source_audio_asset_id: String,
+    /// SHA-256 of the review artifact's `transcription.json`.
+    pub manifest_sha256: String,
+    /// Which transcribed score the version started from.
+    pub mode: CoverMode,
 }
 
 /// One take of a queued batch.
@@ -349,9 +430,12 @@ pub struct Yue2JobSpec {
     pub version_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<CoverSpec>,
-    /// The recording a `transcribe` job would transcribe — blocked.
+    /// The recording a `transcribe` job transcribes (a project audio asset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_audio_asset_id: Option<String>,
+    /// How a `transcribe` job transcribes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<TranscriptionSettings>,
 
     // ---- request envelope (never stored in the block) ----
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +483,9 @@ pub const INVALID_COMBINATION: &str = "yue2_invalid_combination";
 pub const INVALID_VALUE: &str = "yue2_invalid_value";
 /// A field the kind requires is absent.
 pub const MISSING_FIELD: &str = "yue2_missing_field";
+/// A cover named a recording directly: a cover from a recording goes through a reviewed
+/// transcription (see the module docs).
+pub const TRANSCRIPTION_REVIEW_REQUIRED: &str = "yue2_transcription_review_required";
 
 fn error(code: &'static str, field: &str, message: impl Into<String>) -> Yue2JobError {
     Yue2JobError {
@@ -452,6 +539,7 @@ pub const FIELD_KINDS: &[(&str, &[Yue2JobKind])] = &[
     ("versionId", &[K_RENDER]),
     ("cover", &[K_COVER]),
     ("sourceAudioAssetId", &[K_TRANSCRIBE]),
+    ("transcription", &[K_TRANSCRIBE]),
     ("count", &[K_CREATE, K_PLAN, K_COVER]),
 ];
 
@@ -469,7 +557,9 @@ fn why_not(field: &str, kind: Yue2JobKind) -> String {
         }
         (_, K_PLAN) => "a plan-only job stops after planning the score",
         (_, K_COVER) => "a cover plans from its own reviewed score in its own mode",
-        (_, K_TRANSCRIBE) => "transcription takes only the source recording",
+        (_, K_TRANSCRIBE) => {
+            "transcription takes only the source recording and its transcription settings"
+        }
         ("count", _) => {
             "a restored plan, a score version and a cached decode render the same take every time"
         }
@@ -508,6 +598,7 @@ fn set_fields(spec: &Yue2JobSpec) -> Vec<&'static str> {
     push("versionId", spec.version_id.is_some());
     push("cover", spec.cover.is_some());
     push("sourceAudioAssetId", spec.source_audio_asset_id.is_some());
+    push("transcription", spec.transcription.is_some());
     push("count", spec.count.is_some_and(|c| c != 1));
     out
 }
@@ -635,7 +726,7 @@ pub fn validate_request(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
             return Err(error(
                 INVALID_COMBINATION,
                 "cover",
-                "name exactly one of cover.score, cover.versionId and cover.sourceAudioAssetId",
+                "name exactly one of cover.score and cover.versionId",
             ));
         }
     }
@@ -683,7 +774,38 @@ pub fn validate_for_execution(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
             spec.cover.as_ref().is_some_and(|c| c.score.is_some()),
             "cover.score",
         )?,
+        K_TRANSCRIBE => need(sources.recording.is_some(), "sources.recording")?,
         _ => {}
+    }
+    if let Some(recording) = &sources.recording {
+        check_id("sources.recording.assetId", &recording.asset_id)?;
+        if spec.source_audio_asset_id.as_deref() != Some(recording.asset_id.as_str()) {
+            return Err(error(
+                INVALID_COMBINATION,
+                "sources.recording",
+                "is not the job's sourceAudioAssetId",
+            ));
+        }
+        check_sha256("sources.recording.sha256", &recording.sha256)?;
+    }
+    if let Some(transcription) = &sources.transcription {
+        if !transcription.id.starts_with(TRANSCRIPTION_ID_PREFIX) {
+            return Err(error(
+                INVALID_VALUE,
+                "sources.transcription.id",
+                "is not a transcription id",
+            ));
+        }
+        check_id("sources.transcription.id", &transcription.id)?;
+        check_id("sources.transcription.jobId", &transcription.job_id)?;
+        check_id(
+            "sources.transcription.sourceAudioAssetId",
+            &transcription.source_audio_asset_id,
+        )?;
+        check_sha256(
+            "sources.transcription.manifestSha256",
+            &transcription.manifest_sha256,
+        )?;
     }
     for run in [&sources.plan, &sources.source_run].into_iter().flatten() {
         check_id("sources.jobId", &run.job_id)?;
@@ -701,6 +823,13 @@ pub fn validate_for_execution(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                 "is not a hex identity",
             ));
         }
+    }
+    Ok(())
+}
+
+fn check_sha256(field: &str, value: &str) -> Result<(), Yue2JobError> {
+    if value.len() != 64 || !is_lower_hex(value) {
+        return Err(error(INVALID_VALUE, field, "is not a SHA-256"));
     }
     Ok(())
 }
@@ -727,6 +856,32 @@ pub fn is_run_dir(rel: &str) -> bool {
 /// The project-relative run directory of `run_id`.
 pub fn run_dir(run_id: &str) -> String {
     format!("{RUNS_DIR}/{run_id}")
+}
+
+/// The project-relative review-artifact directory of a `transcribe` job's `run_id`.
+pub fn transcription_dir(run_id: &str) -> String {
+    format!("{TRANSCRIPTIONS_DIR}/{run_id}")
+}
+
+/// The transcription record id of a `transcribe` job's `run_id` — deterministic, so a retried job
+/// and the API's idempotent side effects name the same record.
+pub fn transcription_id(run_id: &str) -> Option<String> {
+    run_id
+        .strip_prefix(RUN_ID_PREFIX)
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| format!("{TRANSCRIPTION_ID_PREFIX}{rest}"))
+}
+
+/// Whether `rel` is exactly `yue2/transcriptions/<run id>` (no traversal, no nesting).
+pub fn is_transcription_dir(rel: &str) -> bool {
+    rel.strip_prefix(TRANSCRIPTIONS_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|id| {
+            id.starts_with(RUN_ID_PREFIX)
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        })
 }
 
 fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
@@ -771,12 +926,24 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                 .as_deref()
                 .ok_or_else(|| error(MISSING_FIELD, "sourceAudioAssetId", "is required"))
                 .and_then(|id| check_id("sourceAudioAssetId", id))?;
+            if let Some(settings) = &spec.transcription {
+                check_transcription(settings)?;
+            }
         }
         K_COVER => {
             let cover = spec
                 .cover
                 .as_ref()
                 .ok_or_else(|| error(MISSING_FIELD, "cover", "is required"))?;
+            if cover.source_audio_asset_id.is_some() {
+                return Err(error(
+                    TRANSCRIPTION_REVIEW_REQUIRED,
+                    "cover.sourceAudioAssetId",
+                    "a cover from a recording is two steps: transcribe the recording (kind \
+                     \"transcribe\"), review or edit the score version it imports, then cover \
+                     that version (cover.versionId)",
+                ));
+            }
             if cover.mode.is_none() {
                 return Err(error(
                     MISSING_FIELD,
@@ -784,14 +951,10 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                     "is required (melody or full)",
                 ));
             }
-            let sources = [
-                cover.score.is_some(),
-                cover.version_id.is_some(),
-                cover.source_audio_asset_id.is_some(),
-            ]
-            .iter()
-            .filter(|s| **s)
-            .count();
+            let sources = [cover.score.is_some(), cover.version_id.is_some()]
+                .iter()
+                .filter(|s| **s)
+                .count();
             // At execution the server has inlined the version's score, so both are present then;
             // what must hold is that a request names exactly one source.
             let resolved_version = cover.version_id.is_some() && cover.score.is_some();
@@ -802,12 +965,11 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                     "a cover needs a reviewed score (cover.score or cover.versionId)",
                 ));
             }
-            if sources > 1 && !(resolved_version && cover.source_audio_asset_id.is_none()) {
+            if sources > 1 && !resolved_version {
                 return Err(error(
                     INVALID_COMBINATION,
                     "cover",
-                    "name exactly one of cover.score, cover.versionId and \
-                     cover.sourceAudioAssetId",
+                    "name exactly one of cover.score and cover.versionId",
                 ));
             }
             if cover.keep.is_some() && cover.mode != Some(CoverMode::Melody) {
@@ -822,9 +984,6 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
             }
             if let Some(id) = &cover.version_id {
                 check_id("cover.versionId", id)?;
-            }
-            if let Some(id) = &cover.source_audio_asset_id {
-                check_id("cover.sourceAudioAssetId", id)?;
             }
             if let Some(source) = &cover.translated_from {
                 check_text("cover.translatedFrom", source, MAX_LYRICS_CHARS)?;
@@ -1000,13 +1159,45 @@ fn fresh_hex_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Whether a request (or its cover) asks for recording transcription, which is blocked.
-pub fn requests_transcription(spec: &Yue2JobSpec) -> bool {
-    spec.kind == K_TRANSCRIBE
-        || spec
-            .cover
-            .as_ref()
-            .is_some_and(|c| c.source_audio_asset_id.is_some())
+/// The engine's window-plan rule (`sliding_window_plan`) over the resolved values —
+/// `0 <= lookahead <= overlap < 300 s` — and a finite, positive crop.
+fn check_transcription(settings: &TranscriptionSettings) -> Result<(), Yue2JobError> {
+    for (field, value) in [
+        ("transcription.maxSeconds", settings.max_seconds),
+        ("transcription.overlapSeconds", settings.overlap_seconds),
+        ("transcription.lookaheadSeconds", settings.lookahead_seconds),
+    ] {
+        if value.is_some_and(|v| !v.is_finite()) {
+            return Err(error(INVALID_VALUE, field, "must be finite"));
+        }
+    }
+    if settings.max_seconds.is_some_and(|v| v <= 0.0) {
+        return Err(error(
+            INVALID_VALUE,
+            "transcription.maxSeconds",
+            "must be positive",
+        ));
+    }
+    let overlap = settings.resolved_overlap_seconds();
+    let lookahead = settings.resolved_lookahead_seconds();
+    if !(0.0..TRANSCRIPTION_WINDOW_SECONDS).contains(&overlap) {
+        return Err(error(
+            INVALID_VALUE,
+            "transcription.overlapSeconds",
+            format!(
+                "must be in [0, {TRANSCRIPTION_WINDOW_SECONDS}) seconds (resolved {overlap}); \
+                 SheetSage2 transcribes {TRANSCRIPTION_WINDOW_SECONDS} s windows"
+            ),
+        ));
+    }
+    if !(0.0..=overlap).contains(&lookahead) {
+        return Err(error(
+            INVALID_VALUE,
+            "transcription.lookaheadSeconds",
+            format!("must be in [0, overlapSeconds] (resolved {lookahead} / {overlap})"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

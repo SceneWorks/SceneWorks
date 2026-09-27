@@ -393,18 +393,20 @@ fn variant_row(entry: &Value, variant: &str) -> Value {
         .clone()
 }
 
-/// sc-22998 item 1: SheetSage2 / MERT-v2-FullSong are BLOCKED conditional components. Every
-/// repo-keyed door takes a caller-supplied repo verbatim, so each must refuse them — with the
-/// block's reason and unblock condition, and whatever the caller asserts about the licence.
-/// Mutation that reds this: drop the `conditionalComponents` indexing (or the blocked check) in
-/// `license_acknowledgment_index_for` / `ensure_license_acknowledged_for_source` (201 comes back).
+/// sc-22998 / sc-23002: SheetSage2 / MERT-v2-FullSong are conditional cover components under YuE2's
+/// licence. Every repo-keyed door takes a caller-supplied repo verbatim, so each must refuse them
+/// WITHOUT the acknowledgment — now that the owner's decision unblocked them, never with
+/// `component_blocked` — and the generic job door queues them WITH it. Mutation that reds this:
+/// drop the `conditionalComponents` indexing in `license_acknowledgment_index_for` (the doors then
+/// fetch without the acknowledgment), or re-add a `blocked` record (the doors refuse even with it).
 #[tokio::test]
-async fn blocked_cover_components_are_refused_on_every_repo_keyed_door() {
+async fn cover_components_need_the_licence_acknowledgment_on_every_repo_keyed_door() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = app_with_yue1_and_yue2(&temp_dir);
     for repo in ["m-a-p/SheetSage2", "m-a-p/MERT-v2-FullSong"] {
-        for acknowledged in [false, true] {
+        {
+            let acknowledged = false;
             let doors = [
                 (
                     "/api/v1/jobs",
@@ -442,18 +444,36 @@ async fn blocked_cover_components_are_refused_on_every_repo_keyed_door() {
                     StatusCode::FORBIDDEN,
                     "{door} {repo} ack={acknowledged}: {response}"
                 );
-                assert_eq!(response["code"], "component_blocked", "{door}: {response}");
-                let detail = response["detail"].as_str().unwrap_or_default();
-                assert!(
-                    detail.contains("blocked: owner licensing decision for SheetSage2/MERT"),
-                    "{detail}"
+                assert_eq!(
+                    response["code"], "license_acknowledgment_required",
+                    "{door}: {response}"
                 );
-                assert!(detail.contains("Unblock condition:"), "{detail}");
+                let detail = response["detail"].as_str().unwrap_or_default();
+                assert!(detail.contains("'yue2'"), "{detail}");
             }
         }
     }
-    // Nothing was queued through any door.
-    assert!(queued_downloads(app).await.is_empty());
+    // Nothing was queued through any door without the acknowledgment.
+    assert!(queued_downloads(app.clone()).await.is_empty());
+    // With it, the generic job door queues the pinned component.
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_download",
+            "requestedGpu": "auto",
+            "payload": {
+                "repo": "m-a-p/SheetSage2",
+                "revision": "eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+                "files": ["model.safetensors"],
+                "licenseAcknowledged": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{response}");
+    assert_eq!(repos(&queued_downloads(app).await).len(), 1);
 }
 
 /// sc-22998 / sc-22999: the bf16 original does not install the derived tiers — each reads
