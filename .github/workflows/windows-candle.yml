@@ -1432,13 +1432,13 @@ jobs:
   # `yue2` provider on this card) and, once, the memory-profile campaign through the job path.
   # Dispatch only, at the frozen feature head:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_yue2_terminal_cuda=true -f inference_revision=<Cargo pin>
-  # The app state (a FRESH per-run Hugging Face home the cold install downloads into (~11 GB), the
-  # derived q8/q4 tiers, projects -- and the CC BY-NC 4.0 audio) lives on E: under a per-run directory
+  # The app state (a FRESH per-run Hugging Face home for the ~11 GB cold YuE2 install and the
+  # ~2.76 GB conditional SheetSage2/MERT cover closure, derived q8/q4 tiers, projects and CC BY-NC
+  # 4.0 audio) lives on E: under a per-run directory
   # and is NEVER uploaded; the artifact carries records, receipts, hashes and logs only. The shared
   # E:\huggingface\hub is never touched: a preseeded hub is not cold-install evidence. Remove
-  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. A `pass-with-blockers`
-  # acceptance verdict (the blocked AT2 transcription path) exits non-zero and fails this job: an
-  # open owner decision is never reported green.
+  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. Any blocked acceptance
+  # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}

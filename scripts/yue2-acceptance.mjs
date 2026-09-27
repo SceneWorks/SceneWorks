@@ -98,8 +98,8 @@ export const COVER_CLOSURE_ROUTE = `/api/v1/models/${MODEL_ID}/conditional-compo
 export const TRANSCRIPTION_MANIFEST = "transcription.json";
 export const TRANSCRIPTION_ARTIFACT_SCHEMA = "sceneworks-sheetsage2-transcription-v1";
 /**
- * The device the SheetSage2 transcriber runs on in production, per platform. The coordinator sets
- * each value from the inference crate's production device selection (candle-audio-sheetsage2); a
+ * The device the SheetSage2 transcriber runs on in production, per platform. These values follow
+ * the inference crate's production device selection (candle-audio-sheetsage2); a
  * transcription reported on any other device FAILS its check — it is never a pass.
  */
 export const EXPECTED_TRANSCRIPTION_DEVICE = Object.freeze({ metal: "cpu", cuda: "cpu" });
@@ -409,26 +409,37 @@ export function renderAssertions({ platform, job, runResult, runConfig, artifact
 
 /**
  * The tier a render really ran at, from the ENGINE's records (config.json `weight_tier`, result.json
- * `weights`), never the worker's echo of the request: the tier matches, the AR runs without the
+ * `weights`; plan-only runs keep `weights` in provenance.json), never the worker's echo of the request:
+ * the tier matches, the AR runs without the
  * experimental FP8 mode (`quantization` is the engine's AR-precision field, `none` unless FP8), and a
  * derived q8/q4 tier loaded exactly the pinned derived weights (`mot_native_weights_sha256`) while
  * bf16 loaded none of them.
  */
-export function tierAssertions({ tier, runConfig, runResult, manifestEntry }) {
+export function tierAssertions({ tier, runConfig, runResult, runProvenance, manifestEntry }) {
   const out = [];
   const check = (name, ok, detail) => out.push({ name, ok: Boolean(ok), detail });
-  const weights = runResult?.weights ?? {};
+  const weights = runResult?.kind === "plan" ? runProvenance?.weights ?? {} : runResult?.weights ?? {};
+  const source = runResult?.kind === "plan" ? "provenance.json" : "result.json";
   const pins = Object.fromEntries((manifestEntry?.downloads ?? [])
     .filter((row) => !row.coRequisite && row.localDerivation)
     .map((row) => [row.variant, row.localDerivation.weightsSha256]));
-  check(`engine ran the ${tier} tier`, runConfig?.weight_tier === tier && weights.weight_tier === tier, `config.json ${runConfig?.weight_tier}, result.json ${weights.weight_tier}`);
-  check("AR ran without FP8", runConfig?.quantization === "none" && weights.quantization === "none", `config.json ${runConfig?.quantization}, result.json ${weights.quantization}`);
+  check(`engine ran the ${tier} tier`, runConfig?.weight_tier === tier && weights.weight_tier === tier, `config.json ${runConfig?.weight_tier}, ${source} ${weights.weight_tier}`);
+  check("AR ran without FP8", runConfig?.quantization === "none" && weights.quantization === "none", `config.json ${runConfig?.quantization}, ${source} ${weights.quantization}`);
   if (tier === "q8" || tier === "q4") {
     check(`loaded the pinned derived ${tier} weights`, /^[0-9a-f]{64}$/.test(pins[tier] ?? "") && weights.mot_native_weights_sha256 === pins[tier], `${weights.mot_native_weights_sha256} vs pinned ${pins[tier]}`);
   } else {
     check("loaded no derived tier's weights", typeof weights.mot_native_weights_sha256 === "string" && !Object.values(pins).includes(weights.mot_native_weights_sha256), weights.mot_native_weights_sha256);
   }
   return out;
+}
+
+/** The API's persisted sidecar, read back by result.assetIds after assetWrites are consumed. */
+export function persistedAudioAsset(result, asset) {
+  const id = result?.assetIds?.[0];
+  if (!id || asset?.id !== id || asset?.type !== "audio" || typeof asset?.file?.path !== "string" || !asset.file.path) {
+    fail(`the job's library asset is missing or is not persisted audio (${id ?? "no asset id"})`);
+  }
+  return { id, mediaPath: asset.file.path };
 }
 
 /** The worker's refusal of a source run whose latent.npy no longer hashes to its recorded digest. */
@@ -1309,7 +1320,7 @@ class Context {
       rec.check(`${jobId}: plan artifacts verify`, artifactCheck.ok, artifactCheck.detail);
       rec.check(`${jobId}: plan truncation reported`, typeof runResult.truncated?.abc === "boolean", JSON.stringify(runResult.truncated));
       entry.tier = this.requestedTier(snapshot);
-      for (const assertion of tierAssertions({ tier: entry.tier, runConfig, runResult, manifestEntry: this.fixtures.manifestEntry })) {
+      for (const assertion of tierAssertions({ tier: entry.tier, runConfig, runResult, runProvenance: configBody, manifestEntry: this.fixtures.manifestEntry })) {
         rec.check(`${jobId}: ${assertion.name}`, assertion.ok, assertion.detail);
       }
       return { snapshot, entry, runDir, runResult, runConfig };
@@ -1317,7 +1328,13 @@ class Context {
     const audioPath = path.join(runDir, "audio.wav");
     const audioBytes = await readFile(audioPath);
     const runAudio = parseWav(audioBytes);
-    const assetPath = snapshot.result?.assetWrites?.[0]?.mediaPath;
+    // The API persists assetWrites, then removes them from the job result. Read back the
+    // library asset by its server-persisted id and verify the file it serves to users.
+    const assetId = snapshot.result?.assetIds?.[0] ?? null;
+    rec.require(`${jobId}: the result names a library asset`, Boolean(assetId), JSON.stringify(snapshot.result?.assetIds ?? null));
+    const asset = (await this.call(rec, "GET", `/api/v1/projects/${this.project.id}/assets/${assetId}`, undefined, 200)).body;
+    const persisted = persistedAudioAsset(snapshot.result, asset);
+    const assetPath = persisted.mediaPath;
     let assetSha = null;
     let assetAudio = null;
     if (assetPath && existsSync(path.join(this.project.path, assetPath))) {
@@ -1329,7 +1346,7 @@ class Context {
     entry.output = {
       runAudioSha256: sha256(audioBytes),
       runAudioBytes: audioBytes.length,
-      assetId: snapshot.result?.assetIds?.[0] ?? snapshot.result?.assetWrites?.[0]?.assetId ?? null,
+      assetId,
       assetMediaPath: assetPath ?? null,
       assetSha256: assetSha,
       sampleRate: runAudio.sampleRate,
