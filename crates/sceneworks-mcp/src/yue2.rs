@@ -6,12 +6,20 @@
 //! re-parsed in the native dialect and invariant-checked against its source before it is stored as
 //! a new version. These helpers add only what an MCP caller cannot be trusted to set itself —
 //! the agent provenance — plus id validation before any id is spliced into a route.
+//!
+//! Rendering (sc-22988 E5): `yue2_render_score_version` and `yue2_cover_score_version` submit one
+//! take through the same `POST /api/v1/projects/:id/yue2/jobs` route the Song Lab uses, and
+//! `yue2_get_render` polls it. They never send a licence acknowledgment or a commercial-use
+//! declaration: accepting YuE2's noncommercial licence is the user's act, recorded server-side, so
+//! without it the route's `license_acknowledgment_required` refusal comes back to the agent as-is.
+//! Every render answer carries [`REGENERATION_NOTICE`].
 
 use rmcp::{model::CallToolResult, schemars, ErrorData};
 use serde_json::{json, Value};
 
 use crate::api_client::{ApiClient, ApiClientError};
-use crate::server::valid_project_id;
+use crate::server::{compact_job_status, valid_job_id, valid_project_id};
+use sceneworks_core::yue2_score::REGENERATION_NOTICE;
 
 /// Arguments for `yue2_inspect_score`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -129,6 +137,65 @@ pub struct Yue2CompareArgs {
     pub agent_name: Option<String>,
 }
 
+/// Arguments for `yue2_render_score_version`. No licence or commercial-use field exists: the
+/// licence is accepted by the user in SceneWorks, never by an agent.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Yue2RenderArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "Score version id to render (from yue2_list_score_versions).")]
+    pub version_id: String,
+    #[schemars(description = "Acoustic sampling steps; omit for the model default.")]
+    pub steps: Option<u32>,
+    #[schemars(
+        description = "\"standard\" (default) or \"legacy\" (only when the legacy decoder add-on is installed)."
+    )]
+    pub decoder: Option<String>,
+    #[schemars(description = "Installed weight tier: \"bf16\" (default), \"q8\" or \"q4\".")]
+    pub tier: Option<String>,
+}
+
+/// Arguments for `yue2_cover_score_version`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Yue2CoverArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "The reviewed score version the cover follows.")]
+    pub version_id: String,
+    #[schemars(
+        description = "\"melody\" (keep the melody, re-voice the rest) or \"full\" (follow the whole score)."
+    )]
+    pub mode: String,
+    #[schemars(description = "Lyrics the cover sings, with section tags such as [Verse].")]
+    pub lyrics: String,
+    #[schemars(description = "Style prompt for the cover; omit for none.")]
+    pub style: Option<String>,
+    #[schemars(
+        description = "Melody covers only: which melodies to keep — \"both\", \"vocal\" or \"instrumental\"."
+    )]
+    pub keep: Option<String>,
+    #[schemars(description = "Generation seed; omit for a random one.")]
+    pub seed: Option<u64>,
+    #[schemars(description = "Acoustic sampling steps; omit for the model default.")]
+    pub steps: Option<u32>,
+    #[schemars(description = "\"standard\" (default) or \"legacy\".")]
+    pub decoder: Option<String>,
+    #[schemars(description = "Installed weight tier: \"bf16\" (default), \"q8\" or \"q4\".")]
+    pub tier: Option<String>,
+}
+
+/// Arguments for `yue2_get_render`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Yue2RenderStatusArgs {
+    #[schemars(
+        description = "Job id returned by yue2_render_score_version or yue2_cover_score_version."
+    )]
+    pub job_id: String,
+}
+
 fn invalid(message: impl Into<String>) -> ErrorData {
     ErrorData::invalid_params(message.into(), None)
 }
@@ -236,6 +303,160 @@ pub(crate) fn compare_body(args: &Yue2CompareArgs) -> Result<Value, ErrorData> {
         body["notes"] = json!(notes);
     }
     Ok(body)
+}
+
+fn insert_some<T: serde::Serialize>(body: &mut Value, key: &str, value: Option<T>) {
+    if let Some(value) = value {
+        body[key] = json!(value);
+    }
+}
+
+/// The `renderVersion` job body: one take of the version, the controls the agent chose, and never
+/// `licenseAcknowledged` / `commercialUse` / `count`.
+pub(crate) fn render_body(args: &Yue2RenderArgs) -> Result<Value, ErrorData> {
+    let mut body = json!({
+        "kind": "renderVersion",
+        "versionId": record_id(&args.version_id, "versionId")?,
+    });
+    insert_some(&mut body, "steps", args.steps);
+    insert_some(&mut body, "decoder", args.decoder.as_deref());
+    insert_some(&mut body, "tier", args.tier.as_deref());
+    Ok(body)
+}
+
+/// The `cover` job body for a cover that follows a stored score version.
+pub(crate) fn cover_body(args: &Yue2CoverArgs) -> Result<Value, ErrorData> {
+    let mut cover = json!({
+        "versionId": record_id(&args.version_id, "versionId")?,
+        "mode": args.mode,
+    });
+    insert_some(&mut cover, "keep", args.keep.as_deref());
+    let mut body = json!({ "kind": "cover", "lyrics": args.lyrics, "cover": cover });
+    insert_some(&mut body, "style", args.style.as_deref());
+    insert_some(&mut body, "seed", args.seed);
+    insert_some(&mut body, "steps", args.steps);
+    insert_some(&mut body, "decoder", args.decoder.as_deref());
+    insert_some(&mut body, "tier", args.tier.as_deref());
+    Ok(body)
+}
+
+const LICENSE_ACK_REQUIRED: &str = "license_acknowledgment_required";
+
+/// A submitted render: the queued job, the usage policy it was granted and the regeneration notice.
+fn submitted(response: Value) -> Value {
+    let jobs: Vec<Value> = response
+        .get("jobs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|job| {
+            json!({
+                "jobId": job.get("id"),
+                "status": job.get("status"),
+                "kind": job.pointer("/payload/yue2/kind"),
+            })
+        })
+        .collect();
+    let policy = response
+        .pointer("/jobs/0/payload/usagePolicy")
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "jobs": jobs,
+        "usagePolicy": policy,
+        "renderNotice": REGENERATION_NOTICE,
+        "next": "Poll yue2_get_render with the jobId; once it is completed, get_job_result returns download links.",
+    })
+}
+
+async fn submit_render(
+    api: &ApiClient,
+    project: &str,
+    body: Value,
+) -> Result<CallToolResult, ErrorData> {
+    let path = format!("/api/v1/projects/{}/yue2/jobs", project_id(project)?);
+    match api.post_json(&path, &body).await {
+        Ok(response) => result(submitted(response)),
+        Err(ApiClientError::Api { status, detail }) if detail.contains(LICENSE_ACK_REQUIRED) => {
+            Ok(CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "{LICENSE_ACK_REQUIRED}: YuE2's noncommercial licence (CC BY-NC 4.0) has not \
+                     been accepted. The USER must read and accept it in SceneWorks (Audio Studio → \
+                     Song Lab); an agent cannot accept it for them, and this tool never does. \
+                     Nothing was queued. SceneWorks answered ({status}): {detail}"
+                )),
+            ]))
+        }
+        Err(error) => outcome(Err(error)),
+    }
+}
+
+pub(crate) async fn render_version(
+    api: &ApiClient,
+    args: Yue2RenderArgs,
+) -> Result<CallToolResult, ErrorData> {
+    let body = render_body(&args)?;
+    submit_render(api, &args.project_id, body).await
+}
+
+pub(crate) async fn cover_version(
+    api: &ApiClient,
+    args: Yue2CoverArgs,
+) -> Result<CallToolResult, ErrorData> {
+    let body = cover_body(&args)?;
+    submit_render(api, &args.project_id, body).await
+}
+
+/// A YuE2 job's progress and — once finished — its outcome, bounded (no score text, no weights).
+pub(crate) fn render_status(job: &Value) -> Value {
+    let mut status = compact_job_status(job);
+    let block = job.pointer("/result/yue2");
+    let field = |key: &str| {
+        block
+            .and_then(|block| block.get(key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let assets: Vec<Value> = job
+        .pointer("/result/assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|asset| asset.get("id").or_else(|| asset.get("assetId")).cloned())
+        .collect();
+    status["yue2"] = json!({
+        "kind": job.pointer("/payload/yue2/kind"),
+        "versionId": job.pointer("/payload/yue2/versionId"),
+        "renderRecordId": field("renderRecordId"),
+        "scoreVersionId": field("scoreVersionId"),
+        "truncated": field("truncated"),
+        "warnings": field("warnings"),
+        "sideEffectErrors": field("sideEffectErrors"),
+        "error": field("error"),
+        "usagePolicy": job.pointer("/payload/usagePolicy"),
+        "assetIds": assets,
+    });
+    status["renderNotice"] = json!(REGENERATION_NOTICE);
+    status
+}
+
+pub(crate) async fn get_render(
+    api: &ApiClient,
+    args: Yue2RenderStatusArgs,
+) -> Result<CallToolResult, ErrorData> {
+    let job_id = valid_job_id(&args.job_id).map_err(invalid)?;
+    let job = match api.get_json(&format!("/api/v1/jobs/{job_id}"), &[]).await {
+        Ok(job) => job,
+        Err(error) => return outcome(Err(error)),
+    };
+    if job.pointer("/payload/yue2").is_none_or(Value::is_null) {
+        return Ok(CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text(format!(
+                "Job {job_id} is not a YuE2 job; use get_job_status for other jobs."
+            )),
+        ]));
+    }
+    result(render_status(&job))
 }
 
 fn result(value: Value) -> Result<CallToolResult, ErrorData> {
@@ -443,6 +664,48 @@ mod tests {
         );
         assert!(comparison_path(&args("p1", "../versions/x")).is_err());
         assert!(comparison_path(&args("p/1", "yue2c_ab")).is_err());
+    }
+
+    #[test]
+    fn render_bodies_never_acknowledge_the_licence_or_declare_commercial_use() {
+        let render = render_body(&Yue2RenderArgs {
+            project_id: "p1".into(),
+            version_id: "yue2v_a".into(),
+            steps: Some(8),
+            decoder: None,
+            tier: Some("q8".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            render,
+            json!({"kind": "renderVersion", "versionId": "yue2v_a", "steps": 8, "tier": "q8"})
+        );
+        let cover = cover_body(&Yue2CoverArgs {
+            project_id: "p1".into(),
+            version_id: "yue2v_a".into(),
+            mode: "melody".into(),
+            lyrics: "[Verse]\nla".into(),
+            style: Some("folk".into()),
+            keep: Some("vocal".into()),
+            seed: Some(3),
+            steps: None,
+            decoder: None,
+            tier: None,
+        })
+        .unwrap();
+        assert_eq!(
+            cover,
+            json!({"kind": "cover", "lyrics": "[Verse]\nla", "style": "folk", "seed": 3,
+                   "cover": {"versionId": "yue2v_a", "mode": "melody", "keep": "vocal"}})
+        );
+        assert!(render_body(&Yue2RenderArgs {
+            project_id: "p1".into(),
+            version_id: "../x".into(),
+            steps: None,
+            decoder: None,
+            tier: None,
+        })
+        .is_err());
     }
 
     #[test]

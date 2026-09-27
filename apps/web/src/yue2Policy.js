@@ -55,6 +55,13 @@ export function yue2ExportStem(prefix, id, policy) {
   return `${prefix}-${safe}${policy?.nonCommercial ? "-noncommercial" : ""}`;
 }
 
+// The name ANY save of a library asset suggests when it is a YuE2 take (its own provenance or recipe
+// says so) — the library "Save As…" and the Simple download included — else null.
+export function yue2AssetFilename(asset) {
+  const yue2 = Boolean(asset?.extra?.yue2) || asset?.recipe?.model === YUE2_MODEL_ID;
+  return yue2 ? yue2TakeFilename(asset) : null;
+}
+
 // A YuE2 take's download name: never the style text, always the licence-marked export stem.
 export function yue2TakeFilename(asset, policy = null) {
   return `${yue2ExportStem("yue2-song", asset?.id ?? "take", asset?.extra?.usagePolicy ?? policy)}.wav`;

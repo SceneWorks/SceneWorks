@@ -12,3 +12,7 @@ for the native score-editing port in `crates/sceneworks-core/src/yue2_score/`.
 
 `score-jazz.abc` is upstream's released harmony-only edit of `score.abc` (seventh-chord
 reharmonization with every melody note, duration, bar, section and tempo unchanged).
+
+`web-job-requests.json` is SceneWorks' own (not upstream): the Song Lab's request field table and
+the job bodies its builder produces (`apps/web/src/yue2Lab.test.js` writes and checks it with
+`UPDATE_YUE2_WEB_FIXTURE=1`); the rust-api suite replays each body through the core contract.

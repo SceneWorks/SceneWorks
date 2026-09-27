@@ -1005,6 +1005,11 @@
             "description": "Installable component bundle loaded by owning routes (e.g. the InstantID face stack); never a routable `model` of any job. The capability matrix keys non-routability on this declaration."
           },
           "credentialHost": { "type": "string" },
+          "license": {
+            "type": "string",
+            "minLength": 1,
+            "description": "SPDX identifier of the model WEIGHTS' licence (e.g. `CC-BY-NC-4.0`). Carried verbatim into a job's usage policy (`usagePolicy.license.license`) and the provenance written into its outputs, and hashed into the acknowledged terms with `licenseUrl` / `licenseNotice`."
+          },
           "licenseUrl": { "type": "string", "format": "uri" },
           "requiresLicenseAcknowledgment": {
             "type": "boolean",

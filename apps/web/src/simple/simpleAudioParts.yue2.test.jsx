@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { audioAssetRunGroups } from "../audioTakes.js";
-import { SimpleAudioDeck } from "./simpleAudioParts.jsx";
+import { SimpleAudioDeck, SimpleTakeCard } from "./simpleAudioParts.jsx";
+import { AudioPlayDeck, AudioTakeCard } from "../screens/audioResults.jsx";
 
 // sc-23000: the Simple UI's play deck for a YuE2 take. A YuE2 song replays only from the Song Lab
 // (the generic audio route refuses it), so the deck offers no "Run again"; and its download carries
@@ -56,6 +57,31 @@ describe("Simple audio deck — YuE2 takes (sc-23000)", () => {
     expect(container.querySelector("a[download]").getAttribute("download")).toBe(
       "yue2-song-asset_song-noncommercial.wav",
     );
+  });
+
+  // A truncated take looks complete unless it says so: every take surface badges it (E6/AT3).
+  it("badges a truncated YuE2 take on the Simple deck and take card and the Audio Studio deck and card", async () => {
+    const truncated = { ...YUE2_ASSET, extra: { ...YUE2_ASSET.extra, yue2: { kind: "create", truncated: { abc: false, semantic: true } } } };
+    const run = audioAssetRunGroups([truncated], [KOKORO, YUE2_MODEL])[0];
+    function Surfaces({ asset }) {
+      const player = useAudioTakePlayer();
+      return (
+        <>
+          <SimpleAudioDeck asset={asset} breakpoint="desktop" player={player} run={run} takeIndex={0} />
+          <SimpleTakeCard asset={asset} index={0} onToggle={() => {}} run={run} />
+          <AudioPlayDeck asset={asset} player={player} run={run} takeIndex={0} />
+          <AudioTakeCard asset={asset} index={0} onToggle={() => {}} run={run} />
+        </>
+      );
+    }
+    // Mutation that reds this: `AudioTruncatedBadge` rendering nothing.
+    await act(async () => root.render(<Surfaces asset={truncated} />));
+    const badges = container.querySelectorAll('[data-testid="audio-truncated-badge"]');
+    expect(badges.length).toBe(4);
+    expect(badges[0].getAttribute("title")).toBe("Truncated: the song hit its token budget, so this take is cut short.");
+    // A complete take carries no badge.
+    await act(async () => root.render(<Surfaces asset={YUE2_ASSET} />));
+    expect(container.querySelectorAll('[data-testid="audio-truncated-badge"]').length).toBe(0);
   });
 
   it("still offers Run again for a replayable standard take", async () => {

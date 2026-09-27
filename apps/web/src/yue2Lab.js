@@ -260,6 +260,10 @@ function memoryBody(settings, kind) {
   });
 }
 
+function planText(value) {
+  return typeof value === "string" && value ? value : undefined;
+}
+
 function trimmed(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -286,9 +290,14 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
   const suppliedScore = s.planSource === "supplied" ? trimmed(stripYue2ExportHeader(s.suppliedScore)) : undefined;
   const samplesPlan = s.planSource === "sample" && s.planning !== "off";
   const count = intOrUndefined(s.count);
+  // A restored plan renders ITS OWN style and lyrics (the engine and the server refuse any other
+  // words — an edited plan is a new request), so a fromPlan body carries the plan's recorded text
+  // verbatim (`target.plan`, from `yue2PlanRequest`), never the Compose fields; omitted when the
+  // plan's text is not known, which the server reads as "the plan's".
+  const fromPlan = kind === "fromPlan";
   const candidates = {
-    style: trimmed(s.style),
-    lyrics: trimmed(s.lyrics),
+    style: fromPlan ? planText(target.plan?.style) : trimmed(s.style),
+    lyrics: fromPlan ? planText(target.plan?.lyrics) : trimmed(s.lyrics),
     seed: intOrUndefined(s.seed),
     cfgScale: numberOrUndefined(s.cfgScale),
     steps: intOrUndefined(s.steps),
@@ -296,7 +305,9 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
     score: suppliedScore,
     scoreSampling: samplesPlan ? samplingBody(s.scoreSampling) : undefined,
     semanticSampling: samplingBody(s.semanticSampling),
-    decoder: s.decoder || undefined,
+    // A cached decode ("Decode again" on a run card) chooses its decoder on that card, never
+    // through the lab-wide select.
+    decoder: (target.decoder !== undefined ? target.decoder : s.decoder) || undefined,
     tier: s.tier || undefined,
     precision: s.precision || undefined,
     offloadPolicy: s.offloadPolicy || undefined,
@@ -613,6 +624,18 @@ export function yue2RunView(job) {
     decodable:
       status === "completed" && ["song", "cached_decode"].includes(String(block.run?.kind ?? "")),
   };
+}
+
+// The style and lyrics a restorable run's plan was made with — its recorded request (the engine's
+// `request.json`), else the settings it ran with. Null when the run recorded neither.
+export function yue2PlanRequest(view) {
+  const source = [view?.request, view?.effectiveSettings].find(
+    (candidate) => candidate && typeof candidate === "object" && typeof candidate.lyrics === "string",
+  );
+  if (!source) {
+    return null;
+  }
+  return { style: typeof source.style === "string" ? source.style : "", lyrics: source.lyrics };
 }
 
 // The YuE2 runs of a project, newest first.

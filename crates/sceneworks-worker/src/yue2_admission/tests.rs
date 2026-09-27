@@ -1302,12 +1302,6 @@ fn meminfo_available_is_parsed_in_bytes() {
     assert_eq!(parse_meminfo_available("MemTotal: 1 kB\n"), None);
 }
 
-#[test]
-fn the_catalog_entry_is_yue2() {
-    assert!(is_yue2(&builtin_yue2_entry()));
-    assert!(!is_yue2(&json!({ "family": "yue" })));
-}
-
 /// The catalog's advisory `candle.minMemoryGbByTier` floors are THIS estimator's derivation: the
 /// smallest machine admission can admit the default song on — the default request at the smallest
 /// controls admission can choose (1-frame decode core, one-row score chunks, AR offload on CUDA),

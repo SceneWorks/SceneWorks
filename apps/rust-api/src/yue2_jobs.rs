@@ -63,6 +63,8 @@ use sceneworks_core::yue2_score::store::{
 pub(crate) const COMMERCIAL_USE_REFUSED_CODE: &str = "commercial_use_refused";
 /// A plan / run / version a job needs is missing, incomplete or not this project's.
 pub(crate) const YUE2_SOURCE_UNAVAILABLE_CODE: &str = "yue2_source_unavailable";
+/// A `fromPlan` job's style / lyrics are not the restored plan's.
+pub(crate) const YUE2_PLAN_REQUEST_MISMATCH_CODE: &str = "yue2_plan_request_mismatch";
 /// Transcription is not blocked by the catalog but no linked bundle can run it.
 pub(crate) const YUE2_TRANSCRIPTION_UNAVAILABLE_CODE: &str = "yue2_transcription_unavailable";
 /// A symbolic-song model sent to the generic audio route.
@@ -490,6 +492,67 @@ async fn version_source(
     ))
 }
 
+/// A `fromPlan` job whose `style` / `lyrics` are not the restored plan's own is refused here, at
+/// submission: the engine refuses the same mismatch (an edited plan is a new request), but only
+/// after loading the model. An omitted field is the plan's. The plan's request is the run's
+/// recorded `request.json` — what the engine restores and compares against.
+async fn refuse_plan_request_mismatch(
+    state: &AppState,
+    project_id: &str,
+    spec: &Yue2JobSpec,
+    plan: &RunSource,
+) -> Result<(), ApiError> {
+    let style = spec.style.as_deref().filter(|style| !style.is_empty());
+    let lyrics = spec.lyrics.as_deref();
+    if style.is_none() && lyrics.is_none() {
+        return Ok(());
+    }
+    if !yue2::is_run_dir(&plan.run_dir) {
+        return Err(source_unavailable(format!(
+            "planJobId: job {}'s run directory is not a YuE2 run.",
+            plan.job_id
+        )));
+    }
+    let path = project_path_for_id(state.clone(), project_id)
+        .await?
+        .join(&plan.run_dir)
+        .join("request.json");
+    let recorded = tokio::fs::read(&path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .ok_or_else(|| {
+            source_unavailable(format!(
+                "planJobId: job {}'s run has no readable recorded request.",
+                plan.job_id
+            ))
+        })?;
+    let text = |key: &str| {
+        recorded
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let field = if style.is_some_and(|style| style != text("style")) {
+        "style"
+    } else if lyrics.is_some_and(|lyrics| lyrics != text("lyrics")) {
+        "lyrics"
+    } else {
+        return Ok(());
+    };
+    Err(ApiError::typed(
+        StatusCode::CONFLICT,
+        format!(
+            "YuE2 job: {field} differs from the restored plan's own (job {}). A restored plan \
+             renders its recorded style and lyrics; omit them, or send the plan's exact text. \
+             Changing them is a new request — plan it again.",
+            plan.job_id
+        ),
+        YUE2_PLAN_REQUEST_MISMATCH_CODE,
+        json!({ "field": field, "planJobId": plan.job_id }),
+    ))
+}
+
 async fn resolve_sources(
     state: &AppState,
     project_id: &str,
@@ -518,6 +581,9 @@ async fn resolve_sources(
                 return Err(source_unavailable(format!(
                     "planJobId: job {job_id} recorded no plan identity."
                 )));
+            }
+            if let Some(plan) = &sources.plan {
+                refuse_plan_request_mismatch(state, project_id, spec, plan).await?;
             }
         }
         Yue2JobKind::Decode => {
@@ -678,6 +744,14 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
             json!({ "field": field }),
         )
     };
+    // `"yue2": null` is not "no block" everywhere a payload is read — refuse it rather than store
+    // a key whose meaning depends on the reader.
+    if merged.get(yue2::PAYLOAD_KEY).is_some_and(Value::is_null) {
+        return Err(refused(
+            "yue2",
+            "a yue2 block cannot be null; omit the key to keep the job as it is".into(),
+        ));
+    }
     match (block_of(persisted), block_of(merged)) {
         (None, Some(_)) => Err(refused(
             "yue2",
@@ -1065,13 +1139,35 @@ fn asset_usage_policies(asset_id: &str, asset: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|entry| entry.get("policy").is_some_and(|policy| !policy.is_null()))
+        .filter(|entry| {
+            entry.get("policy").is_some_and(|policy| !policy.is_null())
+                || entry.get("unresolved").is_some()
+        })
         .cloned();
     own.into_iter().chain(inherited).collect()
 }
 
-/// The usage policies of `asset_ids` in `project_id`, deduplicated. A missing asset carries none;
-/// any other read failure is an error (never an empty policy set).
+/// The lineage entry for an input asset that is in neither the library nor the same write batch:
+/// its policy cannot be read, so it is recorded as unresolved — never as "no policy" — and a
+/// commercial export refuses it ([`refuse_commercial_export`]).
+fn unresolved_lineage(asset_id: &str) -> Value {
+    json!({ "assetId": asset_id, "policy": null, "unresolved": "not_found" })
+}
+
+fn push_distinct(list: &mut Vec<Value>, entries: impl IntoIterator<Item = Value>) -> bool {
+    let mut changed = false;
+    for entry in entries {
+        if !list.contains(&entry) {
+            list.push(entry);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The usage policies of `asset_ids` in `project_id`, deduplicated. A missing asset is an
+/// [unresolved](unresolved_lineage) entry, never an empty policy set; any other read failure is an
+/// error.
 fn usage_policies_of(
     store: &ProjectStore,
     project_id: &str,
@@ -1079,16 +1175,12 @@ fn usage_policies_of(
 ) -> Result<Vec<Value>, ProjectStoreError> {
     let mut policies: Vec<Value> = Vec::new();
     for id in asset_ids {
-        let asset = match store.get_asset(project_id, &id) {
-            Ok(asset) => asset,
-            Err(ProjectStoreError::NotFound(_)) => continue,
+        let entries = match store.get_asset(project_id, &id) {
+            Ok(asset) => asset_usage_policies(&id, &asset),
+            Err(ProjectStoreError::NotFound(_)) => vec![unresolved_lineage(&id)],
             Err(error) => return Err(error),
         };
-        for policy in asset_usage_policies(&id, &asset) {
-            if !policies.contains(&policy) {
-                policies.push(policy);
-            }
-        }
+        push_distinct(&mut policies, entries);
     }
     Ok(policies)
 }
@@ -1145,17 +1237,60 @@ fn fact_input_asset_ids(fact: &Value) -> Vec<String> {
 /// from it, a stem, a mux — inherits the source's policy as `extra.usagePolicies`, so neither
 /// the library nor an export can launder the noncommercial restriction by deriving from it.
 /// Runs on every reported asset write before it is persisted.
+///
+/// An input may be another asset of the SAME batch, not yet persisted — a stem names its mix,
+/// which inherited from the render's ICL reference — so batch members are resolved from the batch
+/// (to a fixpoint, whatever their order) before the library is read. An input in neither is
+/// recorded as [unresolved](unresolved_lineage) rather than refusing the write: refusing would
+/// drop a finished render over a source deleted while it ran, while "no policy" would launder the
+/// restriction; the unresolved entry keeps the output and fails a commercial export closed.
 pub(crate) fn inherit_usage_policies(
     store: &ProjectStore,
     project_id: &str,
     asset_writes: &mut [Value],
 ) -> Result<(), ProjectStoreError> {
-    for fact in asset_writes.iter_mut() {
-        let inputs = fact_input_asset_ids(fact);
-        if inputs.is_empty() {
-            continue;
+    let batch_ids: Vec<Option<String>> = asset_writes
+        .iter()
+        .map(|fact| {
+            fact.get("assetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let in_batch = |id: &str| {
+        batch_ids
+            .iter()
+            .position(|batch| batch.as_deref() == Some(id))
+    };
+    let inputs: Vec<Vec<String>> = asset_writes.iter().map(fact_input_asset_ids).collect();
+    // Library inputs are read once; batch inputs are resolved below.
+    let mut inherited: Vec<Vec<Value>> = Vec::with_capacity(asset_writes.len());
+    for fact_inputs in &inputs {
+        let external = fact_inputs
+            .iter()
+            .filter(|id| in_batch(id).is_none())
+            .cloned();
+        inherited.push(usage_policies_of(store, project_id, external)?);
+    }
+    // Each pass only adds entries, and a lineage chain within the batch is at most `len` deep, so
+    // `len + 1` passes reach the fixpoint.
+    for _ in 0..=asset_writes.len() {
+        let mut changed = false;
+        for index in 0..asset_writes.len() {
+            let mut from_batch = Vec::new();
+            for id in &inputs[index] {
+                if let Some(parent) = in_batch(id) {
+                    from_batch.extend(asset_usage_policies(id, &asset_writes[parent]));
+                    from_batch.extend(inherited[parent].iter().cloned());
+                }
+            }
+            changed |= push_distinct(&mut inherited[index], from_batch);
         }
-        let inherited = usage_policies_of(store, project_id, inputs)?;
+        if !changed {
+            break;
+        }
+    }
+    for (fact, inherited) in asset_writes.iter_mut().zip(inherited) {
         if inherited.is_empty() {
             continue;
         }
@@ -1170,11 +1305,7 @@ pub(crate) fn inherit_usage_policies(
             .entry("usagePolicies")
             .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(list) = merged.as_array_mut() {
-            for policy in inherited {
-                if !list.contains(&policy) {
-                    list.push(policy);
-                }
-            }
+            push_distinct(list, inherited);
         }
     }
     Ok(())
@@ -1200,13 +1331,15 @@ fn collect_asset_ids(value: &Value, out: &mut std::collections::BTreeSet<String>
 /// Refuse a commercial export that places a noncommercial asset, naming the asset and the
 /// alternative its model's verdict points to.
 pub(crate) fn refuse_commercial_export(policies: &[Value]) -> Result<(), ApiError> {
+    // An unresolved lineage entry fails closed: what it was made from cannot be shown eligible.
     let restricted: Vec<&Value> = policies
         .iter()
         .filter(|entry| {
-            entry
-                .pointer("/policy/commercialUse/verdict")
-                .and_then(Value::as_str)
-                == Some("refused")
+            entry.get("unresolved").is_some()
+                || entry
+                    .pointer("/policy/commercialUse/verdict")
+                    .and_then(Value::as_str)
+                    == Some("refused")
         })
         .collect();
     if restricted.is_empty() {
@@ -1221,7 +1354,7 @@ pub(crate) fn refuse_commercial_export(policies: &[Value]) -> Result<(), ApiErro
                 entry
                     .pointer("/policy/modelId")
                     .and_then(Value::as_str)
-                    .unwrap_or("?")
+                    .unwrap_or("lineage unresolved")
             )
         })
         .collect();

@@ -65,9 +65,12 @@ pub(crate) const RUN_LOCK_FILE: &str = ".yue2-run.lock";
 /// Engine progress is per token; posts are coalesced to at most one per interval.
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Whether an `audio_generate` payload is a YuE2 job.
+/// Whether an `audio_generate` payload is a YuE2 job. `"yue2": null` is no block — as the API
+/// reads it — so such a payload stays a generic audio job.
 pub(crate) fn is_yue2_job(payload: &JsonObject) -> bool {
-    payload.contains_key(contract::PAYLOAD_KEY)
+    payload
+        .get(contract::PAYLOAD_KEY)
+        .is_some_and(|block| !block.is_null())
 }
 
 /// Run a YuE2 job with the runtime's audio registry.
@@ -1439,22 +1442,14 @@ fn provenance_block(
 /// model it came from. Read from the usage policy the run was granted, never assumed.
 pub(crate) fn wav_licence_info(usage_policy: &Value) -> Vec<([u8; 4], String)> {
     let flag = |key: &str| usage_policy.get(key).and_then(Value::as_bool) == Some(true);
+    // The catalog's declared licence identifier (`license`, carried into the usage policy) — never
+    // a guess parsed out of the notice prose.
     let license = usage_policy
         .pointer("/license/license")
         .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            usage_policy
-                .pointer("/license/notice")
-                .and_then(Value::as_str)
-                .and_then(|notice| {
-                    notice
-                        .find("CC BY-NC")
-                        .map(|at| notice[at..].chars().take("CC BY-NC 4.0".len()).collect())
-                })
-        })
-        .unwrap_or_else(|| "see the model licence".to_owned());
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("see the model licence");
     let mut copyright = format!("Generated with YuE2 (weights: {license})");
     if flag("nonCommercial") {
         copyright.push_str(". NONCOMMERCIAL USE ONLY");

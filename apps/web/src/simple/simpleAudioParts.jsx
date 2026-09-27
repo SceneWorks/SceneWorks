@@ -5,6 +5,7 @@ import {
   AudioClock,
   AudioDownloadButton,
   AudioPlayButton,
+  AudioTruncatedBadge,
   AudioWaveform,
   LoadedAudioElement,
   WAVEFORM_BARS,
@@ -53,7 +54,7 @@ export function SimpleTakeCard({ run, asset, index, loaded, playing, progress, o
         <span className="su-take__duration">{formatClock(duration)}</span>
       </div>
       <strong className="su-take__title">
-        Take {index + 1} · {audioTakeTitle(run?.job, asset)}
+        Take {index + 1} · {audioTakeTitle(run?.job, asset)} <AudioTruncatedBadge asset={asset} />
       </strong>
       <span className="su-take__meta">
         {run?.modeLabel} · {run?.modelName}
@@ -103,6 +104,7 @@ export function SimpleAudioDeck({ run, asset, takeIndex, player, breakpoint, onR
           {takeIndex >= 0 ? <span className="audio-mode-chip__extra">Take {takeIndex + 1}</span> : null}
         </span>
         <strong className="su-deck__title">{audioTakeTitle(run?.job, asset)}</strong>
+        <AudioTruncatedBadge asset={asset} />
         <button aria-label="Close player" className="su-deck__close" onClick={player.unload} type="button">
           <Icon.Close size={16} />
         </button>
