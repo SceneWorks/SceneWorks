@@ -288,6 +288,8 @@ pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
+// YuE lyrics2song whole-render memory admission (sc-19386): max-over-stages + KV, all targets.
+mod yue_admission;
 use audio_jobs::*;
 // The Voice Clone "register a voice" embed path (sc-13517): the rust-api calls
 // `voice_register::embed_reference_clip` to compute a reference clip's Chatterbox-VE speaker vector

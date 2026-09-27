@@ -601,7 +601,7 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
 /// while the limit is still MLX's untouched default. `/ 3 * 2` (rather than `* 2 / 3`) makes any
 /// integer rounding go DOWNward, staying at or below the ceiling — which never throws.
 #[cfg(all(target_os = "macos", not(test)))]
-fn device_wired_ceiling_bytes() -> usize {
+pub(crate) fn device_wired_ceiling_bytes() -> usize {
     static CEILING: OnceLock<usize> = OnceLock::new();
     *CEILING.get_or_init(|| mlx_rs::memory::get_memory_limit() / 3 * 2)
 }

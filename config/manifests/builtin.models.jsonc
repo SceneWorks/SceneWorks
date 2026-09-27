@@ -26485,6 +26485,843 @@
       }
     },
     {
+      // YuE lyrics2song (epic sc-19373, sc-19383) — six stage-1 checkpoints (en / zh / jp-kr ×
+      // CoT / ICL), each its own registered candle-audio-yue provider (`yue_{en,zh,jp_kr}_{cot,icl}`).
+      // One render runs stage 1 (7B Llama, this entry's primary) → stage 2 (1B Llama) → xcodec →
+      // the vocal + instrumental Vocos upsamplers → a low-band splice, and returns a 44.1 kHz mix plus
+      // `vocals` and `instrumental` stems. Candle-only (epic R3 — no MLX audio backend exists).
+      //
+      // TIERS (epic R2): the stage-1 and stage-2 LMs ship bf16 / q8 / q4 as PHYSICAL pre-quantized
+      // subtrees (`<tier>/`, candle-llm `prepare_snapshot`), so a user downloads only the tier they
+      // pick — q4 by default. Each tier row carries the stage-2 LM at the SAME tier as a per-tier
+      // `coRequisite` (componentId `stage2`, `subdir` = the tier dir), exactly the Mage-Flow sc-14980
+      // shape, so `resolve_co_requisites_for_tier` can never pair a q4 stage 1 with a bf16 stage 2.
+      //
+      // xcodec + BOTH Vocos decoders are ONE untiered `coRequisite` (componentId `xcodec`) — the
+      // approved R2 carve-out: those convnets stay at upstream precision at every tier, and the
+      // re-host's `sceneworks-tiers.json` records `tiered: false`. The provider opens exactly three
+      // files from the one `xcodec` component directory (`candle_audio_yue::model::XCODEC_COMPONENT_ID`):
+      // `final_ckpt/ckpt_00360000.safetensors` (codec encode + decode AND the HuBERT semantic branch,
+      // read from its `semantic_model.*` tensors) and the two `decoders/decoder_*.safetensors` Vocos
+      // upsamplers. The re-host's `semantic_ckpts/`, `mm_tokenizer_v0.2_hf/` (the mm tokenizer is read
+      // from each stage-1 tier dir) and `config.yaml` files are never opened, so they are not
+      // downloaded. Its descriptor's `required_components` is
+      // exactly `["stage2", "xcodec"]`, which is what these two componentIds provision. Both
+      // co-requisites are shared by all six entries (same repo + revision ⇒ one cached snapshot).
+      //
+      // `files` name every file the loader opens (never `[]`), so a partial snapshot cannot read as
+      // installed. Sizes are the per-tier sums from the HF tree API at each pinned revision. Every
+      // repo is a SceneWorks safetensors re-host of the Apache-2.0 upstream carrying its LICENSE +
+      // NOTICE (About → Licenses: `yue`, `xcodec-mini-infer`).
+      "id": "yue_en_cot",
+      "name": "YuE English CoT (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["en"],
+        "sampleRates": [44100],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle",
+          "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle",
+          "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle",
+          "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle"
+      },
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
+      "candle": {
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-cot",
+      "ui": {
+        "label": "YuE English CoT",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-en-cot) lyrics-to-song model for English lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Chain-of-thought checkpoint: lyrics + genre tags only, no reference audio. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-en-cot (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-cot" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "yue_en_icl",
+      "name": "YuE English ICL (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["en"],
+        "sampleRates": [44100],
+        "conditioning": ["ReferenceAudio"],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle",
+          "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle",
+          "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle",
+          "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle"
+      },
+      // MEASURED on CUDA (sc-19387, epic 19373's terminal campaign): inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
+      "candle": {
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-icl",
+      "ui": {
+        "label": "YuE English ICL",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-en-icl) lyrics-to-song model for English lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Conditions on a reference clip (in-context learning): a single-track mix, or a dual-track vocal + instrumental pair, over a chosen time window. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-en-icl (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-en-icl" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "yue_zh_cot",
+      "name": "YuE Chinese CoT (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["zh"],
+        "sampleRates": [44100],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-cot-candle",
+          "revision": "b83f42f9d1ef918f63ad1b1fcde1f32ec1adc91e",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-cot-candle",
+          "revision": "b83f42f9d1ef918f63ad1b1fcde1f32ec1adc91e",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-cot-candle",
+          "revision": "b83f42f9d1ef918f63ad1b1fcde1f32ec1adc91e",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-cot-candle"
+      },
+      // CARRIED OVER from yue_en_cot (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
+      "candle": {
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-cot",
+      "ui": {
+        "label": "YuE Chinese CoT",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-zh-cot) lyrics-to-song model for Chinese lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Chain-of-thought checkpoint: lyrics + genre tags only, no reference audio. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-zh-cot (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-cot" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "yue_zh_icl",
+      "name": "YuE Chinese ICL (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["zh"],
+        "sampleRates": [44100],
+        "conditioning": ["ReferenceAudio"],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-icl-candle",
+          "revision": "846f49abbd9bbec4f2f59369d7bb1ba60998e642",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-icl-candle",
+          "revision": "846f49abbd9bbec4f2f59369d7bb1ba60998e642",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-zh-icl-candle",
+          "revision": "846f49abbd9bbec4f2f59369d7bb1ba60998e642",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-zh-icl-candle"
+      },
+      // CARRIED OVER from yue_en_icl (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
+      "candle": {
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-icl",
+      "ui": {
+        "label": "YuE Chinese ICL",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-zh-icl) lyrics-to-song model for Chinese lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Conditions on a reference clip (in-context learning): a single-track mix, or a dual-track vocal + instrumental pair, over a chosen time window. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-zh-icl (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-zh-icl" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "yue_jp_kr_cot",
+      "name": "YuE Japanese / Korean CoT (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["ja", "ko"],
+        "sampleRates": [44100],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": false,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle",
+          "revision": "6e9ed91d3f27566fc6162e2d6c5960fdbb4b06de",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle",
+          "revision": "6e9ed91d3f27566fc6162e2d6c5960fdbb4b06de",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle",
+          "revision": "6e9ed91d3f27566fc6162e2d6c5960fdbb4b06de",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-cot-candle"
+      },
+      // CARRIED OVER from yue_en_cot (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, no reference):
+      // q4 / q8 / bf16 peak = 5.71 / 8.34 / 13.12 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 8.42 / 13.58 / 14.10 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 11 / 17 / 18.
+      "candle": {
+        "minMemoryGb": 17,
+        "minMemoryGbByTier": { "q4": 8, "q8": 11, "bf16": 17 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-cot",
+      "ui": {
+        "label": "YuE Japanese / Korean CoT",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-jp-kr-cot) lyrics-to-song model for Japanese / Korean lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Chain-of-thought checkpoint: lyrics + genre tags only, no reference audio. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-jp-kr-cot (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-cot" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "yue_jp_kr_icl",
+      "name": "YuE Japanese / Korean ICL (Lyrics-to-Song)",
+      "family": "yue",
+      "type": "audio",
+      "macOnly": false,
+      "audio": {
+        "languages": ["ja", "ko"],
+        "sampleRates": [44100],
+        "conditioning": ["ReferenceAudio"],
+        "supportsMultiSpeaker": false,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": false,
+        "supportsSegmentedLyrics": true,
+        "supportsRepetitionPenalty": true,
+        "supportsReferenceRegion": true,
+        "supportsOutputLimiter": true
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle",
+          "revision": "f3e47df59921b81782c58bb9ef6678a7a91924db",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4497628709,
+          "footprint": {"diskSizeBytes": 4497628709}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle",
+          "revision": "f3e47df59921b81782c58bb9ef6678a7a91924db",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 7265869349,
+          "footprint": {"diskSizeBytes": 7265869349}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle",
+          "revision": "f3e47df59921b81782c58bb9ef6678a7a91924db",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12456344476,
+          "footprint": {"diskSizeBytes": 12456344476}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q4",
+          "subdir": "q4",
+          "files": ["q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1604865100,
+          "footprint": {"diskSizeBytes": 1604865100}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "q8",
+          "subdir": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2414365844,
+          "footprint": {"diskSizeBytes": 2414365844}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/yue-s2-1b-general-candle",
+          "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6",
+          "coRequisite": true,
+          "componentId": "stage2",
+          "variant": "bf16",
+          "subdir": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 3932179917,
+          "footprint": {"diskSizeBytes": 3932179917}
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/xcodec-mini-infer",
+          "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
+          "coRequisite": true,
+          "componentId": "xcodec",
+          "files": ["final_ckpt/ckpt_00360000.safetensors", "decoders/decoder_131000.safetensors", "decoders/decoder_151000.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 888703120,
+          "footprint": {"diskSizeBytes": 888703120}
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-jp-kr-icl-candle"
+      },
+      // CARRIED OVER from yue_en_icl (sc-19387): only the en checkpoints were captured on CUDA, and
+      // this entry's components are the same sizes (identical per-tier stage-1 / stage-2 / xcodec
+      // estimatedSizeBytes; same architecture), so the en floors apply. The en capture: inference#1083 run 36258288357
+      // (RTX PRO 6000 Blackwell, candle-audio-yue tests/cuda_memory_real_weights.rs @ inference 1744de6e),
+      // Audio Studio default request (verse + chorus, 2 segments x 3000 tokens, CFG on, a dual 60 s reference, the default 0-30 s window):
+      // q4 / q8 / bf16 peak = 6.35 / 8.94 / 13.78 GiB above the card's baseline (CUDA context included;
+      // max of the 500 ms nvidia-smi and 20 ms device series). Floors = ceil(peak x 1.25) per tier (the
+      // qwen_image_2_1 rule); the scalar is the densest tier, the fallback for an unlisted tier. These
+      // describe the default request only: longer songs and ICL windows are admitted or refused per
+      // request by the worker's yue_admission gate (its CUDA lane is calibrated on the same run).
+      // Metal (not read from this block — Apple silicon is gated by yue_admission's unified envelope):
+      // 10.53 / 15.72 / 16.71 GiB lifetime-max footprint on an M-series Mac, ceil(x1.25) = 14 / 20 / 21.
+      "candle": {
+        "minMemoryGb": 18,
+        "minMemoryGbByTier": { "q4": 8, "q8": 12, "bf16": 18 },
+        "measured": true
+      },
+      "licenseUrl": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-icl",
+      "ui": {
+        "label": "YuE Japanese / Korean ICL",
+        "description": "YuE (m-a-p/YuE-s1-7B-anneal-jp-kr-icl) lyrics-to-song model for Japanese / Korean lyrics — full songs with vocals from structured lyrics ([verse] / [chorus] …) and genre tags, rendered segment by segment (7B stage-1 LM + 1B stage-2 LM + xcodec + Vocos). Returns a 44.1 kHz mix plus separate vocal and instrumental stems. Conditions on a reference clip (in-context learning): a single-track mix, or a dual-track vocal + instrumental pair, over a chosen time window. bf16 / q8 / q4 tiers (q4 by default). Candle-native on every platform. Apache-2.0 (HKUST / M-A-P).",
+        "recommendedFor": ["music"],
+        "promptGuide": {
+          "title": "YuE Lyrics-to-Song Guide",
+          "path": "/prompt-guides/yue.md",
+          "sources": [
+            { "label": "m-a-p/YuE-s1-7B-anneal-jp-kr-icl (Hugging Face)", "url": "https://huggingface.co/m-a-p/YuE-s1-7B-anneal-jp-kr-icl" },
+            { "label": "YuE (GitHub)", "url": "https://github.com/multimodal-art-projection/YuE" }
+          ]
+        }
+      }
+    },
+    {
       // MOSS-TTS-Realtime (sc-13675, epic 13400 E2) — the audio lane's first STREAMING TTS model:
       // a Qwen3-1.7B autoregressive backbone + CSM-style local/depth transformer that emits 16 RVQ
       // speech-codebook frames one block at a time, decoded to 24 kHz PCM by the separate
@@ -27418,7 +28255,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "4aca60f746019e98f8981663f394728f5dfcd3e19172f9fdd88ea212417c7cd0",
+              "sha256": "1c4a8cdfd48754db4a08df939822bfa467a55ca08f49c98375fbe5c50dc8cec2",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27437,23 +28274,23 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 251788,
-                  "sha256": "337bb3b086e2b2043fb7e1672262d69d83295b008a858e2c2ede8b78a41315fa"
+                  "byteSize": 252128,
+                  "sha256": "a074f504d858a6481a7ba1ce05ba72139708bae08e80e82ebc94a2517db1ae72"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "97e099232b150eac3bc75df948d31bfc9d940f16e8f64b65ac54657dc2679a04"
+                  "sha256": "d211361f243d10d1e92da6964c9a093ccd628ec62ef8d488404077217ffdd89b"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 69413,
-                  "sha256": "e7b3bef233d919abd20583128beeeda6fdd87fa992566e02563630224dc9f358"
+                  "byteSize": 72566,
+                  "sha256": "0c8d130bcaabffc99216b44347c2fe406fbe467a30cbf4f5b87b0438e8e41142"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 135325,
-                  "sha256": "6795856b217fc457236ea01e1e79c5f65f7766424a5d9a1b1abb2e125b5f7ad8"
+                  "byteSize": 135633,
+                  "sha256": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -27467,8 +28304,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 8876,
-                  "sha256": "e4a84ddb3ff587798da7d6889c5375570dbc3f61758bf5f466c8d404a5046733"
+                  "byteSize": 9161,
+                  "sha256": "89dc986c5e099b8cedff8ec26f779c1c64d9e31ef9ffab21fdda9034c6544b3e"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -27497,8 +28334,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 148393,
-                  "sha256": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199"
+                  "byteSize": 148508,
+                  "sha256": "9df9a88168d4e57db4495452ed6fc30fb951f8315bb8727fb268f84f767795f6"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -27537,8 +28374,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 147353,
-                  "sha256": "321eb8f2fe37645316b97ad26c9765a50c6fa237b1ac9e60a8f7a70436658287"
+                  "byteSize": 149343,
+                  "sha256": "a7f90818d2879852238e608ded4f21cfa508797d965079f531b214cdbab8a7e3"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

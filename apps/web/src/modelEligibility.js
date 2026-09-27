@@ -156,10 +156,15 @@ export function videoModelUsable(model, caps) {
 //                  MOSS-TTSD, sc-13676). A streaming / multi-speaker TTS has no fixed voice list (it
 //                  speaks in its own voice(s)), so that capability is its speech signal — never a
 //                  hardcoded id.
-//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend). → ACE-Step.
+//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend) → ACE-Step,
+//                  OR sings segmented lyrics (audio.supportsSegmentedLyrics → the six YuE lyrics2song
+//                  checkpoints, sc-19383). A lyrics-to-song model has no edit surface, so the lyrics
+//                  capability is its music signal; without it YuE CoT would fall through to sfx.
 //   * voiceclone — conditions on a reference / speaker-identity embedding
 //                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
 //                  ACE-Step's conditioning is "AudioEdit" (a music-edit signal), so it does NOT match.
+//                  YuE ICL's ReferenceAudio is a SONG prompt (a lyrics2song model), not a voice to clone,
+//                  so a model that sings segmented lyrics never serves voiceclone.
 //   * sfx        — a general text-to-audio generator (audio.sampleRates[]) that is none of the above. → MOSS.
 function audioBlock(model) {
   return model?.audio && typeof model.audio === "object" ? model.audio : null;
@@ -186,6 +191,11 @@ function audioHasEditModes(audio) {
   return Array.isArray(audio?.editModes) && audio.editModes.length > 0;
 }
 
+// A lyrics-to-song model (backend Capabilities.supports_segmented_lyrics — YuE, sc-19383).
+function audioSingsSegmentedLyrics(audio) {
+  return audio?.supportsSegmentedLyrics === true;
+}
+
 function audioGenerates(audio) {
   // A generative (text→waveform) model advertises the sample rates it emits.
   return Array.isArray(audio?.sampleRates) && audio.sampleRates.length > 0;
@@ -205,10 +215,10 @@ export function audioModelServesMode(model, mode) {
     return audioHasVoices(audio) || audioSupportsStreaming(audio) || audioSupportsMultiSpeaker(audio);
   }
   if (mode === "music") {
-    return audioHasEditModes(audio);
+    return audioHasEditModes(audio) || audioSingsSegmentedLyrics(audio);
   }
   if (mode === "voiceclone") {
-    return audioHasVoiceCloneConditioning(audio);
+    return audioHasVoiceCloneConditioning(audio) && !audioSingsSegmentedLyrics(audio);
   }
   if (mode === "sfx") {
     return (
@@ -217,6 +227,7 @@ export function audioModelServesMode(model, mode) {
       !audioSupportsStreaming(audio) &&
       !audioSupportsMultiSpeaker(audio) &&
       !audioHasEditModes(audio) &&
+      !audioSingsSegmentedLyrics(audio) &&
       !audioHasVoiceCloneConditioning(audio)
     );
   }
