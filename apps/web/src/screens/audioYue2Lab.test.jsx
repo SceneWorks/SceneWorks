@@ -368,6 +368,18 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(container.querySelector(".settings-field-model select").value).toBe("kokoro_82m");
   });
 
+  it("does not re-check the acknowledgment when a catalog refresh hands back an equal entry", async () => {
+    await openEnabledLab();
+    const reads = calls("/license-acknowledgment", "GET").length;
+    // A catalog refresh: same entry, new object identity.
+    await render(context({ models: [...STANDARD, YUE1, yue2Entry()] }));
+    expect(calls("/license-acknowledgment", "GET").length).toBe(reads);
+    expect(container.querySelector('[data-testid="yue2-compose"]')).toBeTruthy();
+    // Changed licence terms DO re-read it.
+    await render(context({ models: [...STANDARD, YUE1, yue2Entry({ licenseNotice: "New terms (CC BY-NC 4.0)." })] }));
+    expect(calls("/license-acknowledgment", "GET").length).toBe(reads + 1);
+  });
+
   it("renders the acknowledgment read failure instead of an empty gate", async () => {
     apiFetchMock.mockImplementation(async (path) => {
       if (path.endsWith("/license-acknowledgment")) throw new ApiError("catalog unavailable", { status: 503 });

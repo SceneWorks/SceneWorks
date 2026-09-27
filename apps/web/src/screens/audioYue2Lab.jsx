@@ -256,17 +256,22 @@ export function Yue2SongLab({ header }) {
   const [ack, setAck] = useState({ status: "loading", acknowledged: false, error: null });
   const [ackBusy, setAckBusy] = useState(false);
   const [gateError, setGateError] = useState(null);
+  // Keyed on the model id and its licence TERMS, not the catalog object: a catalog refresh hands
+  // back a new object for the same entry, and re-reading on identity would reset the lab to
+  // "checking" on every refresh. Changed terms do re-read (the server lapses the old acceptance).
+  const modelId = model?.id ?? null;
+  const termsKey = model ? `${model.licenseNotice ?? ""}|${model.licenseUrl ?? ""}` : "";
   const loadAck = useCallback(() => {
-    if (!model) return undefined;
+    if (!modelId) return undefined;
     let live = true;
     setAck((current) => ({ ...current, status: "loading", error: null }));
-    getLicenseAcknowledgment(model.id, token)
+    getLicenseAcknowledgment(modelId, token)
       .then((view) => {
         if (!live) return;
         setAck({ status: "ready", acknowledged: view?.acknowledged === true, error: null, view });
         // Mirror the server's record into the download choke point's cache so an install from
         // here (or the Models card) is not refused for a stale browser flag.
-        if (view?.acknowledged === true) writeLicenseAck(model.id, true);
+        if (view?.acknowledged === true) writeLicenseAck(modelId, true);
       })
       .catch((error) => {
         if (live) setAck({ status: "error", acknowledged: false, error });
@@ -274,7 +279,9 @@ export function Yue2SongLab({ header }) {
     return () => {
       live = false;
     };
-  }, [model, token]);
+    // termsKey re-reads the acknowledgment when the licence terms change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelId, termsKey, token]);
   useEffect(() => loadAck(), [loadAck]);
 
   const enabled = settings.optIn && ack.status === "ready" && ack.acknowledged;
@@ -491,7 +498,11 @@ export function Yue2SongLab({ header }) {
           </div>
         </div>
 
-        {!enabled ? (
+        {!enabled && ack.status === "loading" ? (
+          <p className="yue2-muted" data-testid="yue2-ack-loading">
+            Checking your licence acceptance…
+          </p>
+        ) : !enabled ? (
           <Yue2Gate
             // Remount once the server's acknowledgment has loaded so the checkbox starts from it.
             key={`${ack.status}:${ack.acknowledged}`}
