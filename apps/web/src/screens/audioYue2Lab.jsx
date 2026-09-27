@@ -17,6 +17,7 @@ import {
   blockedTranscription,
   buildYue2JobRequest,
   commercialAlternatives,
+  installJobStatusLabel,
   composeKind,
   restoreYue2Settings,
   yue2ModelIdentity,
@@ -222,7 +223,7 @@ function Yue2Install({ model, downloads, onInstall, decoder }) {
       </ul>
       {downloads.map((job) => (
         <p className="yue2-muted" key={job.id}>
-          {job.payload?.localDerivation?.variant ?? job.payload?.variant ?? "install"}: {job.status}
+          {job.payload?.localDerivation?.variant ?? job.payload?.variant ?? "install"}: {installJobStatusLabel(job)}
           {job.message ? ` — ${job.message}` : ""}
         </p>
       ))}

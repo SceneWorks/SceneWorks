@@ -293,6 +293,12 @@ export function Yue2RunCard({
           ))}
         </ul>
       ) : null}
+      {view.truncationUnknown ? (
+        <p className="yue2-notice yue2-notice--info" data-testid="yue2-run-truncation-unknown">
+          <Icon.Info size={15} />
+          <span>Whether this run was truncated is unknown.</span>
+        </p>
+      ) : null}
       {view.scoreVersionSkipped ? (
         <p className="yue2-notice yue2-notice--warn" data-testid="yue2-run-version-skipped">
           <Icon.Warning size={15} />
@@ -818,7 +824,12 @@ export function Yue2ScoreWorkbench({
                   <div className="yue2-render" key={render.id}>
                     <span className={`status-badge ${render.status}`}>{render.status}</span>
                     {asset ? <audio controls preload="none" src={assetUrl(asset)} /> : null}
-                    {render.truncated?.abc || render.truncated?.semantic ? (
+                    {render.truncated == null ? (
+                      // A failed render may not know whether it truncated: say so, never "not truncated".
+                      <span className="status-badge" data-testid="yue2-render-truncation-unknown">
+                        truncation unknown
+                      </span>
+                    ) : render.truncated.abc || render.truncated.semantic ? (
                       <span className="status-badge warning">truncated</span>
                     ) : null}
                     {render.error ? <span className="yue2-error-text">{render.error}</span> : null}

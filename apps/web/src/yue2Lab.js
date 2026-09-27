@@ -485,6 +485,20 @@ export function yue2TierRows(model) {
   });
 }
 
+// The status of a model-download job, in words. A derived-tier install (q8 / q4) is claimed only by
+// an audio-lane worker and may sit queued longer than a plain download, so it says so.
+export function installJobStatusLabel(job) {
+  const derived = Boolean(job?.payload?.localDerivation);
+  const status = String(job?.status ?? "");
+  if (derived && (status === "queued" || status === "pending")) {
+    return "queued — waits for an audio-lane worker to derive it";
+  }
+  if (derived && status === "running") {
+    return "deriving on this machine";
+  }
+  return status;
+}
+
 export function yue2ModelInstalled(model) {
   return model?.installState === "installed";
 }
@@ -514,6 +528,8 @@ export function yue2RunView(job) {
   const status = job?.status ?? "queued";
   const running = !TERMINAL.has(status);
   const truncated = block.truncated && typeof block.truncated === "object" ? block.truncated : {};
+  // `truncated: null` means the run could not tell (a failed render): unknown, never "not truncated".
+  const truncationUnknown = "truncated" in block && block.truncated === null;
   const truncations = ["abc", "semantic"]
     .filter((key) => truncated[key] === true)
     .map((key) => ({ key, text: TRUNCATION_TEXT[key] }));
@@ -540,6 +556,7 @@ export function yue2RunView(job) {
     progress: Number.isFinite(progressNumber) ? Math.max(0, Math.min(1, progressNumber)) : 0,
     error,
     truncations,
+    truncationUnknown,
     warnings,
     sideEffectErrors: Array.isArray(block.sideEffectErrors) ? block.sideEffectErrors : [],
     effectiveSettings: block.effectiveSettings ?? null,

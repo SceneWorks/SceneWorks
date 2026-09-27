@@ -686,6 +686,28 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab().querySelector('[data-testid="yue2-invariant-report"]').textContent).toContain("melody — violated");
   });
 
+  it("shows a failed render's unknown truncation as unknown", async () => {
+    await openEnabledLab(context(), {
+      ack: true,
+      handle: async (path) => {
+        if (path === "/api/v1/projects/project_1/yue2/score-versions/ver_2") {
+          return {
+            version: { ...VERSION_RECORD, id: "ver_2" },
+            renders: [{ id: "rnd_f", status: "failed", truncated: null, error: "worker died" }],
+          };
+        }
+        return undefined;
+      },
+    });
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[1]);
+    await settle();
+    const renders = lab().querySelector('[data-testid="yue2-version-renders"]');
+    expect(renders.querySelector('[data-testid="yue2-render-truncation-unknown"]')).toBeTruthy();
+    expect(renders.textContent).toContain("worker died");
+  });
+
   it("renders a score version with the synthesis controls", async () => {
     await openEnabledLab();
     await setEveryAdvancedControl();

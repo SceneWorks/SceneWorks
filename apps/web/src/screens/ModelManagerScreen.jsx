@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { installJobStatusLabel } from "../yue2Lab.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
@@ -479,7 +480,7 @@ function ModelTierDownloadPanel({
                 title={incomplete ? incompleteHint : undefined}
               >
                 {activeJob
-                  ? activeJob.status
+                  ? installJobStatusLabel(activeJob)
                   : installed
                     ? "installed"
                     : pendingArtifact

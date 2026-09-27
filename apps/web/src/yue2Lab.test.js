@@ -6,6 +6,7 @@ import {
   buildYue2JobRequest,
   defaultEditDraft,
   defaultYue2Settings,
+  installJobStatusLabel,
   restoreYue2Settings,
   usagePolicyChips,
   yue2ModelIdentity,
@@ -273,6 +274,21 @@ describe("YuE2 run view (sc-23000)", () => {
     expect(view.warnings).toEqual([{ code: "semantic_truncated", message: "hit max tokens" }]);
     expect(view.sideEffectErrors).toEqual(["score version: boom"]);
     expect(view.usagePolicy).toBe(POLICY);
+  });
+
+  it("reports unknown truncation as unknown, never as not truncated", () => {
+    const view = yue2RunView({ status: "failed", payload: { yue2: { kind: "renderVersion" } }, result: { yue2: { truncated: null, error: "x" } } });
+    expect(view.truncationUnknown).toBe(true);
+    expect(view.truncations).toEqual([]);
+    expect(yue2RunView({ status: "completed", payload: { yue2: {} }, result: { yue2: { truncated: { abc: false, semantic: false } } } }).truncationUnknown).toBe(false);
+  });
+
+  it("says a derived-tier install waits for an audio-lane worker", () => {
+    expect(installJobStatusLabel({ status: "queued", payload: { localDerivation: { variant: "q8" } } })).toBe(
+      "queued — waits for an audio-lane worker to derive it",
+    );
+    expect(installJobStatusLabel({ status: "running", payload: { localDerivation: { variant: "q8" } } })).toBe("deriving on this machine");
+    expect(installJobStatusLabel({ status: "queued", payload: { variant: "bf16" } })).toBe("queued");
   });
 
   it("says when a truncated plan was not saved as a score version", () => {
