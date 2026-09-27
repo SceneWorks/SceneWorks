@@ -202,6 +202,26 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("attributes both conditional cover weights and the native port under distinct noncommercial notices", async () => {
+    await render();
+    const expected = [
+      ["SheetSage2 weights", "m-a-p/SheetSage2"],
+      ["MERT-v2-FullSong weights", "m-a-p/MERT-v2-FullSong"],
+      ["Native SheetSage2 and MERT-v2-FullSong transcription port", "candle-audio-sheetsage2"],
+    ];
+    for (const [name, provenance] of expected) {
+      const item = [...container.querySelectorAll(".licenses-item")].find((button) => button.textContent.includes(name));
+      expect(item, name).toBeTruthy();
+      await act(async () => item.click());
+      expect(container.querySelector(".licenses-facts").textContent).toContain("CC-BY-NC-4.0");
+      expect(container.querySelector(".licenses-usage").textContent).toContain("noncommercial");
+      const notice = container.querySelector(".licenses-text").textContent;
+      expect(notice).toContain("Attribution-NonCommercial 4.0 International Public License");
+      expect(notice).toContain(provenance);
+    }
+    expect(bundledLicenses.filter((entry) => entry.models.includes("yue2")).map((entry) => entry.id)).toEqual(["yue2"]);
+  });
+
   it("reports a bundled-text load failure and offers a retry", async () => {
     await render();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("local asset unavailable")));
