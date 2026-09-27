@@ -530,6 +530,11 @@ pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
 /// owner decision the user cannot make from a checkbox.
 pub(crate) const COMPONENT_BLOCKED_CODE: &str = "component_blocked";
 
+/// The derivation a `ModelDownload` job runs after fetching the original (sc-22999): the worker
+/// derives this tier locally through the audio-lane preparer into
+/// `local_derivation_snapshot_dir` and verifies it against the pinned weights.
+pub(crate) const LOCAL_DERIVATION_PAYLOAD_KEY: &str = "localDerivation";
+
 /// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
 /// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
 /// and `owner/name` to the same repository, so treating them as different would be a bypass.
@@ -933,6 +938,11 @@ pub(crate) async fn create_model_download_job(
             context: None,
         });
     }
+    // sc-22999: the acceptance is recorded server-side for the entry's current terms, so a queued
+    // YuE2 job can re-check it at execution and a withdrawn acknowledgment refuses the job.
+    if model_requires_license_acknowledgment(&model) && payload.license_acknowledged {
+        crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+    }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.
@@ -966,33 +976,60 @@ pub(crate) async fn create_model_download_job(
                 .unwrap_or("selected")
         )));
     }
-    // sc-22998: a locally derived tier (YuE2 q8 / q4) is not an artifact anyone can download — it is
-    // produced on this machine from the `fromVariant` original. Its row's `files` name the ORIGINAL,
-    // so queueing it would fetch bf16 and label the receipt with the derived tier. Refused with the
-    // reason until the worker's deriver exists (sc-22999) rather than "installing" nothing.
-    if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(&download) {
-        let variant = download
-            .get("variant")
-            .and_then(Value::as_str)
-            .unwrap_or("selected");
-        let from =
-            sceneworks_core::model_artifacts::artifact_selection::local_derivation(&download)
-                .map(|derivation| derivation.from_variant)
-                .unwrap_or_else(|| "original".to_owned());
-        return Err(ApiError::conflict(format!(
-            "Model '{model_id}': the '{variant}' tier is derived on this machine from the \
-             '{from}' original, not downloaded, and this build has no deriver for it yet. Install \
-             the '{from}' tier instead."
-        )));
-    }
+    // sc-22998 / sc-22999: a locally derived tier (YuE2 q8 / q4) is not an artifact anyone can
+    // download — it is produced on this machine from the `fromVariant` original. Its row's `files`
+    // name the ORIGINAL, so the job fetches (or re-verifies) that original under the ORIGINAL's
+    // variant (its receipt is the original's, never the tier's) and carries the derivation for the
+    // worker's audio-lane preparer to run afterwards. The tier reads installed only once its
+    // snapshot verifies against the pinned weights (`derived_snapshot_state`).
+    let derivation =
+        if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+            &download,
+        ) {
+            let variant = download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+                .to_owned();
+            let derivation =
+                sceneworks_core::model_artifacts::artifact_selection::local_derivation(&download)
+                    .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "Model '{model_id}': the '{variant}' tier declares a malformed \
+                         localDerivation block."
+                    ))
+                })?;
+            Some((variant, derivation))
+        } else {
+            None
+        };
+    let download = match &derivation {
+        Some((variant, derivation)) => model_download_for_variant(&model, &derivation.from_variant)
+            .filter(|original| {
+                !sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                    original,
+                )
+            })
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Model '{model_id}': the '{variant}' tier derives from '{}', which this \
+                     catalog does not define as a download.",
+                    derivation.from_variant
+                ))
+            })?,
+        None => download,
+    };
     // The selected `download` is always the primary/tier entry — `model_download` and
     // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
     // installed as if it were the model itself.
-    let requested_variant = payload
-        .variant
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let requested_variant = match &derivation {
+        Some((_, derivation)) => Some(derivation.from_variant.as_str()),
+        None => payload
+            .variant
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    };
 
     // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
     // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
@@ -1069,7 +1106,7 @@ pub(crate) async fn create_model_download_job(
     )
     .await?;
 
-    let job_payload = build_model_download_job_payload(
+    let mut job_payload = build_model_download_job_payload(
         &model,
         &model_id,
         &download,
@@ -1078,6 +1115,19 @@ pub(crate) async fn create_model_download_job(
         payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
+    if let Some((variant, derivation)) = &derivation {
+        job_payload.insert(
+            LOCAL_DERIVATION_PAYLOAD_KEY.to_owned(),
+            json!({
+                "variant": variant,
+                "fromVariant": derivation.from_variant,
+                "conversion": derivation.conversion,
+                "weightsFile": derivation.weights_file,
+                "weightsBytes": derivation.weights_bytes,
+                "weightsSha256": derivation.weights_sha256,
+            }),
+        );
+    }
 
     // Co-requisites (sc-9696): dependencies that must install ALONGSIDE the primary — e.g. the PiD
     // decoder's shared gemma-2-2b-it caption encoder, or 10Eros's cond_safe distill LoRA. Without
@@ -3894,10 +3944,9 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
 /// `alternativeFamily` that are themselves eligible here — YuE2 lists the YuE1 entries. The declared
 /// block is otherwise passed through untouched, and nothing here reroutes anything.
 ///
-/// This EXPOSES the verdict; it enforces nothing. SceneWorks has no commercial-use route yet: the
-/// verdict (`model_usage_policy::commercial_use_verdict`) is published here for routes to enforce,
-/// and sc-22999 wires the refusal into its YuE2 job/export routes and persists the licence
-/// acknowledgment and noncommercial policy into provenance and exports.
+/// This EXPOSES the verdict; it enforces nothing. The routes that enforce it (sc-22999) are the
+/// YuE2 job route and its execution-time eligibility check (`yue2_jobs`) and timeline exports,
+/// which also persist the licence acknowledgment and noncommercial policy into provenance.
 fn annotate_commercial_use_alternatives(model: &mut Value, catalog: &[Value]) {
     if model.get("commercialUse").is_none() {
         return;
@@ -7419,7 +7468,8 @@ struct ModelVariantState {
     tier_deletable: bool,
     /// sc-22998: `Some` only for a locally derived tier (`downloads[].localDerivation`). `true` while
     /// no snapshot verified against the pinned derived weights exists at its location — the tier
-    /// is then not installed and not installable (no deriver ships yet, sc-22999).
+    /// is then not installed; `POST /models/:id/download {variant}` fetches the original and the
+    /// worker derives the tier locally (sc-22999).
     derivation_pending: Option<bool>,
 }
 

@@ -1,11 +1,12 @@
 //! Usage policy declared by a catalog entry (sc-22998, epic sc-22988 E2 / E7): whether a model may
 //! run on a commercial-use route, and how a purpose-specific component closure is acquired.
 //!
-//! These are the resolvers; enforcement belongs to the routes that call them. As of sc-22998 no
-//! SceneWorks route is a commercial-use route: the API only publishes the verdict's pointer
-//! (`commercialUse.alternatives` on `GET /api/v1/models`), and sc-22999 wires the refusal into its
-//! YuE2 job/export routes. The repo-keyed download gate refuses `blocked` conditional components on
-//! every door (`models::ensure_license_acknowledged_for_source`).
+//! These are the resolvers; enforcement belongs to the routes that call them. The API publishes the
+//! verdict's pointer (`commercialUse.alternatives` on `GET /api/v1/models`) and, since sc-22999,
+//! enforces it wherever a request declares a commercial use: the YuE2 job route and its
+//! execution-time eligibility check (`yue2_jobs::yue2_eligibility`), and timeline exports whose
+//! placed assets carry a refusing usage policy. The repo-keyed download gate refuses `blocked`
+//! conditional components on every door (`models::ensure_license_acknowledged_for_source`).
 //!
 //! Both answers are read from the manifest entry itself — `nonCommercial`, `commercialUse` and
 //! `conditionalComponents` — never from a model id or name, so the policy for a model travels with

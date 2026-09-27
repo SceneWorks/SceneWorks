@@ -666,6 +666,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
+        // A YuE2 retry/duplicate is held to the stored-block contract the worker enforces
+        // (sc-22999): a changed `yue2` block is re-validated here, not first at execution.
+        crate::yue2_jobs::validate_replayed_yue2_block(&merged)?;
     } else {
         validate_raw_job_payload(state, &job_type, &merged).await?;
     }
@@ -1462,6 +1465,9 @@ async fn apply_progress_side_effects(
     // re-inject the built sidecars into the result so the UI keeps streaming them
     // (story 1656 — Rust is the single project-store writer).
     persist_reported_assets(state, &job_id, &mut result).await?;
+    // YuE2 (sc-22999): a finished plan becomes a score version; a score-version render — completed
+    // or failed — is recorded against its version. Idempotent per job for the recovery sweep.
+    crate::yue2_jobs::apply_yue2_side_effects(state, &job, &mut result).await?;
 
     if result == accepted_result && !clear_terminal_side_effects {
         return Ok(job);
@@ -1632,6 +1638,7 @@ pub(crate) async fn persist_reported_assets(
     })
     .await?;
     stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
+    crate::yue2_jobs::stamp_export_usage_policies(&job.job_type, &job.payload, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
