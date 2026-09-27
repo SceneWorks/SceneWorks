@@ -28530,7 +28530,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "1c6a6f52e35d45f8008f64078bd49f8224eb8086d1edb23383dab61457e2c5fa",
+              "sha256": "75972d2382ba9bb415e9c3e2d260f5093c17669337f299eeb67729e476e3408c",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28549,23 +28549,23 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 252540,
-                  "sha256": "6995446c7e738d06a8b6e7c8dea073450952734d411d257d286a00cd2f772f91"
+                  "byteSize": 252550,
+                  "sha256": "7a0c7eb59fa8534c6920fb6971aa62707f0cf4cb965cdef11bd8d5cafb02344c"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "456657f5c9b674685793d38996e27a3e694ea0eb5f639ae900b339eedf14e972"
+                  "sha256": "0b5ade4d1468817d05d80316d845c077cc67793ced045b92223fac9cce7b1ebf"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 70210,
-                  "sha256": "37c5dadf78cb264f951277451d818bcfd863e8e8b50eed11dc2cd3797a445d1e"
+                  "byteSize": 73363,
+                  "sha256": "6f575abb52cda2949552a870ac895dc7e6882dc38c0fbba8ed1bf74093dcc56a"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
-                  "byteSize": 135612,
-                  "sha256": "16d139aabfed54280ef4d36f67bca1197dfee9b3a0c61dc3c2a8554813b0e321"
+                  "byteSize": 135920,
+                  "sha256": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12"
                 },
                 {
                   "path": "apps/rust-api/src/main.rs",
@@ -28579,8 +28579,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 8876,
-                  "sha256": "e1cc7ba931ad9349a3b7fefd0b18d1cb343168bd1e8b1fdce1c61508213592ac"
+                  "byteSize": 9161,
+                  "sha256": "be2f413d318cd6bf7bc16bd8f6a7ad487cecdec02819943e10631590e9282830"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -28609,8 +28609,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 149484,
-                  "sha256": "a8b08c50805129ac3c718c59b0cfde77768311cb084b7ca5b9b460f970518f29"
+                  "byteSize": 149599,
+                  "sha256": "cd80e397fd0f619e89953d9c0efbf2b0c8249e81d1d5feceb6411c3db83a5760"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -28649,8 +28649,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 158058,
-                  "sha256": "cb0e7987edd161160eebf2d48e04da25e1a217ebb4d3c19dfb0de25fe5e8f309"
+                  "byteSize": 160048,
+                  "sha256": "e2e407f975f2e1b5fee9b7fb4601f4d06517fc58e2748a46ceee3fd3d5a62b7c"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 11319984 (inference feature/sc-22988-yue2, merge of PR #1086 — the YuE2 feature-end review round 2: memory controls are no longer part of any run identity). This is the YuE2 epic's feature-branch pin (SceneWorks sc-22999), not an inference main revision; the epic's terminal story re-pins to the merged inference main commit. The delta from the previously pinned revision f695a359 is confined to crates/audio/candle-audio-yue2 (plan-only, cover, memory controls kept out of the run, input and cached-decode identities, truncation warnings and AR progress through the Generator contract; one durable digest/atomic-write helper; advertised supported_quants [Q4, Q8]; real-weight tier and parity tests), a CUDA-lane CI change and the runtime bundles re-exporting the audio provider crates. It adds no production crate and no ported-source area. The crates/audio/candle-audio-yue, candle-audio-yue2 and candle-audio-sheetsage2 crate classifications remain open items reported by check-license-coverage.mjs for the compliance pass (report-only since sc-19751). Current reviewed population: 735 provenance candidates and 103 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
-  "inferenceRevision": "11319984d0c5aa7ff63bffa0760d93aec823aeea",
-  "auditDigest": "3c7648f16c5d383ab77d4bb5e7b320c4126d70c550bb857940ecc4ea9d768bc5",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision f3197395 (inference feature/sc-22988-yue2 after it absorbed inference main as of 2026-09-26, which includes 1744de6e — the YuE-v1 chunked codec + Vocos decode pinned by SceneWorks main — plus all of YuE2). This is the YuE2 epic's feature-branch pin (SceneWorks sc-22988 main sync, 2026-09-27), not an inference main revision; the epic's terminal story re-pins to the merged inference main commit. Against the previous feature pin 11319984 the only candidate row that changed is crates/audio/candle-audio-yue/src/vocoder.rs, whose chunked-upsample module doc (inference PR #1073) adds marker text to an already-classified upstream-Vocos port; its architecture:crates/audio/candle-audio-yue classification is unchanged. It adds no production crate and no ported-source area. The crates/audio/candle-audio-yue, candle-audio-yue2 and candle-audio-sheetsage2 crate classifications remain open items reported by check-license-coverage.mjs for the compliance pass (report-only since sc-19751). Current reviewed population: 735 provenance candidates and 103 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
+  "inferenceRevision": "f3197395e44031249dc35f6729490eefd3ac795f",
+  "auditDigest": "0b6b756b0da885688c871215d074334d2d599e562cc7fd90162162a49e7d46e7",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "11319984d0c5aa7ff63bffa0760d93aec823aeea",
+    "revision": "f3197395e44031249dc35f6729490eefd3ac795f",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 735,
-    "populationSha256": "0b9c7b2f18753d151cad7662f977fc8f764d46804d4c4efd10c83fb4d4fbbd74"
+    "populationSha256": "efb8e9c9fb5789b120a35e22122207efbc4bb49103a2b252cffda7108e56a030"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "11319984d0c5aa7ff63bffa0760d93aec823aeea",
+    "revision": "f3197395e44031249dc35f6729490eefd3ac795f",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 103,
     "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"
