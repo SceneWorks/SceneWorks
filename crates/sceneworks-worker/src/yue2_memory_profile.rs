@@ -4,19 +4,23 @@
 //!
 //! The Node controller owns the case list, repository and closure-digest identity, the memory
 //! sampler (Darwin: the `memory-calibration-watchdog.py` footprint guard; CUDA: `nvidia-smi`) and
-//! the record. This module owns the reviewable native work, through the SAME seams a YuE2 job uses:
-//! the installed weights resolved as the job resolves them (the pinned bf16 snapshot, or the locally
-//! derived q8 / q4 tier verified against its pins), the job's admission gate
-//! ([`crate::yue2_admission::check`], against this host's live budget), and the registered `yue2`
-//! provider loaded through [`crate::inference_runtime::load_audio`]. It writes, into the case's output
-//! directory:
+//! the record. This module owns the reviewable native work, through the job path's OWN functions
+//! (sc-23002): a case is parsed into the `create` job the API would queue ([`case_spec`]), whose
+//! weights are resolved by `yue2_jobs::resolve_load` (the pinned bf16 snapshot, or the locally derived
+//! q8 / q4 tier verified against its pins), whose engine request is `yue2_jobs::build_request`, and
+//! whose admission is the job's gate ([`crate::yue2_admission::check`] with `yue2_jobs::admission_pins`,
+//! against this host's live budget); the registered `yue2` provider is loaded through
+//! [`crate::inference_runtime::load_audio`]. It writes, into the case's output directory:
 //!
 //! * `admission.json` — the admission outcome: refused (with the gate's message), or the chosen
 //!   controls, the per-stage estimate and its evidence class;
 //! * `stages.jsonl` — `{"stage", "at"}` marks (wall-clock seconds, the sampler's clock) as the
 //!   render moves through load → plan → semantic → acoustic → decode, driven by the admission lease
 //!   from the engine's own progress, so the controller attributes each memory sample to a stage;
-//! * `outcome.json` — completed / failed, with the audio's length and RMS.
+//! * `outcome.json` — completed, with the audio's length and RMS, the run's truncation flags, the
+//!   per-stage wall times (from the stage marks, [`stage_seconds`]), the engine's own timings and the
+//!   run / plan / decoder / latent identities read back from the published run's `result.json`
+//!   ([`outcome_json`]) — so a record states which exact latent and decoder it measured.
 //!
 //! ```text
 //! SCENEWORKS_ENABLE_YUE2_MEMORY_PROFILE=1 SCENEWORKS_YUE2_PROFILE_CASE=<case.json> \
@@ -29,14 +33,13 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gen_core::{
-    AudioArtifacts, AudioParams, GenerationOutput, GenerationRequest, LoadSpec, Precision,
-    Progress, Quant, SongDecoder, SongParams, SongPlanning, TokenSampling, WeightsSource,
-};
+use gen_core::{CancelFlag, GenerationOutput, GenerationRequest, Progress};
+use sceneworks_core::yue2_score::jobs::{self as contract, Yue2JobSpec};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::yue2_admission::{Yue2LoadFacts, Yue2Stage, Yue2Tier};
+use crate::yue2_jobs::{admission_pins, build_request, resolve_load, Inputs};
 use crate::Settings;
 
 const ENABLE_ENV: &str = "SCENEWORKS_ENABLE_YUE2_MEMORY_PROFILE";
@@ -62,7 +65,7 @@ pub(crate) struct CaseRequest {
     lyrics: String,
     seed: u64,
     #[serde(default)]
-    cfg_scale: Option<f32>,
+    cfg_scale: Option<f64>,
     #[serde(default)]
     steps: Option<u32>,
     #[serde(default)]
@@ -81,52 +84,47 @@ pub(crate) struct ProfileCase {
     request: CaseRequest,
 }
 
-fn sampling(s: &CaseSampling) -> TokenSampling {
-    TokenSampling {
-        min_tokens: s.min_tokens,
-        max_tokens: s.max_tokens,
-        ..Default::default()
-    }
+fn sampling_json(s: &CaseSampling) -> Value {
+    json!({ "minTokens": s.min_tokens, "maxTokens": s.max_tokens })
 }
 
-/// The job-shaped request a case renders into `run_dir`.
+/// The YuE2 job a case measures: the `create` job the API queues for the same request, parsed from
+/// the same `POST /api/v1/projects/:id/yue2/jobs` body and held to the same `validate_request`. The
+/// capture then resolves, admits and renders it through the job's own `resolve_load`,
+/// `admission_pins` and `build_request` (`crate::yue2_jobs`), so the campaign measures exactly what a
+/// production job runs — there is no second copy of the load or request construction to drift.
+pub(crate) fn case_spec(case: &ProfileCase) -> Result<Yue2JobSpec, String> {
+    let request = &case.request;
+    let body = json!({
+        "kind": "create",
+        "planning": request.planning,
+        "style": request.style,
+        "lyrics": request.lyrics,
+        "seed": request.seed,
+        "cfgScale": request.cfg_scale,
+        "steps": request.steps,
+        "scoreSampling": request.score_sampling.as_ref().map(sampling_json),
+        "semanticSampling": request.semantic_sampling.as_ref().map(sampling_json),
+        "decoder": case.decoder,
+        "tier": case.tier,
+    });
+    let spec: Yue2JobSpec =
+        serde_json::from_value(body).map_err(|error| format!("{}: {error}", case.id))?;
+    contract::validate_request(&spec).map_err(|error| format!("{}: {error}", case.id))?;
+    Ok(spec)
+}
+
+/// The request a case renders into `run_dir`: the job path's `build_request` for [`case_spec`].
 pub(crate) fn case_request(
     case: &ProfileCase,
     run_dir: &Path,
 ) -> Result<GenerationRequest, String> {
-    let planning = match case.request.planning.as_str() {
-        "full" => SongPlanning::Full,
-        "melody" => SongPlanning::Melody,
-        "off" => SongPlanning::Off,
-        other => return Err(format!("unknown planning {other:?}")),
-    };
-    let decoder = match case.decoder.as_str() {
-        "standard" => SongDecoder::Standard,
-        "legacy" => SongDecoder::Legacy,
-        other => return Err(format!("unknown decoder {other:?}")),
-    };
-    Ok(GenerationRequest {
-        prompt: case.request.style.clone(),
-        seed: Some(case.request.seed),
-        steps: case.request.steps,
-        guidance: case.request.cfg_scale,
-        audio: Some(AudioParams {
-            lyrics: Some(case.request.lyrics.clone()),
-            song: Some(SongParams {
-                planning: Some(planning),
-                decoder: Some(decoder),
-                score_sampling: case.request.score_sampling.as_ref().map(sampling),
-                semantic_sampling: case.request.semantic_sampling.as_ref().map(sampling),
-                ..Default::default()
-            }),
-            artifacts: Some(AudioArtifacts {
-                dir: run_dir.to_path_buf(),
-                resume: false,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    })
+    Ok(build_request(
+        &case_spec(case)?,
+        &Inputs::default(),
+        run_dir,
+        CancelFlag::new(),
+    ))
 }
 
 /// The stage key a record carries for a lease stage (the acoustic prefill and solve alternate chunk
@@ -186,7 +184,8 @@ fn write_json(path: &Path, value: &Value) {
 
 struct StageMarks {
     file: std::fs::File,
-    last: Option<&'static str>,
+    /// Every mark written, in order: `(stage, at)`.
+    marks: Vec<(&'static str, f64)>,
 }
 
 impl StageMarks {
@@ -197,71 +196,84 @@ impl StageMarks {
                 .append(true)
                 .open(path)
                 .expect("open stage marks"),
-            last: None,
+            marks: Vec::new(),
         }
     }
 
     fn mark(&mut self, stage: &'static str) {
-        if self.last == Some(stage) {
+        if self.marks.last().map(|(last, _)| *last) == Some(stage) {
             return;
         }
-        self.last = Some(stage);
-        let line = json!({ "stage": stage, "at": now_secs() });
+        let at = now_secs();
+        self.marks.push((stage, at));
+        let line = json!({ "stage": stage, "at": at });
         writeln!(self.file, "{line}").expect("write stage mark");
         self.file.flush().expect("flush stage mark");
     }
 }
 
-/// The installed weights directory for `tier`, resolved exactly as the YuE2 job resolves it.
-fn tier_dir(data_dir: &Path, entry: &Value, tier: Yue2Tier) -> PathBuf {
-    use sceneworks_core::model_artifacts::artifact_selection::{
-        derived_snapshot_state, local_derivation, local_derivation_snapshot_dir,
-        DerivedSnapshotState,
-    };
-    let row = entry["downloads"]
-        .as_array()
-        .expect("downloads")
-        .iter()
-        .find(|row| row["variant"] == tier.key())
-        .unwrap_or_else(|| panic!("the catalog declares no {} tier", tier.key()));
-    match local_derivation(row) {
-        None => crate::model_jobs::huggingface_pinned_snapshot_dir(
-            data_dir,
-            row["repo"].as_str().expect("repo"),
-            row["revision"].as_str().expect("revision"),
-        )
-        .unwrap_or_else(|| {
-            panic!(
-                "the {} weights are not installed under {data_dir:?}",
-                tier.key()
-            )
-        }),
-        Some(derivation) => {
-            let dir = local_derivation_snapshot_dir(data_dir, "yue2", tier.key(), &derivation)
-                .expect("a safe derivation path");
-            assert!(
-                matches!(
-                    derived_snapshot_state(&dir, &derivation),
-                    DerivedSnapshotState::Verified
-                ),
-                "the derived {} tier at {dir:?} is not installed and verified",
-                tier.key()
-            );
-            dir
-        }
+/// The wall time each stage held, in seconds: from its mark to the next mark. A stage the render
+/// entered more than once (it cannot today — the lease only moves forward) sums its spans. The last
+/// mark (`done`) closes the final stage and holds no time of its own.
+pub(crate) fn stage_seconds(marks: &[(&'static str, f64)]) -> serde_json::Map<String, Value> {
+    let mut seconds: std::collections::BTreeMap<&str, f64> = Default::default();
+    for pair in marks.windows(2) {
+        let ((stage, from), (_, to)) = (pair[0], pair[1]);
+        *seconds.entry(stage).or_default() += (to - from).max(0.0);
     }
+    seconds
+        .into_iter()
+        .map(|(stage, secs)| (stage.to_owned(), json!(secs)))
+        .collect()
 }
 
-fn component_dir(data_dir: &Path, entry: &Value, component: &str) -> Option<PathBuf> {
-    let row = entry["downloads"]
-        .as_array()?
-        .iter()
-        .find(|row| row["componentId"] == component)?;
-    crate::model_jobs::huggingface_pinned_snapshot_dir(
-        data_dir,
-        row["repo"].as_str()?,
-        row["revision"].as_str()?,
-    )
+/// `outcome.json` for a completed render: the audio's length and RMS, the published run's truncation
+/// flags and identities (`result.json`: run, plan, decoder, latent) and its engine timings, and the
+/// per-stage wall times. Every run field is required — a run record that lacks one is an error, never
+/// a default, so a record can never claim an identity or a truncation state the run did not state.
+pub(crate) fn outcome_json(
+    case_id: &str,
+    audio_seconds: f64,
+    rms: f32,
+    run_result: &Value,
+    stage_seconds: serde_json::Map<String, Value>,
+) -> Result<Value, String> {
+    let field = |key: &str| {
+        run_result
+            .get(key)
+            .filter(|value| !value.is_null())
+            .cloned()
+            .ok_or_else(|| format!("the run's result.json has no `{key}`"))
+    };
+    let truncated = field("truncated")?;
+    for phase in ["abc", "semantic"] {
+        if !truncated.get(phase).is_some_and(Value::is_boolean) {
+            return Err(format!(
+                "the run's result.json states no boolean `truncated.{phase}`"
+            ));
+        }
+    }
+    let latent = field("latent")?;
+    if !latent
+        .get("sha256")
+        .and_then(Value::as_str)
+        .is_some_and(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("the run's latent identity has no sha256".into());
+    }
+    Ok(json!({
+        "caseId": case_id,
+        "outcome": "completed",
+        "audioSeconds": audio_seconds,
+        "rms": rms,
+        "truncated": { "abc": truncated["abc"], "semantic": truncated["semantic"] },
+        "stageSeconds": stage_seconds,
+        "engineTiming": field("timing")?,
+        "runIdentity": field("identity")?,
+        "planIdentity": field("plan_identity")?,
+        "decoder": field("decoder")?,
+        "latent": latent,
+    }))
 }
 
 fn builtin_entry() -> Value {
@@ -283,25 +295,22 @@ fn capture_case() {
     std::fs::create_dir_all(&out).expect("output dir");
     let case: ProfileCase =
         serde_json::from_slice(&std::fs::read(&case_file).expect("read case")).expect("case json");
-    let tier = Yue2Tier::from_key(&case.tier).expect("a YuE2 tier");
     let settings = Settings::from_env();
     let entry = builtin_entry();
     let run_dir = out.join("run");
-    let mut request = case_request(&case, &run_dir).expect("case request");
-
-    let weights = tier_dir(&settings.data_dir, &entry, tier);
-    let mut spec = LoadSpec::new(WeightsSource::Dir(weights));
-    spec.precision = Precision::default();
-    spec.quantize = match tier {
-        Yue2Tier::Bf16 => None,
-        Yue2Tier::Q8 => Some(Quant::Q8),
-        Yue2Tier::Q4 => Some(Quant::Q4),
-    };
-    for (component, id) in [("vae", "vae"), ("vae_legacy", "vae_legacy")] {
-        if let Some(dir) = component_dir(&settings.data_dir, &entry, component) {
-            spec = spec.with_component(id, WeightsSource::Dir(dir));
-        }
+    // A capture measures one fresh render: a run left by an earlier attempt would be resumed (the
+    // job path renders with `resume: true`) and measure a partial render.
+    for leftover in [run_dir.clone(), crate::yue2_jobs::partial_dir(&run_dir)] {
+        assert!(
+            !leftover.exists(),
+            "{leftover:?} already exists; capture into a fresh output directory"
+        );
     }
+    let spec = case_spec(&case).unwrap_or_else(|why| panic!("{why}"));
+    let load = resolve_load(&settings, &entry, &spec).unwrap_or_else(|why| panic!("{why}"));
+    let mut request = build_request(&spec, &Inputs::default(), &run_dir, CancelFlag::new());
+    let tier = Yue2Tier::from_key(load.tier.as_str()).expect("a YuE2 tier");
+    let pins = admission_pins(&spec).unwrap_or_else(|why| panic!("{why}"));
 
     crate::yue2_admission::probe_hardware_in_this_test();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -309,11 +318,11 @@ fn capture_case() {
         .build()
         .expect("runtime");
     let admitted = runtime.block_on(crate::yue2_admission::check(
-        "yue2",
+        contract::MODEL_ID,
         &entry,
         &request,
-        Yue2LoadFacts::of(tier, &spec),
-        None,
+        Yue2LoadFacts::of(tier, &load.spec),
+        Some(pins),
         &settings.gpu_id,
     ));
     let admitted = match admitted {
@@ -338,7 +347,8 @@ fn capture_case() {
     let mut lease = admitted.lease;
     let mut marks = StageMarks::open(&out.join("stages.jsonl"));
     marks.mark("load");
-    let generator = crate::inference_runtime::load_audio("yue2", &spec).expect("load yue2");
+    let generator =
+        crate::inference_runtime::load_audio(contract::MODEL_ID, &load.spec).expect("load yue2");
     let report = {
         let mut on_progress = |progress: Progress| {
             lease.observe(&progress);
@@ -352,6 +362,14 @@ fn capture_case() {
     drop(generator);
     drop(lease);
     marks.mark("done");
+    let published = report
+        .artifacts
+        .as_ref()
+        .expect("the render published no run record");
+    let run_result: Value = serde_json::from_slice(
+        &std::fs::read(published.dir.join("result.json")).expect("read the run's result.json"),
+    )
+    .expect("the run's result.json is JSON");
     let (seconds, rms) = match report.output {
         Some(GenerationOutput::Audio(track)) => {
             let n = track.samples.len().max(1);
@@ -365,18 +383,186 @@ fn capture_case() {
         _ => panic!("the render returned no audio"),
     };
     assert!(rms > 1e-3, "the render is silent (rms {rms})");
-    write_json(
-        &out.join("outcome.json"),
-        &json!({ "caseId": case.id, "outcome": "completed", "audioSeconds": seconds, "rms": rms }),
-    );
+    let outcome = outcome_json(
+        &case.id,
+        seconds,
+        rms,
+        &run_result,
+        stage_seconds(&marks.marks),
+    )
+    .unwrap_or_else(|why| panic!("{why}"));
+    write_json(&out.join("outcome.json"), &outcome);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gen_core::{SongDecoder, SongPlanning};
 
     fn case(json: Value) -> Result<ProfileCase, serde_json::Error> {
         serde_json::from_value(json)
+    }
+
+    /// A case as the harness writes it (`caseFile` in scripts/yue2-memory-profile.mjs), setting
+    /// every field a case can carry, and the Song Lab / API job body for the same song.
+    fn full_case() -> ProfileCase {
+        case(json!({
+            "id": "yue2:q4:metal:long-context",
+            "tier": "q4",
+            "decoder": "legacy",
+            "request": {
+                "planning": "melody", "style": "rock", "lyrics": "[verse]\nla", "seed": 7,
+                "cfgScale": 1.01, "steps": 32,
+                "scoreSampling": { "maxTokens": 2048 },
+                "semanticSampling": { "minTokens": 16000, "maxTokens": 16000 }
+            }
+        }))
+        .expect("parses")
+    }
+
+    fn full_job_body() -> Value {
+        json!({
+            "kind": "create", "planning": "melody", "style": "rock", "lyrics": "[verse]\nla",
+            "seed": 7, "cfgScale": 1.01, "steps": 32, "tier": "q4", "decoder": "legacy",
+            "scoreSampling": { "maxTokens": 2048 },
+            "semanticSampling": { "minTokens": 16000, "maxTokens": 16000 }
+        })
+    }
+
+    /// The capture renders exactly the job the API would queue for the same song: the same
+    /// validated `Yue2JobSpec`, and — through the job path's own `build_request` — the same engine
+    /// request (sampling, decoder, guidance, steps, artifacts, memory) and the same admission pins.
+    #[test]
+    fn the_capture_request_is_the_job_paths_request() {
+        let job: Yue2JobSpec = serde_json::from_value(full_job_body()).unwrap();
+        contract::validate_request(&job).unwrap();
+        let spec = case_spec(&full_case()).unwrap();
+        assert_eq!(spec, job);
+
+        let run_dir = Path::new("/tmp/yue2-profile/run");
+        let captured = case_request(&full_case(), run_dir).unwrap();
+        let queued = build_request(&job, &Inputs::default(), run_dir, CancelFlag::new());
+        assert_eq!(captured.prompt, queued.prompt);
+        assert_eq!(captured.seed, queued.seed);
+        assert_eq!(captured.steps, queued.steps);
+        assert_eq!(captured.guidance, queued.guidance);
+        assert_eq!(
+            format!("{:?}", captured.audio),
+            format!("{:?}", queued.audio)
+        );
+        assert_eq!(
+            format!("{:?}", captured.memory),
+            format!("{:?}", queued.memory)
+        );
+        assert_eq!(
+            format!("{:?}", admission_pins(&spec).unwrap()),
+            format!("{:?}", admission_pins(&job).unwrap())
+        );
+        // And the request really carries the case (not two equally empty requests).
+        let song = captured.audio.as_ref().unwrap().song.clone().unwrap();
+        assert_eq!(song.planning, Some(SongPlanning::Melody));
+        assert_eq!(song.decoder, Some(SongDecoder::Legacy));
+        assert_eq!(song.score_sampling.unwrap().max_tokens, Some(2048));
+        assert_eq!(captured.steps, Some(32));
+        assert_eq!(captured.guidance, Some(1.01));
+    }
+
+    /// Every case the checked-in plan declares is a job the API accepts.
+    #[test]
+    fn every_planned_case_is_a_valid_job() {
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../config/yue2-memory-profile-plan.json"
+        ))
+        .unwrap();
+        let requests = plan["requests"].as_object().unwrap();
+        assert!(!requests.is_empty());
+        for (name, spec) in requests {
+            for tier in spec["tiers"].as_array().unwrap() {
+                let parsed = case(json!({
+                    "id": format!("yue2:{}:metal:{name}", tier.as_str().unwrap()),
+                    "tier": tier,
+                    "decoder": spec["decoder"],
+                    "request": spec["request"],
+                }))
+                .unwrap();
+                case_spec(&parsed).unwrap_or_else(|why| panic!("{name}: {why}"));
+            }
+        }
+    }
+
+    /// A result.json shaped like a published song run's (`candle_audio_yue2::run`).
+    fn run_result() -> Value {
+        json!({
+            "schema": "yue2-run-v1", "kind": "song", "status": "complete",
+            "identity": "run-identity", "plan_identity": "plan-identity",
+            "truncated": { "abc": false, "semantic": true },
+            "decoder": { "release": "legacy", "repo": "m-a-p/YuE2-Vae-legacy" },
+            "latent": { "sha256": "a".repeat(64), "shape": [100, 64], "dtype": "float32" },
+            "timing": { "nar_seconds": 3.5, "vae_seconds": 1.25, "e2e_seconds": 20.0 },
+        })
+    }
+
+    /// Each stage holds the time from its mark to the next; `done` closes the last stage.
+    #[test]
+    fn stage_wall_times_run_from_each_mark_to_the_next() {
+        let seconds = stage_seconds(&[
+            ("load", 10.0),
+            ("plan", 12.5),
+            ("semantic", 20.0),
+            ("acoustic", 30.0),
+            ("decode", 34.0),
+            ("done", 35.5),
+        ]);
+        let got: Vec<(&str, f64)> = seconds
+            .iter()
+            .map(|(stage, secs)| (stage.as_str(), secs.as_f64().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("acoustic", 4.0),
+                ("decode", 1.5),
+                ("load", 2.5),
+                ("plan", 7.5),
+                ("semantic", 10.0)
+            ]
+        );
+        assert!(!seconds.contains_key("done"));
+    }
+
+    /// outcome.json carries the run's truncation flags, identities and timings as the run stated
+    /// them, and refuses a run record that does not state one.
+    #[test]
+    fn the_outcome_carries_the_runs_truncation_identities_and_timings() {
+        let marks = stage_seconds(&[("load", 1.0), ("plan", 2.0), ("done", 4.0)]);
+        let outcome = outcome_json("case", 42.0, 0.2, &run_result(), marks).unwrap();
+        assert_eq!(
+            outcome["truncated"],
+            json!({ "abc": false, "semantic": true })
+        );
+        assert_eq!(outcome["runIdentity"], "run-identity");
+        assert_eq!(outcome["planIdentity"], "plan-identity");
+        assert_eq!(outcome["decoder"]["release"], "legacy");
+        assert_eq!(outcome["latent"]["sha256"], "a".repeat(64));
+        assert_eq!(outcome["engineTiming"]["vae_seconds"], 1.25);
+        assert_eq!(outcome["stageSeconds"], json!({ "load": 1.0, "plan": 2.0 }));
+        assert_eq!(outcome["audioSeconds"], 42.0);
+
+        for (pointer, broken) in [
+            ("/truncated", Value::Null),
+            ("/truncated/semantic", json!("yes")),
+            ("/latent/sha256", json!("short")),
+            ("/decoder", Value::Null),
+            ("/timing", Value::Null),
+            ("/identity", Value::Null),
+        ] {
+            let mut result = run_result();
+            *result.pointer_mut(pointer).unwrap() = broken;
+            assert!(
+                outcome_json("case", 42.0, 0.2, &result, Default::default()).is_err(),
+                "a run record with a broken {pointer} must be refused, not defaulted"
+            );
+        }
     }
 
     /// The plan's case shape maps onto the job's request; unknown fields and values are refused.
