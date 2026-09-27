@@ -214,6 +214,11 @@ enum Behavior {
     WaitForCancel,
     /// Leave a working directory with a checkpoint, then fail.
     Fail,
+    /// Complete, but fail if the engine's own claim file is present when it starts (a stale one
+    /// must have been removed by the worker's run claim).
+    RequireNoEngineLock,
+    /// Publish the run, then have the user cancel before the job reports it.
+    CompleteThenCancel(Arc<AtomicBool>),
 }
 
 #[derive(Default)]
@@ -397,6 +402,21 @@ impl Generator for StubYue2 {
                 // Like the engine, the claim is released when the run is cancelled.
                 let _ = std::fs::remove_file(work.join(RUN_LOCK_FILE));
                 Err(gen_core::Error::Canceled)
+            }
+            Behavior::RequireNoEngineLock => {
+                let lock = partial_dir(&artifacts.dir).join(RUN_LOCK_FILE);
+                if lock.exists() {
+                    return Err(gen_core::Error::Msg(format!(
+                        "{} is claimed (the stale engine lock was not reclaimed)",
+                        lock.display()
+                    )));
+                }
+                Self::publish(req, (false, false))
+            }
+            Behavior::CompleteThenCancel(cancel) => {
+                let report = Self::publish(req, (false, false));
+                cancel.store(true, Ordering::SeqCst);
+                report
             }
             Behavior::Fail => {
                 let work = partial_dir(&artifacts.dir);
@@ -683,7 +703,13 @@ async fn a_create_job_maps_every_setting_and_publishes_a_library_asset() {
     assert_eq!(block["effectiveSettings"]["decoder"], "legacy");
     assert_eq!(block["effectiveSettings"]["engineConfig"]["ode_steps"], 8);
     assert_eq!(block["decoder"]["id"], "m-a-p/YuE2-Vae-legacy");
-    assert_eq!(block["model"]["id"], "m-a-p/YuE2-3B");
+    // Exactly the score store's `{id, revision}` component identity (it denies unknown fields);
+    // the tier lives in the effective settings. Mutation that reds this: putting `tier` back into
+    // the model identity.
+    assert_eq!(
+        block["model"],
+        json!({"id": "m-a-p/YuE2-3B", "revision": BF16_REVISION})
+    );
     // Execution-time policy, not the one stamped at submission.
     assert_eq!(block["usagePolicy"]["checkedAt"], "execution");
     assert_eq!(
@@ -1113,21 +1139,24 @@ fn progress_maps_plan_semantic_acoustic_and_decode_in_order() {
     assert!(!m.starts_with("Planning"), "{m}");
 }
 
-/// Restart/resume: the job resumes its own stable run directory, a claim left by a dead worker
-/// is reclaimed, and a live claim is refused (the lock is kept).
-#[cfg(unix)]
+/// Restart/resume: the job resumes its own stable run directory under an OS advisory claim on
+/// `<run dir>.claim`. An engine lock left behind by a prior incarnation — even one naming THIS
+/// process's pid, as a restarted container's pid 1 would — is stale while the claim is held and is
+/// removed; a run whose claim another job holds is refused before anything loads.
 #[tokio::test]
-async fn a_resumed_job_reclaims_a_dead_workers_claim_and_refuses_a_live_one() {
+async fn a_resumed_job_reclaims_a_dead_attempts_lock_and_refuses_a_held_claim() {
     let h = Harness::new().await;
     let run_dir = h.run_dir("yue2run_resume-1");
     let work = partial_dir(&run_dir);
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("plan.json"), b"checkpoint").unwrap();
-    // A pid that is certainly gone: a child that already exited and was reaped.
-    let mut child = std::process::Command::new("true").spawn().unwrap();
-    let dead = child.id();
-    child.wait().unwrap();
-    std::fs::write(work.join(RUN_LOCK_FILE), format!("pid {dead}\n")).unwrap();
+    // Left by a prior incarnation of this very worker (same pid): a pid check calls it live.
+    // Mutation that reds this: dropping the engine-lock removal from `RunClaim::acquire`.
+    std::fs::write(
+        work.join(RUN_LOCK_FILE),
+        format!("pid {}\n", std::process::id()),
+    )
+    .unwrap();
     let seen = Arc::new(Mutex::new(Seen::default()));
     let job = h.job(
         "resume-1",
@@ -1135,11 +1164,15 @@ async fn a_resumed_job_reclaims_a_dead_workers_claim_and_refuses_a_live_one() {
     );
     h.run(
         &job,
-        loader(complete(vec![]), seen.clone(), Default::default()),
+        loader(
+            Behavior::RequireNoEngineLock,
+            seen.clone(),
+            Default::default(),
+        ),
     )
     .await
     .unwrap();
-    assert_eq!(h.terminal()["status"], "completed");
+    assert_eq!(h.terminal()["status"], "completed", "{}", h.terminal());
     let artifacts = seen
         .lock()
         .unwrap()
@@ -1155,16 +1188,15 @@ async fn a_resumed_job_reclaims_a_dead_workers_claim_and_refuses_a_live_one() {
     assert_eq!(artifacts.dir, run_dir);
     assert!(artifacts.resume);
 
-    // A live claimant (this very process — e.g. an abandoned task) keeps its claim.
+    // Another job holds the run's claim: this one is refused and touches nothing.
+    // Mutation that reds this: ignoring the `try_exclusive` failure in `RunClaim::acquire`.
     drop(h);
     let h = Harness::new().await;
-    let work = partial_dir(&h.run_dir("yue2run_resume-2"));
+    let run_dir = h.run_dir("yue2run_resume-2");
+    let held = RunClaim::acquire(&run_dir).expect("the other job's claim");
+    let work = partial_dir(&run_dir);
     std::fs::create_dir_all(&work).unwrap();
-    std::fs::write(
-        work.join(RUN_LOCK_FILE),
-        format!("pid {}\n", std::process::id()),
-    )
-    .unwrap();
+    std::fs::write(work.join(RUN_LOCK_FILE), b"pid 1\n").unwrap();
     let loads = Arc::new(AtomicUsize::new(0));
     let job = h.job(
         "resume-2",
@@ -1176,13 +1208,181 @@ async fn a_resumed_job_reclaims_a_dead_workers_claim_and_refuses_a_live_one() {
     )
     .await
     .unwrap();
-    // Mutation that reds this: reclaiming every claim (`stale = true`).
     assert_eq!(loads.load(Ordering::SeqCst), 0);
-    assert_eq!(h.terminal()["status"], "failed");
+    let terminal = h.terminal();
+    assert_eq!(terminal["status"], "failed");
+    assert!(terminal["error"]
+        .as_str()
+        .unwrap()
+        .contains("claimed by another active job"));
     assert!(
         work.join(RUN_LOCK_FILE).is_file(),
-        "a live claim is never removed"
+        "a held run's engine lock is never removed"
     );
+    drop(held);
+}
+
+/// Two reclaimers racing for one run: exactly one holds the claim; the other is refused until the
+/// holder is gone (compare-and-delete by lock ownership, not by reading a pid).
+#[test]
+fn two_concurrent_reclaimers_never_both_hold_a_run() {
+    let root = tempfile::tempdir().unwrap();
+    let run_dir = root.path().join("yue2/runs/yue2run_race");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let (run_dir, barrier) = (run_dir.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                let claim = RunClaim::acquire(&run_dir);
+                // Hold it long enough for the other to try.
+                std::thread::sleep(Duration::from_millis(200));
+                claim.is_ok()
+            })
+        })
+        .collect();
+    let won: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    // Mutation that reds this: `try_exclusive` replaced by an unlocked open (both win).
+    assert_eq!(won.iter().filter(|w| **w).count(), 1, "{won:?}");
+    // Released with its holder: the next attempt succeeds.
+    RunClaim::acquire(&run_dir).expect("free once the holder is gone");
+}
+
+/// A cancel before the engine starts working in the run leaves a prior attempt's resumable
+/// checkpoints alone; only the job whose engine worked in the run cleans it.
+#[tokio::test]
+async fn a_cancel_before_generation_leaves_an_existing_working_directory_intact() {
+    let h = Harness::new().await;
+    let work = partial_dir(&h.run_dir("yue2run_early-cancel"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("plan.json"), b"a prior attempt's checkpoint").unwrap();
+    let job = h.job(
+        "early-cancel",
+        json!({"kind": "create", "style": "x", "lyrics": "[verse]\nla"}),
+    );
+    let cancel = h.state.cancel_requested.clone();
+    // The cancel arrives while the model is still loading (the claim is held, the engine has
+    // not started): the loader waits for it, then gives up as a cancelled load does.
+    let slow_load: Loader = Box::new(move |_id: &str, _spec: &LoadSpec| {
+        cancel.store(true, Ordering::SeqCst);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+            if start.elapsed() > Duration::from_secs(6) {
+                break;
+            }
+        }
+        Err(gen_core::Error::Canceled)
+    });
+    let outcome = h.run(&job, slow_load).await;
+    assert!(
+        matches!(outcome, Err(WorkerError::Canceled(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(h.terminal()["status"], "canceled");
+    // Mutation that reds this: removing the `.partial` on every cancel (the `engine_started`
+    // condition dropped).
+    assert!(
+        work.join("plan.json").is_file(),
+        "a cancel before generation keeps the checkpoints"
+    );
+}
+
+/// A cancel that arrives after the engine published its run does not orphan it: the finished work
+/// is published as the job's result.
+#[tokio::test]
+async fn a_cancel_after_the_run_published_still_publishes_it() {
+    let h = Harness::new().await;
+    let job = h.job(
+        "late-cancel",
+        json!({"kind": "create", "style": "late", "lyrics": "[verse]\nla"}),
+    );
+    h.run(
+        &job,
+        loader(
+            Behavior::CompleteThenCancel(h.state.cancel_requested.clone()),
+            Default::default(),
+            Default::default(),
+        ),
+    )
+    .await
+    .unwrap();
+    // Mutation that reds this: restoring the post-generate `check_cancel`.
+    let terminal = h.terminal();
+    assert_eq!(terminal["status"], "completed", "{terminal}");
+    assert!(h
+        .run_dir("yue2run_late-cancel")
+        .join("result.json")
+        .is_file());
+    assert!(terminal["result"]["assetWrites"][0].is_object());
+}
+
+/// A generic audio job must not run a symbolic-song model: it is refused before anything loads.
+#[tokio::test]
+async fn a_generic_audio_job_for_a_symbolic_song_model_is_refused() {
+    let settings = Settings::from_env();
+    let api = ApiClient::new(&settings);
+    let mut job: JobSnapshot = serde_json::from_value(job_json("generic-yue2", false)).unwrap();
+    job.payload = json!({
+        "projectId": "p", "model": "yue2", "prompt": "x",
+        "modelManifestEntry": builtin_yue2(),
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    // Mutation that reds this: dropping `refuse_symbolic_song_without_block` from the generic arm
+    // (the job then reaches the project lookup and fails there instead, with another error).
+    let error = crate::audio_jobs::run_audio_generate_job(&api, &settings, &job)
+        .await
+        .expect_err("refused");
+    assert!(
+        error.to_string().contains("symbolic-plan song model"),
+        "{error}"
+    );
+}
+
+/// The catalog's locally derived tiers pin exactly the bytes the linked engine's conversion
+/// produces (`candle_audio_yue2::tier::TIER_PINS`), so a derived snapshot the catalog verifies is
+/// the one the engine loads. Mutation that reds this: change one digit of a catalog pin.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn catalog_derivation_pins_equal_the_engines_tier_pins() {
+    use crate::inference_runtime::candle_audio_yue2::tier::{
+        CONVERSION_ID, TIER_PINS, WEIGHTS_FILE,
+    };
+    let entry = builtin_yue2();
+    let rows: Vec<&Value> = entry["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row.get("localDerivation").is_some())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        TIER_PINS.len(),
+        "one catalog row per engine tier pin"
+    );
+    for pin in TIER_PINS {
+        let row = rows
+            .iter()
+            .find(|row| row["variant"] == pin.tier.name())
+            .unwrap_or_else(|| panic!("the catalog declares no {} tier", pin.tier.name()));
+        let derivation = &row["localDerivation"];
+        assert_eq!(
+            derivation["weightsBytes"],
+            json!(pin.bytes),
+            "{}",
+            pin.tier.name()
+        );
+        assert_eq!(
+            derivation["weightsSha256"],
+            json!(pin.sha256),
+            "{}",
+            pin.tier.name()
+        );
+        assert_eq!(derivation["conversion"], json!(CONVERSION_ID));
+        assert_eq!(derivation["weightsFile"], json!(WEIGHTS_FILE));
+    }
 }
 
 /// A source run is verified against the identity its producing job recorded before anything
@@ -1285,6 +1485,16 @@ async fn failed_and_truncated_runs_persist_with_their_provenance() {
     assert_eq!(block["effectiveSettings"]["seed"], 1);
     assert_eq!(block["effectiveSettings"]["tier"], "bf16");
     assert_eq!(block["usagePolicy"]["checkedAt"], "execution");
+    // The weights it was running on (item: a failed result keeps its provenance); no truncation
+    // is claimed for a run that never published. Mutations that red this: dropping the
+    // `identities` fields from `failed_result`, or emitting a default truncation there.
+    assert_eq!(
+        block["model"],
+        json!({"id": "m-a-p/YuE2-3B", "revision": BF16_REVISION})
+    );
+    assert_eq!(block["decoder"]["id"], "m-a-p/YuE2-Vae");
+    assert_eq!(block["tier"], "bf16");
+    assert!(block.get("truncated").is_none(), "{block}");
     assert!(block["error"]
         .as_str()
         .unwrap()
@@ -1313,7 +1523,13 @@ async fn failed_and_truncated_runs_persist_with_their_provenance() {
     )
     .await
     .unwrap();
-    let result = h.terminal()["result"].clone();
+    let terminal = h.terminal();
+    // Mutation that reds this: a fixed "Generated a YuE2 song." completion message.
+    assert!(
+        terminal["message"].as_str().unwrap().contains("truncated"),
+        "{terminal}"
+    );
+    let result = terminal["result"].clone();
     assert_eq!(
         result["yue2"]["truncated"],
         json!({"abc": true, "semantic": true})
@@ -1637,12 +1853,15 @@ mod real_weights {
         }
     }
 
-    fn warnings(result: &Value) -> Vec<gen_core::GenerationWarning> {
+    /// The published run's truncation as the provider reports it: its own codes
+    /// (`provider::TRUNCATION_CODES`), in its order.
+    fn truncation_warnings(result: &Value) -> Vec<gen_core::GenerationWarning> {
         ["abc", "semantic"]
             .into_iter()
-            .filter(|key| result.pointer(&format!("/truncated/{key}")) == Some(&json!(true)))
-            .map(|key| gen_core::GenerationWarning {
-                code: format!("{key}_truncated"),
+            .zip(y2::provider::TRUNCATION_CODES)
+            .filter(|(key, _)| result.pointer(&format!("/truncated/{key}")) == Some(&json!(true)))
+            .map(|(key, code)| gen_core::GenerationWarning {
+                code: code.to_owned(),
                 message: format!("the {key} phase hit its max_tokens budget"),
             })
             .collect()
@@ -1668,12 +1887,33 @@ mod real_weights {
             on_progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<GenerationReport> {
             let engine = &self.engine;
+            // The provider's own gates, in its order: the shared gen-core audio floor, its request
+            // mapping (which also builds the cover and attaches its `cover.json` to the run output),
+            // its memory controls, and the decoder check before any compute.
+            self.descriptor
+                .capabilities
+                .validate_request_audio(y2::PROVIDER_ID, req)?;
             let mut mapped = y2::provider::map_request(req, engine.generation_config())?;
             mapped.settings.options = y2::provider::memory_options(
                 req.memory.as_ref(),
                 engine.options(),
                 engine.attention_bounds(),
             )?;
+            if !mapped.plan_only {
+                engine.check_decoder_available(mapped.settings.decoder)?;
+            }
+            if req.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            let mut warnings: Vec<gen_core::GenerationWarning> = mapped
+                .cover
+                .iter()
+                .flat_map(|report| &report.warnings)
+                .map(|w| gen_core::GenerationWarning {
+                    code: w.code.to_string(),
+                    message: w.message.clone(),
+                })
+                .collect();
             let options = engine.options_for(&mapped.settings);
             let cancel = req.cancel.clone();
             let cancelled = move || cancel.is_cancelled();
@@ -1728,7 +1968,15 @@ mod real_weights {
                         y2::provider::Job::FromPlan { dir, identity } => {
                             let plan = y2::SymbolicPlan::restore(&dir, engine.tokenizer())
                                 .map_err(|e| gen_core::Error::Msg(e.to_string()))?;
-                            assert_eq!(Some(plan.identity().to_string()), identity);
+                            if let Some(expected) = identity {
+                                if plan.identity().to_string() != expected.to_ascii_lowercase() {
+                                    return Err(gen_core::Error::Msg(format!(
+                                        "the saved plan's identity {} is not the expected \
+                                         {expected}",
+                                        plan.identity()
+                                    )));
+                                }
+                            }
                             y2::run::SongInput::Plan(plan)
                         }
                         y2::provider::Job::DecodeCached(_) => unreachable!(),
@@ -1739,10 +1987,11 @@ mod real_weights {
                     (Some(outcome.samples), outcome.result, outcome.dir)
                 }
             };
+            warnings.extend(truncation_warnings(&result));
             Ok(GenerationReport {
                 output: samples.map(audio),
                 artifacts: Some(record(&result, &dir)),
-                warnings: warnings(&result),
+                warnings,
             })
         }
     }
@@ -1763,11 +2012,25 @@ mod real_weights {
                     dirs = dirs.with(id.component().repo.id, dir.clone());
                 }
             }
+            // The provider's `resolve_spec` tier gate: only an advertised quant, asserted as the
+            // tier the directory must hold (`None` loads the staged one).
+            if let Some(quant) = spec
+                .quantize
+                .filter(|q| !y2::provider::SUPPORTED_QUANTS.contains(q))
+            {
+                return Err(gen_core::Error::Unsupported(format!(
+                    "yue2: quantize={quant:?} is not an advertised tier"
+                )));
+            }
+            let precision = y2::engine::ModelPrecision {
+                tier: y2::Tier::from_quant(spec.quantize)?,
+                ..Default::default()
+            };
             let engine = y2::Yue2Engine::load_with_precision(
                 &dirs,
                 DType::F32,
                 &Device::Cpu,
-                y2::engine::ModelPrecision::default(),
+                precision,
                 y2::GenerationConfig::default(),
                 y2::provider::engine_options(spec),
             )?;
@@ -1908,5 +2171,105 @@ mod real_weights {
             "the completed run was reused, not recomputed"
         );
         eprintln!("resume: {:?}", started.elapsed());
+    }
+
+    const COVER_LYRICS: &str = "[verse]\nMorning light across the water\nSails are turning slowly home\nEvery rope is pulling tighter\nEvery wave a softer tone\n[chorus]\nCarry me back to the harbor\nCarry me back to the shore\nLanterns are lit on the pier now\nI won't be leaving no more\n";
+
+    /// Cover from a reviewed score, a score-version render and a cached decode of that render —
+    /// the job kinds the first real-weight run did not reach — through the worker job path on
+    /// the CPU (sc-22999 review item 6).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "real YuE2 weights on the CPU; SCENEWORKS_YUE2_E2E=1"]
+    async fn real_weights_cover_render_version_and_cached_decode_on_cpu() {
+        let hub = hub();
+        let h = Harness::over_hub(&hub).await;
+        let semantic = json!({"minTokens": 20, "maxTokens": 150});
+
+        // 1. A melody cover of the reviewed score.
+        let started = Instant::now();
+        let cover = h.job(
+            "e2e-cover",
+            json!({"kind": "cover", "style": STYLE, "lyrics": COVER_LYRICS, "seed": 31, "steps": 2,
+                   "semanticSampling": semantic,
+                   "cover": {"mode": "melody", "score": SCORE, "keep": "vocal"}}),
+        );
+        h.run(&cover, cpu_loader())
+            .await
+            .expect("the cover job runs");
+        let terminal = h.terminal();
+        assert_eq!(terminal["status"], "completed", "{terminal}");
+        let cover_dir = h.run_dir("yue2run_e2e-cover");
+        assert!(
+            cover_dir.join("cover.json").is_file(),
+            "the cover record is published"
+        );
+        crate::inference_runtime::verify_yue2_run(
+            &cover_dir,
+            terminal["result"]["yue2"]["run"]["identity"].as_str(),
+        )
+        .expect("the cover run verifies, cover.json included");
+        eprintln!(
+            "cover: {:?} duration={}s warnings={}",
+            started.elapsed(),
+            terminal["result"]["assetWrites"][0]["duration"],
+            terminal["result"]["yue2"]["warnings"]
+        );
+
+        // 2. A score-version render: the version's own request and ABC, read at execution.
+        let started = Instant::now();
+        let version = version_fixture("yue2v_e2e");
+        h.state
+            .versions
+            .lock()
+            .unwrap()
+            .insert("yue2v_e2e".into(), version.clone());
+        let render = h.job(
+            "e2e-render",
+            json!({"kind": "renderVersion", "versionId": "yue2v_e2e", "steps": 2,
+                   "semanticSampling": semantic, "decoder": "standard",
+                   "sources": {"version": {"id": "yue2v_e2e",
+                                            "scoreSha256": version["score"]["sha256"],
+                                            "requestSha256": version["requestSha256"]}}}),
+        );
+        h.run(&render, cpu_loader())
+            .await
+            .expect("the render job runs");
+        let terminal = h.terminal();
+        assert_eq!(terminal["status"], "completed", "{terminal}");
+        let block = terminal["result"]["yue2"].clone();
+        assert_eq!(block["renderedScoreSha256"], version["score"]["sha256"]);
+        assert_eq!(block["renderedRequestSha256"], version["requestSha256"]);
+        let render_duration = terminal["result"]["assetWrites"][0]["duration"].clone();
+        eprintln!(
+            "renderVersion: {:?} duration={}s truncated={}",
+            started.elapsed(),
+            render_duration,
+            block["truncated"]
+        );
+
+        // 3. Decode the render's cached latents with the other decoder.
+        let started = Instant::now();
+        let decode = h.job(
+            "e2e-decode",
+            json!({"kind": "decode", "sourceJobId": "job-e2e-render", "decoder": "legacy",
+                   "sources": {"sourceRun": {"jobId": "job-e2e-render",
+                                              "runDir": "yue2/runs/yue2run_e2e-render",
+                                              "identity": block["run"]["identity"]}}}),
+        );
+        h.run(&decode, cpu_loader())
+            .await
+            .expect("the decode job runs");
+        let terminal = h.terminal();
+        assert_eq!(terminal["status"], "completed", "{terminal}");
+        assert_eq!(terminal["result"]["yue2"]["run"]["kind"], "cached_decode");
+        assert_eq!(
+            terminal["result"]["yue2"]["decoder"]["id"],
+            "m-a-p/YuE2-Vae-legacy"
+        );
+        assert_eq!(
+            terminal["result"]["assetWrites"][0]["duration"], render_duration,
+            "the same latents, decoded again"
+        );
+        eprintln!("decode: {:?}", started.elapsed());
     }
 }

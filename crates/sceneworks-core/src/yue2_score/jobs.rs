@@ -968,6 +968,38 @@ fn check_score(field: &str, abc: &str) -> Result<(), Yue2JobError> {
         .map_err(|e| error("yue2_unsupported_notation", field, e.to_string()))
 }
 
+/// A duplicate is a NEW take, never a resume: give a `yue2` payload block a fresh run id and drop
+/// its batch membership, so two jobs never share a run directory. (A retry keeps its run id — it
+/// resumes the same run's verified checkpoints.) A payload without a block is left untouched.
+pub fn refresh_block_for_duplicate(payload: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(block) = payload
+        .get_mut(PAYLOAD_KEY)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    block.insert(
+        "runId".to_owned(),
+        serde_json::Value::String(format!("{RUN_ID_PREFIX}{}", fresh_hex_id())),
+    );
+    block.remove("batch");
+}
+
+fn fresh_hex_id() -> String {
+    let mut bytes = [0u8; 16];
+    // A failed OS RNG must not hand two duplicates the same run: fall back to a time-and-address
+    // mix, which is unique per call in one process.
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let marker = &bytes as *const _ as usize as u128;
+        bytes = (nanos ^ marker.rotate_left(64)).to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Whether a request (or its cover) asks for recording transcription, which is blocked.
 pub fn requests_transcription(spec: &Yue2JobSpec) -> bool {
     spec.kind == K_TRANSCRIBE

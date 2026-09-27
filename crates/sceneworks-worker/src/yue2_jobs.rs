@@ -17,8 +17,9 @@
 //!    plan or source run is verified against the identity its producing job recorded; a score
 //!    version is re-read and must still have the digests it was queued with.
 //! 4. **Generate** on a blocking thread with `audio.artifacts { dir: <project>/yue2/runs/<runId>,
-//!    resume: true }`: the stable run id makes a retried job resume its own checkpoints, and the
-//!    engine checks every recorded identity before it reuses anything. The shared keepalive watcher
+//!    resume: true }` under an exclusive OS claim on `<run dir>.claim` ([`RunClaim`]): the stable
+//!    run id makes a retried job resume its own checkpoints (a duplicate gets a fresh run id), and
+//!    the engine checks every recorded identity before it reuses anything. The shared keepalive watcher
 //!    ([`run_blocking_with_heartbeat`]) keeps the worker heartbeat alive through long AR phases and
 //!    trips the request's cancel flag — the engine's own cancel hook — on a user cancel. Engine
 //!    progress (per-token plan / semantic steps, acoustic ODE steps, decoding) is coalesced onto the
@@ -29,9 +30,10 @@
 //!    into a score version (plans) or a render record (score-version renders).
 //!
 //! A failure posts the job `failed` **with** that provenance (what ran, on what, under which
-//! policy, and the run directory it left for a resume). A cancel removes the run's unpublished
-//! `.partial` working directory and nothing else — a source run, a plan, a published run and
-//! every original stay untouched.
+//! policy, and the run directory it left for a resume). A cancel after this job's engine started
+//! working in the run removes the run's unpublished `.partial` working directory and nothing else —
+//! a source run, a plan, a published run and every original stay untouched; an earlier cancel
+//! leaves a prior attempt's checkpoints for the next retry.
 
 use super::*;
 
@@ -49,6 +51,9 @@ use sceneworks_core::yue2_score::jobs::{
     Tier, TokenSampling, Yue2JobKind, Yue2JobSpec,
 };
 use sceneworks_core::yue2_score::store::ScoreVersionRecord;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::video_jobs::{write_wav_pcm16, AudioTrack};
 
@@ -83,6 +88,13 @@ struct JobRecord {
     effective: Option<Value>,
     run_rel: Option<String>,
     run_dir: Option<PathBuf>,
+    /// The resolved weights: `(model, decoder)` identities and the tier.
+    identities: Option<(Value, Option<Value>, &'static str)>,
+    /// Set by the blocking task the moment it hands the request to the engine — the only point
+    /// after which the run's working directory can be this job's.
+    engine_started: Arc<AtomicBool>,
+    /// This job's exclusive claim on its run directory, held until the job has cleaned up.
+    claim: Option<RunClaim>,
 }
 
 impl JobRecord {
@@ -104,6 +116,11 @@ impl JobRecord {
                 "partial": partial.is_some(),
             })),
             "error": error.to_string(),
+            // What it was running on, when it got that far. Truncation is deliberately absent:
+            // a failed run never observed it.
+            "model": self.identities.as_ref().map(|(model, _, _)| model.clone()),
+            "decoder": self.identities.as_ref().and_then(|(_, decoder, _)| decoder.clone()),
+            "tier": self.identities.as_ref().map(|(_, _, tier)| *tier),
             "effectiveSettings": self.effective,
             "sources": spec.and_then(|s| s.sources.clone()),
             "batch": spec.and_then(|s| s.batch.clone()),
@@ -129,11 +146,16 @@ pub(crate) async fn run_yue2_job_using(
     match execute(api, settings, job, load_generator, &mut record).await {
         Ok(()) => Ok(()),
         Err(WorkerError::Canceled(message)) => {
-            // A canceled job cleans its temporary work: the run's unpublished working directory.
-            // Never a published run, a source run or an original.
-            if let Some(dir) = &record.run_dir {
-                remove_partial(dir);
+            // A canceled job cleans its temporary work: the run's unpublished working directory —
+            // only when this job's engine worked in it (it started generating while this job held
+            // the run's claim). A cancel before that leaves a prior attempt's resumable
+            // checkpoints alone; a published run, a source run or an original is never touched.
+            if record.claim.is_some() && record.engine_started.load(Ordering::SeqCst) {
+                if let Some(dir) = &record.run_dir {
+                    remove_partial(dir);
+                }
             }
+            drop(record.claim.take());
             Err(WorkerError::Canceled(message))
         }
         Err(error) => {
@@ -236,9 +258,16 @@ async fn execute(
         return Err(transcription_blocked(&entry));
     }
     let load = resolve_load(settings, &entry, &spec)?;
+    record.identities = Some((
+        load.model_identity.clone(),
+        load.decoder_identity.clone(),
+        load.tier.as_str(),
+    ));
     let inputs = resolve_inputs(api, &spec, &project_path, &project_id).await?;
     record.effective = Some(effective_settings(&spec, &load, &inputs, None));
-    reclaim_stale_run_lock(&run_dir)?;
+    // Exclusive for the whole job: no other worker (this host or another sharing the data dir)
+    // can run, resume or clean this run while it is held.
+    record.claim = Some(RunClaim::acquire(&run_dir)?);
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
 
     // Whole-render memory admission (sc-23001): price THIS request as THIS load will run it, before
@@ -296,11 +325,13 @@ async fn execute(
         request,
         cancel,
         admitted.lease,
+        record.engine_started.clone(),
         load_generator,
     )
     .await?;
 
-    check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
+    // The run is published: finish publishing it. (A cancel that arrives now would leave a
+    // published run no job owns; the finished work is kept instead.)
     update_job(
         api,
         &job.id,
@@ -336,11 +367,17 @@ async fn execute(
             }
         };
         let result = publish_audio(&spec, &project_path, track, &mut block, &usage_policy).await?;
-        (result, "Generated a YuE2 song.")
+        (
+            result,
+            completion_message("Generated a YuE2 song", &published),
+        )
     } else {
         let mut result = JsonObject::new();
         result.insert("yue2".to_owned(), Value::Object(block));
-        (result, "Published the YuE2 plan.")
+        (
+            result,
+            completion_message("Published the YuE2 plan", &published),
+        )
     };
     update_job(
         api,
@@ -349,13 +386,38 @@ async fn execute(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            message,
+            &message,
             Some(result),
             &backend,
         ),
     )
     .await?;
+    drop(record.claim.take());
     Ok(())
+}
+
+/// The completion message: a truncated run says so, naming the phase that hit its budget.
+fn completion_message(done: &str, published: &Published) -> String {
+    let truncated = published.truncated();
+    let phases: Vec<&str> = ["abc", "semantic"]
+        .into_iter()
+        .filter(|phase| truncated.get(*phase).and_then(Value::as_bool) == Some(true))
+        .map(|phase| {
+            if phase == "abc" {
+                "score"
+            } else {
+                "semantic tokens"
+            }
+        })
+        .collect();
+    if phases.is_empty() {
+        format!("{done}.")
+    } else {
+        format!(
+            "{done} (truncated: {} hit the token budget).",
+            phases.join(" and ")
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -473,7 +535,9 @@ fn resolve_load(settings: &Settings, entry: &Value, spec: &Yue2JobSpec) -> Worke
         })?;
     let repo = text(row, "repo").unwrap_or_default();
     let revision = text(row, "revision").unwrap_or_default();
-    let model_identity = json!({ "id": repo, "revision": revision, "tier": tier.as_str() });
+    // `{id, revision}` — the score store's component identity; the tier is in the effective
+    // settings.
+    let model_identity = json!({ "id": repo, "revision": revision });
     let (weights, quant) = match local_derivation(row) {
         None => {
             let dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
@@ -994,6 +1058,7 @@ async fn generate(
     request: GenerationRequest,
     cancel: CancelFlag,
     lease: crate::yue2_admission::Yue2Lease,
+    engine_started: Arc<AtomicBool>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -1022,6 +1087,7 @@ async fn generate(
                 // The pump may be gone; generation never depends on its progress sink.
                 tx.send_replace(Some(update));
             };
+            engine_started.store(true, Ordering::SeqCst);
             generator
                 .generate_with_report(&request, &mut on_progress)
                 .map_err(|error| classify("YuE2 generation failed", error))
@@ -1108,52 +1174,57 @@ fn remove_partial(run_dir: &Path) {
     }
 }
 
-/// A worker that died mid-run leaves its claim file behind, and the engine refuses to resume a
-/// claimed working directory. Reclaim it only when the claiming process is gone: a live claimant
-/// (another process, or an abandoned task of this one) keeps its claim and the job is refused.
-fn reclaim_stale_run_lock(run_dir: &Path) -> WorkerResult<()> {
-    let lock = partial_dir(run_dir).join(RUN_LOCK_FILE);
-    let Ok(contents) = std::fs::read_to_string(&lock) else {
-        return Ok(());
-    };
-    let pid = contents
-        .trim()
-        .strip_prefix("pid ")
-        .and_then(|pid| pid.trim().parse::<u32>().ok());
-    let stale = match pid {
-        Some(pid) if pid == std::process::id() => false,
-        Some(pid) => !process_alive(pid),
-        None => false,
-    };
-    if !stale {
-        return Err(WorkerError::InvalidPayload(format!(
-            "yue2: the run {} is claimed by a live process ({}); it cannot be resumed while that \
-             run is active",
-            run_dir.display(),
-            contents.trim()
-        )));
-    }
-    std::fs::remove_file(&lock)?;
-    Ok(())
+/// This job's exclusive claim on its run directory: an OS advisory lock (`flock` / `LockFileEx`,
+/// through the workspace's `fs2` guard) on the sidecar `<run dir>.claim`, held for the whole job.
+///
+/// The lock belongs to the open file, so it is released the moment its holder is gone — a crashed
+/// worker, a container restarted as pid 1, a recycled pid — and it is honoured across processes
+/// and pid namespaces sharing the data directory. While it is held, nothing else can be running
+/// this run, so the engine's own `.yue2-run.lock` in the working directory can only be a stale
+/// leftover of a dead attempt and is removed.
+pub(crate) struct RunClaim {
+    _lock: sceneworks_core::file_lock::FileLock,
 }
 
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) => true,
-        Err(nix::errno::Errno::ESRCH) => false,
-        // EPERM: the process exists but belongs to someone else.
-        Err(_) => true,
+impl RunClaim {
+    pub(crate) fn path(run_dir: &Path) -> PathBuf {
+        let mut name = run_dir
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".claim");
+        run_dir.with_file_name(name)
     }
-}
 
-#[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
-    // No portable liveness probe: never reclaim a claim we cannot prove stale.
-    true
+    pub(crate) fn acquire(run_dir: &Path) -> WorkerResult<Self> {
+        let path = Self::path(run_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let lock = sceneworks_core::file_lock::FileLock::try_exclusive(file).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "yue2: the run {} is claimed by another active job ({error}); it cannot run or \
+                 resume while that job holds it",
+                run_dir.display()
+            ))
+        })?;
+        let engine_lock = partial_dir(run_dir).join(RUN_LOCK_FILE);
+        match std::fs::remove_file(&engine_lock) {
+            Ok(()) => tracing::info!(
+                path = %engine_lock.display(),
+                "removed a stale YuE2 engine claim left by a dead attempt"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(WorkerError::Io(error)),
+        }
+        Ok(Self { _lock: lock })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

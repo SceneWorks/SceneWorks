@@ -406,6 +406,29 @@ fn audio_model_repo(entry: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A symbolic-plan song model (YuE2) only runs as a YuE2 job — its contract, eligibility check and
+/// run directory come with the `yue2` block. A generic audio job naming one (a replayed payload, a
+/// hand-built job) is refused before anything loads. Judged on both the linked provider's
+/// descriptor and the manifest entry the job carries.
+fn refuse_symbolic_song_without_block(request: &AudioRequest) -> WorkerResult<()> {
+    let declared = request
+        .model_manifest_entry
+        .get("audio")
+        .and_then(|audio| audio.get("supportsSymbolicSong"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let linked = crate::inference_runtime::audio_descriptor(&request.model)
+        .is_some_and(|descriptor| descriptor.capabilities.supports_symbolic_song);
+    if declared || linked {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} is a symbolic-plan song model; it runs only as a YuE2 job (POST \
+             /api/v1/projects/:project_id/yue2/jobs), not as a generic audio job.",
+            request.model
+        )));
+    }
+    Ok(())
+}
+
 fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
     if request.project_id.is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -437,6 +460,7 @@ pub(crate) async fn run_audio_generate_job(
         return crate::yue2_jobs::run_yue2_job(api, settings, job).await;
     }
     let request = AudioRequest::from_payload(&job.payload);
+    refuse_symbolic_song_without_block(&request)?;
     audio_preflight(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
