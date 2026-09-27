@@ -101,6 +101,106 @@ fn every_field_is_accepted_exactly_by_the_kinds_that_read_it() {
     }
 }
 
+/// Independent of [`FIELD_KINDS`] (the matrix test reads its expectations from the table under
+/// test): every (kind, field) the `yue2` provider reads for that kind — its `map_request` arms and
+/// the `LoadSpec` / memory controls each kind loads with. Mutation that reds this: removing
+/// `K_COVER` from the `steps` row of FIELD_KINDS (a cover's ODE steps would be refused).
+#[test]
+fn every_field_the_engine_reads_for_a_kind_is_accepted() {
+    use Yue2JobKind::*;
+    let load = ["tier", "precision"];
+    let render = ["decoder", "memory.decode"];
+    let synthesis = [
+        "steps",
+        "semanticSampling",
+        "offloadPolicy",
+        "memory.acoustic",
+    ];
+    let sampled = ["style", "lyrics", "seed", "cfgScale"];
+    let accepted: Vec<(Yue2JobKind, Vec<&str>)> = vec![
+        (
+            Create,
+            [
+                &sampled[..],
+                &["planning", "score", "scoreSampling", "count"],
+                &synthesis,
+                &render,
+                &load,
+            ]
+            .concat(),
+        ),
+        (
+            Plan,
+            [
+                &sampled[..],
+                &["planning", "score", "scoreSampling", "count"],
+                &load,
+            ]
+            .concat(),
+        ),
+        (
+            FromPlan,
+            [
+                &["style", "lyrics", "planJobId"][..],
+                &synthesis,
+                &render,
+                &load,
+            ]
+            .concat(),
+        ),
+        (
+            Cover,
+            [
+                &sampled[..],
+                &["cover", "count"],
+                &synthesis,
+                &render,
+                &load,
+            ]
+            .concat(),
+        ),
+        (
+            RenderVersion,
+            [&["versionId"][..], &synthesis, &render, &load].concat(),
+        ),
+        (Decode, [&["sourceJobId"][..], &render, &load].concat()),
+        (Transcribe, vec!["sourceAudioAssetId"]),
+    ];
+    for (kind, fields) in accepted {
+        for field in fields {
+            let mut spec = with_field(base(kind), field);
+            if field == "score" {
+                spec.planning = None;
+            }
+            if let Err(error) = validate_request(&spec) {
+                panic!("{field} on {kind:?} is read by the engine but refused: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_duplicate_gets_a_fresh_run_and_leaves_its_batch() {
+    let mut payload = serde_json::json!({
+        "yue2": {"kind": "create", "runId": "yue2run_original", "batch": {"id": "b", "index": 1, "count": 2}}
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    refresh_block_for_duplicate(&mut payload);
+    let run_id = payload["yue2"]["runId"].as_str().unwrap().to_owned();
+    // Mutation that reds this: keeping the original run id (a duplicate would share its run dir).
+    assert_ne!(run_id, "yue2run_original");
+    assert!(run_id.starts_with(RUN_ID_PREFIX) && is_run_dir(&run_dir(&run_id)));
+    assert!(payload["yue2"].get("batch").is_none());
+    let mut plain = serde_json::json!({"model": "kokoro_82m"})
+        .as_object()
+        .unwrap()
+        .clone();
+    refresh_block_for_duplicate(&mut plain);
+    assert_eq!(plain.len(), 1, "a payload without a block is untouched");
+}
+
 #[test]
 fn each_kind_names_its_missing_input() {
     type Mutate = fn(&mut Yue2JobSpec);
@@ -184,6 +284,14 @@ fn protocol_limits_are_refused_with_the_field_named() {
         ..Default::default()
     });
     cases.push((s, "memory.decodeTileEdge"));
+    // sc-23001: the engine refuses a chunk below one query row at the full context.
+    let mut s = base(Yue2JobKind::Create);
+    s.memory = Some(MemoryControls {
+        chunk_attention: Some(true),
+        attention_chunk_size: Some(MIN_ATTENTION_CHUNK_ELEMENTS - 1),
+        ..Default::default()
+    });
+    cases.push((s, "memory.attentionChunkSize"));
     let mut s = base(Yue2JobKind::Create);
     s.count = Some(MAX_BATCH + 1);
     cases.push((s, "count"));

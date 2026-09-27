@@ -938,7 +938,7 @@ fn render(sha: &str, request_sha: &str, audio: &str, truncated: Truncation) -> R
         status: RenderStatus::Completed,
         score_sha256: sha.to_owned(),
         request_sha256: request_sha.to_owned(),
-        truncated,
+        truncated: Some(truncated),
         model: ComponentIdentity {
             id: "m-a-p/YuE2-3B".into(),
             revision: Some("1a96eca".into()),
@@ -1179,7 +1179,7 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
     assert_eq!(after.edit_brief.as_deref(), Some(brief));
     assert_eq!(after.parent_version_id.as_deref(), Some(root.id.as_str()));
     assert!(after.whole_recording_regenerated);
-    assert!(after.truncated.semantic);
+    assert!(after.truncated.unwrap().semantic);
     assert_eq!(
         store.get_version(&child.id).unwrap().renders,
         std::slice::from_ref(&after)
@@ -1282,6 +1282,64 @@ fn renders_and_listening_comparisons_retain_request_score_brief_and_truncation()
     assert!(
         error.to_string().contains("cannot name an audio asset"),
         "{error}"
+    );
+
+    // sc-22999: a render that failed before its run published never observed truncation, so it
+    // reports `truncated: null`; only a failed render may. Mutations that red this: drop the
+    // completed-render `truncated` check in `record_render`, or make the key optional
+    // (`#[serde(default)]`) so a missing key reads as unknown.
+    let mut failed = render(
+        &child.score.sha256,
+        &child.request_sha256,
+        "audio_after",
+        Truncation {
+            abc: false,
+            semantic: false,
+        },
+    );
+    failed.status = RenderStatus::Failed;
+    failed.audio_asset_id = None;
+    failed.decoder = None;
+    failed.truncated = None;
+    failed.error = Some("the semantic stage failed".into());
+    let recorded = projects
+        .record_yue2_render(&project.id, &child.id, failed)
+        .unwrap();
+    assert_eq!(recorded.truncated, None);
+    let mut unknown = render(
+        &child.score.sha256,
+        &child.request_sha256,
+        "audio_after",
+        Truncation {
+            abc: false,
+            semantic: false,
+        },
+    );
+    unknown.truncated = None;
+    let error = projects
+        .record_yue2_render(&project.id, &child.id, unknown)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("must state its truncation"),
+        "{error}"
+    );
+    let mut null_key = serde_json::to_value(render(
+        &child.score.sha256,
+        &child.request_sha256,
+        "audio_after",
+        Truncation {
+            abc: false,
+            semantic: false,
+        },
+    ))
+    .unwrap();
+    null_key["truncated"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<RenderInput>(null_key)
+            .unwrap()
+            .truncated,
+        None,
+        "null is accepted as unknown; a missing key is still refused (above)"
     );
 
     // Stored render and comparison snapshots are integrity-checked on read.

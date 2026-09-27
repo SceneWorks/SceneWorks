@@ -6,6 +6,7 @@
 //! YuE1 entries are fixtures in the shape the YuE1 epic (sc-19373) ships, which is not on this branch
 //! (epic sc-22988 acceptance test 5).
 use super::support::*;
+use crate::AppState;
 
 pub(super) fn builtin_yue2() -> Value {
     let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -46,6 +47,19 @@ pub(super) fn app_with_yue1_and_yue2(temp_dir: &tempfile::TempDir) -> axum::Rout
 }
 
 pub(super) fn app_with_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) -> axum::Router {
+    write_yue1_and(temp_dir, yue2);
+    create_app(test_settings(temp_dir)).expect("app creates")
+}
+
+/// [`app_with_yue1_and_yue2`] with the app state, for tests that seed a stored job directly.
+pub(super) fn app_with_yue1_and_yue2_state(
+    temp_dir: &tempfile::TempDir,
+) -> (axum::Router, AppState) {
+    write_yue1_and(temp_dir, builtin_yue2());
+    create_app_with_state(test_settings(temp_dir)).expect("app and state create")
+}
+
+fn write_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -59,7 +73,6 @@ pub(super) fn app_with_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) -> ax
     )
     .expect("builtin models writes");
     write_empty_sibling_manifests(&config_dir);
-    create_app(test_settings(temp_dir)).expect("app creates")
 }
 
 async fn queued_downloads(app: axum::Router) -> Vec<Value> {

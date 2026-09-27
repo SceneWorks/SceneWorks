@@ -324,18 +324,20 @@ pub(crate) async fn get_job_yue2_eligibility(
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let job = store_call(state.clone(), move |store, _| store.get_job(&job_id)).await?;
-    if job.payload.get(yue2::PAYLOAD_KEY).is_none() {
+    if job.job_type != JobType::AudioGenerate
+        || job
+            .payload
+            .get(yue2::PAYLOAD_KEY)
+            .is_none_or(Value::is_null)
+    {
         return Err(ApiError::bad_request(format!(
             "Job {} is not a YuE2 job.",
             job.id
         )));
     }
-    let model_id = job
-        .payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(yue2::MODEL_ID)
-        .to_owned();
+    // The worker always loads the `yue2` provider for a job with a `yue2` block, so eligibility
+    // is always YuE2's — never whatever `model` the payload names (a replay could have changed it).
+    let model_id = yue2::MODEL_ID.to_owned();
     let commercial = job
         .payload
         .get("commercialUse")
@@ -634,21 +636,94 @@ pub(crate) async fn create_yue2_jobs(
     ))
 }
 
-/// Re-validate the `yue2` block of a replayed (retried / duplicated) `audio_generate` payload: it
-/// must still be a block the worker will run. A payload without one is not a YuE2 job.
-pub(crate) fn validate_replayed_yue2_block(payload: &JsonObject) -> Result<(), ApiError> {
-    let Some(block) = payload.get(yue2::PAYLOAD_KEY) else {
-        return Ok(());
+/// Canonicalize a replayed (retried / duplicated) `audio_generate` payload: `persisted` is the
+/// original job's payload, `merged` the payload the replay will enqueue.
+///
+/// * A `yue2` block can be neither added (a generic audio job must not become a YuE2 job that
+///   skipped the YuE2 route's eligibility and source resolution) nor removed.
+/// * A YuE2 replay keeps `model = yue2` (the worker always loads the `yue2` provider, and
+///   eligibility is always evaluated for it), its block must still be one the worker will run,
+///   its manifest entry is re-resolved from the catalog, its submission-time usage policy is kept
+///   and a commercial declaration can only be added, never withdrawn.
+/// * A replay without a block must not name a symbolic-song model: the generic audio route
+///   refuses those, and so does its replay.
+pub(crate) async fn canonicalize_replayed_audio_payload(
+    state: &AppState,
+    persisted: &JsonObject,
+    merged: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let block_of = |payload: &JsonObject| {
+        payload
+            .get(yue2::PAYLOAD_KEY)
+            .filter(|value| !value.is_null())
+            .cloned()
     };
-    let spec: Yue2JobSpec = serde_json::from_value(block.clone()).map_err(|error| {
+    let refused = |field: &str, detail: String| {
         ApiError::typed(
             StatusCode::BAD_REQUEST,
-            format!("YuE2 job: the yue2 block is malformed: {error}"),
-            yue2::INVALID_VALUE,
-            json!({ "field": "yue2" }),
+            format!("YuE2 job: {detail}"),
+            yue2::INVALID_COMBINATION,
+            json!({ "field": field }),
         )
-    })?;
-    yue2::validate_for_execution(&spec).map_err(spec_error)
+    };
+    match (block_of(persisted), block_of(merged)) {
+        (None, Some(_)) => Err(refused(
+            "yue2",
+            "a yue2 block cannot be added to a job that was not submitted through the YuE2 \
+             route"
+                .into(),
+        )),
+        (Some(_), None) => Err(refused(
+            "yue2",
+            "a YuE2 job's yue2 block cannot be removed".into(),
+        )),
+        (Some(_), Some(block)) => {
+            let model = merged.get("model").and_then(Value::as_str).unwrap_or("");
+            if model != yue2::MODEL_ID {
+                return Err(refused(
+                    "model",
+                    format!("a YuE2 job always runs `{}`, not `{model}`", yue2::MODEL_ID),
+                ));
+            }
+            let spec: Yue2JobSpec = serde_json::from_value(block).map_err(|error| {
+                ApiError::typed(
+                    StatusCode::BAD_REQUEST,
+                    format!("YuE2 job: the yue2 block is malformed: {error}"),
+                    yue2::INVALID_VALUE,
+                    json!({ "field": "yue2" }),
+                )
+            })?;
+            yue2::validate_for_execution(&spec).map_err(spec_error)?;
+            let entry = resolve_model_manifest_entry(state, yue2::MODEL_ID).await?;
+            merged.insert("modelManifestEntry".to_owned(), entry);
+            match persisted.get("usagePolicy") {
+                Some(policy) => merged.insert("usagePolicy".to_owned(), policy.clone()),
+                None => merged.remove("usagePolicy"),
+            };
+            let declared = |payload: &JsonObject| {
+                payload
+                    .get("commercialUse")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            };
+            let commercial = declared(persisted) || declared(merged);
+            merged.insert("commercialUse".to_owned(), json!(commercial));
+            Ok(())
+        }
+        (None, None) => {
+            let model = merged
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let entry = resolve_model_manifest_entry(state, &model).await?;
+            refuse_symbolic_song_on_audio_route(&model, &entry)?;
+            if let Some(stored) = merged.get("modelManifestEntry") {
+                refuse_symbolic_song_on_audio_route(&model, stored)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The generic audio route refuses a symbolic-song model: its submission, eligibility and source
@@ -720,8 +795,35 @@ fn model_identity(entry: &Value) -> ComponentIdentity {
     }
 }
 
-fn identity_from(value: Option<&Value>) -> Option<ComponentIdentity> {
-    serde_json::from_value(value?.clone()).ok()
+/// A component identity the worker recorded under `field`: `Ok(None)` when it recorded none (a job
+/// that failed before it resolved its weights), an error when it recorded one that is not a
+/// `{id, revision}` identity — never silently replaced by another identity.
+fn identity_from(block: &JsonObject, field: &str) -> Result<Option<ComponentIdentity>, ApiError> {
+    match block.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                ApiError::internal(format!(
+                "the worker's `{field}` identity is not a component identity ({error}): {value}"
+            ))
+            }),
+    }
+}
+
+/// The truncation the worker OBSERVED: `Ok(None)` when it recorded none (the run never
+/// published), an error when the record is malformed. Never a default.
+fn observed_truncation(block: &JsonObject) -> Result<Option<Truncation>, ApiError> {
+    match block.get("truncated") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "the worker's truncation record is malformed ({error}): {value}"
+                ))
+            }),
+    }
 }
 
 /// Apply the YuE2 terminal side effects of `job` into `result` (see the [module docs](self)).
@@ -761,7 +863,16 @@ pub(crate) async fn apply_yue2_side_effects(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
             {
-                if block.get("scoreVersionId").is_none() {
+                let abc_truncated = block
+                    .get("truncated")
+                    .and_then(|t| t.get("abc"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if abc_truncated {
+                    // A plan cut off by its token budget is not a reviewable score: it is kept in
+                    // the run (and on the result) but never becomes a score version.
+                    block.insert("scoreVersionSkipped".to_owned(), json!("abc_truncated"));
+                } else if block.get("scoreVersionId").is_none() {
                     match create_plan_version(state, job, &project_id, &block, abc).await {
                         Ok(Some(id)) => {
                             block.insert("scoreVersionId".to_owned(), json!(id));
@@ -857,13 +968,18 @@ async fn record_render(
             .unwrap_or(fallback)
             .to_owned()
     };
-    let truncated = block
-        .get("truncated")
-        .and_then(|value| serde_json::from_value::<Truncation>(value.clone()).ok())
-        .unwrap_or(Truncation {
-            abc: false,
-            semantic: false,
-        });
+    let truncated = observed_truncation(block)?;
+    // Absent only when the job failed before it resolved its weights: then the identity the job
+    // was queued for (the catalog's pinned primary download) is what it would have rendered with.
+    let model = match identity_from(block, "model")? {
+        Some(model) => model,
+        None => model_identity(&entry),
+    };
+    let decoder = if completed {
+        identity_from(block, "decoder")?
+    } else {
+        None
+    };
     let input = RenderInput {
         status: if completed {
             RenderStatus::Completed
@@ -873,12 +989,8 @@ async fn record_render(
         score_sha256: rendered("renderedScoreSha256", &version.score_sha256),
         request_sha256: rendered("renderedRequestSha256", &version.request_sha256),
         truncated,
-        model: identity_from(block.get("model")).unwrap_or_else(|| model_identity(&entry)),
-        decoder: if completed {
-            identity_from(block.get("decoder"))
-        } else {
-            None
-        },
+        model,
+        decoder,
         job_id: Some(job.id.clone()),
         audio_asset_id: if completed {
             result
@@ -926,8 +1038,51 @@ async fn record_render(
 // Exports.
 // ---------------------------------------------------------------------------------------------
 
-/// The distinct usage policies of the assets a timeline document places (their `extra.usagePolicy`),
-/// read from the project library.
+/// Every usage policy an asset carries, as `{assetId, policy}` entries: its own
+/// (`extra.usagePolicy`, a YuE2 output) and the ones it inherited from what it was made from
+/// (`extra.usagePolicies`, a derived asset or an export — already in that shape, flattened so a
+/// derivative of a derivative still names the original asset).
+fn asset_usage_policies(asset_id: &str, asset: &Value) -> Vec<Value> {
+    let extra = asset.get("extra");
+    let own = extra
+        .and_then(|extra| extra.get("usagePolicy"))
+        .filter(|policy| !policy.is_null())
+        .map(|policy| json!({ "assetId": asset_id, "policy": policy }));
+    let inherited = extra
+        .and_then(|extra| extra.get("usagePolicies"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("policy").is_some_and(|policy| !policy.is_null()))
+        .cloned();
+    own.into_iter().chain(inherited).collect()
+}
+
+/// The usage policies of `asset_ids` in `project_id`, deduplicated. A missing asset carries none;
+/// any other read failure is an error (never an empty policy set).
+fn usage_policies_of(
+    store: &ProjectStore,
+    project_id: &str,
+    asset_ids: impl IntoIterator<Item = String>,
+) -> Result<Vec<Value>, ProjectStoreError> {
+    let mut policies: Vec<Value> = Vec::new();
+    for id in asset_ids {
+        let asset = match store.get_asset(project_id, &id) {
+            Ok(asset) => asset,
+            Err(ProjectStoreError::NotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        for policy in asset_usage_policies(&id, &asset) {
+            if !policies.contains(&policy) {
+                policies.push(policy);
+            }
+        }
+    }
+    Ok(policies)
+}
+
+/// The distinct usage policies of the assets a timeline document places — their own and the ones
+/// they inherited — read from the project library.
 pub(crate) async fn timeline_usage_policies(
     state: &AppState,
     project_id: &str,
@@ -937,24 +1092,80 @@ pub(crate) async fn timeline_usage_policies(
     collect_asset_ids(document, &mut asset_ids);
     let project = project_id.to_owned();
     project_call(state.clone(), move |store| {
-        let mut policies: Vec<Value> = Vec::new();
-        for id in asset_ids {
-            let Ok(asset) = store.get_asset(&project, &id) else {
-                continue;
-            };
-            if let Some(policy) = asset
-                .get("extra")
-                .and_then(|extra| extra.get("usagePolicy"))
-            {
-                let policy = json!({ "assetId": id, "policy": policy });
-                if !policies.contains(&policy) {
-                    policies.push(policy);
+        usage_policies_of(&store, &project, asset_ids)
+    })
+    .await
+}
+
+/// The asset ids a generated-asset fact names as its inputs: `parents`, and every
+/// `...AssetId` / `...AssetIds` field (source, reference, edit and stem inputs), excluding the
+/// fact's own `assetId`.
+fn fact_input_asset_ids(fact: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(object) = fact.as_object() else {
+        return ids;
+    };
+    for (key, value) in object {
+        let is_input = key == "parents"
+            || (key != "assetId" && (key.ends_with("AssetId") || key.ends_with("AssetIds")));
+        if !is_input {
+            continue;
+        }
+        match value {
+            Value::String(id) if !id.trim().is_empty() => ids.push(id.clone()),
+            Value::Array(items) => ids.extend(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_owned),
+            ),
+            _ => {}
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Propagate usage policies onto generated assets derived from policy-bearing inputs (sc-22999,
+/// epic E2): an asset made from a YuE2 output — an audio edit or extension of it, a voice clone
+/// from it, a stem, a mux — inherits the source's policy as `extra.usagePolicies`, so neither
+/// the library nor an export can launder the noncommercial restriction by deriving from it.
+/// Runs on every reported asset write before it is persisted.
+pub(crate) fn inherit_usage_policies(
+    store: &ProjectStore,
+    project_id: &str,
+    asset_writes: &mut [Value],
+) -> Result<(), ProjectStoreError> {
+    for fact in asset_writes.iter_mut() {
+        let inputs = fact_input_asset_ids(fact);
+        if inputs.is_empty() {
+            continue;
+        }
+        let inherited = usage_policies_of(store, project_id, inputs)?;
+        if inherited.is_empty() {
+            continue;
+        }
+        let Some(object) = fact.as_object_mut() else {
+            continue;
+        };
+        let extra = object.entry("extra").or_insert_with(|| json!({}));
+        let Some(extra) = extra.as_object_mut() else {
+            continue;
+        };
+        let merged = extra
+            .entry("usagePolicies")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(list) = merged.as_array_mut() {
+            for policy in inherited {
+                if !list.contains(&policy) {
+                    list.push(policy);
                 }
             }
         }
-        Ok(policies)
-    })
-    .await
+    }
+    Ok(())
 }
 
 fn collect_asset_ids(value: &Value, out: &mut std::collections::BTreeSet<String>) {
