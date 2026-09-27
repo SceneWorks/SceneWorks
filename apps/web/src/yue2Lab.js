@@ -702,6 +702,7 @@ export function yue2TranscriptionView(record) {
     versionErrors: Object.entries(versionErrors)
       .filter(([, message]) => message)
       .map(([mode, message]) => ({ mode, message: String(message) })),
+    abcErrors: record?.abcErrors && typeof record.abcErrors === "object" ? record.abcErrors : {},
     exportGroups: EXPORT_KIND_ORDER.filter((kind) => groups.has(kind)).map((kind) => ({
       kind,
       label: EXPORT_KIND_LABELS[kind],

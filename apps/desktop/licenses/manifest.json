@@ -1,6 +1,6 @@
 {
-  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs stages the bundled-binary files (ffmpeg/onnxruntime/cuda) next to the corresponding binaries in the packaged app. Model entries (sc-5604) are notice-only — they record the upstream license + attribution for AI model weights SceneWorks re-hosts on its Hugging Face org and downloads at runtime; they are not staged as binaries. The `description` below is shown to end users — keep it user-facing.",
-  "description": "SceneWorks bundles the third-party binaries listed below, and redistributes the AI model weights listed below — downloaded on first use from the SceneWorks model repository on Hugging Face. The upstream attributions, license notices, and any written offers are reproduced here.",
+  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs stages the bundled-binary files (ffmpeg/onnxruntime/cuda) next to the corresponding binaries in the packaged app. Model entries (sc-5604) are notice-only — they record the upstream license + attribution for AI model weights SceneWorks downloads at runtime, whether from upstream or a SceneWorks re-host; they are not staged as binaries. The `description` below is shown to end users — keep it user-facing.",
+  "description": "SceneWorks bundles the third-party binaries listed below and records the licenses of AI model weights acquired at runtime, whether downloaded from upstream or from a SceneWorks repository. The upstream attributions, license notices, and any written offers are reproduced here.",
   "components": [
     {
       "id": "ffmpeg",
@@ -1011,12 +1011,7 @@
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
       "usage": "Image generation + edit model (base / Turbo / Edit). SceneWorks downloads on first use converted copies of the upstream Apache-2.0 weights, re-hosted at SceneWorks/z-image-mlx and SceneWorks/z-image-turbo-mlx. Redistributed with attribution as permitted by Apache-2.0.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "ltx-2.3-eros",
@@ -1389,6 +1384,78 @@
       ]
     },
     {
+      "id": "sheetsage2-weights",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "SheetSage2 weights",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/SheetSage2/tree/eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Conditional Song Lab cover component, downloaded only when the user sets up covers directly from m-a-p/SheetSage2 at eab522a8168e8b8b8c4856bf8609cd86198f01fe; never included in the YuE2 generation install. Weights are CC BY-NC 4.0, noncommercial only, with attribution. SceneWorks does not re-host these weights; re-hosting remains gated on a separate rights review.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "sheetsage2-weights-cc-by-nc"
+        }
+      ]
+    },
+    {
+      "id": "mert-v2-fullsong-weights",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "MERT-v2-FullSong weights",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/MERT-v2-FullSong/tree/d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Conditional Song Lab cover component, downloaded only when the user sets up covers directly from m-a-p/MERT-v2-FullSong at d8ba1c745e733b3908ce6ad16ebeb17ac7600a42; never included in the YuE2 generation install. Weights are CC BY-NC 4.0, noncommercial only, with attribution. SceneWorks does not re-host these weights; re-hosting remains gated on a separate rights review.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "mert-v2-fullsong-weights-cc-by-nc"
+        }
+      ]
+    },
+    {
+      "id": "sheetsage2-port",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "Native SheetSage2 and MERT-v2-FullSong transcription port",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/SheetSage2",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Native Rust/Candle transcription port for the Song Lab recording-to-score cover flow. The owner recorded CC BY-NC 4.0 noncommercial distribution with attribution on epic sc-22988 (2026-09-27). Modified from the upstream SheetSage2 and MERT-v2-FullSong implementation. This code entry is distinct from both weight entries; re-hosting weights remains gated.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "sheetsage2-port-cc-by-nc"
+        }
+      ]
+    },
+    {
       "id": "yue2-qwen-tiktoken",
       "models": [],
       "appliesToModels": [
@@ -1553,12 +1620,7 @@
         "linux"
       ],
       "usage": "Image-to-SVG vectorization from the immutable StarVector-1B 380ab95d25a8e9ab1dc825debe238b4953ae13b9 and StarVector-8B 518beea8dcb5f7a37c5911e92d1d62a76beee7f9 snapshots. SceneWorks downloads each immutable model card plus the exact native model, tokenizer, configuration and processor closures declared by the paired inference contract; it excludes and never executes either repository's remote Python module. Both model cards declare Apache-2.0, and there is no separate NOTICE file in either repository at these revisions.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "insightface",

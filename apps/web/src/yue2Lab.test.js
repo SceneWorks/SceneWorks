@@ -578,6 +578,7 @@ describe("YuE2 cover from a recording (sc-23002)", () => {
       readiness: { melody: { ready: false, reason: "the transcription has no melody notes" }, full: { ready: true } },
       versions: { melody: null, full: "ver_full" },
       versionErrors: { full: "unsupported notation" },
+      abcErrors: { melody: "score syntax rejected", full: null },
       exports: [
         { path: "chord.lab", kind: "lab", sha256: "a" },
         { path: "melody.mid", kind: "midi", sha256: "b" },
@@ -589,6 +590,7 @@ describe("YuE2 cover from a recording (sc-23002)", () => {
     expect(view.readiness.melody).toEqual({ ready: false, reason: "the transcription has no melody notes" });
     expect(view.readiness.full).toEqual({ ready: true, reason: "" });
     expect(view.versionErrors).toEqual([{ mode: "full", message: "unsupported notation" }]);
+    expect(view.abcErrors).toEqual({ melody: "score syntax rejected", full: null });
     expect(view.octave).toMatchObject({ checked: 4, f0HalfDominant: 3, fraction: 0.75, range: [60, 72] });
     // Mutation that reds this: grouping exports in manifest order instead of by kind.
     expect(view.exportGroups.map((group) => [group.kind, group.files.map((file) => file.path)])).toEqual([

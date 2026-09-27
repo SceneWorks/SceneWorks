@@ -147,6 +147,11 @@ import joycaptionApache20 from "../../../desktop/licenses/joycaption-source/Apac
 // Upstream algorithm + vocabulary ported into sceneworks-core's YuE2 score tools (sc-22997): the
 // yue2-music skill's own LICENSE file, kept verbatim.
 import yue2ScoreToolsApache20 from "../../../desktop/licenses/yue2-score-tools-source/Apache-2.0.txt?url&no-inline";
+// The conditional recording-cover closure has its own noncommercial terms. Keep the weights
+// separate from the native port so neither implies permission to re-host the checkpoints.
+import sheetsage2WeightsCcByNc from "../../../desktop/licenses/sheetsage2-weights/CC-BY-NC-4.0.txt?url&no-inline";
+import mertV2FullSongWeightsCcByNc from "../../../desktop/licenses/mert-v2-fullsong-weights/CC-BY-NC-4.0.txt?url&no-inline";
+import sheetsage2PortCcByNc from "../../../desktop/licenses/sheetsage2-port/CC-BY-NC-4.0.txt?url&no-inline";
 // YuE2 — EXPERIMENTAL, NON-COMMERCIAL (epic sc-22988, sc-22998). Three sets of terms, kept apart:
 // the CC BY-NC 4.0 weights (YuE2-3B + both VAEs, downloaded from the upstream m-a-p repos, never
 // re-hosted) with the notices those repos ship; the Qwen tokenizer's Tongyi Qianwen Agreement +
@@ -251,6 +256,9 @@ const DOCUMENT_URL = {
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
   "joycaption-source-apache": joycaptionApache20,
   "yue2-score-tools-source-apache": yue2ScoreToolsApache20,
+  "sheetsage2-weights-cc-by-nc": sheetsage2WeightsCcByNc,
+  "mert-v2-fullsong-weights-cc-by-nc": mertV2FullSongWeightsCcByNc,
+  "sheetsage2-port-cc-by-nc": sheetsage2PortCcByNc,
   "yue2-weights-cc-by-nc": yue2WeightsCcByNc,
   "yue2-weights-third-party-notices": yue2WeightsNotices,
   "yue2-weights-snakebeta-mit": yue2WeightsSnakeBetaMit,

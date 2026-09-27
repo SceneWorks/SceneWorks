@@ -103,6 +103,9 @@
     "sourceAudioAssetId": [
       "transcribe"
     ],
+    "transcription": [
+      "transcribe"
+    ],
     "count": [
       "create",
       "plan",
@@ -344,6 +347,21 @@
       "kind": "create",
       "lyrics": "la la",
       "planning": "full",
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "transcribe",
+      "sourceAudioAssetId": "asset_take",
+      "transcription": {
+        "maxSeconds": 90,
+        "overlapSeconds": 150,
+        "lookaheadSeconds": 50
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "transcribe",
+      "sourceAudioAssetId": "asset_take",
       "requestedGpu": "auto"
     }
   ]

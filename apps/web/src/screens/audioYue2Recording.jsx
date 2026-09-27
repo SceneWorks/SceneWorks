@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { assetCanRenderAsAudio } from "../components/assetMedia.jsx";
 import { formatRelativeTime } from "../audioTakes.js";
 import { formatBytes, percent } from "../formatting.js";
 import { terminalStatuses } from "../jobTypes.js";
@@ -61,6 +62,116 @@ function NoncommercialChips({ license }) {
       <span className="yue2-chip yue2-chip--warn">Noncommercial</span>
       {license ? <span className="yue2-chip">{license}</span> : null}
     </span>
+  );
+}
+
+// A microphone take becomes a normal project audio asset before it can be transcribed. The
+// recorder and stream never survive leaving this panel, including during the permission prompt.
+function MicrophoneTake({ importAsset, onImported }) {
+  const recorder = useRef(null);
+  const stream = useRef(null);
+  const live = useRef(true);
+  const discard = useRef(false);
+  const [state, setState] = useState("idle");
+  const [error, setError] = useState(null);
+  const [importedName, setImportedName] = useState("");
+
+  function release() {
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+    recorder.current = null;
+  }
+
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+      discard.current = true;
+      const active = recorder.current;
+      if (active?.state === "recording") active.stop();
+      release();
+    };
+  }, []);
+
+  async function start() {
+    setError(null);
+    setImportedName("");
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setError("Microphone recording is unavailable in this browser. Upload an audio file instead.");
+      return;
+    }
+    setState("requesting");
+    let acquired;
+    try {
+      acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!live.current) {
+        acquired.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      stream.current = acquired;
+      const next = new MediaRecorder(acquired);
+      const chunks = [];
+      discard.current = false;
+      recorder.current = next;
+      next.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
+      next.onerror = (event) => {
+        discard.current = true;
+        release();
+        if (live.current) { setError(event.error || "The microphone recording failed."); setState("idle"); }
+      };
+      next.onstop = async () => {
+        release();
+        if (!live.current || discard.current) { if (live.current) setState("idle"); return; }
+        setState("saving");
+        try {
+          if (!chunks.length) throw new Error("The microphone recording was empty.");
+          const mime = next.mimeType || chunks[0].type || "audio/webm";
+          const ext = mime.includes("mp4") ? "m4a" : mime.includes("ogg") ? "ogg" : "webm";
+          const file = new File(chunks, `Song Lab recording ${new Date().toISOString().replaceAll(":", "-")}.${ext}`, { type: mime });
+          const asset = await importAsset(file, { select: false, throwOnError: true });
+          if (!asset?.id || !assetCanRenderAsAudio(asset)) throw new Error("The recording could not be imported as an audio asset.");
+          if (live.current) {
+            setImportedName(file.name);
+            onImported(asset.id);
+          }
+        } catch (cause) {
+          if (live.current) setError(cause);
+        } finally {
+          if (live.current) setState("idle");
+        }
+      };
+      next.start();
+      setState("recording");
+    } catch (cause) {
+      acquired?.getTracks().forEach((track) => track.stop());
+      release();
+      if (live.current) { setError(cause); setState("idle"); }
+    }
+  }
+
+  function stop(keep) {
+    discard.current = !keep;
+    if (recorder.current?.state === "recording") recorder.current.stop();
+    stream.current?.getTracks().forEach((track) => track.stop());
+    if (!keep) setState("idle");
+  }
+
+  return (
+    <div className="yue2-microphone" data-testid="yue2-microphone" data-state={state}>
+      {state === "recording" ? (
+        <div className="yue2-inline">
+          <span role="status">Recording from the microphone…</span>
+          <button className="secondary-action" onClick={() => stop(true)} type="button">Stop and use recording</button>
+          <button className="secondary-action" onClick={() => stop(false)} type="button">Discard recording</button>
+        </div>
+      ) : (
+        <button className="secondary-action" disabled={!importAsset || state !== "idle"} onClick={start} type="button">
+          {state === "requesting" ? "Requesting microphone…" : state === "saving" ? "Saving recording…" : "Record with microphone"}
+        </button>
+      )}
+      {importedName ? <p className="yue2-muted" role="status">{importedName} was saved to the project and is ready to transcribe.</p> : null}
+      <ErrorNotice error={error} testId="yue2-microphone-error" />
+    </div>
   );
 }
 
@@ -326,6 +437,7 @@ function ModeCard({ mode, label, view, abc, versions, token, onEdit, onUseForCov
   const readiness = view.readiness[mode];
   const versionId = view.versions[mode];
   const versionError = view.versionErrors.find((row) => row.mode === mode);
+  const abcError = view.abcErrors[mode];
   // The imported (source) version and every edit derived from it — all retained, each coverable.
   const lineage = versions.filter(
     (version) => version.transcription?.transcriptionId === view.id && version.transcription?.mode === mode,
@@ -373,6 +485,9 @@ function ModeCard({ mode, label, view, abc, versions, token, onEdit, onUseForCov
           testId={`yue2-version-error-${mode}`}
         />
       ) : null}
+      {abcError ? (
+        <ErrorNotice error={`The ${mode} score could not be built: ${abcError}`} testId={`yue2-abc-error-${mode}`} />
+      ) : null}
       {lineage.length ? (
         <ul className="yue2-version-list" data-testid={`yue2-transcription-versions-${mode}`}>
           {lineage.map((version) => (
@@ -389,7 +504,9 @@ function ModeCard({ mode, label, view, abc, versions, token, onEdit, onUseForCov
               <button
                 aria-pressed={coverVersionId === version.id}
                 className="secondary-action"
+                disabled={!readiness?.ready || Boolean(versionError)}
                 onClick={() => onUseForCover(version.id, version.cot === "full" || version.cot === "melody" ? version.cot : mode)}
+                title={!readiness?.ready ? readiness?.reason || "The transcription is not ready for this cover mode." : versionError ? versionError.message : undefined}
                 type="button"
               >
                 Use for the cover
@@ -448,6 +565,13 @@ function TranscriptionReview({ projectId, token, detail, versions, assetName, on
           The review raised no warnings.
         </p>
       )}
+      {view.decodeWarnings.length ? (
+        <ul className="yue2-notice yue2-notice--warn" data-testid="yue2-transcription-decode-warnings">
+          {view.decodeWarnings.map((warning, index) => (
+            <li key={`${warning.code}-${index}`}><Icon.Warning size={14} /> {warning.code ? <code>{warning.code}</code> : null} {warning.message}</li>
+          ))}
+        </ul>
+      ) : null}
       <OctaveEvidence octave={view.octave} />
 
       <dl className="yue2-facts" data-testid="yue2-transcription-facts">
@@ -553,14 +677,15 @@ export function Yue2RecordingCover({
   refreshKey = "",
 }) {
   const setup = useMemo(() => yue2CoverSetup(model), [model]);
-  const audioAssets = useMemo(() => (assets ?? []).filter((asset) => asset?.type === "audio"), [assets]);
+  const audioAssets = useMemo(() => (assets ?? []).filter(assetCanRenderAsAudio), [assets]);
   const assetName = (id, fallback = "") => {
     const asset = (assets ?? []).find((item) => item.id === id);
     return asset?.displayName || fallback || id || "recording";
   };
 
   // Transcriptions: server records, re-read whenever a run finishes.
-  const [listing, setListing] = useState({ items: [], error: null });
+  const [listing, setListing] = useState({ items: [], error: null, loading: true });
+  const [readRetry, setReadRetry] = useState(0);
   useEffect(() => {
     let live = true;
     if (!projectId) return undefined;
@@ -572,17 +697,22 @@ export function Yue2RecordingCover({
         setListing({
           items,
           error: unreadable.length ? `Some transcriptions could not be read: ${unreadable.join(", ")}` : null,
+          loading: false,
         });
       })
       .catch((error) => {
-        if (live) setListing((current) => ({ ...current, error }));
+        if (live) setListing((current) => ({ ...current, error, loading: false }));
       });
     return () => {
       live = false;
     };
-  }, [projectId, token, refreshKey]);
+  }, [projectId, token, refreshKey, readRetry]);
 
-  const selectedId = settings.transcriptionId || listing.items[0]?.id || "";
+  const selectedId = listing.loading
+    ? settings.transcriptionId || ""
+    : listing.items.some((item) => item.id === settings.transcriptionId)
+      ? settings.transcriptionId
+      : listing.items[0]?.id || "";
   const [detail, setDetail] = useState({ id: "", data: null, error: null });
   useEffect(() => {
     let live = true;
@@ -600,7 +730,7 @@ export function Yue2RecordingCover({
     return () => {
       live = false;
     };
-  }, [projectId, selectedId, token, refreshKey]);
+  }, [projectId, selectedId, token, refreshKey, readRetry]);
 
   // The newest transcription job, and a just-finished one opens its own review.
   const transcribeRuns = useMemo(() => runs.filter((job) => job.payload?.yue2?.kind === "transcribe"), [runs]);
@@ -676,6 +806,7 @@ export function Yue2RecordingCover({
           showCategories={false}
           value={settings.transcribeAssetId}
         />
+        <MicrophoneTake importAsset={importAsset} onImported={(id) => update({ transcribeAssetId: id })} />
         <details className="yue2-inspect" data-testid="yue2-transcribe-settings">
           <summary>Transcription settings</summary>
           <div className="yue2-grid">
@@ -745,7 +876,11 @@ export function Yue2RecordingCover({
         ) : null}
       </div>
 
-      <ErrorNotice error={listing.error} testId="yue2-transcriptions-error" />
+      {listing.error ? (
+        <ErrorNotice error={listing.error} testId="yue2-transcriptions-error">
+          <button className="secondary-action" onClick={() => setReadRetry((value) => value + 1)} type="button">Retry transcriptions</button>
+        </ErrorNotice>
+      ) : null}
       {listing.items.length > 1 ? (
         <label>
           Transcription
@@ -763,7 +898,11 @@ export function Yue2RecordingCover({
           </select>
         </label>
       ) : null}
-      {selectedId ? <ErrorNotice error={detail.error} testId="yue2-transcription-error" /> : null}
+      {selectedId && detail.error ? (
+        <ErrorNotice error={detail.error} testId="yue2-transcription-error">
+          <button className="secondary-action" onClick={() => setReadRetry((value) => value + 1)} type="button">Retry transcription</button>
+        </ErrorNotice>
+      ) : null}
       {detail.data && detail.id === selectedId ? (
         <TranscriptionReview
           assetName={assetName}
@@ -775,6 +914,8 @@ export function Yue2RecordingCover({
           token={token}
           versions={versions}
         />
+      ) : !selectedId && listing.loading ? (
+        <p className="yue2-muted">Loading transcriptions…</p>
       ) : !selectedId && !listing.error ? (
         <p className="yue2-muted">No transcriptions in this project yet.</p>
       ) : null}

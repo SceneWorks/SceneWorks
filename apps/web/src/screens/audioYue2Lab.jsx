@@ -430,6 +430,12 @@ export function Yue2SongLab({ header }) {
 
   // The version a cover follows: a transcribed one must be covered in its own mode (sc-23002).
   const coverVersion = versions.find((version) => version.id === settings.coverVersionId) ?? null;
+  const [reviewedTranscriptionVersionId, setReviewedTranscriptionVersionId] = useState("");
+  const transcriptionReviewProblem =
+    settings.coverSource === "version" && coverVersion?.transcription &&
+    reviewedTranscriptionVersionId !== settings.coverVersionId
+      ? "Review the transcription and score, then confirm your review before covering it."
+      : null;
   const problemContext = { hasProject: Boolean(projectId), coverVersion };
 
   // The server says the acceptance lapsed (the terms changed, or it was withdrawn): re-gate.
@@ -441,6 +447,7 @@ export function Yue2SongLab({ header }) {
   async function submit(kind, target = {}) {
     if (submitting) return;
     const problems = yue2RequestProblems(kind, settings, target, problemContext);
+    if (kind === "cover" && transcriptionReviewProblem) problems.push(transcriptionReviewProblem);
     if (problems.length) {
       setSubmitError(problems.join(" "));
       return;
@@ -543,6 +550,7 @@ export function Yue2SongLab({ header }) {
   const hasProject = problemContext;
   const composeProblems = yue2RequestProblems(kind, settings, {}, hasProject);
   const coverProblems = yue2RequestProblems("cover", settings, {}, hasProject);
+  if (transcriptionReviewProblem) coverProblems.push(transcriptionReviewProblem);
   // The job kind the visible surface submits: its controls are the only ones that reach a request,
   // so a control the kind does not read is disabled with core's reason rather than silently dropped.
   const activeKind =
@@ -991,6 +999,16 @@ export function Yue2SongLab({ header }) {
                   />
                 </label>
                 <RegenerationNotice text={regenerationNotice} />
+                {settings.coverSource === "version" && coverVersion?.transcription ? (
+                  <label className="model-license-ack" data-testid="yue2-transcription-review-confirmation">
+                    <input
+                      checked={reviewedTranscriptionVersionId === settings.coverVersionId}
+                      onChange={(event) => setReviewedTranscriptionVersionId(event.target.checked ? settings.coverVersionId : "")}
+                      type="checkbox"
+                    />
+                    I reviewed this transcription, its warnings and octave evidence, and this score version
+                  </label>
+                ) : null}
                 <div className="prompt-cta-stack yue2-cta">
                   <button
                     className="prompt-cta"
@@ -1012,7 +1030,14 @@ export function Yue2SongLab({ header }) {
                 onReloadVersions={reloadVersions}
                 onRender={(versionId) => submit("renderVersion", { versionId })}
                 onSelectVersion={(versionId) => update({ selectedVersionId: versionId })}
-                onUseForCover={(versionId) => update({ tab: "cover", coverSource: "version", coverVersionId: versionId })}
+                onUseForCover={(versionId) => {
+                  const version = versions.find((item) => item.id === versionId);
+                  update({
+                    tab: "cover", coverSource: "version", coverVersionId: versionId,
+                    ...(version?.transcription && (version.cot === "full" || version.cot === "melody")
+                      ? { coverMode: version.cot } : {}),
+                  });
+                }}
                 projectId={projectId}
                 regenerationNotice={regenerationNotice}
                 draft={settings.editDraft}
