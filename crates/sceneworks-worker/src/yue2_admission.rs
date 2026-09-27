@@ -2163,6 +2163,7 @@ pub(crate) async fn transcription_unknown_decode_cap(gpu_id: &str) -> Result<u64
 
 /// `ReviewArtifact::open` replays persisted F32 model input. It reads raw bytes and constructs an
 /// F32 vector, so an existing artifact needs admission too, before replay allocates either copy.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) async fn check_transcription_replay(
     artifact_file_bytes: u64,
     gpu_id: &str,

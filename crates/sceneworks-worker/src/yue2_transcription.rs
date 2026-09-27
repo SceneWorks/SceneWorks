@@ -21,6 +21,7 @@ fn artifact_owner(
         "manifestSha256":manifest})
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn owner_matches(dir: &Path, run_id: &str, asset_id: &str, sha256: &str) -> WorkerResult<String> {
     let path = dir.join(OWNER_FILE);
     let file = std::fs::File::open(&path)?;
