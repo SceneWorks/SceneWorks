@@ -25,15 +25,25 @@ pub(crate) fn require_unloaded(live: usize) -> WorkerResult<()> {
 }
 
 /// The narrow injectable boundary around the native cover closure and its explicit unload.
+// The neither build keeps the trait for job routing but has no native transcriber to read these
+// fields; its implementation rejects the request before touching any input.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) struct TranscriptionInput<'a> {
+    pub snapshots: &'a [(String, PathBuf)],
+    pub audio: gen_core::AudioTrack,
+    pub source_sha256: &'a str,
+    pub spec: &'a Yue2JobSpec,
+    pub artifact_dir: &'a Path,
+    pub canceled: &'a gen_core::CancelFlag,
+}
+
 pub(crate) trait TranscriptionBackend: Send + Sync + 'static {
     fn transcribe(
         &self,
-        snapshots: &[(String, PathBuf)],
-        audio: gen_core::AudioTrack,
-        source_sha256: &str,
-        spec: &Yue2JobSpec,
-        artifact_dir: &Path,
-        canceled: &gen_core::CancelFlag,
+        input: TranscriptionInput<'_>,
         progress: &mut dyn FnMut(f64, String),
     ) -> WorkerResult<Value>;
 
@@ -50,14 +60,17 @@ impl TranscriptionBackend for NativeTranscription {
 
     fn transcribe(
         &self,
-        snapshots: &[(String, PathBuf)],
-        audio: gen_core::AudioTrack,
-        source_sha256: &str,
-        spec: &Yue2JobSpec,
-        artifact_dir: &Path,
-        canceled: &gen_core::CancelFlag,
+        input: TranscriptionInput<'_>,
         progress: &mut dyn FnMut(f64, String),
     ) -> WorkerResult<Value> {
+        let TranscriptionInput {
+            snapshots,
+            audio,
+            source_sha256,
+            spec,
+            artifact_dir,
+            canceled,
+        } = input;
         use crate::inference_runtime::audio_providers::{
             candle_audio_sheetsage2 as ss2, candle_audio_yue2 as yue2,
         };
@@ -183,12 +196,7 @@ impl TranscriptionBackend for NativeTranscription {
     }
     fn transcribe(
         &self,
-        _: &[(String, PathBuf)],
-        _: gen_core::AudioTrack,
-        _: &str,
-        _: &Yue2JobSpec,
-        _: &Path,
-        _: &gen_core::CancelFlag,
+        _: TranscriptionInput<'_>,
         _: &mut dyn FnMut(f64, String),
     ) -> WorkerResult<Value> {
         Err(WorkerError::InvalidPayload(
@@ -319,17 +327,31 @@ fn cover_snapshots(settings: &Settings, entry: &Value) -> WorkerResult<Vec<(Stri
 
 /// Execute after the job's live eligibility check. Its terminal result is exactly the pointer the
 /// API side effect reopens, so a forged or incomplete artifact cannot be imported as a score.
+pub(crate) struct TranscriptionJob<'a> {
+    pub api: &'a ApiClient,
+    pub settings: &'a Settings,
+    pub job: &'a JobSnapshot,
+    pub spec: &'a Yue2JobSpec,
+    pub project_id: &'a str,
+    pub project_path: &'a Path,
+    pub entry: &'a Value,
+    pub usage_policy: &'a Value,
+}
+
 pub(crate) async fn run<B: TranscriptionBackend>(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    spec: &Yue2JobSpec,
-    project_id: &str,
-    project_path: &Path,
-    entry: &Value,
-    usage_policy: &Value,
+    context: TranscriptionJob<'_>,
     backend: B,
 ) -> WorkerResult<()> {
+    let TranscriptionJob {
+        api,
+        settings,
+        job,
+        spec,
+        project_id,
+        project_path,
+        entry,
+        usage_policy,
+    } = context;
     let source_id = spec.source_audio_asset_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload("yue2: transcribe has no sourceAudioAssetId".into())
     })?;
@@ -431,12 +453,14 @@ pub(crate) async fn run<B: TranscriptionBackend>(
             tx.send_replace(Some((fraction, message)));
         };
         let result = backend.transcribe(
-            &snapshots,
-            audio,
-            &source_sha,
-            &spec_copy,
-            &partial,
-            &task_cancel,
+            TranscriptionInput {
+                snapshots: &snapshots,
+                audio,
+                source_sha256: &source_sha,
+                spec: &spec_copy,
+                artifact_dir: &partial,
+                canceled: &task_cancel,
+            },
             &mut progress,
         );
         if result.is_err() {

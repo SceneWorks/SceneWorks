@@ -605,16 +605,11 @@ impl crate::yue2_transcription::TranscriptionBackend for StubTranscriber {
 
     fn transcribe(
         &self,
-        _: &[(String, PathBuf)],
-        _: gen_core::AudioTrack,
-        _: &str,
-        _: &Yue2JobSpec,
-        dir: &Path,
-        _: &gen_core::CancelFlag,
+        input: crate::yue2_transcription::TranscriptionInput<'_>,
         progress: &mut dyn FnMut(f64, String),
     ) -> WorkerResult<Value> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        std::fs::write(dir.join("partial-marker"), b"work")?;
+        std::fs::write(input.artifact_dir.join("partial-marker"), b"work")?;
         progress(0.5, "Transcribing window 1 of 1.".into());
         if self.fail {
             return Err(WorkerError::Engine("stub transcription failed".into()));

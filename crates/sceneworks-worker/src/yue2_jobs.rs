@@ -293,14 +293,16 @@ async fn execute<B: crate::yue2_transcription::TranscriptionBackend>(
         .unwrap_or_else(|| json!({}));
     if spec.kind == Yue2JobKind::Transcribe {
         return crate::yue2_transcription::run(
-            api,
-            settings,
-            job,
-            &spec,
-            &project_id,
-            &project_path,
-            &entry,
-            &usage_policy,
+            crate::yue2_transcription::TranscriptionJob {
+                api,
+                settings,
+                job,
+                spec: &spec,
+                project_id: &project_id,
+                project_path: &project_path,
+                entry: &entry,
+                usage_policy: &usage_policy,
+            },
             transcription_backend,
         )
         .await;
