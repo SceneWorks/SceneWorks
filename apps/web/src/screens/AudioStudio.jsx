@@ -18,6 +18,7 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { Yue2SongLab } from "./audioYue2Lab.jsx";
 
 // SceneWorks Audio Studio — the navigable shell (epic 13400, C0 / sc-13407). This screen mirrors
 // the canonical studio shell (VideoStudio.jsx): page-frame > WorkPanel + .mode-tabs + AdvancedSection
@@ -281,6 +282,11 @@ export function AudioStudio() {
   const deletingVoiceRef = useRef("");
   const [savedVoiceNotice, setSavedVoiceNotice] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  // Which surface is showing (sc-23000): the standard modes, or the experimental YuE2 Song Lab.
+  // The lab is entered ONLY by an explicit click on its separately-marked tab; the standard modes'
+  // own `mode` state is untouched while it shows, so leaving the lab returns to exactly where the
+  // user was.
+  const [surface, setSurface] = useState(saved.songLab === true ? "yue2" : "standard");
   const [guideOpen, setGuideOpen] = useState(false);
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
@@ -314,6 +320,14 @@ export function AudioStudio() {
   // serve a real Audio Studio generation mode. Offers still come from the full catalog so the user
   // can install a compatible generator.
   const modelReady = AUDIO_MODES.some((value) => modelsForMode(value).length > 0);
+  // The experimental Song Lab (sc-23000) is offered when the catalog carries a symbolic-song model
+  // (YuE2), installed or not — the lab owns its own opt-in, licence acceptance and install. An
+  // INSTALLED one also opens the studio's availability gate, so a YuE2-only install is reachable.
+  const songLabModel = useMemo(
+    () => (models ?? []).find((item) => item?.type === "audio" && item?.audio?.supportsSymbolicSong === true) ?? null,
+    [models],
+  );
+  const songLabInstalled = audioModels.some((item) => item?.audio?.supportsSymbolicSong === true);
   const modelOffers = useMemo(
     () => downloadOffersFor(models, audioModelUsable, macCapabilities),
     [models, macCapabilities],
@@ -616,6 +630,7 @@ export function AudioStudio() {
       referenceAudioAssetId,
       matchStrength,
       advancedOpen,
+      songLab: surface === "yue2",
     },
     // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
     preferencesHydrated && audioModels.length > 0,
@@ -776,9 +791,57 @@ export function AudioStudio() {
   // incompatible reduced catalogs are handled by the availability gate / mode snap above.
   const pickerModels = modeModels;
 
+  // The mode tab row, shared by the standard form and the Song Lab (sc-23000). The four standard
+  // tabs are unchanged; the experimental lab entry sits in its OWN tablist after them, marked
+  // experimental, so it never reads as (or displaces) a standard mode.
+  const modeTabs = (
+    <div className="audio-mode-tab-group">
+      <div className="mode-tabs mode-control" role="tablist" aria-label="Audio mode">
+        {AUDIO_MODES.map((value) => {
+          // Disabled only when no available model serves this mode — and never the active tab,
+          // so the user can always switch away (mirrors VideoStudio's mode-level gating).
+          const blocked = value !== mode && modelsForMode(value).length === 0;
+          const active = surface === "standard" && mode === value;
+          return (
+            <button
+              className={active ? "mode-tab active" : "mode-tab"}
+              key={value}
+              role="tab"
+              aria-selected={active}
+              onClick={() => {
+                setMode(value);
+                setSurface("standard");
+              }}
+              type="button"
+              disabled={blocked}
+              title={blocked ? "No installed model supports this mode." : undefined}
+            >
+              {MODE_LABELS[value] ?? value}
+            </button>
+          );
+        })}
+      </div>
+      {songLabModel ? (
+        <div className="mode-tabs yue2-lab-entry" role="tablist" aria-label="Experimental audio">
+          <button
+            aria-selected={surface === "yue2"}
+            className={surface === "yue2" ? "mode-tab active" : "mode-tab"}
+            data-testid="yue2-lab-tab"
+            onClick={() => setSurface("yue2")}
+            role="tab"
+            title="YuE2 — an experimental, noncommercial song model, separate from YuE1"
+            type="button"
+          >
+            Song Lab <span className="yue2-experimental-badge">Experimental</span>
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+
   return (
     <ModelAvailabilityGate
-      ready={modelReady}
+      ready={modelReady || songLabInstalled}
       initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Audio Studio needs an audio model"
       description="Download a recommended audio model to start generating speech, music and sound."
@@ -790,31 +853,10 @@ export function AudioStudio() {
       onCancelJob={onCancelJob}
     >
       <section className="page-frame audio-studio">
-        <form className="studio-shell" onSubmit={submit}>
+        <form className="studio-shell" hidden={surface !== "standard"} onSubmit={submit}>
           <WorkPanel className="studio-work-panel">
             <div className="prompt-hero-top">
-              <div className="mode-tabs mode-control" role="tablist" aria-label="Audio mode">
-                {AUDIO_MODES.map((value) => {
-                  // Disabled only when no available model serves this mode — and never the active tab,
-                  // so the user can always switch away (mirrors VideoStudio's mode-level gating).
-                  const blocked = value !== mode && modelsForMode(value).length === 0;
-                  const active = mode === value;
-                  return (
-                    <button
-                      className={active ? "mode-tab active" : "mode-tab"}
-                      key={value}
-                      role="tab"
-                      aria-selected={active}
-                      onClick={() => setMode(value)}
-                      type="button"
-                      disabled={blocked}
-                      title={blocked ? "No installed model supports this mode." : undefined}
-                    >
-                      {MODE_LABELS[value] ?? value}
-                    </button>
-                  );
-                })}
-              </div>
+              {modeTabs}
               <div className="prompt-hero-links">
                 <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
                   <Icon.Book size={14} /> Prompt guide
@@ -1396,6 +1438,9 @@ export function AudioStudio() {
             />
           </div>
         </form>
+        {surface === "yue2" ? (
+          <Yue2SongLab header={<div className="prompt-hero-top">{modeTabs}</div>} />
+        ) : null}
         {guideOpen ? (
           <PromptGuideModal
             guide={promptGuide}

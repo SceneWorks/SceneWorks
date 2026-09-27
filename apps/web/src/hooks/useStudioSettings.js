@@ -10,7 +10,10 @@ const PREFIX = "sceneworks-studio";
 // (`{ [workspaceId]: { [studio]: {…} } }`) while the cache is one localStorage key per
 // (studio, workspace) — seeding has to know which keys to write, and there is no way to
 // enumerate them from the map alone without trusting its contents.
-const STUDIOS = ["image", "video", "audio", "character", "editor-video"];
+// `yue2lab` is the Audio Studio's experimental YuE2 Song Lab (sc-23000): its own snapshot, so the
+// lab's controls never share a key with (or displace) the standard audio modes' settings. Named so
+// that no studio id is a prefix of another (`audio-…` would be parsed back as `audio`).
+const STUDIOS = ["image", "video", "audio", "yue2lab", "character", "editor-video"];
 
 // Kept OUT of the durable copy (sc-15425). Both are unbounded free text — a batch sheet can
 // hold hundreds of prompts — and `ImageStudio` alone persists ~47 fields, so including them
@@ -19,6 +22,15 @@ const STUDIOS = ["image", "video", "audio", "character", "editor-video"];
 // localStorage cache, which is what actually serves within-session navigation; the contract is
 // "your setup comes back after a relaunch, an in-progress batch sheet doesn't".
 const NON_DURABLE_FIELDS = ["batchPromptsText", "batchVariableValues"];
+
+// Free-text fields that are durable only while they are small (sc-23000). The YuE2 lab's ABC
+// scores can reach 256 KiB and its lyrics 16 000 characters; one of them at full size would push
+// the whole workspace entry past the server's 128 KiB budget, where it is dropped WHOLE and every
+// studio in that workspace fails to restore. Under the cap they survive a relaunch; over it they
+// stay in the session cache only (a score is durable on the server as a score version).
+const DURABLE_TEXT_CAPS = {
+  yue2lab: { suppliedScore: 16 * 1024, coverScore: 16 * 1024, lyrics: 16 * 1024 },
+};
 
 const DEFAULT_WORKSPACE = "default";
 // Keep in sync with MAX_STUDIO_WORKSPACES in apps/rust-api/src/preferences.rs.
@@ -128,6 +140,11 @@ function persistToServer(touchedWorkspace) {
     const durable = { ...settings };
     for (const field of NON_DURABLE_FIELDS) {
       delete durable[field];
+    }
+    for (const [field, cap] of Object.entries(DURABLE_TEXT_CAPS[studio] ?? {})) {
+      if (typeof durable[field] === "string" && durable[field].length > cap) {
+        delete durable[field];
+      }
     }
     map[workspace] = { ...(map[workspace] ?? {}), [studio]: durable };
   }

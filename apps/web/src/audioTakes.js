@@ -15,7 +15,30 @@ export const AUDIO_MODE_LABELS = Object.freeze({
   sfx: "Sound FX",
   music: "Music",
   voiceclone: "Voice Clone",
+  yue2: "YuE2 · Experimental",
 });
+
+// A YuE2 song (sc-23000): submitted through its own route by the experimental Song Lab, never by a
+// standard mode. Recognised by the job's `yue2` block, the recorded model id or the asset's
+// `extra.yue2` provenance, so the shared results surfaces label it as the experimental,
+// noncommercial model it is — instead of guessing a standard mode from its knobs — and never offer
+// a "Run again" that would resubmit it to the generic audio route (which refuses it).
+export function isYue2AudioRun(job, asset = null) {
+  return Boolean(
+    job?.payload?.yue2 ||
+      job?.payload?.model === "yue2" ||
+      asset?.extra?.yue2 ||
+      asset?.recipe?.model === "yue2",
+  );
+}
+
+function yue2PolicyChips(policy) {
+  const chips = [];
+  if (policy?.nonCommercial) {
+    chips.push("Noncommercial");
+  }
+  return chips;
+}
 
 // m:ss clock for every transport read-out. Clamps NaN/negative to 0:00.
 export function formatClock(seconds) {
@@ -131,18 +154,21 @@ export function audioRunGroups(jobs, assets, models = []) {
   return (Array.isArray(jobs) ? jobs : []).map((job) => {
     const takes = jobAudioResultAssets(job, assets);
     const model = (models ?? []).find((item) => item?.id === job?.payload?.model) ?? null;
-    const mode = audioJobMode(job, model);
+    const yue2 = isYue2AudioRun(job);
+    const mode = yue2 ? "yue2" : audioJobMode(job, model);
     return {
       job,
       id: job.id,
       mode,
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
-      chips: audioRunChips(job),
+      chips: yue2
+        ? [...yue2PolicyChips(job?.payload?.usagePolicy), ...audioRunChips(job)]
+        : audioRunChips(job),
       takes,
       running: audioJobIsRunning(job),
       createdAt: job.createdAt ?? job.startedAt ?? null,
-      replayable: Boolean(job.payload),
+      replayable: Boolean(job.payload) && !yue2,
     };
   });
 }
@@ -201,21 +227,25 @@ export function audioAssetRunGroups(assets, models = [], coveredAssetIds = new S
     const payload = assetRunPayload(asset);
     const job = { id: `run:${key}`, status: "completed", createdAt: asset.createdAt ?? null, payload };
     const model = (models ?? []).find((item) => item?.id === payload.model) ?? null;
-    const mode = audioJobMode(job, model);
+    const yue2 = isYue2AudioRun(job, asset);
+    const mode = yue2 ? "yue2" : audioJobMode(job, model);
     const group = {
       job,
       id: job.id,
       mode,
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
-      chips: audioRunChips(job),
+      chips: yue2
+        ? [...yue2PolicyChips(asset?.extra?.usagePolicy), ...audioRunChips(job)]
+        : audioRunChips(job),
       takes: [asset],
       running: false,
       createdAt: asset.createdAt ?? null,
       // A voice clone can't be replayed without re-picking its reference clip, and a run
       // whose model is gone can't be replayed at all — so those groups hide "Run again"
-      // rather than offering a button that would fail.
-      replayable: mode !== "voiceclone" && Boolean(model),
+      // rather than offering a button that would fail. A YuE2 song replays only from the Song
+      // Lab (its own route), never through the generic audio route.
+      replayable: mode !== "voiceclone" && !yue2 && Boolean(model),
     };
     byRun.set(key, group);
     groups.push(group);
