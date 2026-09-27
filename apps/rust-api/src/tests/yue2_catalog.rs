@@ -259,10 +259,15 @@ async fn catalog_points_commercial_use_from_yue2_to_the_yue1_entries() {
     assert_eq!(yue2["nonCommercial"], true);
     assert_eq!(yue2["requiresLicenseAcknowledgment"], true);
     assert_eq!(yue2["commercialUse"]["eligible"], false);
-    assert_eq!(
-        yue2["commercialUse"]["alternatives"],
-        json!(["yue_en_cot", "yue_zh_icl"])
-    );
+    // The listing orders the live YuE1 rows by display name, so compare the pointer as a set.
+    let mut alternatives: Vec<&str> = yue2["commercialUse"]["alternatives"]
+        .as_array()
+        .expect("alternatives array")
+        .iter()
+        .map(|id| id.as_str().expect("alternative id"))
+        .collect();
+    alternatives.sort_unstable();
+    assert_eq!(alternatives, ["yue_en_cot", "yue_zh_icl"]);
     // YuE1 declares no restriction, so it carries no pointer and no V2 reference.
     let yue1 = by_id("yue_en_cot");
     assert!(yue1.get("commercialUse").is_none());
