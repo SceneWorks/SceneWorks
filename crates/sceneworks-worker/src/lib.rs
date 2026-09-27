@@ -289,6 +289,15 @@ pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
 use audio_jobs::*;
+// YuE2's whole-render memory admission (sc-23001, epic 22988): prices every stage of one render,
+// chooses the per-request memory controls the engine honours, refuses before the load, and holds
+// the admitted residency in a lease until the generator drops. Audio-lane only, all targets.
+mod yue2_admission;
+// sc-23001's YuE2 memory-profile capture entrypoint: one #[ignore]d test the terminal campaign
+// (`scripts/yue2-memory-profile.mjs`, sc-23002) runs once per case in a fresh process. Test-only,
+// and only where the candle audio lane is linked (Metal on macOS, CUDA under `backend-candle`).
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod yue2_memory_profile;
 // YuE2 song jobs (sc-22999): `audio_generate` jobs carrying a `yue2` block, run through the `yue2`
 // provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
 // lane, which errors clearly on a build that links none.

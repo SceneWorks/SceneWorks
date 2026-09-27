@@ -129,6 +129,12 @@ where
         self.entry.take().map(|entry| entry.key)
     }
 
+    /// The resident model, if any (read-only; the YuE2 admission reads what it would free).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn resident_model(&self) -> Option<&M> {
+        self.entry.as_ref().map(|entry| &entry.model)
+    }
+
     /// Load (on a miss) or reuse (on a hit) the model for `key`, then run `run` against it.
     ///
     /// A miss clears the resident entry, optionally frees the backend cache first (see

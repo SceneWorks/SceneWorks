@@ -270,6 +270,39 @@ async fn execute(
     record.claim = Some(RunClaim::acquire(&run_dir)?);
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
 
+    // Whole-render memory admission (sc-23001): price THIS request as THIS load will run it, before
+    // anything loads. A render that cannot fit is refused here with the binding stage, the
+    // shortfall and what would fit; one that fits carries a memory block where every control the
+    // job set is honoured as sent and every control it left unset is the gate's choice (so a job
+    // that sets only `stageResidency` still gets a decode tile that fits), and the lease holds its
+    // residency until the generator is dropped.
+    let cancel = CancelFlag::new();
+    let mut request = build_request(&spec, &inputs, &run_dir, cancel.clone());
+    let tier = crate::yue2_admission::Yue2Tier::from_key(load.tier.as_str()).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("yue2: {} is not a YuE2 tier", load.tier.as_str()))
+    })?;
+    let controls = spec.memory.unwrap_or_default();
+    let pins = crate::yue2_admission::Yue2Pins::from_controls(
+        controls.stage_residency,
+        spec.offload_policy
+            .map(|policy| policy == OffloadPolicy::Sequential),
+        controls.chunk_attention,
+        controls.attention_chunk_size,
+        controls.tile_vae_decode,
+        controls.decode_tile_edge,
+    )
+    .map_err(|why| WorkerError::InvalidPayload(format!("yue2: {why}")))?;
+    let admitted = crate::yue2_admission::check(
+        contract::MODEL_ID,
+        &entry,
+        &request,
+        crate::yue2_admission::Yue2LoadFacts::of(tier, &load.spec),
+        Some(pins),
+        &settings.gpu_id,
+    )
+    .await?;
+    request.memory = Some(admitted.memory);
+
     update_job(
         api,
         &job.id,
@@ -283,8 +316,6 @@ async fn execute(
         ),
     )
     .await?;
-    let cancel = CancelFlag::new();
-    let request = build_request(&spec, &inputs, &run_dir, cancel.clone());
     let report = generate(
         api,
         settings,
@@ -293,6 +324,7 @@ async fn execute(
         load.spec.clone(),
         request,
         cancel,
+        admitted.lease,
         record.engine_started.clone(),
         load_generator,
     )
@@ -1025,6 +1057,7 @@ async fn generate(
     load: LoadSpec,
     request: GenerationRequest,
     cancel: CancelFlag,
+    lease: crate::yue2_admission::Yue2Lease,
     engine_started: Arc<AtomicBool>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
@@ -1037,6 +1070,9 @@ async fn generate(
         tokio::task::spawn_blocking(move || -> WorkerResult<GenerationReport> {
             // The engine's cancel hook is `request.cancel`; it is checked at the load boundary
             // too, so a cancel during a cold load never starts generation.
+            // Declared before the generator so it drops AFTER it (sc-23001): the admitted
+            // residency is released only once the model's memory is — on success, error or cancel.
+            let mut lease = lease;
             if cancel.is_cancelled() {
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
@@ -1046,6 +1082,7 @@ async fn generate(
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
             let mut on_progress = |progress: Progress| {
+                lease.observe(&progress);
                 let update = tracker.observe(progress);
                 // The pump may be gone; generation never depends on its progress sink.
                 tx.send_replace(Some(update));
