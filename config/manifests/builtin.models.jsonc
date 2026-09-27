@@ -26741,8 +26741,8 @@
       // equal to its derivation. `measured: false` until the terminal campaign (sc-23002,
       // config/yue2-memory-profile-plan.json) captures the tiers.
       "candle": {
-        "minMemoryGb": 14,
-        "minMemoryGbByTier": { "bf16": 14, "q8": 9, "q4": 8 },
+        "minMemoryGb": 12,
+        "minMemoryGbByTier": { "bf16": 12, "q8": 9, "q4": 8 },
         "measured": false
       },
       "ui": {

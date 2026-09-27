@@ -749,8 +749,12 @@ async fn run_audio_synthesis_using(
     // what runs is what was priced. The lease holds the admitted residency until the generator is
     // dropped (completion, error or cancellation alike). This lane loads the snapshot at
     // `paths.model` with no tier assertion — the released bf16 checkpoint — so it is priced as bf16.
+    // The model id counts as much as the catalog family: a `yue2` request whose manifest entry is
+    // missing or foreign is priced (and so fails closed), never waved through.
     let mut yue2_lease = None;
-    if crate::yue2_admission::is_yue2(&request.model_manifest_entry) {
+    if model_id == crate::yue2_admission::YUE2_FAMILY
+        || crate::yue2_admission::is_yue2(&request.model_manifest_entry)
+    {
         let admitted = crate::yue2_admission::check(
             &model_id,
             &request.model_manifest_entry,
@@ -759,12 +763,11 @@ async fn run_audio_synthesis_using(
                 crate::yue2_admission::Yue2Tier::Bf16,
                 &LoadSpec::new(WeightsSource::Dir(model_dir.clone())),
             ),
+            None,
             &settings.gpu_id,
         )
         .await?;
-        if let Some(memory) = admitted.memory {
-            req.memory = Some(memory);
-        }
+        req.memory = Some(admitted.memory);
         yue2_lease = Some(admitted.lease);
     }
     let handle = {
@@ -2874,6 +2877,8 @@ mod tests {
         Some(crate::yue2_admission::Yue2Budget::Unified {
             backend: crate::yue2_admission::Yue2Backend::Metal,
             capacity_bytes,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
         })
     }
 
@@ -2989,6 +2994,45 @@ mod tests {
                 !crate::yue2_admission::lease_is_live(lease),
                 "the cancelled render's residency was released"
             );
+        });
+    }
+
+    /// A `yue2` request whose manifest entry is missing (or names another family) is still priced —
+    /// and, unpriceable, refused before the loader — never waved through on the family check.
+    /// Mutation: gate on the manifest family alone.
+    #[test]
+    fn a_yue2_request_without_its_manifest_entry_fails_closed_before_load() {
+        let _serial = crate::yue2_admission::tests::lease_test_serial();
+        crate::yue2_admission::tests::block_on(async {
+            let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+            let settings = cancel_test_settings(base_url);
+            let api = ApiClient::new(&settings);
+            let _budget = crate::yue2_admission::override_budget(metal_budget(u64::MAX / 4));
+            for entry in [json!({}), json!({"id": "yue2", "family": "stub"})] {
+                let (run, load) = yue2_run(StubBehavior::CompleteOk);
+                let result = run_audio_synthesis_using(
+                    &api,
+                    &settings,
+                    &audio_test_job("yue2-no-entry"),
+                    &AudioRequest::from_payload(&payload(json!({
+                        "model": "yue2",
+                        "lyrics": "[verse]\nla",
+                        "modelManifestEntry": entry,
+                    }))),
+                    PathBuf::from("unused"),
+                    None,
+                    load,
+                )
+                .await;
+                let Err(WorkerError::InvalidPayload(message)) = result else {
+                    panic!("expected a fail-closed refusal, got {result:?}");
+                };
+                assert!(message.contains("cannot price"), "{message}");
+                assert!(
+                    !run.loaded.load(Ordering::SeqCst),
+                    "refused before the load"
+                );
+            }
         });
     }
 

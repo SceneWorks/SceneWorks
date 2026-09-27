@@ -313,6 +313,7 @@ fn capture_case() {
         &entry,
         &request,
         Yue2LoadFacts::of(tier, &spec),
+        None,
         &settings.gpu_id,
     ));
     let admitted = match admitted {
@@ -333,9 +334,7 @@ fn capture_case() {
             "estimate": estimate_json(admitted.lease.estimate()),
         }),
     );
-    if let Some(memory) = admitted.memory {
-        request.memory = Some(memory);
-    }
+    request.memory = Some(admitted.memory);
     let mut lease = admitted.lease;
     let mut marks = StageMarks::open(&out.join("stages.jsonl"));
     marks.mark("load");
@@ -430,7 +429,7 @@ mod tests {
             precision: Yue2Precision::Default,
             sequential_offload: false,
         };
-        let shape = shape_of(&builtin_entry(), &request, load, Yue2ArMode::Native).unwrap();
+        let shape = shape_of(&builtin_entry(), &request, load, None, Yue2ArMode::Native).unwrap();
         let est = estimate(&shape, Yue2Backend::Metal, Yue2Controls::production(), None).unwrap();
         let json = estimate_json(&est);
         let stages = json["stages"].as_object().unwrap();

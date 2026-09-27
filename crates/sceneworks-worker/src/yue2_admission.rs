@@ -119,6 +119,11 @@ const SCORE_TILES_LIVE: u64 = 3;
 const ABC_MAX_TOKENS_DEFAULT: u64 = 4096;
 /// `Sampling::semantic_default().max_tokens`.
 const SEMANTIC_MAX_TOKENS_DEFAULT: u64 = 9000;
+/// A lower bound on the semantic prefix, priced as zero tokens (the real one always carries at
+/// least `EOD`, an instruction line and the score framing, so zero is conservative). It bounds the
+/// longest song and the longest acoustic chunk — a shorter prefix leaves more of the context to the
+/// song — so it, never the upper-bound prefix, sizes them.
+const MIN_SEMANTIC_PREFIX: u64 = 0;
 /// Allowance for the fixed prompt framing around the style and lyrics text: `EOD`, the mode's
 /// instruction line (≤ 160 bytes), the field labels and the ABC / music markers. Qwen BPE never emits
 /// more tokens than a text has bytes, so text bytes plus this bound every prefix.
@@ -546,32 +551,50 @@ pub(crate) enum Yue2Work {
     DecodeCached { frames: u64 },
 }
 
-/// Memory controls the request or its load already fixes. A fixed control is a user's knob and is
-/// honoured exactly — priced as given and never overridden; the gate chooses only the free ones.
+/// How a request fixes the NAR attention chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttentionPin {
+    /// The historical 256-row query tiles (`chunk_attention: false`, or `true` without a size) —
+    /// priced at the default chunk; `chunk_attention` is echoed back exactly as the job sent it.
+    Historical { chunk_attention: bool },
+    /// At most this many score elements per call.
+    Elements(u64),
+}
+
+/// How a request fixes the VAE decode tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodePin {
+    /// The production tiling (`tile_vae_decode: false`, or `true` without an edge);
+    /// `tile_vae_decode` is echoed back exactly as sent.
+    Production { tile_vae_decode: bool },
+    /// This tile core, in latent frames.
+    Core(u64),
+}
+
+/// Memory controls the request or its load already fixes. A fixed control is a user's knob: it is
+/// priced as given and sent back unchanged. The gate chooses only the free ones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Yue2Pins {
     pub offload_ar: Option<bool>,
-    pub attention_elements: Option<u64>,
-    pub decode_core_frames: Option<u64>,
+    pub attention: Option<AttentionPin>,
+    pub decode: Option<DecodePin>,
 }
 
 impl Yue2Pins {
-    /// The controls `memory` (the request's block, read as `provider::memory_options` reads it)
-    /// and the load's offload policy fix. A present block fixes all three: its `chunk_attention:
-    /// false` is the historical 256-row tile and its `tile_vae_decode: false` the production tiling,
-    /// exactly what the engine then runs. Values the engine refuses are refused here too.
-    pub(crate) fn of(
-        memory: Option<&GenerationMemory>,
-        sequential_offload: bool,
+    /// Pins from a job's own memory controls, field by field: a field the job set (`Some`) is
+    /// pinned, a field it left unset stays free for the gate to choose. `offload` is the load's
+    /// explicit offload policy (`Some(true)` Sequential, `Some(false)` Resident), read only when the
+    /// job sets no `stage_residency`. Values the engine refuses are refused here too.
+    pub(crate) fn from_controls(
+        stage_residency: Option<bool>,
+        offload: Option<bool>,
+        chunk_attention: Option<bool>,
+        attention_chunk_size: Option<u32>,
+        tile_vae_decode: Option<bool>,
+        decode_tile_edge: Option<u32>,
     ) -> Result<Self, String> {
-        let Some(memory) = memory else {
-            return Ok(Self {
-                offload_ar: sequential_offload.then_some(true),
-                ..Self::default()
-            });
-        };
-        let attention_elements = match (memory.chunk_attention, memory.attention_chunk_size) {
-            (true, Some(elements)) => {
+        let attention = match (chunk_attention, attention_chunk_size) {
+            (Some(true), Some(elements)) => {
                 let elements = u64::from(elements);
                 if elements < ATTENTION_ELEMENTS_MIN {
                     return Err(format!(
@@ -580,12 +603,16 @@ impl Yue2Pins {
                          {ATTENTION_ELEMENTS_MIN} elements)"
                     ));
                 }
-                elements
+                Some(AttentionPin::Elements(elements))
             }
-            _ => ATTENTION_ELEMENTS_DEFAULT,
+            (Some(chunk_attention), _) => Some(AttentionPin::Historical { chunk_attention }),
+            (None, Some(_)) => {
+                return Err("memory.attention_chunk_size is read only with chunk_attention".into())
+            }
+            (None, None) => None,
         };
-        let decode_core_frames = match (memory.tile_vae_decode, memory.decode_tile_edge) {
-            (true, Some(core)) => {
+        let decode = match (tile_vae_decode, decode_tile_edge) {
+            (Some(true), Some(core)) => {
                 let core = u64::from(core);
                 if !(1..=DECODE_MAX_CORE_FRAMES).contains(&core) {
                     return Err(format!(
@@ -593,21 +620,89 @@ impl Yue2Pins {
                          1..={DECODE_MAX_CORE_FRAMES} latent frames"
                     ));
                 }
-                core
+                Some(DecodePin::Core(core))
             }
-            _ => default_decode_core(),
+            (Some(tile_vae_decode), _) => Some(DecodePin::Production { tile_vae_decode }),
+            (None, Some(_)) => {
+                return Err("memory.decode_tile_edge is read only with tile_vae_decode".into())
+            }
+            (None, None) => None,
         };
         Ok(Self {
-            offload_ar: Some(memory.stage_residency),
-            attention_elements: Some(attention_elements),
-            decode_core_frames: Some(decode_core_frames),
+            offload_ar: stage_residency.or(offload),
+            attention,
+            decode,
+        })
+    }
+
+    /// Pins from a request that already carries a complete `memory` block (every field is then a
+    /// decision the request made), or from the load alone when it carries none.
+    pub(crate) fn of_request(
+        memory: Option<&GenerationMemory>,
+        sequential_offload: bool,
+    ) -> Result<Self, String> {
+        match memory {
+            None => Ok(Self {
+                offload_ar: sequential_offload.then_some(true),
+                ..Self::default()
+            }),
+            Some(memory) => Self::from_controls(
+                Some(memory.stage_residency),
+                None,
+                Some(memory.chunk_attention),
+                memory.attention_chunk_size,
+                Some(memory.tile_vae_decode),
+                memory.decode_tile_edge,
+            ),
+        }
+    }
+
+    fn attention_elements(&self) -> Option<u64> {
+        self.attention.map(|pin| match pin {
+            AttentionPin::Historical { .. } => ATTENTION_ELEMENTS_DEFAULT,
+            AttentionPin::Elements(elements) => elements,
+        })
+    }
+
+    fn decode_core_frames(&self) -> Option<u64> {
+        self.decode.map(|pin| match pin {
+            DecodePin::Production { .. } => default_decode_core(),
+            DecodePin::Core(core) => core,
         })
     }
 
     fn any(&self) -> bool {
-        self.offload_ar.is_some()
-            || self.attention_elements.is_some()
-            || self.decode_core_frames.is_some()
+        self.offload_ar.is_some() || self.attention.is_some() || self.decode.is_some()
+    }
+
+    /// The request's `memory` block: every pinned control exactly as the request set it, every free
+    /// one as the gate chose it (explicitly, so what runs is what was priced).
+    pub(crate) fn memory_block(&self, chosen: &Yue2Controls) -> GenerationMemory {
+        let chosen_block = chosen.generation_memory();
+        let (chunk_attention, attention_chunk_size) = match self.attention {
+            Some(AttentionPin::Historical { chunk_attention }) => (chunk_attention, None),
+            Some(AttentionPin::Elements(elements)) => (
+                true,
+                Some(u32::try_from(elements).expect("a u32 the request sent")),
+            ),
+            None => (true, chosen_block.attention_chunk_size),
+        };
+        let (tile_vae_decode, decode_tile_edge) = match self.decode {
+            Some(DecodePin::Production { tile_vae_decode }) => (tile_vae_decode, None),
+            Some(DecodePin::Core(core)) => (
+                true,
+                Some(u32::try_from(core).expect("a u32 the request sent")),
+            ),
+            None => (true, chosen_block.decode_tile_edge),
+        };
+        GenerationMemory {
+            stage_residency: self.offload_ar.unwrap_or(chosen.offload_ar),
+            chunk_attention,
+            attention_chunk_size,
+            tile_vae_decode,
+            decode_tile_edge,
+            ..GenerationMemory::default()
+        }
     }
 }
 
@@ -683,8 +778,10 @@ pub(crate) struct Yue2Controls {
 
 /// The largest NAR score chunk this gate selects: the historical 256-row tile at the full context.
 const ATTENTION_ELEMENTS_DEFAULT: u64 = HEADS * EAGER_QUERY_TILE * CONTEXT;
-/// The smallest the engine accepts: one query row at the full context (`heads × positions`).
-const ATTENTION_ELEMENTS_MIN: u64 = HEADS * CONTEXT;
+/// The smallest the engine accepts: one query row at the full context (`heads × positions`). One
+/// constant, shared with the job contract's submission check.
+const ATTENTION_ELEMENTS_MIN: u64 =
+    sceneworks_core::yue2_score::jobs::MIN_ATTENTION_CHUNK_ELEMENTS as u64;
 
 /// `DecodeOptions::production()`'s core: the largest whose tile fits the 8 GiB production budget.
 fn default_decode_core() -> u64 {
@@ -920,11 +1017,12 @@ fn latent_bytes(song_frames: u64, rows: u64, dense: u64) -> u64 {
     song_frames * LATENT_DIM * 4 + 4 * rows * LATENT_DIM * dense
 }
 
-/// `DecodeOptions::estimated_peak_bytes`: one tile of `core + 2 × halo` latent frames, or the whole
-/// song when it is shorter than a tile.
-fn decode_tile_bytes(core: u64, song_frames: u64) -> u64 {
+/// The per-frame part of `DecodeOptions::estimated_peak_bytes`: one tile of `core + 2 × halo`
+/// latent frames, or the whole song when it is shorter than a tile (its fixed part,
+/// `TILE_RESERVE_BYTES`, is the decode stage's "decoder + reserve" term).
+fn decode_tile_activation_bytes(core: u64, song_frames: u64) -> u64 {
     let tile = (core + 2 * DECODE_HALO_FRAMES).min(song_frames.max(1));
-    DECODE_TILE_RESERVE_BYTES + DECODE_TILE_BYTES_PER_FRAME * tile
+    DECODE_TILE_BYTES_PER_FRAME * tile
 }
 
 fn waveform_bytes(frames: u64) -> u64 {
@@ -932,9 +1030,10 @@ fn waveform_bytes(frames: u64) -> u64 {
         + frames * LATENT_DIM * 4
 }
 
-/// SheetSage2 + MERT-v2 over one window: the weights plus, on the load, their mapped files; in the
-/// encoder, one query chunk's score tiles over the whole window and its SwiGLU/residual activations.
-fn transcription_terms(secs: u64, transcriber_bytes: u64) -> Vec<Yue2Term> {
+/// SheetSage2 + MERT-v2 over one window: the weights (plus, on CUDA, their mapped files in host
+/// RAM while loading — see the load stage); in the encoder, one query chunk's score tiles over the
+/// whole window and its SwiGLU/residual activations.
+fn transcription_terms(secs: u64, transcriber_bytes: u64, backend: Yue2Backend) -> Vec<Yue2Term> {
     let frames = secs.min(TRANSCRIPTION_WINDOW_SECS) * MERT_FRAMES_PER_SEC;
     let encoder = SCORE_TILES_LIVE * MERT_HEADS * MERT_QUERY_CHUNK.min(frames) * frames * 4
         + (4 * MERT_HIDDEN + 4 * MERT_FFN) * frames * 4;
@@ -947,7 +1046,7 @@ fn transcription_terms(secs: u64, transcriber_bytes: u64) -> Vec<Yue2Term> {
         Yue2Term {
             what: "their mapped weights files while loading",
             device_bytes: 0,
-            host_bytes: transcriber_bytes,
+            host_bytes: mapped_file_bytes(backend, transcriber_bytes),
         },
         Yue2Term {
             what: "one 300 s encoder window",
@@ -955,6 +1054,18 @@ fn transcription_terms(secs: u64, transcriber_bytes: u64) -> Vec<Yue2Term> {
             host_bytes: 0,
         },
     ]
+}
+
+/// The host-pool bytes a weights file mapped during a load costs on `backend`. Mapped safetensors
+/// pages are clean and file-backed: in unified memory (Metal, CPU) they are not Metal buffers, do not
+/// count against the GPU working set (or the process footprint) and are reclaimable, so they cost
+/// nothing there. On CUDA they sit in host RAM beside the device copy and are charged to the host
+/// pool, which is compared with `MemAvailable`.
+fn mapped_file_bytes(backend: Yue2Backend, file_bytes: u64) -> u64 {
+    match backend {
+        Yue2Backend::Cuda => file_bytes,
+        Yue2Backend::Cpu | Yue2Backend::Metal => 0,
+    }
 }
 
 /// Price `shape` on `backend` under `controls`.
@@ -978,14 +1089,18 @@ pub(crate) fn estimate(
     if let Some(secs) = shape.transcription_secs {
         stages.push(Yue2StageResidency {
             stage: Yue2Stage::Transcription,
-            terms: transcription_terms(secs, shape.transcriber_bytes),
+            terms: transcription_terms(secs, shape.transcriber_bytes, backend),
         });
     }
     stages.push(Yue2StageResidency {
         stage: Yue2Stage::Load,
         terms: vec![
             term("resident weights", weights.restored_device_bytes, 0),
-            term("the mapped weights file", 0, weights.stored_bytes),
+            term(
+                "the mapped weights file",
+                0,
+                mapped_file_bytes(backend, weights.stored_bytes),
+            ),
         ],
     });
     // Resident weights while the AR stages run (FP8: FP8 on the device, originals on the host).
@@ -1030,9 +1145,11 @@ pub(crate) fn estimate(
                 semantic_max_tokens,
                 if cfg { 2 } else { 1 },
             );
+            // The song can be as long as the SHORTEST prefix allows (no score, no text: the
+            // protocol checks `prefix + max_tokens <= CONTEXT` against the real prefix).
             (
                 Some(planning),
-                semantic_max_tokens.min(CONTEXT.saturating_sub(prefix)),
+                semantic_max_tokens.min(CONTEXT - MIN_SEMANTIC_PREFIX),
             )
         }
         Yue2Work::PlanOnly { planning } => {
@@ -1047,14 +1164,16 @@ pub(crate) fn estimate(
     if let Some(planning) = planning {
         // `protocol::chunk_ranges`: chunks of `(CONTEXT − prefix − 3) / 2` frames; each chunk's AR
         // sequence is the prefix, its codec ids and MUSIC_END, its NAR sequence its latents plus two
-        // slots, and its cache holds both.
+        // slots, and its cache holds both. A SHORTER real prefix makes a LONGER chunk, so the NAR
+        // rows are sized with the smallest prefix the protocol allows, while the AR prefill and the
+        // cache take the upper-bound prefix (capped at the context, which bounds every real cache).
         let prefix = shape.semantic_prefix(planning);
-        let chunk = ((CONTEXT.saturating_sub(prefix + 3)) / 2)
+        let chunk = ((CONTEXT - MIN_SEMANTIC_PREFIX - 3) / 2)
             .min(song_frames)
             .max(1);
-        let ar_len = prefix + chunk + 1;
+        let ar_len = (prefix + chunk + 1).min(CONTEXT);
         let nar_rows = chunk + 2;
-        let cache_positions = (ar_len + nar_rows).min(CONTEXT);
+        let cache_positions = (prefix + chunk + 1 + nar_rows).min(CONTEXT);
         let restored = || term("resident weights", weights.restored_device_bytes, 0);
         stages.push(Yue2StageResidency {
             stage: Yue2Stage::AcousticPrefill,
@@ -1102,10 +1221,17 @@ pub(crate) fn estimate(
             stage: Yue2Stage::Decode,
             terms: vec![
                 term("resident weights", weights.restored_device_bytes, 0),
-                term("FP32 VAE decoder", shape.decoder_bytes, 0),
+                // The engine's `TILE_RESERVE_BYTES` (1 GiB) already covers the process, the FP32
+                // decoder-only weights (folded at load) and their mapped pages, so the decoder is not
+                // charged again on top of it — unless a decoder file ever outgrows the reserve.
                 term(
-                    "VAE decode tile",
-                    decode_tile_bytes(controls.decode_core_frames, song_frames),
+                    "FP32 VAE decoder + decode reserve",
+                    DECODE_TILE_RESERVE_BYTES.max(shape.decoder_bytes),
+                    0,
+                ),
+                term(
+                    "VAE decode tile activations",
+                    decode_tile_activation_bytes(controls.decode_core_frames, song_frames),
                     0,
                 ),
                 term("song waveform", waveform_bytes(song_frames), 0),
@@ -1126,11 +1252,17 @@ pub(crate) fn estimate(
 /// The memory a render may use.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Yue2Budget {
-    /// One pool (Apple unified memory, or a CPU host): every byte counts against `capacity_bytes`.
+    /// One pool (Apple unified memory, or a CPU host): every byte counts against `capacity_bytes`,
+    /// less `resident_bytes` other allocations of this process already hold there (on macOS the
+    /// MLX allocator's active + cached bytes — the image generator the cache keeps warm for 300 s,
+    /// the refine model). `reclaimable_bytes` of those are freed by evicting the cached generator
+    /// and clearing the MLX cache.
     #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
     Unified {
         backend: Yue2Backend,
         capacity_bytes: u64,
+        resident_bytes: u64,
+        reclaimable_bytes: u64,
     },
     /// A CUDA card: live free VRAM, its total, what evicting the cached generator would return, and
     /// the host RAM available right now (`None`: unread — the host pool is then not checked).
@@ -1193,16 +1325,29 @@ enum Pool {
 /// free reading already reflects what they hold).
 fn fit(estimate: &Yue2Estimate, budget: &Yue2Budget, other_live: u64) -> Fit {
     match budget {
-        Yue2Budget::Unified { capacity_bytes, .. } => {
-            let available = capacity_bytes.saturating_sub(other_live);
-            match estimate.stages.iter().find(|s| s.total_bytes() > available) {
-                None => Fit::Fits,
-                Some(s) => Fit::Short {
+        Yue2Budget::Unified {
+            capacity_bytes,
+            resident_bytes,
+            reclaimable_bytes,
+            ..
+        } => {
+            let base = capacity_bytes.saturating_sub(other_live);
+            let available = base.saturating_sub(*resident_bytes);
+            let reclaimed = base.saturating_sub(resident_bytes.saturating_sub(*reclaimable_bytes));
+            let short =
+                |available: u64| estimate.stages.iter().find(|s| s.total_bytes() > available);
+            if short(available).is_none() {
+                Fit::Fits
+            } else if short(reclaimed).is_none() {
+                Fit::FitsAfterEvict
+            } else {
+                let s = short(reclaimed).expect("checked above");
+                Fit::Short {
                     stage: s.stage,
                     pool: Pool::Unified,
                     needed: s.total_bytes(),
-                    available,
-                },
+                    available: reclaimed,
+                }
             }
         }
         Yue2Budget::Dedicated {
@@ -1272,7 +1417,7 @@ fn choose(
     };
     let pins = shape.pins;
     let production_core = pins
-        .decode_core_frames
+        .decode_core_frames()
         .unwrap_or(Yue2Controls::production().decode_core_frames);
     // AR offload moves bytes into the SAME pool on a unified backend, so it is never chosen there.
     let offloads: Vec<bool> = match pins.offload_ar {
@@ -1280,7 +1425,7 @@ fn choose(
         None if backend.unified() => vec![false],
         None => vec![false, true],
     };
-    let attentions: Vec<u64> = match pins.attention_elements {
+    let attentions: Vec<u64> = match pins.attention_elements() {
         Some(pinned) => vec![pinned],
         None => attention_candidates().collect(),
     };
@@ -1314,7 +1459,7 @@ fn choose(
                     // Every earlier stage fits; only the tile can help. The largest core that fits
                     // (none to search when the request fixes the tile).
                     let mut smallest = None;
-                    let free_cores = if pins.decode_core_frames.is_some() {
+                    let free_cores = if pins.decode.is_some() {
                         1..1
                     } else {
                         1..production_core
@@ -1438,15 +1583,35 @@ fn refusal(
         })
         .unwrap_or_default();
     let pool_text = match (pool, budget) {
-        (Pool::Unified, Yue2Budget::Unified { capacity_bytes, .. }) => {
-            let held = if other_live > 0 {
-                format!(
-                    " (~{:.1} GB of it is still held by another YuE2 render that has not \
-                     released its memory yet)",
+        (
+            Pool::Unified,
+            Yue2Budget::Unified {
+                capacity_bytes,
+                resident_bytes,
+                reclaimable_bytes,
+                ..
+            },
+        ) => {
+            let mut held = Vec::new();
+            if other_live > 0 {
+                held.push(format!(
+                    "~{:.1} GB of it is still held by another YuE2 render that has not \
+                     released its memory yet",
                     gb(other_live)
-                )
-            } else {
+                ));
+            }
+            let pinned = resident_bytes.saturating_sub(*reclaimable_bytes);
+            if pinned > 0 {
+                held.push(format!(
+                    "~{:.1} GB is held by other models in this process that evicting the cached \
+                     generator does not free",
+                    gb(pinned)
+                ));
+            }
+            let held = if held.is_empty() {
                 String::new()
+            } else {
+                format!(" ({})", held.join("; "))
             };
             format!(
                 "this machine's GPU working set is ~{:.1} GB{held}",
@@ -1709,9 +1874,15 @@ pub(crate) fn shape_of(
     manifest_entry: &Value,
     request: &GenerationRequest,
     load: Yue2LoadFacts,
+    pins: Option<Yue2Pins>,
     ar: Yue2ArMode,
 ) -> Result<Yue2Shape, String> {
-    let pins = Yue2Pins::of(request.memory.as_ref(), load.sequential_offload)?;
+    // The caller's field-by-field pins when it has them (a job's own memory controls); otherwise
+    // what the request's block and the load fix.
+    let pins = match pins {
+        Some(pins) => pins,
+        None => Yue2Pins::of_request(request.memory.as_ref(), load.sequential_offload)?,
+    };
     let audio = request.audio.clone().unwrap_or_default();
     let song = audio.song.clone().unwrap_or_default();
     let lyrics = audio.lyrics.as_deref().unwrap_or_default();
@@ -2033,6 +2204,8 @@ thread_local! {
     static BUDGET_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether this thread's admissions read the real hardware budget (the profile capture).
     static HARDWARE_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Evictions [`check`] requested on this thread.
+    static EVICTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The last lease [`Yue2Lease::open`] opened on this thread.
     static LAST_OPENED_LEASE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -2068,6 +2241,12 @@ pub(crate) fn budget_probes() -> usize {
 )]
 pub(crate) fn probe_hardware_in_this_test() {
     HARDWARE_PROBE.with(|probe| probe.set(true));
+}
+
+/// Evictions [`check`] requested on this thread (tests only).
+#[cfg(test)]
+pub(crate) fn evictions() -> usize {
+    EVICTIONS.with(std::cell::Cell::get)
 }
 
 /// The last lease opened on this thread (tests only).
@@ -2127,20 +2306,42 @@ async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
     let capacity_bytes = crate::mlx_fit_gate::mlx_memory_cap_gb().map_or(working_set, |cap| {
         working_set.min((cap * BYTES_PER_GIB) as u64)
     });
-    Some(Yue2Budget::Unified {
+    // The rest of this process shares the working set: the MLX allocator's live and cached bytes —
+    // the image generator the cache keeps warm for 300 s after an image job, the refine model.
+    // Evicting the cached generator frees its own load's bytes; clearing the MLX cache frees the
+    // cached ones. Anything else MLX holds stays charged.
+    let active = mlx_rs::memory::get_active_memory() as u64;
+    let cached = mlx_rs::memory::get_cache_memory() as u64;
+    let generator = crate::generator_cache::cached_generator_resident_bytes()
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
+    Some(unified_budget(capacity_bytes, active, cached, generator))
+}
+
+/// A Metal budget from the working set and what the MLX allocator holds (`active`, `cached`), of
+/// which `cached_generator` bytes belong to the generator the cache keeps resident.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) fn unified_budget(
+    capacity_bytes: u64,
+    active: u64,
+    cached: u64,
+    cached_generator: u64,
+) -> Yue2Budget {
+    let resident_bytes = active + cached;
+    Yue2Budget::Unified {
         backend: Yue2Backend::Metal,
         capacity_bytes,
-    })
+        resident_bytes,
+        reclaimable_bytes: (cached + cached_generator.min(active)).min(resident_bytes),
+    }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+/// The GPU's recommended working set. Read in test builds too (the profile capture admits against
+/// the real ceiling); reading it runs no workload.
+#[cfg(target_os = "macos")]
 fn working_set_ceiling_bytes() -> Option<u64> {
     Some(crate::generator_cache::device_wired_ceiling_bytes() as u64).filter(|&bytes| bytes > 0)
-}
-
-#[cfg(all(target_os = "macos", test))]
-fn working_set_ceiling_bytes() -> Option<u64> {
-    None
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -2225,45 +2426,65 @@ fn parse_meminfo_available(meminfo: &str) -> Option<u64> {
 /// A render the gate admitted: the controls to send and the lease that holds its residency.
 #[derive(Debug)]
 pub(crate) struct Yue2Admitted {
-    /// Set as the request's `memory` block — `None` when the request already carries one, which
-    /// was priced exactly as sent and is left untouched.
-    pub memory: Option<GenerationMemory>,
+    /// The request's `memory` block to send: the controls the request fixed, exactly as it set
+    /// them, and the free ones as the gate chose them.
+    pub memory: GenerationMemory,
     /// Move into the task that owns the generator and drop it after the generator.
     pub lease: Yue2Lease,
 }
 
+/// Evict the cached generator so a render that fits only without it can load: on Metal it frees
+/// the MLX generator's share of the unified working set (and clears the MLX cache), on CUDA its pool.
+async fn evict_for_admission(gpu_id: &str) -> Result<(), WorkerError> {
+    #[cfg(test)]
+    EVICTIONS.with(|evictions| evictions.set(evictions.get() + 1));
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let evicted = crate::generator_cache::evict_cached_generator().await?;
+        tracing::info!(
+            gpu_id,
+            evicted,
+            "YuE2 admission: evicted the resident generator to reclaim its memory (sc-23001)"
+        );
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let _ = gpu_id;
+    Ok(())
+}
+
 /// The pre-load gate a YuE2 job runs: price `request` as `load` will run it, choose the memory
 /// controls the request leaves free against the live budget, and refuse before anything loads when
-/// it cannot fit. A render that fits only once the cached generator's pool is reclaimed evicts it
-/// first (CUDA). Call it with the exact request the job will send and the exact load it will make.
+/// it cannot fit. A render that fits only once the cached generator is evicted evicts it first (on
+/// Metal and on CUDA). Call it with the exact request the job will send, the exact load it will
+/// make, and — when the job knows which memory controls its user set — those as `pins`.
 pub(crate) async fn check(
     model: &str,
     manifest_entry: &Value,
     request: &GenerationRequest,
     load: Yue2LoadFacts,
+    pins: Option<Yue2Pins>,
     gpu_id: &str,
 ) -> Result<Yue2Admitted, WorkerError> {
     // A request that cannot be priced fails closed BEFORE the hardware is probed.
-    let shape = shape_of(manifest_entry, request, load, Yue2ArMode::Native).map_err(|why| {
-        WorkerError::InvalidPayload(format!(
-            "{model}: YuE2 memory admission cannot price this render ({why}); the installed \
+    let shape =
+        shape_of(manifest_entry, request, load, pins, Yue2ArMode::Native).map_err(|why| {
+            WorkerError::InvalidPayload(format!(
+                "{model}: YuE2 memory admission cannot price this render ({why}); the installed \
              catalog entry or saved plan is incomplete."
-        ))
-    })?;
+            ))
+        })?;
     let budget = live_budget(gpu_id).await;
     let (other_device, other_host) = live_residency_bytes();
     let estimate = match decide(model, &shape, budget.as_ref(), other_device + other_host) {
         Yue2Admission::Admit(estimate) => estimate,
         Yue2Admission::AdmitAfterEvict(estimate) => {
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            {
-                let evicted = crate::generator_cache::evict_cached_generator().await?;
-                tracing::info!(
-                    gpu_id,
-                    evicted,
-                    "YuE2 admission: evicted the resident generator to reclaim its pool (sc-23001)"
-                );
-            }
+            evict_for_admission(gpu_id).await?;
             estimate
         }
         Yue2Admission::Refuse(error) => return Err(error),
@@ -2282,10 +2503,7 @@ pub(crate) async fn check(
         "YuE2 admission: render admitted (sc-23001)"
     );
     Ok(Yue2Admitted {
-        memory: request
-            .memory
-            .is_none()
-            .then(|| estimate.controls.generation_memory()),
+        memory: shape.pins.memory_block(&estimate.controls),
         lease: Yue2Lease::open(estimate, shape.work),
     })
 }

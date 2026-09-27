@@ -9,7 +9,7 @@
   "backends": ["metal", "cuda"],
   "requests": {
     "default": {
-      "$comment": "The product default: a planned (cot full) song at the engine's default ABC / semantic budgets, standard decoder, admission-chosen memory controls. One per tier: every advertised tier gets a measurement.",
+      "$comment": "The product default: a planned (cot full) song at the engine's default ABC / semantic budgets, standard decoder, admission-chosen memory controls. One per tier: every advertised tier gets a measurement. The measured load stage checks the estimator's assumption that the mapped weights file costs nothing in unified memory (clean file-backed pages): on Metal the load is priced at the resident weights alone, so the decode or the acoustic stage binds; on CUDA the mapped file is charged to host RAM.",
       "tiers": ["bf16", "q8", "q4"],
       "decoder": "standard",
       "request": {

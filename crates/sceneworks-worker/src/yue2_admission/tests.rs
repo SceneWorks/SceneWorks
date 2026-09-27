@@ -90,6 +90,7 @@ fn shape(tier: Yue2Tier, request: &GenerationRequest) -> Yue2Shape {
         &builtin_yue2_entry(),
         request,
         load(tier),
+        None,
         Yue2ArMode::Native,
     )
     .expect("the request prices")
@@ -105,6 +106,8 @@ fn metal(capacity_bytes: u64) -> Yue2Budget {
     Yue2Budget::Unified {
         backend: Yue2Backend::Metal,
         capacity_bytes,
+        resident_bytes: 0,
+        reclaimable_bytes: 0,
     }
 }
 
@@ -560,13 +563,10 @@ fn partial_work_prices_only_the_stages_it_runs() {
         .unwrap()
         .terms
         .iter()
-        .find(|t| t.what == "VAE decode tile")
+        .find(|t| t.what == "VAE decode tile activations")
         .unwrap()
         .device_bytes;
-    assert_eq!(
-        tile,
-        DECODE_TILE_RESERVE_BYTES + 250 * DECODE_TILE_BYTES_PER_FRAME
-    );
+    assert_eq!(tile, 250 * DECODE_TILE_BYTES_PER_FRAME);
 
     let entry = builtin_yue2_entry();
     let transcription = transcription_shape(&entry, Yue2Tier::Q4, 180).unwrap();
@@ -762,7 +762,7 @@ fn an_unpriceable_request_is_an_error_not_a_zero() {
     });
     let entry = builtin_yue2_entry();
     let price = |entry: &Value, request: &GenerationRequest| {
-        shape_of(entry, request, load(Yue2Tier::Q4), Yue2ArMode::Native)
+        shape_of(entry, request, load(Yue2Tier::Q4), None, Yue2ArMode::Native)
     };
     assert!(price(&entry, &missing_plan)
         .unwrap_err()
@@ -923,8 +923,14 @@ fn cuda_offloads_the_ar_path_when_the_solve_needs_it() {
 fn an_over_budget_render_is_refused_with_stage_shortfall_and_alternatives() {
     let bf16 = shape(Yue2Tier::Bf16, &default_request());
     let q4 = shape(Yue2Tier::Q4, &default_request());
-    let (_, q4_floor) = priced(&q4, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
-    let message = refused(decide("yue2", &bf16, Some(&metal(q4_floor)), 0));
+    let smallest = Yue2Controls {
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    // One byte below bf16's smallest-controls floor: bf16 cannot fit at any control, q4 can.
+    let (binding, bf16_min) = priced(&bf16, Yue2Backend::Metal, smallest).unified_floor();
+    let message = refused(decide("yue2", &bf16, Some(&metal(bf16_min - 1)), 0));
     for needle in [
         "yue2:",
         "bf16",
@@ -932,7 +938,7 @@ fn an_over_budget_render_is_refused_with_stage_shortfall_and_alternatives() {
         "q4",
         "estimate pending",
         "sc-23002",
-        "the model load",
+        binding.label(),
     ] {
         assert!(message.contains(needle), "missing {needle:?}: {message}");
     }
@@ -1195,25 +1201,50 @@ async fn check_prices_before_probing_and_charges_live_leases_body() {
         .unwrap()
         .retain(|row| row["componentId"] != "vae");
     let probes = budget_probes();
-    let error = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
-        .await
-        .expect_err("no decoder, no price");
+    let error = check(
+        "yue2",
+        &entry,
+        &default_request(),
+        load(Yue2Tier::Q8),
+        None,
+        "0",
+    )
+    .await
+    .expect_err("no decoder, no price");
     assert!(error.to_string().contains("cannot price"), "{error}");
     assert_eq!(budget_probes(), probes, "refused before the budget probe");
 
     let entry = builtin_yue2_entry();
     let s = shape(Yue2Tier::Q8, &default_request());
-    let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let smallest = Yue2Controls {
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    // Exactly the smallest-controls floor: one render fits, two cannot.
+    let (_, floor) = priced(&s, Yue2Backend::Metal, smallest).unified_floor();
     let _budget = override_budget(Some(metal(floor)));
-    let first = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
-        .await
-        .expect("fits alone");
-    assert_eq!(
-        first.memory,
-        Some(Yue2Controls::production().generation_memory())
-    );
+    let first = check(
+        "yue2",
+        &entry,
+        &default_request(),
+        load(Yue2Tier::Q8),
+        None,
+        "0",
+    )
+    .await
+    .expect("fits alone");
+    assert!(first.memory.tile_vae_decode && first.memory.chunk_attention);
     // The first render's lease still holds its load stage: the second no longer fits.
-    let second = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0").await;
+    let second = check(
+        "yue2",
+        &entry,
+        &default_request(),
+        load(Yue2Tier::Q8),
+        None,
+        "0",
+    )
+    .await;
     assert!(
         second
             .as_ref()
@@ -1221,9 +1252,16 @@ async fn check_prices_before_probing_and_charges_live_leases_body() {
         "{second:?}"
     );
     drop(first);
-    check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
-        .await
-        .expect("fits again once the first lease is released");
+    check(
+        "yue2",
+        &entry,
+        &default_request(),
+        load(Yue2Tier::Q8),
+        None,
+        "0",
+    )
+    .await
+    .expect("fits again once the first lease is released");
 }
 
 /// The memory block sets every field YuE2 reads, and only those.
@@ -1332,8 +1370,10 @@ fn requested_memory_controls_are_honoured_not_overridden() {
         pinned.pins,
         Yue2Pins {
             offload_ar: Some(false),
-            attention_elements: Some(ATTENTION_ELEMENTS_DEFAULT),
-            decode_core_frames: Some(600),
+            attention: Some(AttentionPin::Historical {
+                chunk_attention: false
+            }),
+            decode: Some(DecodePin::Core(600)),
         }
     );
     let est = admitted(decide("yue2", &pinned, Some(&metal(u64::MAX / 4)), 0));
@@ -1351,11 +1391,11 @@ fn requested_memory_controls_are_honoured_not_overridden() {
     // `tile_vae_decode: false` is the production tiling, `chunk_attention: false` the 256-row tile.
     let defaults = shape(Yue2Tier::Q4, &with_memory(GenerationMemory::default()));
     assert_eq!(
-        defaults.pins.decode_core_frames,
+        defaults.pins.decode_core_frames(),
         Some(default_decode_core())
     );
     assert_eq!(
-        defaults.pins.attention_elements,
+        defaults.pins.attention_elements(),
         Some(ATTENTION_ELEMENTS_DEFAULT)
     );
 }
@@ -1371,6 +1411,7 @@ fn the_load_and_invalid_controls_pin_or_refuse() {
         &builtin_yue2_entry(),
         &default_request(),
         sequential,
+        None,
         Yue2ArMode::Native,
     )
     .unwrap();
@@ -1387,6 +1428,7 @@ fn the_load_and_invalid_controls_pin_or_refuse() {
             &builtin_yue2_entry(),
             &with_memory(memory),
             load(Yue2Tier::Q4),
+            None,
             Yue2ArMode::Native,
         )
     };
@@ -1409,6 +1451,7 @@ fn the_load_and_invalid_controls_pin_or_refuse() {
             precision: Yue2Precision::Fp32,
             ..load(Yue2Tier::Bf16)
         },
+        None,
         Yue2ArMode::Native,
     )
     .unwrap();
@@ -1420,27 +1463,335 @@ fn the_load_and_invalid_controls_pin_or_refuse() {
     );
 }
 
-/// A request with its own memory block keeps it: `check` returns no replacement block.
+/// A request with a complete memory block keeps it: `check` sends it back exactly as given.
 #[test]
 fn check_leaves_a_requested_memory_block_untouched() {
     let _serial = lease_test_serial();
     block_on(async {
         let _budget = override_budget(Some(metal(u64::MAX / 4)));
-        let request = with_memory(GenerationMemory {
+        let block = GenerationMemory {
             tile_vae_decode: true,
             decode_tile_edge: Some(64),
             ..GenerationMemory::default()
-        });
+        };
+        let request = with_memory(block);
         let admitted = check(
             "yue2",
             &builtin_yue2_entry(),
             &request,
             load(Yue2Tier::Q4),
+            None,
             "0",
         )
         .await
         .expect("fits");
-        assert_eq!(admitted.memory, None);
+        assert_eq!(admitted.memory, block);
         assert_eq!(admitted.lease.estimate().controls.decode_core_frames, 64);
+    });
+}
+
+// ---- Hand-computed formula checks (sc-23001 review) ---------------------------------------------------
+//
+// Every expected value below is a literal worked out by hand from the pinned YuE2-3B tensor table
+// (`manifests/yue2_3b.json` @ inference 11319984: 28 layers; `k_proj` [1024, 2048] with 128-wide
+// heads ⇒ 8 KV heads; `q_proj` [2048, 2048] ⇒ 16 query heads) and the engine constants, never by
+// the functions under test.
+
+fn bare_shape(work: Yue2Work) -> Yue2Shape {
+    Yue2Shape {
+        text_tokens: 0,
+        work,
+        ..shape(Yue2Tier::Bf16, &default_request())
+    }
+}
+
+fn term_bytes(est: &Yue2Estimate, stage: Yue2Stage, what: &str) -> u64 {
+    est.stage(stage)
+        .unwrap_or_else(|| panic!("{stage:?} priced"))
+        .terms
+        .iter()
+        .find(|t| t.what == what)
+        .unwrap_or_else(|| panic!("{stage:?} has a {what:?} term"))
+        .device_bytes
+}
+
+/// KV cache: 28 layers × 2 (K, V) × 8 KV heads × 128 × positions × element bytes. At 1 000 positions
+/// that is 114 688 000 bytes in BF16 and 229 376 000 in F32. Mutation: drop the K/V ×2 (or the layer
+/// count) in `kv_cache_bytes`.
+#[test]
+fn kv_cache_matches_the_hand_computed_bytes() {
+    let s = bare_shape(Yue2Work::PlanOnly {
+        planning: Yue2Planning::Sample { max_tokens: 1000 },
+    });
+    let bf16 = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    assert_eq!(term_bytes(&bf16, Yue2Stage::Plan, "KV cache"), 114_688_000);
+    let f32 = priced(&s, Yue2Backend::Cpu, Yue2Controls::production());
+    assert_eq!(term_bytes(&f32, Yue2Stage::Plan, "KV cache"), 229_376_000);
+}
+
+/// NAR score tiles: 3 live tiles × 16 heads × rows × keys × element bytes, or 3 × the chunk budget
+/// when that is smaller. A 100-frame song (no plan, no text: prefix 3) is one chunk of 102 NAR rows
+/// over 3 + 100 + 1 + 102 = 206 keys ⇒ 3 × 16 × 102 × 206 × 2 = 2 017 152 bytes. At the one-row
+/// budget (393 216 elements) over a 1 000-frame song ⇒ 3 × 393 216 × 2 = 2 359 296 bytes. Mutation:
+/// drop `SCORE_TILES_LIVE` in `nar_score_bytes`.
+#[test]
+fn nar_score_tiles_match_the_hand_computed_bytes() {
+    let song = |frames| {
+        bare_shape(Yue2Work::Generate {
+            planning: Yue2Planning::Off,
+            semantic_max_tokens: frames,
+            cfg: false,
+        })
+    };
+    let whole = priced(&song(100), Yue2Backend::Metal, Yue2Controls::production());
+    assert_eq!(
+        term_bytes(
+            &whole,
+            Yue2Stage::AcousticSolve,
+            "NAR attention score tiles"
+        ),
+        2_017_152
+    );
+    let one_row = Yue2Controls {
+        attention_elements: 393_216,
+        ..Yue2Controls::production()
+    };
+    let bounded = priced(&song(1000), Yue2Backend::Metal, one_row);
+    assert_eq!(
+        term_bytes(
+            &bounded,
+            Yue2Stage::AcousticSolve,
+            "NAR attention score tiles"
+        ),
+        2_359_296
+    );
+    assert_eq!(ATTENTION_ELEMENTS_MIN, 393_216, "16 heads × 24 576 keys");
+}
+
+/// VAE decode tile: 28 MiB (29 360 128 bytes) per latent frame of `core + 2 × 16` halo frames, plus a
+/// 1 GiB reserve that already covers the FP32 decoder (530 MB file < 1 073 741 824). Core 100 over a
+/// 1 000-frame song ⇒ 132 × 29 360 128 = 3 875 536 896 bytes. Mutation: drop the halo, or charge the
+/// decoder file on top of the reserve.
+#[test]
+fn the_decode_tile_matches_the_hand_computed_bytes() {
+    let s = bare_shape(Yue2Work::Generate {
+        planning: Yue2Planning::Off,
+        semantic_max_tokens: 1000,
+        cfg: false,
+    });
+    let controls = Yue2Controls {
+        decode_core_frames: 100,
+        ..Yue2Controls::production()
+    };
+    let est = priced(&s, Yue2Backend::Metal, controls);
+    assert_eq!(
+        term_bytes(&est, Yue2Stage::Decode, "VAE decode tile activations"),
+        3_875_536_896
+    );
+    assert_eq!(
+        term_bytes(&est, Yue2Stage::Decode, "FP32 VAE decoder + decode reserve"),
+        1_073_741_824
+    );
+    assert_eq!(est.stage(Yue2Stage::Decode).unwrap().terms.len(), 4);
+}
+
+/// The acoustic chunk is sized with the SHORTEST prefix (a shorter real plan makes a longer chunk):
+/// a 16 000-frame song gets chunks of (24 576 − 0 − 3) / 2 = 12 286 frames, 12 288 NAR rows, whose
+/// untiled activations are 3 × 12 288 × 6 144 × 2 + 4 × 12 288 × 2 048 × 2 = 654 311 424 bytes —
+/// even under a sampled 4 096-token plan, whose upper-bound prefix would have shrunk the chunk to
+/// 10 087 frames. Mutation: size the chunk with the upper-bound prefix.
+#[test]
+fn the_acoustic_chunk_is_sized_for_the_shortest_prefix() {
+    let s = Yue2Shape {
+        text_tokens: 300,
+        ..bare_shape(Yue2Work::Generate {
+            planning: Yue2Planning::Sample { max_tokens: 4096 },
+            semantic_max_tokens: 16_000,
+            cfg: true,
+        })
+    };
+    let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    assert_eq!(
+        term_bytes(&est, Yue2Stage::AcousticSolve, "NAR activations"),
+        654_311_424
+    );
+    // The cache still takes the upper-bound prefix, capped at the context.
+    assert_eq!(
+        term_bytes(&est, Yue2Stage::AcousticSolve, "chunk KV cache"),
+        kv_cache_bytes(CONTEXT, 2)
+    );
+}
+
+/// Mapped weights pages are clean file-backed pages, not Metal buffers: on Metal (and CPU) the load
+/// holds only the resident weights; on CUDA the mapped file is charged to host RAM. Mutation: charge
+/// `stored_bytes` on every backend.
+#[test]
+fn the_mapped_weights_file_costs_host_ram_on_cuda_only() {
+    let s = shape(Yue2Tier::Bf16, &default_request());
+    let metal = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    let load = metal.stage(Yue2Stage::Load).unwrap();
+    assert_eq!(load.total_bytes(), 7_261_368_448, "bf16 weights alone");
+    let cpu = priced(&s, Yue2Backend::Cpu, Yue2Controls::production());
+    assert_eq!(cpu.stage(Yue2Stage::Load).unwrap().host_bytes(), 0);
+    let cuda = priced(&s, Yue2Backend::Cuda, Yue2Controls::production());
+    let load = cuda.stage(Yue2Stage::Load).unwrap();
+    assert_eq!(load.device_bytes(), 7_261_368_448);
+    assert_eq!(load.host_bytes(), cuda.weights.stored_bytes);
+}
+
+// ---- Field-by-field pins (sc-23001 review) -----------------------------------------------------------
+
+/// A job that sets only `stageResidency` pins that one control: on a decode-bound budget the gate
+/// still shrinks the decode tile, and the block it sends carries the job's residency, explicit
+/// chunk attention and the chosen tile. Mutation: pin every control when any is set.
+#[test]
+fn an_unset_control_stays_free_when_another_is_set() {
+    let pins = Yue2Pins::from_controls(Some(true), None, None, None, None, None).unwrap();
+    assert_eq!(
+        pins,
+        Yue2Pins {
+            offload_ar: Some(true),
+            attention: None,
+            decode: None,
+        }
+    );
+    let s = Yue2Shape {
+        pins,
+        ..shape(Yue2Tier::Q4, &default_request())
+    };
+    let production = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    let (binding, floor) = production.unified_floor();
+    assert_eq!(binding, Yue2Stage::Decode, "precondition: decode-bound");
+    let est = admitted(decide("yue2", &s, Some(&metal(floor - 1)), 0));
+    assert!(est.controls.decode_core_frames < Yue2Controls::production().decode_core_frames);
+    let block = pins.memory_block(&est.controls);
+    assert!(block.stage_residency, "the job's own control, as sent");
+    assert!(block.tile_vae_decode && block.chunk_attention);
+    assert_eq!(
+        block.decode_tile_edge,
+        Some(est.controls.decode_core_frames as u32)
+    );
+    assert_eq!(
+        block.attention_chunk_size,
+        Some(est.controls.attention_elements as u32)
+    );
+    // A pinned historical tile is echoed back exactly (no invented size).
+    let historical = Yue2Pins::from_controls(None, None, Some(false), None, None, None).unwrap();
+    let block = historical.memory_block(&Yue2Controls::production());
+    assert!(!block.chunk_attention && block.attention_chunk_size.is_none());
+    assert!(Yue2Pins::from_controls(None, None, None, Some(1 << 20), None, None).is_err());
+    assert!(Yue2Pins::from_controls(None, None, None, None, None, Some(64)).is_err());
+    // An explicit Resident offload policy pins offload off; a job's stageResidency wins over it.
+    assert_eq!(
+        Yue2Pins::from_controls(None, Some(false), None, None, None, None)
+            .unwrap()
+            .offload_ar,
+        Some(false)
+    );
+    assert_eq!(
+        Yue2Pins::from_controls(Some(true), Some(false), None, None, None, None)
+            .unwrap()
+            .offload_ar,
+        Some(true)
+    );
+}
+
+// ---- The resident MLX generator (sc-23001 review) -----------------------------------------------------
+
+fn metal_with_resident(
+    capacity_bytes: u64,
+    resident_bytes: u64,
+    reclaimable_bytes: u64,
+) -> Yue2Budget {
+    Yue2Budget::Unified {
+        backend: Yue2Backend::Metal,
+        capacity_bytes,
+        resident_bytes,
+        reclaimable_bytes,
+    }
+}
+
+/// The MLX generator the cache keeps warm shares the Metal working set. A render that fits only
+/// without it is admitted after an evict; one it still cannot free room for is refused naming what
+/// holds the memory. Mutation: ignore `resident_bytes` in `fit` (then it is admitted outright), or
+/// never return `FitsAfterEvict` for the unified pool.
+#[test]
+fn a_resident_mlx_generator_is_evicted_or_the_render_refused() {
+    let s = shape(Yue2Tier::Q4, &default_request());
+    let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let resident = 6 << 30;
+    // The working set holds the render only once the cached generator's 6 GiB are freed.
+    let evictable = metal_with_resident(floor + resident - 1, resident, resident);
+    match decide("yue2", &s, Some(&evictable), 0) {
+        Yue2Admission::AdmitAfterEvict(est) => {
+            assert_eq!(est.controls, Yue2Controls::production())
+        }
+        other => panic!("expected AdmitAfterEvict, got {other:?}"),
+    }
+    // The same memory held by something eviction does not free: nothing to reclaim.
+    let smallest = Yue2Controls {
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    let (_, min_floor) = priced(&s, Yue2Backend::Metal, smallest).unified_floor();
+    let pinned = metal_with_resident(min_floor + resident - 1, resident, 0);
+    let message = refused(decide("yue2", &s, Some(&pinned), 0));
+    assert!(
+        message.contains("held by other models in this process"),
+        "{message}"
+    );
+    // With the generator's bytes absent the same capacity admits outright.
+    assert!(matches!(
+        decide("yue2", &s, Some(&metal_with_resident(floor, 0, 0)), 0),
+        Yue2Admission::Admit(_)
+    ));
+}
+
+/// The Metal budget charges everything MLX holds and credits only what evicting the cached
+/// generator and clearing the MLX cache frees. Mutation: credit the whole of `active`.
+#[test]
+fn the_metal_budget_credits_only_the_cached_generator_and_mlx_cache() {
+    assert_eq!(
+        unified_budget(100, 30, 5, 20),
+        metal_with_resident(100, 35, 25)
+    );
+    // A generator larger than MLX's live bytes cannot free more than MLX holds.
+    assert_eq!(
+        unified_budget(100, 10, 0, 50),
+        metal_with_resident(100, 10, 10)
+    );
+    assert_eq!(
+        unified_budget(100, 30, 5, 0),
+        metal_with_resident(100, 35, 5)
+    );
+}
+
+/// `check` evicts the cached generator before admitting a render that needs its memory.
+/// Mutation: drop the evict call in `check`'s `AdmitAfterEvict` arm.
+#[test]
+fn check_evicts_the_cached_generator_when_the_render_needs_its_memory() {
+    let _serial = lease_test_serial();
+    block_on(async {
+        let s = shape(Yue2Tier::Q4, &default_request());
+        let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+        let resident = 6 << 30;
+        let _budget = override_budget(Some(metal_with_resident(
+            floor + resident - 1,
+            resident,
+            resident,
+        )));
+        let before = evictions();
+        check(
+            "yue2",
+            &builtin_yue2_entry(),
+            &default_request(),
+            load(Yue2Tier::Q4),
+            None,
+            "0",
+        )
+        .await
+        .expect("fits once evicted");
+        assert_eq!(evictions(), before + 1);
     });
 }
