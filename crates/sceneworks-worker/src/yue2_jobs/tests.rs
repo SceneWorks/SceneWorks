@@ -1030,7 +1030,8 @@ async fn a_long_ar_phase_keeps_heartbeats_flowing_and_coalesces_progress() {
     )
     .await
     .unwrap();
-    assert!(before.elapsed() >= Duration::from_secs(6));
+    let elapsed = before.elapsed();
+    assert!(elapsed >= Duration::from_secs(6));
     // The watcher's first tick is immediate; a second means the interval kept firing while the
     // blocking task held its thread. Mutation that reds this: running generation inline on the
     // async task instead of `spawn_blocking` + `run_blocking_with_heartbeat`.
@@ -1043,10 +1044,13 @@ async fn a_long_ar_phase_keeps_heartbeats_flowing_and_coalesces_progress() {
             p["status"] == "running" && p["message"].as_str().unwrap_or("").starts_with("Planning")
         })
         .collect();
-    // Mutation that reds this: posting every step (PROGRESS_POST_INTERVAL removed).
+    // Coalesced: at most a few posts per second over however long the phase took (a slow hosted
+    // runner stretches the 6 s phase, so the bound scales with the elapsed time, not a count).
+    // Mutation that reds this: posting every step (PROGRESS_POST_INTERVAL = 0) — thousands.
+    let bound = (elapsed.as_secs_f64() * 4.0).ceil() as usize + 3;
     assert!(
-        (2..=40).contains(&running.len()),
-        "20k steps coalesced into {} posts",
+        running.len() >= 2 && running.len() <= bound,
+        "20k steps over {elapsed:?} coalesced into {} posts (bound {bound})",
         running.len()
     );
     let fractions: Vec<f64> = running
