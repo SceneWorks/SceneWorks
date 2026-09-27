@@ -170,6 +170,10 @@ pub struct Yue2CoverArgs {
     pub mode: String,
     #[schemars(description = "Lyrics the cover sings, with section tags such as [Verse].")]
     pub lyrics: String,
+    #[schemars(
+        description = "When `lyrics` is a section-aligned translation, the source lyrics it translates (same sections, same order)."
+    )]
+    pub translated_from: Option<String>,
     #[schemars(description = "Style prompt for the cover; omit for none.")]
     pub style: Option<String>,
     #[schemars(
@@ -331,6 +335,11 @@ pub(crate) fn cover_body(args: &Yue2CoverArgs) -> Result<Value, ErrorData> {
         "mode": args.mode,
     });
     insert_some(&mut cover, "keep", args.keep.as_deref());
+    insert_some(
+        &mut cover,
+        "translatedFrom",
+        args.translated_from.as_deref(),
+    );
     let mut body = json!({ "kind": "cover", "lyrics": args.lyrics, "cover": cover });
     insert_some(&mut body, "style", args.style.as_deref());
     insert_some(&mut body, "seed", args.seed);
@@ -687,6 +696,7 @@ mod tests {
             lyrics: "[Verse]\nla".into(),
             style: Some("folk".into()),
             keep: Some("vocal".into()),
+            translated_from: None,
             seed: Some(3),
             steps: None,
             decoder: None,

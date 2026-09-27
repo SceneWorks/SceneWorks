@@ -7316,6 +7316,27 @@ fn install_state_for(
     }
 }
 
+/// Per co-requisite choice group, the options whose component is installed on this host
+/// (`{"decoder": ["standard"]}`); `None` for a model with no choice group.
+fn installed_co_requisite_choices(model: &Value, data_dir: &FsPath) -> Option<Value> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        co_requisite_choice, model_co_requisite_downloads,
+    };
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for download in model_co_requisite_downloads(model) {
+        let Some(choice) = co_requisite_choice(&download) else {
+            continue;
+        };
+        let options = groups.entry(choice.group).or_default();
+        let installed =
+            co_requisite_cache_health(data_dir, &download).is_some_and(|health| health.installed);
+        if installed && !options.contains(&choice.option) {
+            options.push(choice.option);
+        }
+    }
+    (!groups.is_empty()).then(|| json!(groups))
+}
+
 /// [`co_requisite_cache_health`] as the three-way presence choice-group gating reads (sc-22998).
 fn co_requisite_presence(
     data_dir: &FsPath,
@@ -8910,9 +8931,16 @@ fn apply_model_catalog_entry(
         && cleanup_with_model_artifact_paths(&model, data_dir)
             .iter()
             .any(|path| std::fs::symlink_metadata(path).is_ok());
+    // sc-22988: which options of each co-requisite choice group are installed here (YuE2's
+    // `decoder`: `standard` / `legacy`), so a surface that offers the choice can disable an option
+    // whose component is not installed. Present only on a model that declares a choice group.
+    let installed_choices = installed_co_requisite_choices(&model, data_dir);
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    if let Some(choices) = installed_choices {
+        object.insert("installedChoices".to_owned(), choices);
+    }
     object.insert(
         "modelAvailability".to_owned(),
         serde_json::to_value(&availability).map_err(|error| {

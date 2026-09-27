@@ -1275,7 +1275,39 @@ async fn stems_of_an_icl_render_from_a_yue2_song_inherit_its_policy() {
     .await;
     // Mutation that reds this: dropping the `unresolved` arm of `refuse_commercial_export`.
     assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
-    assert_eq!(response["code"], "commercial_use_refused");
+    // Told apart from a noncommercial refusal: no noncommercial model is involved here.
+    // Mutation that reds this: refusing unknown lineage with `COMMERCIAL_USE_REFUSED_CODE`.
+    assert_eq!(
+        response["code"], "commercial_use_lineage_unknown",
+        "{response}"
+    );
+    let detail = response["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("lineage is unknown")
+            && detail.contains("asset_deleted_meanwhile")
+            && !detail.contains("noncommercial assets"),
+        "{detail}"
+    );
+}
+
+/// Both refusals in one export: the noncommercial one wins the code, and the message still names
+/// the asset whose lineage is unknown.
+#[test]
+fn a_noncommercial_asset_wins_the_code_over_unknown_lineage() {
+    let noncommercial = json!({"assetId": "asset_nc", "policy": {"modelId": "yue2", "commercialUse": {"verdict": "refused"}}});
+    let unknown = json!({"assetId": "asset_gone", "policy": null, "unresolved": "not_found"});
+    let error =
+        crate::yue2_jobs::refuse_commercial_export(&[noncommercial.clone(), unknown.clone()])
+            .expect_err("refused");
+    // Mutation that reds this: checking unknown lineage before the noncommercial verdicts.
+    assert_eq!(error.code, Some("commercial_use_refused"));
+    assert!(error.detail.contains("asset_nc (yue2)") && error.detail.contains("asset_gone"));
+    let error = crate::yue2_jobs::refuse_commercial_export(&[unknown]).expect_err("refused");
+    assert_eq!(error.code, Some("commercial_use_lineage_unknown"));
+    assert!(crate::yue2_jobs::refuse_commercial_export(&[
+        json!({"assetId": "ok", "policy": {"commercialUse": {"verdict": "eligible"}}})
+    ])
+    .is_ok());
 }
 
 async fn timeline_placing(app: &axum::Router, project_id: &str, asset_id: &str) -> String {
@@ -1605,13 +1637,21 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
         .call_tool(call(
             "yue2_cover_score_version",
             json!({"projectId": project_id, "versionId": version_id, "mode": "melody",
-                   "keep": "vocal", "lyrics": "[Verse]\nNew words"}),
+                   "keep": "vocal", "lyrics": "[Verse]\nNuevas palabras",
+                   "translatedFrom": "[Verse]\nNew words"}),
         ))
         .await
         .expect("cover call");
     assert_ne!(covered.is_error, Some(true), "{covered:?}");
     let covered = mcp_tool_content_json(&covered);
     assert_eq!(covered["jobs"][0]["kind"], "cover");
+    // The translation's source lyrics reach the stored cover block (round-2 item 3).
+    // Mutation that reds this: dropping the `translatedFrom` insert from `cover_body`.
+    let cover_job = job(&http, covered["jobs"][0]["jobId"].as_str().unwrap()).await;
+    assert_eq!(
+        cover_job["payload"]["yue2"]["cover"]["translatedFrom"], "[Verse]\nNew words",
+        "{cover_job}"
+    );
     assert_eq!(covered["renderNotice"], REGENERATION_NOTICE);
 
     let missing = client

@@ -15,6 +15,7 @@ import {
   yue2AbcExport,
   stripYue2ExportHeader,
   usagePolicyChips,
+  yue2DecoderInstalled,
   yue2ExportStem,
   yue2RunExport,
   yue2RunView,
@@ -242,8 +243,10 @@ export function Yue2RunCard({
   decodeBlocked = null,
 }) {
   const view = useMemo(() => yue2RunView(job), [job]);
-  // "Decode again" picks its decoder here, on the run it re-decodes.
+  // "Decode again" picks its decoder here, on the run it re-decodes; the legacy add-on only once
+  // its component is installed.
   const [decoder, setDecoder] = useState("");
+  const legacyInstalled = yue2DecoderInstalled(model, "legacy");
   const takes = useMemo(() => jobAudioResultAssets(job, assets), [job, assets]);
   const [exportError, setExportError] = useState("");
 
@@ -382,8 +385,15 @@ export function Yue2RunCard({
               <select aria-label="Decode again with" onChange={(event) => setDecoder(event.target.value)} value={decoder}>
                 <option value="">Default decoder (standard)</option>
                 <option value="standard">Standard decoder</option>
-                <option value="legacy">Legacy decoder (add-on install)</option>
+                <option disabled={!legacyInstalled} value="legacy">
+                  {legacyInstalled ? "Legacy decoder" : "Legacy decoder — not installed"}
+                </option>
               </select>
+              {!legacyInstalled ? (
+                <span className="yue2-muted" data-testid="yue2-decode-legacy-missing">
+                  The legacy decoder is an add-on that is not installed; install it from the Song Lab to decode with it.
+                </span>
+              ) : null}
               <button
                 className="secondary-action"
                 disabled={Boolean(decodeBlocked)}
