@@ -26732,6 +26732,19 @@
       "paths": {
         "model": "${HF_CACHE}/m-a-p/YuE2-3B"
       },
+      // Advisory floors (sc-23001): DERIVED, not measured. crates/sceneworks-worker/src/yue2_admission.rs
+      // prices the default song at the smallest memory controls its admission can choose (1-frame VAE
+      // decode core, one-row NAR score chunks, AR offload on CUDA); each tier's row is the larger of the
+      // Metal working set and the CUDA card (device + 2 GB allocator reserve) that needs, in whole GiB
+      // rounded up. The runtime gate is that admission itself, per request against the live budget —
+      // never these numbers; `yue2_admission::tests::the_catalog_floors_are_the_estimators_*` keeps them
+      // equal to its derivation. `measured: false` until the terminal campaign (sc-23002,
+      // config/yue2-memory-profile-plan.json) captures the tiers.
+      "candle": {
+        "minMemoryGb": 14,
+        "minMemoryGbByTier": { "bf16": 14, "q8": 9, "q4": 8 },
+        "measured": false
+      },
       "ui": {
         "label": "YuE2 (Experimental)",
         "description": "EXPERIMENTAL · NONCOMMERCIAL (CC BY-NC 4.0). YuE2-3B plans a song as a two-voice ABC score, then generates its semantic and acoustic tokens and decodes 48 kHz stereo through the YuE2 VAE (standard, or the legacy decoder as an add-on). A separate model from YuE1, the commercial-use lyrics-to-song option — never a substitute for it. bf16 is the released checkpoint; q8 / q4 are derived on this machine from it, not re-hosted. Candle-native on every platform. Source Apache-2.0; weights CC BY-NC 4.0; qwen.tiktoken under the Tongyi Qianwen License Agreement.",
@@ -27680,7 +27693,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "0da4e0607b6422f9c2c5a9942a39ba960991105874f826c3b565d3f8a08c3215",
+              "sha256": "391d5786d845305830e88bd71739ea855cafae526c61c4e50e2b4cbc31fb7ab4",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -27759,8 +27772,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 148393,
-                  "sha256": "f7e139b5cc22b69b9bcb11a76ba7b1e5bc0305fbdc62111c1de7d5b963bf8199"
+                  "byteSize": 149092,
+                  "sha256": "f680f04c019b816192307a8dd6d5f4c17f7c6ca152763dd4a40ffcd1f51c341f"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -27794,8 +27807,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7557,
-                  "sha256": "4b41631f76bab152f8c5d8eb61c1133103c0653d3ea2ef5492c434f22b07ee7a"
+                  "byteSize": 7594,
+                  "sha256": "f9eebffbcb459949e1b953d9697cc2f1ac357ce27a2f2e8e7551fb3932e4ac89"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

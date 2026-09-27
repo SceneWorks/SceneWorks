@@ -717,43 +717,72 @@ async fn run_audio_synthesis_using(
             components.insert("sft_cover".to_string(), source);
         }
     }
+    let mut req = GenerationRequest {
+        prompt,
+        negative_prompt,
+        seed,
+        steps,
+        guidance,
+        audio: Some(AudioParams {
+            voice,
+            language,
+            target_duration,
+            bpm,
+            musical_key,
+            lyrics,
+            script,
+            ..Default::default()
+        }),
+        // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band
+        // was supplied; empty for plain text-to-music.
+        conditioning: audio_edit.into_iter().collect(),
+        // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    // YuE2 whole-render memory admission (sc-23001): price THIS request before anything loads,
+    // refuse it here when it cannot fit, and otherwise send the memory controls the gate chose so
+    // what runs is what was priced. The lease holds the admitted residency until the generator is
+    // dropped (completion, error or cancellation alike). This lane loads the snapshot at
+    // `paths.model` with no tier assertion — the released bf16 checkpoint — so it is priced as bf16.
+    let mut yue2_lease = None;
+    if crate::yue2_admission::is_yue2(&request.model_manifest_entry) {
+        let admitted = crate::yue2_admission::check(
+            &model_id,
+            &request.model_manifest_entry,
+            &req,
+            crate::yue2_admission::Yue2LoadFacts::of(
+                crate::yue2_admission::Yue2Tier::Bf16,
+                &LoadSpec::new(WeightsSource::Dir(model_dir.clone())),
+            ),
+            &settings.gpu_id,
+        )
+        .await?;
+        if let Some(memory) = admitted.memory {
+            req.memory = Some(memory);
+        }
+        yue2_lease = Some(admitted.lease);
+    }
     let handle = {
-        let cancel = cancel.clone();
         let chunk_tx = chunk_tx.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+            // Declared before the generator so it drops AFTER it: the residency is released only
+            // once the model's memory is.
+            let mut yue2_lease = yue2_lease;
             let spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
             );
             let generator = load_generator(&model_id, &spec)
                 .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
-            let req = GenerationRequest {
-                prompt,
-                negative_prompt,
-                seed,
-                steps,
-                guidance,
-                audio: Some(AudioParams {
-                    voice,
-                    language,
-                    target_duration,
-                    bpm,
-                    musical_key,
-                    lyrics,
-                    script,
-                    ..Default::default()
-                }),
-                // Extend/edit source-audio conditioning (Conditioning::AudioEdit), when a source band
-                // was supplied; empty for plain text-to-music.
-                conditioning: audio_edit.into_iter().collect(),
-                // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
-                cancel,
-                ..Default::default()
-            };
             // The Audio Studio progress is driven around this call (Preparing → Generating → Saving);
-            // the per-stage engine callback is a no-op here — the shared keepalive watcher is what
-            // keeps the job alive during synthesis, so the engine progress doesn't need forwarding.
-            let mut on_progress = |_progress: Progress| {};
+            // the shared keepalive watcher is what keeps the job alive during synthesis. The engine
+            // progress only advances a YuE2 lease through the render's stages.
+            let mut on_progress = |progress: Progress| {
+                if let Some(lease) = yue2_lease.as_mut() {
+                    lease.observe(&progress);
+                }
+            };
             // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
             // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
@@ -2716,6 +2745,234 @@ mod tests {
             posts.iter().any(|p| p["status"] == "canceled"),
             "the terminal Canceled must be posted, got {posts:?}"
         );
+    }
+
+    // ---- sc-23001: YuE2 memory admission on the synthesis path ------------------------------------
+
+    /// A stub YuE2 generator that records the memory block it was sent and whether a YuE2 lease was
+    /// holding residency while it ran.
+    struct Yue2Stub {
+        descriptor: gen_core::ModelDescriptor,
+        behavior: StubBehavior,
+        memory: Arc<Mutex<Option<gen_core::GenerationMemory>>>,
+        lease_held_during_generate: Arc<AtomicBool>,
+    }
+
+    impl gen_core::Generator for Yue2Stub {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            *self.memory.lock().expect("memory lock") = req.memory;
+            let (device, host) = crate::yue2_admission::live_residency_bytes();
+            self.lease_held_during_generate
+                .store(device + host > 0, Ordering::SeqCst);
+            match self.behavior {
+                StubBehavior::WaitForCancel => {
+                    let start = Instant::now();
+                    while !req.cancel.is_cancelled() {
+                        if start.elapsed() > Duration::from_secs(30) {
+                            return Err(gen_core::Error::Msg("never canceled".to_owned()));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(gen_core::Error::Canceled)
+                }
+                StubBehavior::CompleteOk => Ok(GenerationOutput::Audio(gen_core::AudioTrack {
+                    samples: vec![0.1, -0.1, 0.1, -0.1],
+                    sample_rate: 48_000,
+                    channels: 2,
+                    stems: Vec::new(),
+                })),
+            }
+        }
+    }
+
+    struct Yue2Run {
+        loaded: Arc<AtomicBool>,
+        memory: Arc<Mutex<Option<gen_core::GenerationMemory>>>,
+        lease_held_during_generate: Arc<AtomicBool>,
+    }
+
+    fn yue2_run(
+        behavior: StubBehavior,
+    ) -> (
+        Yue2Run,
+        impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+    ) {
+        let run = Yue2Run {
+            loaded: Arc::new(AtomicBool::new(false)),
+            memory: Arc::new(Mutex::new(None)),
+            lease_held_during_generate: Arc::new(AtomicBool::new(false)),
+        };
+        let (loaded, memory, held) = (
+            run.loaded.clone(),
+            run.memory.clone(),
+            run.lease_held_during_generate.clone(),
+        );
+        let load = move |_id: &str, _spec: &LoadSpec| {
+            loaded.store(true, Ordering::SeqCst);
+            Ok(Box::new(Yue2Stub {
+                descriptor: stub_descriptor(),
+                behavior,
+                memory,
+                lease_held_during_generate: held,
+            }) as Box<dyn Generator>)
+        };
+        (run, load)
+    }
+
+    fn yue2_request() -> AudioRequest {
+        AudioRequest::from_payload(&payload(json!({
+            "model": "yue2",
+            "prompt": "indie pop, female vocal",
+            "lyrics": "[verse]\nla la la\n[chorus]\noh oh oh",
+            "modelManifestEntry": crate::yue2_admission::tests::builtin_yue2_entry(),
+        })))
+    }
+
+    fn metal_budget(capacity_bytes: u64) -> Option<crate::yue2_admission::Yue2Budget> {
+        Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes,
+        })
+    }
+
+    /// Over budget: the render is refused with the stage and shortfall BEFORE the loader is called
+    /// — no weights are read and nothing is allocated. Mutation: move the admission call into the
+    /// blocking task after `load_generator` (the loader then runs first).
+    #[test]
+    fn yue2_over_budget_render_is_refused_before_the_loader_runs() {
+        let _serial = crate::yue2_admission::tests::lease_test_serial();
+        crate::yue2_admission::tests::block_on(async {
+            let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+            let settings = cancel_test_settings(base_url);
+            let api = ApiClient::new(&settings);
+            let _budget = crate::yue2_admission::override_budget(metal_budget(1 << 30));
+            let (run, load) = yue2_run(StubBehavior::CompleteOk);
+            let probes = crate::yue2_admission::budget_probes();
+            let result = run_audio_synthesis_using(
+                &api,
+                &settings,
+                &audio_test_job("yue2-over-budget"),
+                &yue2_request(),
+                PathBuf::from("unused"),
+                None,
+                load,
+            )
+            .await;
+            let Err(WorkerError::InvalidPayload(message)) = result else {
+                panic!("expected an admission refusal, got {result:?}");
+            };
+            assert!(message.contains("GB short"), "{message}");
+            assert!(message.contains("the model load"), "{message}");
+            assert_eq!(crate::yue2_admission::budget_probes(), probes + 1);
+            assert!(
+                !run.loaded.load(Ordering::SeqCst),
+                "refused before the loader ran"
+            );
+        });
+    }
+
+    /// A fitting render gets the chosen memory controls on the request the engine receives, a lease
+    /// holds its residency while it generates, and the lease is released when it completes.
+    /// Mutation: drop the `req.memory` assignment (the stub then sees `None`).
+    #[test]
+    fn yue2_fitting_render_sends_the_chosen_controls_and_releases_its_lease() {
+        let _serial = crate::yue2_admission::tests::lease_test_serial();
+        crate::yue2_admission::tests::block_on(async {
+            let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+            let settings = cancel_test_settings(base_url);
+            let api = ApiClient::new(&settings);
+            let _budget = crate::yue2_admission::override_budget(metal_budget(u64::MAX / 4));
+            let (run, load) = yue2_run(StubBehavior::CompleteOk);
+            run_audio_synthesis_using(
+                &api,
+                &settings,
+                &audio_test_job("yue2-fits"),
+                &yue2_request(),
+                PathBuf::from("unused"),
+                None,
+                load,
+            )
+            .await
+            .expect("an admitted render completes");
+            assert_eq!(
+                *run.memory.lock().unwrap(),
+                Some(crate::yue2_admission::Yue2Controls::production().generation_memory())
+            );
+            assert!(run.lease_held_during_generate.load(Ordering::SeqCst));
+            let lease = crate::yue2_admission::last_opened_lease().expect("a lease was opened");
+            assert!(!crate::yue2_admission::lease_is_live(lease));
+        });
+    }
+
+    /// A cancelled render releases its admitted residency once the generator is dropped, so the next
+    /// render is not charged for it. Mutation: leak the lease (`std::mem::forget`) in the task.
+    #[test]
+    fn yue2_cancelled_render_releases_its_residency() {
+        let _serial = crate::yue2_admission::tests::lease_test_serial();
+        crate::yue2_admission::tests::block_on(async {
+            let (base_url, _progress) = spawn_audio_cancel_stub(true).await;
+            let settings = cancel_test_settings(base_url);
+            let api = ApiClient::new(&settings);
+            let _budget = crate::yue2_admission::override_budget(metal_budget(u64::MAX / 4));
+            let (run, load) = yue2_run(StubBehavior::WaitForCancel);
+            let result = run_audio_synthesis_using(
+                &api,
+                &settings,
+                &audio_test_job("yue2-cancel"),
+                &yue2_request(),
+                PathBuf::from("unused"),
+                None,
+                load,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(WorkerError::Canceled(_))),
+                "{result:?}"
+            );
+            assert!(run.lease_held_during_generate.load(Ordering::SeqCst));
+            let lease = crate::yue2_admission::last_opened_lease().expect("a lease was opened");
+            assert!(
+                !crate::yue2_admission::lease_is_live(lease),
+                "the cancelled render's residency was released"
+            );
+        });
+    }
+
+    /// Non-YuE2 audio models are never priced by the YuE2 gate.
+    #[test]
+    fn non_yue2_audio_models_skip_the_yue2_gate() {
+        let _serial = crate::yue2_admission::tests::lease_test_serial();
+        crate::yue2_admission::tests::block_on(async {
+            let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
+            let settings = cancel_test_settings(base_url);
+            let api = ApiClient::new(&settings);
+            let _budget = crate::yue2_admission::override_budget(metal_budget(1));
+            let probes = crate::yue2_admission::budget_probes();
+            let (run, load) = yue2_run(StubBehavior::CompleteOk);
+            run_audio_synthesis_using(
+                &api,
+                &settings,
+                &audio_test_job("kokoro-no-gate"),
+                &AudioRequest::from_payload(&payload(json!({}))),
+                PathBuf::from("unused"),
+                None,
+                load,
+            )
+            .await
+            .expect("the YuE2 gate does not see a kokoro render");
+            assert_eq!(crate::yue2_admission::budget_probes(), probes);
+            assert_eq!(*run.memory.lock().unwrap(), None);
+        });
     }
 
     /// Control: a clean completion must NOT trip the flag and must NOT leak the watcher. The call

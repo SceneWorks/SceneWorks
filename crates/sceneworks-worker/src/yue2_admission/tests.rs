@@ -1,0 +1,1389 @@
+//! sc-23001: YuE2 residency model, admission choice/refusal, and residency leases.
+//!
+//! Every budget below is DERIVED from the estimator itself (a stage's own bytes, ± 1), never a
+//! machine's number, so these assert the model's structure and the decision's logic rather than
+//! any measurement. The one set of absolute figures asserted — sc-22995's recorded weight
+//! residencies — is content-derived (tensor shapes × storage), identical on every machine.
+
+use gen_core::{
+    AudioParams, GenerationRequest, SavedPlan, SongCover, SongCoverMode, SongDecoder, SongParams,
+    SongPlanning, TokenSampling,
+};
+use serde_json::json;
+
+use super::*;
+
+/// Serializes the tests that open leases or run [`check`]: the live-lease table is process-wide, so
+/// a lease another test holds would otherwise shrink a unified budget under a parallel test. Async
+/// tests hold it around their own current-thread runtime (never across an `.await`).
+static LEASE_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn lease_test_serial() -> std::sync::MutexGuard<'static, ()> {
+    LEASE_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Run `future` on a fresh current-thread runtime (so the thread-local budget override and lease
+/// bookkeeping stay on this thread).
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+pub(crate) fn builtin_yue2_entry() -> Value {
+    let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("builtin.models.jsonc is embedded");
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(contents))
+            .expect("builtin manifest parses");
+    manifest["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "yue2")
+        .expect("yue2 is in the builtin catalog")
+        .clone()
+}
+
+fn round_gb(bytes: u64) -> f64 {
+    (bytes as f64 / 1e7).round() / 100.0
+}
+
+fn residency(tier: Yue2Tier, backend: Yue2Backend) -> Yue2WeightResidency {
+    weight_residency(
+        tier,
+        backend,
+        Yue2Precision::Default,
+        Yue2ArMode::Native,
+        None,
+    )
+    .expect("a supported combination")
+}
+
+fn load(tier: Yue2Tier) -> Yue2LoadFacts {
+    Yue2LoadFacts {
+        tier,
+        precision: Yue2Precision::Default,
+        sequential_offload: false,
+    }
+}
+
+fn default_request() -> GenerationRequest {
+    GenerationRequest {
+        prompt: "indie pop, female vocal".into(),
+        audio: Some(AudioParams {
+            lyrics: Some("[verse]\nla la la\n[chorus]\noh oh oh".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn shape(tier: Yue2Tier, request: &GenerationRequest) -> Yue2Shape {
+    shape_of(
+        &builtin_yue2_entry(),
+        request,
+        load(tier),
+        Yue2ArMode::Native,
+    )
+    .expect("the request prices")
+}
+
+fn with_song(song: SongParams) -> GenerationRequest {
+    let mut request = default_request();
+    request.audio.as_mut().unwrap().song = Some(song);
+    request
+}
+
+fn metal(capacity_bytes: u64) -> Yue2Budget {
+    Yue2Budget::Unified {
+        backend: Yue2Backend::Metal,
+        capacity_bytes,
+    }
+}
+
+fn cuda(free_bytes: u64, total_bytes: u64) -> Yue2Budget {
+    Yue2Budget::Dedicated {
+        free_bytes,
+        total_bytes,
+        reclaimable_bytes: 0,
+        host_available_bytes: None,
+        gpu_id: "0".into(),
+        compute_cap: Some(12.0),
+    }
+}
+
+fn priced(shape: &Yue2Shape, backend: Yue2Backend, controls: Yue2Controls) -> Yue2Estimate {
+    estimate(shape, backend, controls, Some(12.0)).expect("prices")
+}
+
+fn admitted(decision: Yue2Admission) -> Yue2Estimate {
+    match decision {
+        Yue2Admission::Admit(estimate) => estimate,
+        other => panic!("expected Admit, got {other:?}"),
+    }
+}
+
+fn refused(decision: Yue2Admission) -> String {
+    match decision {
+        Yue2Admission::Refuse(WorkerError::InvalidPayload(message)) => message,
+        other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+    }
+}
+
+// ---- Weights --------------------------------------------------------------------------------------
+
+/// The shape-derived residency reproduces sc-22995's recorded figures (`precision.rs`' table) on
+/// every backend and tier. Mutation: Q8_0's block bytes 34 → 32, or Q4_K's 144 → 128, or dropping
+/// the CUDA row padding — each moves at least one row off its recorded value.
+#[test]
+fn weights_reproduce_the_recorded_sc_22995_residencies() {
+    use Yue2Backend::*;
+    use Yue2Tier::*;
+    assert_eq!(round_gb(residency(Q8, Cpu).device_bytes), 5.12);
+    assert_eq!(round_gb(residency(Q4, Cpu).device_bytes), 3.52);
+    assert_eq!(
+        round_gb(residency(Bf16, Cpu).device_bytes),
+        14.52,
+        "CPU holds BF16 as F32"
+    );
+    assert_eq!(round_gb(residency(Bf16, Cuda).device_bytes), 7.26);
+    assert_eq!(round_gb(residency(Q8, Cuda).device_bytes), 4.26);
+    assert_eq!(round_gb(residency(Q4, Cuda).device_bytes), 2.66);
+    let fp8 = weight_residency(
+        Bf16,
+        Cuda,
+        Yue2Precision::Default,
+        Yue2ArMode::Fp8,
+        Some(8.9),
+    )
+    .expect("sm_89 bf16 supports FP8");
+    assert_eq!(round_gb(fp8.device_bytes), 5.85);
+    assert_eq!(
+        round_gb(fp8.host_bytes),
+        2.82,
+        "the retained BF16 AR originals"
+    );
+    // The FP8 layout is the AR stages'; the acoustic stage restores the native one.
+    assert_eq!(
+        fp8.restored_device_bytes,
+        residency(Bf16, Cuda).device_bytes
+    );
+    // Precision Fp32 on an accelerator is the F32 residency.
+    let f32 = weight_residency(Bf16, Cuda, Yue2Precision::Fp32, Yue2ArMode::Native, None).unwrap();
+    assert_eq!(round_gb(f32.device_bytes), 14.52);
+}
+
+/// Each tier's stored payload is the catalog's own derived weights file, less only the safetensors
+/// header (q8 / q4: `localDerivation.weightsBytes`; bf16: the released file inside the row's
+/// estimate). Mutation: store the NAR heads BF16 at q4 (or count a norm twice) — the payload drifts
+/// by megabytes and leaves the header window.
+#[test]
+fn stored_tier_bytes_are_the_catalogs_weights_files() {
+    let entry = builtin_yue2_entry();
+    let rows = entry["downloads"].as_array().unwrap();
+    for tier in [Yue2Tier::Q8, Yue2Tier::Q4] {
+        let row = rows
+            .iter()
+            .find(|row| row["variant"] == tier.key())
+            .expect("the tier row");
+        let file = row["localDerivation"]["weightsBytes"].as_u64().unwrap();
+        let stored = residency(tier, Yue2Backend::Metal).stored_bytes;
+        assert!(
+            stored < file && file - stored < 1 << 20,
+            "{tier:?}: stored {stored} vs file {file}"
+        );
+    }
+    let bf16 = rows.iter().find(|row| row["variant"] == "bf16").unwrap();
+    let estimated = bf16["estimatedSizeBytes"].as_u64().unwrap();
+    let stored = residency(Yue2Tier::Bf16, Yue2Backend::Metal).stored_bytes;
+    assert!(stored < estimated && estimated - stored < 8 << 20);
+}
+
+/// AR offload moves exactly the AR-only weights: the embedding, `lm_head` and the AR path — never
+/// the NAR twins, heads or latent table the solve needs. Mutation: classify `lm_head` as not AR-only.
+#[test]
+fn ar_offload_moves_only_the_ar_path() {
+    for tier in Yue2Tier::ALL {
+        let w = residency(tier, Yue2Backend::Cuda);
+        let embedding_and_head = VOCAB * HIDDEN * 2; // embed_tokens alone, BF16 at every tier
+        assert!(w.ar_only_bytes > embedding_and_head, "{tier:?}");
+        // Both MoT paths are the same size, so the AR-only share is strictly under the total and
+        // over the NAR-side remainder less the latent table.
+        assert!(w.ar_only_bytes < w.restored_device_bytes, "{tier:?}");
+        assert!(
+            w.restored_device_bytes - w.ar_only_bytes > CONTEXT * HIDDEN * 2,
+            "{tier:?}"
+        );
+    }
+}
+
+/// FP8 is refused everywhere but CUDA sm_89+ over the bf16 tier with BF16 compute — never folded
+/// onto another precision, and an unread compute capability is a refusal, not a pass. Mutation:
+/// drop the backend check (Metal FP8 then prices).
+#[test]
+fn fp8_is_refused_outside_cuda_sm89_bf16() {
+    let fp8 = |tier, backend, precision, cap| {
+        weight_residency(tier, backend, precision, Yue2ArMode::Fp8, cap)
+    };
+    use Yue2Backend::*;
+    use Yue2Tier::*;
+    assert!(fp8(Bf16, Metal, Yue2Precision::Default, None).is_err());
+    assert!(fp8(Bf16, Cpu, Yue2Precision::Default, None).is_err());
+    assert!(fp8(Q8, Cuda, Yue2Precision::Default, Some(9.0)).is_err());
+    assert!(fp8(Bf16, Cuda, Yue2Precision::Fp32, Some(9.0)).is_err());
+    assert!(fp8(Bf16, Cuda, Yue2Precision::Default, Some(8.6)).is_err());
+    assert!(fp8(Bf16, Cuda, Yue2Precision::Default, None).is_err());
+    assert!(fp8(Bf16, Cuda, Yue2Precision::Default, Some(8.9)).is_ok());
+    // Through the decision: a Metal FP8 render is refused before any pricing loop.
+    let fp8_shape = Yue2Shape {
+        ar: Yue2ArMode::Fp8,
+        ..shape(Bf16, &default_request())
+    };
+    let message = refused(decide("yue2", &fp8_shape, Some(&metal(u64::MAX)), 0));
+    assert!(message.contains("CUDA"), "{message}");
+}
+
+/// An unknown tier key never prices as zero: it is `None`, which the callers refuse.
+#[test]
+fn an_unknown_tier_key_is_not_a_tier() {
+    for key in ["fp8", "nvfp4", "BF16", "", "q2"] {
+        assert_eq!(Yue2Tier::from_key(key), None, "{key:?}");
+    }
+    for tier in Yue2Tier::ALL {
+        assert_eq!(Yue2Tier::from_key(tier.key()), Some(tier));
+    }
+}
+
+// ---- Stages ---------------------------------------------------------------------------------------
+
+/// One MoT serves every stage, so every generation stage holds the resident weights, and the floor
+/// is the LARGEST stage, never the sum. Mutation: drop the weights term from the decode stage, or
+/// make `unified_floor` sum the stages.
+#[test]
+fn every_stage_holds_the_mot_and_the_floor_is_the_max_not_the_sum() {
+    for tier in Yue2Tier::ALL {
+        for backend in [Yue2Backend::Cpu, Yue2Backend::Cuda, Yue2Backend::Metal] {
+            let est = priced(
+                &shape(tier, &default_request()),
+                backend,
+                Yue2Controls::production(),
+            );
+            let stages: Vec<_> = est.stages.iter().map(|s| s.stage).collect();
+            assert_eq!(
+                stages,
+                [
+                    Yue2Stage::Load,
+                    Yue2Stage::Plan,
+                    Yue2Stage::Semantic,
+                    Yue2Stage::AcousticPrefill,
+                    Yue2Stage::AcousticSolve,
+                    Yue2Stage::Decode,
+                ],
+                "{tier:?} {backend:?}"
+            );
+            for stage in &est.stages {
+                let weights = stage
+                    .terms
+                    .iter()
+                    .find(|t| t.what == "resident weights")
+                    .unwrap_or_else(|| panic!("{:?} holds the MoT", stage.stage));
+                let expected = match stage.stage {
+                    Yue2Stage::Plan | Yue2Stage::Semantic => est.weights.device_bytes,
+                    _ => est.weights.restored_device_bytes,
+                };
+                assert_eq!(weights.device_bytes, expected, "{:?}", stage.stage);
+            }
+            let (_, floor) = est.unified_floor();
+            let max = est.stages.iter().map(|s| s.total_bytes()).max().unwrap();
+            let sum: u64 = est.stages.iter().map(|s| s.total_bytes()).sum();
+            assert_eq!(floor, max);
+            assert!(floor < sum);
+        }
+    }
+}
+
+/// Denser tiers need more at every stage; F32 CPU weights are twice the accelerator's dense part.
+#[test]
+fn tiers_order_the_floor_densest_first() {
+    for backend in [Yue2Backend::Cpu, Yue2Backend::Cuda, Yue2Backend::Metal] {
+        let floors: Vec<u64> = Yue2Tier::ALL
+            .into_iter()
+            .map(|tier| {
+                priced(
+                    &shape(tier, &default_request()),
+                    backend,
+                    Yue2Controls::production(),
+                )
+                .unified_floor()
+                .1
+            })
+            .collect();
+        assert!(
+            floors[0] > floors[1] && floors[1] > floors[2],
+            "{backend:?}: {floors:?}"
+        );
+    }
+}
+
+/// The FP8 AR mode holds its BF16 originals in host memory through the AR stages only: the
+/// acoustic stage restores them (host 0, native device layout). Mutation: keep the host term on the
+/// acoustic stages.
+#[test]
+fn fp8_originals_are_held_through_the_ar_stages_only() {
+    let fp8_shape = Yue2Shape {
+        ar: Yue2ArMode::Fp8,
+        ..shape(Yue2Tier::Bf16, &default_request())
+    };
+    let est = priced(&fp8_shape, Yue2Backend::Cuda, Yue2Controls::production());
+    for stage in [Yue2Stage::Plan, Yue2Stage::Semantic] {
+        assert_eq!(
+            est.stage(stage).unwrap().host_bytes(),
+            est.weights.host_bytes
+        );
+    }
+    for stage in [Yue2Stage::AcousticSolve, Yue2Stage::Decode] {
+        assert_eq!(est.stage(stage).unwrap().host_bytes(), 0, "{stage:?}");
+    }
+    let native = priced(
+        &shape(Yue2Tier::Bf16, &default_request()),
+        Yue2Backend::Cuda,
+        Yue2Controls::production(),
+    );
+    assert!(
+        est.stage(Yue2Stage::Semantic).unwrap().device_bytes()
+            < native.stage(Yue2Stage::Semantic).unwrap().device_bytes()
+    );
+}
+
+fn kv_term(est: &Yue2Estimate, stage: Yue2Stage) -> u64 {
+    est.stage(stage)
+        .unwrap()
+        .terms
+        .iter()
+        .filter(|t| t.what.contains("KV cache"))
+        .map(|t| t.device_bytes)
+        .sum()
+}
+
+/// Guidance runs two semantic KV caches (the negative branch's own), none on the ABC stage; a cache
+/// never outgrows the released context. Mutation: price CFG as one cache, or drop the context cap.
+#[test]
+fn cfg_doubles_the_semantic_cache_and_caches_cap_at_the_context() {
+    let song = |guidance: Option<f32>, semantic: Option<u32>| {
+        let mut request = with_song(SongParams {
+            semantic_sampling: semantic.map(|max_tokens| TokenSampling {
+                max_tokens: Some(max_tokens),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        request.guidance = guidance;
+        shape(Yue2Tier::Q8, &request)
+    };
+    let off = priced(
+        &song(Some(1.0), None),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    let on = priced(
+        &song(Some(1.5), None),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    assert_eq!(
+        kv_term(&on, Yue2Stage::Semantic),
+        2 * kv_term(&off, Yue2Stage::Semantic)
+    );
+    assert_eq!(
+        kv_term(&on, Yue2Stage::Plan),
+        kv_term(&off, Yue2Stage::Plan)
+    );
+    let huge = priced(
+        &song(Some(1.0), Some(1_000_000)),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    assert_eq!(
+        kv_term(&huge, Yue2Stage::Semantic),
+        kv_cache_bytes(CONTEXT, 2)
+    );
+    // The chunk cache holds at most the context too.
+    assert!(kv_term(&huge, Yue2Stage::AcousticSolve) <= kv_cache_bytes(CONTEXT, 2));
+}
+
+/// Longer songs cost more (until the context caps them); each control grows only its own stage.
+#[test]
+fn stages_are_monotone_in_the_request_and_in_their_own_control() {
+    let semantic = |tokens: u32| {
+        let request = with_song(SongParams {
+            semantic_sampling: Some(TokenSampling {
+                max_tokens: Some(tokens),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        priced(
+            &shape(Yue2Tier::Q4, &request),
+            Yue2Backend::Metal,
+            Yue2Controls::production(),
+        )
+    };
+    let totals = |est: &Yue2Estimate, stage| est.stage(stage).unwrap().total_bytes();
+    let mut last = None;
+    for tokens in [100, 1000, 4000, 9000] {
+        let est = semantic(tokens);
+        let now = (
+            totals(&est, Yue2Stage::Semantic),
+            totals(&est, Yue2Stage::AcousticSolve),
+            totals(&est, Yue2Stage::Decode),
+        );
+        if let Some(before) = last {
+            let (a, b, c): (u64, u64, u64) = before;
+            assert!(
+                now.0 > a && now.1 > b && now.2 > c,
+                "{tokens}: {now:?} vs {before:?}"
+            );
+        }
+        last = Some(now);
+    }
+    let base = shape(Yue2Tier::Q4, &default_request());
+    let production = Yue2Controls::production();
+    let small_tile = Yue2Controls {
+        decode_core_frames: 32,
+        ..production
+    };
+    let small_chunk = Yue2Controls {
+        attention_elements: HEADS * CONTEXT,
+        ..production
+    };
+    let p = priced(&base, Yue2Backend::Metal, production);
+    let t = priced(&base, Yue2Backend::Metal, small_tile);
+    let c = priced(&base, Yue2Backend::Metal, small_chunk);
+    assert!(totals(&t, Yue2Stage::Decode) < totals(&p, Yue2Stage::Decode));
+    assert_eq!(
+        totals(&t, Yue2Stage::AcousticSolve),
+        totals(&p, Yue2Stage::AcousticSolve)
+    );
+    assert!(totals(&c, Yue2Stage::AcousticSolve) < totals(&p, Yue2Stage::AcousticSolve));
+    assert_eq!(totals(&c, Yue2Stage::Decode), totals(&p, Yue2Stage::Decode));
+    assert_eq!(
+        totals(&c, Yue2Stage::AcousticPrefill),
+        totals(&p, Yue2Stage::AcousticPrefill)
+    );
+}
+
+/// Offload moves the AR-only weights to the host pool for the solve on CUDA, and moves nothing on a
+/// unified backend (same pool). Mutation: apply the offload on Metal.
+#[test]
+fn offload_moves_ar_weights_host_ward_on_cuda_only() {
+    let base = shape(Yue2Tier::Bf16, &default_request());
+    let offload = Yue2Controls {
+        offload_ar: true,
+        ..Yue2Controls::production()
+    };
+    let resident = priced(&base, Yue2Backend::Cuda, Yue2Controls::production());
+    let moved = priced(&base, Yue2Backend::Cuda, offload);
+    let solve = |e: &Yue2Estimate| e.stage(Yue2Stage::AcousticSolve).unwrap().clone();
+    assert_eq!(
+        solve(&resident).device_bytes() - solve(&moved).device_bytes(),
+        resident.weights.ar_only_bytes
+    );
+    assert_eq!(solve(&moved).host_bytes(), resident.weights.ar_only_bytes);
+    // The prefill needs the AR path, so it is unchanged.
+    assert_eq!(
+        resident.stage(Yue2Stage::AcousticPrefill),
+        moved.stage(Yue2Stage::AcousticPrefill)
+    );
+    let unified = priced(&base, Yue2Backend::Metal, offload);
+    assert_eq!(
+        unified.stages,
+        priced(&base, Yue2Backend::Metal, Yue2Controls::production()).stages
+    );
+}
+
+/// Plan-only renders only plan; a cached decode loads and decodes only; a recording's transcription
+/// is its own stage — the transcriber unloads before the MoT loads, so its residency is never added
+/// to the render's. Mutation: add the MoT weights to the transcription stage.
+#[test]
+fn partial_work_prices_only_the_stages_it_runs() {
+    let stages = |request: &GenerationRequest| -> Vec<Yue2Stage> {
+        priced(
+            &shape(Yue2Tier::Q4, request),
+            Yue2Backend::Metal,
+            Yue2Controls::production(),
+        )
+        .stages
+        .iter()
+        .map(|s| s.stage)
+        .collect()
+    };
+    assert_eq!(
+        stages(&with_song(SongParams {
+            plan_only: true,
+            ..Default::default()
+        })),
+        [Yue2Stage::Load, Yue2Stage::Plan]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("latent.npy"), vec![0u8; 128 + 250 * 64 * 4]).unwrap();
+    let cached = with_song(SongParams {
+        cached_latents: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    });
+    assert_eq!(stages(&cached), [Yue2Stage::Load, Yue2Stage::Decode]);
+    assert_eq!(
+        shape(Yue2Tier::Q4, &cached).work,
+        Yue2Work::DecodeCached { frames: 250 }
+    );
+
+    let entry = builtin_yue2_entry();
+    let transcription = transcription_shape(&entry, Yue2Tier::Q4, 180).unwrap();
+    let est = priced(
+        &transcription,
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    let stage = est.stage(Yue2Stage::Transcription).unwrap();
+    assert!(stage.terms.iter().all(|t| t.what != "resident weights"));
+    assert_eq!(
+        stage.terms[0].device_bytes,
+        transcriber_bytes(&entry).unwrap(),
+        "SheetSage2 + MERT-v2 weights from the catalog"
+    );
+    let (_, floor) = est.unified_floor();
+    let sum: u64 = est.stages.iter().map(|s| s.total_bytes()).sum();
+    assert!(floor < sum);
+    // A longer recording costs more, up to the fixed 300 s window.
+    let longer = priced(
+        &transcription_shape(&entry, Yue2Tier::Q4, 300).unwrap(),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    let capped = priced(
+        &transcription_shape(&entry, Yue2Tier::Q4, 900).unwrap(),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    assert!(
+        longer
+            .stage(Yue2Stage::Transcription)
+            .unwrap()
+            .total_bytes()
+            > stage.total_bytes()
+    );
+    assert_eq!(
+        longer.stage(Yue2Stage::Transcription),
+        capped.stage(Yue2Stage::Transcription)
+    );
+}
+
+// ---- The request → shape --------------------------------------------------------------------------
+
+/// The shape is read the way the engine reads the request: defaults, planning modes, supplied
+/// scores, restored plans, overrides, and the `off` mode's default guidance.
+#[test]
+fn the_shape_follows_the_engines_request_mapping() {
+    let default = shape(Yue2Tier::Q8, &default_request());
+    assert_eq!(
+        default.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Sample {
+                max_tokens: ABC_MAX_TOKENS_DEFAULT
+            },
+            semantic_max_tokens: SEMANTIC_MAX_TOKENS_DEFAULT,
+            cfg: false,
+        },
+        "full planning defaults to guidance 1 (no CFG)"
+    );
+    let off = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            planning: Some(SongPlanning::Off),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        off.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Off,
+            semantic_max_tokens: SEMANTIC_MAX_TOKENS_DEFAULT,
+            cfg: true,
+        },
+        "off defaults to guidance 1.01"
+    );
+    let mut off_no_cfg = with_song(SongParams {
+        planning: Some(SongPlanning::Off),
+        ..Default::default()
+    });
+    off_no_cfg.guidance = Some(1.0);
+    assert!(matches!(
+        shape(Yue2Tier::Q8, &off_no_cfg).work,
+        Yue2Work::Generate { cfg: false, .. }
+    ));
+    let supplied = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            score: Some("X:1\nK:C\nCDEF|".into()),
+            score_sampling: Some(TokenSampling {
+                max_tokens: Some(77),
+                ..Default::default()
+            }),
+            semantic_sampling: Some(TokenSampling {
+                max_tokens: Some(1234),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        supplied.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Supplied { abc_tokens: 13 },
+            semantic_max_tokens: 1234,
+            cfg: false,
+        }
+    );
+    let cover = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            cover: Some(SongCover {
+                mode: SongCoverMode::Melody,
+                score: "X:1\nK:C\nCD|".into(),
+                keep: None,
+                translated_from: Some("source lyrics".into()),
+            }),
+            ..Default::default()
+        }),
+    );
+    assert!(matches!(
+        cover.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Supplied { abc_tokens: 11 },
+            ..
+        }
+    ));
+    assert_eq!(
+        cover.text_tokens,
+        default.text_tokens + "source lyrics".len() as u64
+    );
+    let sampled = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            score_sampling: Some(TokenSampling {
+                max_tokens: Some(900),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    );
+    assert!(matches!(
+        sampled.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Sample { max_tokens: 900 },
+            ..
+        }
+    ));
+    let plan_dir = tempfile::tempdir().unwrap();
+    std::fs::write(plan_dir.path().join("abc_tokens.npy"), vec![0u8; 4 * 500]).unwrap();
+    let restored = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            plan: Some(SavedPlan {
+                dir: plan_dir.path().to_path_buf(),
+                identity: None,
+            }),
+            ..Default::default()
+        }),
+    );
+    assert!(matches!(
+        restored.work,
+        Yue2Work::Generate {
+            planning: Yue2Planning::Supplied { abc_tokens: 500 },
+            ..
+        }
+    ));
+    let legacy = shape(
+        Yue2Tier::Q8,
+        &with_song(SongParams {
+            decoder: Some(SongDecoder::Legacy),
+            ..Default::default()
+        }),
+    );
+    let entry = builtin_yue2_entry();
+    assert_eq!(
+        legacy.decoder_bytes,
+        decoder_bytes(&entry, SongDecoder::Legacy).unwrap()
+    );
+    assert_ne!(legacy.decoder_bytes, default.decoder_bytes);
+}
+
+/// What cannot be priced fails closed: a restored plan whose tokens are unreadable, a catalog entry
+/// without the selected decoder. Mutation: fall back to zero ABC tokens / zero decoder bytes.
+#[test]
+fn an_unpriceable_request_is_an_error_not_a_zero() {
+    let missing_plan = with_song(SongParams {
+        plan: Some(SavedPlan {
+            dir: std::path::PathBuf::from("/definitely/not/a/plan"),
+            identity: None,
+        }),
+        ..Default::default()
+    });
+    let entry = builtin_yue2_entry();
+    let price = |entry: &Value, request: &GenerationRequest| {
+        shape_of(entry, request, load(Yue2Tier::Q4), Yue2ArMode::Native)
+    };
+    assert!(price(&entry, &missing_plan)
+        .unwrap_err()
+        .contains("saved plan"));
+    let mut no_legacy = entry.clone();
+    no_legacy["downloads"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|row| row["componentId"] != "vae_legacy");
+    let legacy = with_song(SongParams {
+        decoder: Some(SongDecoder::Legacy),
+        ..Default::default()
+    });
+    assert!(price(&no_legacy, &legacy)
+        .unwrap_err()
+        .contains("vae_legacy"));
+    assert!(price(&no_legacy, &default_request()).is_ok());
+}
+
+// ---- The decision ---------------------------------------------------------------------------------
+
+/// A render that fits at the production controls is admitted with them, exactly at its floor.
+/// Mutation: compare with `>` instead of `>=` in `fit` (the exact-floor budget then refuses).
+#[test]
+fn a_fitting_render_keeps_the_production_controls() {
+    let s = shape(Yue2Tier::Q8, &default_request());
+    let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let est = admitted(decide("yue2", &s, Some(&metal(floor)), 0));
+    assert_eq!(est.controls, Yue2Controls::production());
+    // No reading at all: admitted under the production controls (never blocked without evidence).
+    assert_eq!(
+        admitted(decide("yue2", &s, None, 0)).controls,
+        Yue2Controls::production()
+    );
+}
+
+/// A decode-bound render gets the LARGEST tile core that fits — not the smallest, not the default.
+/// Mutation: iterate the cores upward (the chosen core then drops to 1).
+#[test]
+fn a_decode_bound_render_gets_the_largest_tile_that_fits() {
+    let s = shape(Yue2Tier::Q4, &default_request());
+    let target = Yue2Controls {
+        decode_core_frames: 100,
+        ..Yue2Controls::production()
+    };
+    let at_target = priced(&s, Yue2Backend::Metal, target);
+    let capacity = at_target.stage(Yue2Stage::Decode).unwrap().total_bytes();
+    for stage in &at_target.stages {
+        if stage.stage != Yue2Stage::Decode {
+            assert!(
+                stage.total_bytes() <= capacity,
+                "precondition: {stage:?} fits"
+            );
+        }
+    }
+    let est = admitted(decide("yue2", &s, Some(&metal(capacity)), 0));
+    assert_eq!(est.controls, target);
+    assert!(est.unified_floor().1 <= capacity);
+}
+
+/// An acoustic-bound render gets the largest NAR score chunk that fits (and then the largest tile).
+/// Mutation: skip the attention candidates (the render is then refused).
+#[test]
+fn an_acoustic_bound_render_gets_the_largest_score_chunk_that_fits() {
+    let s = shape(Yue2Tier::Q4, &default_request());
+    let rows16 = Yue2Controls {
+        attention_elements: HEADS * 16 * CONTEXT,
+        ..Yue2Controls::production()
+    };
+    let at = priced(&s, Yue2Backend::Metal, rows16);
+    let capacity = at.stage(Yue2Stage::AcousticSolve).unwrap().total_bytes();
+    for stage in [
+        Yue2Stage::Load,
+        Yue2Stage::Plan,
+        Yue2Stage::Semantic,
+        Yue2Stage::AcousticPrefill,
+    ] {
+        assert!(
+            at.stage(stage).unwrap().total_bytes() <= capacity,
+            "precondition: {stage:?}"
+        );
+    }
+    let est = admitted(decide("yue2", &s, Some(&metal(capacity)), 0));
+    assert_eq!(est.controls.attention_elements, HEADS * 16 * CONTEXT);
+    assert!(
+        !est.controls.offload_ar,
+        "offload is never chosen on a unified pool"
+    );
+    assert!(est.controls.decode_core_frames < Yue2Controls::production().decode_core_frames);
+    assert!(est.unified_floor().1 <= capacity);
+}
+
+/// On CUDA, a solve that stays short at every score chunk is rescued by AR offload (the AR-only
+/// weights leave the card for the solve) — the same capacity on a unified pool is refused, because
+/// offload moves nothing there. Mutation: never try the offload candidates.
+#[test]
+fn cuda_offloads_the_ar_path_when_the_solve_needs_it() {
+    let s = shape(Yue2Tier::Q4, &default_request());
+    let production = priced(&s, Yue2Backend::Cuda, Yue2Controls::production());
+    let smallest_resident = priced(
+        &s,
+        Yue2Backend::Cuda,
+        Yue2Controls {
+            attention_elements: HEADS * CONTEXT,
+            decode_core_frames: 1,
+            ..Yue2Controls::production()
+        },
+    );
+    // The card holds every stage but the resident solve at its smallest score chunk: the prefill,
+    // the load and the smallest decode tile all fit, the solve does not.
+    let prefill = production
+        .stage(Yue2Stage::AcousticPrefill)
+        .unwrap()
+        .device_bytes();
+    let decode = smallest_resident
+        .stage(Yue2Stage::Decode)
+        .unwrap()
+        .device_bytes();
+    let load = production.stage(Yue2Stage::Load).unwrap().device_bytes();
+    let card = prefill.max(decode).max(load);
+    let solve = smallest_resident
+        .stage(Yue2Stage::AcousticSolve)
+        .unwrap()
+        .device_bytes();
+    assert!(
+        card < solve,
+        "precondition: the resident solve binds above every other stage"
+    );
+    let free = card + dedicated_reserve_bytes();
+    let est = admitted(decide("yue2", &s, Some(&cuda(free, free)), 0));
+    assert!(est.controls.offload_ar, "{:?}", est.controls);
+    assert!(est.device_peak().1 + dedicated_reserve_bytes() <= free);
+    assert_eq!(
+        est.stage(Yue2Stage::AcousticSolve).unwrap().host_bytes(),
+        est.weights.ar_only_bytes
+    );
+
+    let unified = production
+        .stage(Yue2Stage::AcousticPrefill)
+        .unwrap()
+        .total_bytes();
+    let load = production.stage(Yue2Stage::Load).unwrap().total_bytes();
+    assert!(
+        load <= unified,
+        "precondition: the load fits the unified pool"
+    );
+    let message = refused(decide("yue2", &s, Some(&metal(unified)), 0));
+    assert!(
+        message.contains("acoustic flow-matching solve"),
+        "{message}"
+    );
+}
+
+/// Over budget: refused BEFORE anything loads, naming the binding stage, the shortfall and a lighter
+/// tier that fits, and saying the Metal figure is an estimate pending the terminal calibration.
+/// Mutation: drop the lighter-tier alternative or the evidence sentence.
+#[test]
+fn an_over_budget_render_is_refused_with_stage_shortfall_and_alternatives() {
+    let bf16 = shape(Yue2Tier::Bf16, &default_request());
+    let q4 = shape(Yue2Tier::Q4, &default_request());
+    let (_, q4_floor) = priced(&q4, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let message = refused(decide("yue2", &bf16, Some(&metal(q4_floor)), 0));
+    for needle in [
+        "yue2:",
+        "bf16",
+        "short",
+        "q4",
+        "estimate pending",
+        "sc-23002",
+        "the model load",
+    ] {
+        assert!(message.contains(needle), "missing {needle:?}: {message}");
+    }
+    // Nothing fits a tiny pool: the refusal says so rather than inventing an alternative.
+    let tiny = refused(decide("yue2", &q4, Some(&metal(1 << 30)), 0));
+    assert!(
+        tiny.contains("No smaller tier or shorter request fits"),
+        "{tiny}"
+    );
+}
+
+/// When a shorter song would fit, the refusal gives the semantic budget that does.
+#[test]
+fn a_refusal_names_the_longest_song_that_fits() {
+    let q4 = shape(Yue2Tier::Q4, &default_request());
+    let short = Yue2Shape {
+        work: Yue2Work::Generate {
+            planning: Yue2Planning::Sample {
+                max_tokens: ABC_MAX_TOKENS_DEFAULT,
+            },
+            semantic_max_tokens: 1000,
+            cfg: false,
+        },
+        ..q4
+    };
+    // The minimal controls of the 1000-token render bound its floor; that pool refuses the 9000.
+    let smallest = Yue2Controls {
+        attention_elements: HEADS * CONTEXT,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    let (_, capacity) = priced(&short, Yue2Backend::Metal, smallest).unified_floor();
+    let message = refused(decide("yue2", &q4, Some(&metal(capacity)), 0));
+    assert!(message.contains("semantic budget of up to"), "{message}");
+    let tokens: u64 = message
+        .split("semantic budget of up to ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("a token count");
+    assert!((1000..9000).contains(&tokens), "{tokens}");
+}
+
+/// CUDA: a render that fits only once the cached generator's pool is reclaimed is admitted after an
+/// evict; a card too small says so; a big-enough card with foreign residency says who holds it.
+#[test]
+fn cuda_budgets_distinguish_evict_small_card_and_foreign_residency() {
+    let s = shape(Yue2Tier::Q8, &default_request());
+    let (_, peak) = priced(&s, Yue2Backend::Cuda, Yue2Controls::production()).device_peak();
+    let need = peak + dedicated_reserve_bytes();
+    let evictable = Yue2Budget::Dedicated {
+        free_bytes: need / 2,
+        total_bytes: need * 2,
+        reclaimable_bytes: need,
+        host_available_bytes: None,
+        gpu_id: "0".into(),
+        compute_cap: Some(8.6),
+    };
+    assert!(matches!(
+        decide("yue2", &s, Some(&evictable), 0),
+        Yue2Admission::AdmitAfterEvict(_)
+    ));
+    let small = refused(decide("yue2", &s, Some(&cuda(1 << 30, 1 << 30)), 0));
+    assert!(small.contains("has only ~"), "{small}");
+    let held = refused(decide("yue2", &s, Some(&cuda(1 << 30, need * 2)), 0));
+    assert!(
+        held.contains("another process or model is holding VRAM"),
+        "{held}"
+    );
+    assert!(held.contains("CUDA weights are measured"), "{held}");
+}
+
+/// The host pool is checked where it is read (the mapped weights file while loading, FP8's retained
+/// originals through the AR stages). Mutation: skip the host check when a reading exists.
+#[test]
+fn cuda_checks_the_host_pool_where_it_is_read() {
+    let fp8 = Yue2Shape {
+        ar: Yue2ArMode::Fp8,
+        ..shape(Yue2Tier::Bf16, &default_request())
+    };
+    let est = priced(&fp8, Yue2Backend::Cuda, Yue2Controls::production());
+    let (_, host_peak) = est.host_peak();
+    let budget = |host| Yue2Budget::Dedicated {
+        free_bytes: u64::MAX / 4,
+        total_bytes: u64::MAX / 4,
+        reclaimable_bytes: 0,
+        host_available_bytes: Some(host),
+        gpu_id: "0".into(),
+        compute_cap: Some(8.9),
+    };
+    assert!(matches!(
+        decide("yue2", &fp8, Some(&budget(host_peak)), 0),
+        Yue2Admission::Admit(_)
+    ));
+    let message = refused(decide("yue2", &fp8, Some(&budget(host_peak - 1)), 0));
+    assert!(message.contains("host RAM"), "{message}");
+}
+
+/// Residency other live YuE2 renders still hold is charged against a unified pool.
+#[test]
+fn other_live_residency_shrinks_a_unified_pool() {
+    let s = shape(Yue2Tier::Q8, &default_request());
+    let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    assert!(matches!(
+        decide("yue2", &s, Some(&metal(floor)), 0),
+        Yue2Admission::Admit(_)
+    ));
+    let smallest = Yue2Controls {
+        attention_elements: HEADS * CONTEXT,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    let (_, min_floor) = priced(&s, Yue2Backend::Metal, smallest).unified_floor();
+    let message = refused(decide(
+        "yue2",
+        &s,
+        Some(&metal(floor)),
+        floor - min_floor + 1,
+    ));
+    assert!(
+        message.contains("still held by another YuE2 render"),
+        "{message}"
+    );
+}
+
+// ---- Leases ---------------------------------------------------------------------------------------
+
+/// A lease publishes the load stage, follows the engine's progress stage by stage (each AR stage's
+/// Step count restarts from 1; `Decoding` marks the decode) and releases everything on drop.
+/// Mutation: never advance on a restarted Step (the lease then holds the plan stage forever).
+#[test]
+fn a_lease_follows_the_stages_and_releases_on_drop() {
+    let _serial = lease_test_serial();
+    let est = priced(
+        &shape(Yue2Tier::Q8, &default_request()),
+        Yue2Backend::Metal,
+        Yue2Controls::production(),
+    );
+    let held = |stage| {
+        let s = est.stage(stage).unwrap();
+        (s.device_bytes(), s.host_bytes())
+    };
+    let mut lease = Yue2Lease::open(est.clone());
+    let id = lease.id();
+    assert!(lease_is_live(id));
+    assert_eq!(lease.stage(), Yue2Stage::Load);
+    assert_eq!(lease.held_bytes(), held(Yue2Stage::Load));
+    let step = |current, total| Progress::Step { current, total };
+    for (event, stage) in [
+        (step(1, 4096), Yue2Stage::Plan),
+        (step(2, 4096), Yue2Stage::Plan),
+        (step(1, 9000), Yue2Stage::Semantic),
+        (step(3, 9000), Yue2Stage::Semantic),
+        (step(1, 64), Yue2Stage::AcousticSolve),
+        (step(64, 64), Yue2Stage::AcousticSolve),
+        (Progress::Decoding, Yue2Stage::Decode),
+    ] {
+        lease.observe(&event);
+        assert_eq!(lease.stage(), stage, "{event:?}");
+    }
+    assert_eq!(lease.held_bytes(), held(Yue2Stage::Decode));
+    // Earlier stages' caches were released on the way: the decode holds no KV cache.
+    assert_eq!(kv_term(lease.estimate(), Yue2Stage::Decode), 0);
+    drop(lease);
+    assert!(!lease_is_live(id), "a dropped lease holds nothing");
+}
+
+/// The acoustic stage holds the larger of its prefill and solve phases; with AR offload on CUDA the
+/// AR-only weights are held in the host pool while it runs.
+#[test]
+fn an_offloaded_lease_holds_the_ar_weights_host_side_during_the_acoustic_stage() {
+    let _serial = lease_test_serial();
+    let est = priced(
+        &shape(Yue2Tier::Bf16, &default_request()),
+        Yue2Backend::Cuda,
+        Yue2Controls {
+            offload_ar: true,
+            ..Yue2Controls::production()
+        },
+    );
+    let ar_only = est.weights.ar_only_bytes;
+    let mut lease = Yue2Lease::open(est);
+    lease.observe(&Progress::Step {
+        current: 1,
+        total: 10,
+    });
+    lease.observe(&Progress::Step {
+        current: 1,
+        total: 20,
+    });
+    lease.observe(&Progress::Step {
+        current: 1,
+        total: 32,
+    });
+    assert_eq!(lease.stage(), Yue2Stage::AcousticSolve);
+    assert_eq!(lease.held_bytes().1, ar_only);
+    lease.observe(&Progress::Decoding);
+    assert_eq!(lease.held_bytes().1, 0, "restored before the decode");
+}
+
+/// A cached decode's lease goes straight from the load to the decode.
+#[test]
+fn a_decode_only_lease_has_only_the_decode_stage() {
+    let _serial = lease_test_serial();
+    let s = Yue2Shape {
+        work: Yue2Work::DecodeCached { frames: 500 },
+        ..shape(Yue2Tier::Q4, &default_request())
+    };
+    let mut lease = Yue2Lease::open(priced(&s, Yue2Backend::Metal, Yue2Controls::production()));
+    lease.observe(&Progress::Decoding);
+    assert_eq!(lease.stage(), Yue2Stage::Decode);
+}
+
+// ---- The hook ---------------------------------------------------------------------------------------
+
+/// `check` fails closed on an unpriceable request BEFORE probing the hardware, and a live lease on a
+/// unified pool is charged against the next admission until it drops.
+#[test]
+fn check_prices_before_probing_and_charges_live_leases() {
+    let _serial = lease_test_serial();
+    block_on(check_prices_before_probing_and_charges_live_leases_body());
+}
+
+async fn check_prices_before_probing_and_charges_live_leases_body() {
+    let mut entry = builtin_yue2_entry();
+    entry["downloads"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|row| row["componentId"] != "vae");
+    let probes = budget_probes();
+    let error = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
+        .await
+        .expect_err("no decoder, no price");
+    assert!(error.to_string().contains("cannot price"), "{error}");
+    assert_eq!(budget_probes(), probes, "refused before the budget probe");
+
+    let entry = builtin_yue2_entry();
+    let s = shape(Yue2Tier::Q8, &default_request());
+    let (_, floor) = priced(&s, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let _budget = override_budget(Some(metal(floor)));
+    let first = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
+        .await
+        .expect("fits alone");
+    assert_eq!(
+        first.memory,
+        Some(Yue2Controls::production().generation_memory())
+    );
+    // The first render's lease still holds its load stage: the second no longer fits.
+    let second = check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0").await;
+    assert!(
+        second
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("still held")),
+        "{second:?}"
+    );
+    drop(first);
+    check("yue2", &entry, &default_request(), load(Yue2Tier::Q8), "0")
+        .await
+        .expect("fits again once the first lease is released");
+}
+
+/// The memory block sets every field YuE2 reads, and only those.
+#[test]
+fn the_memory_block_carries_exactly_the_chosen_controls() {
+    let controls = Yue2Controls {
+        offload_ar: true,
+        attention_elements: HEADS * 8 * CONTEXT,
+        decode_core_frames: 57,
+    };
+    let memory = controls.generation_memory();
+    assert_eq!(
+        memory,
+        GenerationMemory {
+            stage_residency: true,
+            chunk_attention: true,
+            attention_chunk_size: Some((HEADS * 8 * CONTEXT) as u32),
+            tile_vae_decode: true,
+            decode_tile_edge: Some(57),
+            ..GenerationMemory::default()
+        }
+    );
+    // The production core is `DecodeOptions::production()`'s 224 frames (an 8 GiB tile budget).
+    assert_eq!(Yue2Controls::production().decode_core_frames, 224);
+    assert_eq!(
+        attention_candidates().last(),
+        Some(ATTENTION_ELEMENTS_MIN),
+        "the smallest chunk is one query row at the full context"
+    );
+}
+
+/// `/proc/meminfo`'s `MemAvailable` in bytes.
+#[test]
+fn meminfo_available_is_parsed_in_bytes() {
+    let body =
+        "MemTotal:       65536000 kB\nMemFree:         1000 kB\nMemAvailable:   32768000 kB\n";
+    assert_eq!(parse_meminfo_available(body), Some(32_768_000 * 1024));
+    assert_eq!(parse_meminfo_available("MemTotal: 1 kB\n"), None);
+}
+
+#[test]
+fn the_catalog_entry_is_yue2() {
+    assert!(is_yue2(&builtin_yue2_entry()));
+    assert!(!is_yue2(&json!({ "family": "yue" })));
+}
+
+/// The catalog's advisory `candle.minMemoryGbByTier` floors are THIS estimator's derivation: the
+/// smallest machine admission can admit the default song on — the default request at the smallest
+/// controls admission can choose (1-frame decode core, one-row score chunks, AR offload on CUDA),
+/// the larger of a Metal working set and a CUDA card (device + allocator reserve), in whole GiB,
+/// rounded up. The scalar is the densest tier's. Mutation: change the estimator (or the manifest)
+/// without the other.
+#[test]
+fn the_catalog_floors_are_the_estimators_smallest_admissible_default_render() {
+    let entry = builtin_yue2_entry();
+    let candle = &entry["candle"];
+    assert_eq!(
+        candle["measured"],
+        json!(false),
+        "no YuE2 memory is measured yet"
+    );
+    let smallest = |offload_ar| Yue2Controls {
+        offload_ar,
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+    };
+    let mut derived = BTreeMap::new();
+    for tier in Yue2Tier::ALL {
+        let s = shape(tier, &default_request());
+        let (_, metal) = priced(&s, Yue2Backend::Metal, smallest(false)).unified_floor();
+        let (_, device) = priced(&s, Yue2Backend::Cuda, smallest(true)).device_peak();
+        let bytes = metal.max(device + dedicated_reserve_bytes());
+        derived.insert(tier.key(), bytes.div_ceil(1 << 30));
+    }
+    for tier in Yue2Tier::ALL {
+        assert_eq!(
+            candle["minMemoryGbByTier"][tier.key()].as_u64(),
+            Some(derived[tier.key()]),
+            "{tier:?}: derived {derived:?}"
+        );
+    }
+    assert_eq!(candle["minMemoryGb"].as_u64(), Some(derived["bf16"]));
+}
+
+// ---- Requested controls are knobs -----------------------------------------------------------------
+
+fn with_memory(memory: GenerationMemory) -> GenerationRequest {
+    GenerationRequest {
+        memory: Some(memory),
+        ..default_request()
+    }
+}
+
+/// A request that carries its own memory block is priced exactly as sent — a large tile stays large
+/// — and refused when it does not fit, with the controls that would. Mutation: let `choose` search
+/// the cores even when the tile is pinned (the render is then admitted at a smaller tile).
+#[test]
+fn requested_memory_controls_are_honoured_not_overridden() {
+    let big_tile = GenerationMemory {
+        tile_vae_decode: true,
+        decode_tile_edge: Some(600),
+        ..GenerationMemory::default()
+    };
+    let pinned = shape(Yue2Tier::Q4, &with_memory(big_tile));
+    assert_eq!(
+        pinned.pins,
+        Yue2Pins {
+            offload_ar: Some(false),
+            attention_elements: Some(ATTENTION_ELEMENTS_DEFAULT),
+            decode_core_frames: Some(600),
+        }
+    );
+    let est = admitted(decide("yue2", &pinned, Some(&metal(u64::MAX / 4)), 0));
+    assert_eq!(est.controls.decode_core_frames, 600);
+    // Enough for the production tile, not for the requested one.
+    let free = shape(Yue2Tier::Q4, &default_request());
+    let (_, production_floor) =
+        priced(&free, Yue2Backend::Metal, Yue2Controls::production()).unified_floor();
+    let message = refused(decide("yue2", &pinned, Some(&metal(production_floor)), 0));
+    assert!(
+        message.contains("requested memory controls do not fit, but these do"),
+        "{message}"
+    );
+    assert!(message.contains("decode_tile_edge 224"), "{message}");
+    // `tile_vae_decode: false` is the production tiling, `chunk_attention: false` the 256-row tile.
+    let defaults = shape(Yue2Tier::Q4, &with_memory(GenerationMemory::default()));
+    assert_eq!(
+        defaults.pins.decode_core_frames,
+        Some(default_decode_core())
+    );
+    assert_eq!(
+        defaults.pins.attention_elements,
+        Some(ATTENTION_ELEMENTS_DEFAULT)
+    );
+}
+
+/// A `Sequential` load pins AR offload on; values the engine refuses are refused here.
+#[test]
+fn the_load_and_invalid_controls_pin_or_refuse() {
+    let sequential = Yue2LoadFacts {
+        sequential_offload: true,
+        ..load(Yue2Tier::Bf16)
+    };
+    let s = shape_of(
+        &builtin_yue2_entry(),
+        &default_request(),
+        sequential,
+        Yue2ArMode::Native,
+    )
+    .unwrap();
+    assert_eq!(s.pins.offload_ar, Some(true));
+    let est = admitted(decide(
+        "yue2",
+        &s,
+        Some(&cuda(u64::MAX / 4, u64::MAX / 4)),
+        0,
+    ));
+    assert!(est.controls.offload_ar);
+    let price = |memory| {
+        shape_of(
+            &builtin_yue2_entry(),
+            &with_memory(memory),
+            load(Yue2Tier::Q4),
+            Yue2ArMode::Native,
+        )
+    };
+    let too_small = price(GenerationMemory {
+        chunk_attention: true,
+        attention_chunk_size: Some((ATTENTION_ELEMENTS_MIN - 1) as u32),
+        ..GenerationMemory::default()
+    });
+    assert!(too_small.unwrap_err().contains("cannot hold one query row"));
+    let bad_tile = price(GenerationMemory {
+        tile_vae_decode: true,
+        decode_tile_edge: Some(4096),
+        ..GenerationMemory::default()
+    });
+    assert!(bad_tile.unwrap_err().contains("decode tile core"));
+    let f32 = shape_of(
+        &builtin_yue2_entry(),
+        &default_request(),
+        Yue2LoadFacts {
+            precision: Yue2Precision::Fp32,
+            ..load(Yue2Tier::Bf16)
+        },
+        Yue2ArMode::Native,
+    )
+    .unwrap();
+    let dense = priced(&f32, Yue2Backend::Metal, Yue2Controls::production());
+    assert_eq!(
+        round_gb(dense.weights.device_bytes),
+        14.52,
+        "an F32 load holds F32 weights"
+    );
+}
+
+/// A request with its own memory block keeps it: `check` returns no replacement block.
+#[test]
+fn check_leaves_a_requested_memory_block_untouched() {
+    let _serial = lease_test_serial();
+    block_on(async {
+        let _budget = override_budget(Some(metal(u64::MAX / 4)));
+        let request = with_memory(GenerationMemory {
+            tile_vae_decode: true,
+            decode_tile_edge: Some(64),
+            ..GenerationMemory::default()
+        });
+        let admitted = check(
+            "yue2",
+            &builtin_yue2_entry(),
+            &request,
+            load(Yue2Tier::Q4),
+            "0",
+        )
+        .await
+        .expect("fits");
+        assert_eq!(admitted.memory, None);
+        assert_eq!(admitted.lease.estimate().controls.decode_core_frames, 64);
+    });
+}

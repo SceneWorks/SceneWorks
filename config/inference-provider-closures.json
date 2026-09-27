@@ -934,6 +934,27 @@
       "sharedContractFileCount": 87,
       "lockedPackageCount": 236
     },
+    "candle:yue2": {
+      "crate": "crates/audio/candle-audio-yue2",
+      "digest": "d7715209a430ef7752546a444871837642665c6dcb0517eadef56f2ce8a4a27a",
+      "sharedContractDigest": "78ed2566dd247cd396c207241c05199f4d76e2a3f734d44f2a8d6c3a7deb4c9e",
+      "closureCrates": [
+        "crates/audio/candle-audio",
+        "crates/audio/candle-audio-yue2",
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/kernels/candle-quant-kernels",
+        "crates/llm/candle-llm",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 174,
+      "sharedContractFileCount": 87,
+      "lockedPackageCount": 238
+    },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
       "digest": "9eec59b7caddd47734b6fa427d2c383f79d4df5e4a6a14e3b4f532c2daeb37a2",
